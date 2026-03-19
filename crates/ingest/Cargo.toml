@@ -1,0 +1,15 @@
+[package]
+name = "netan-ingest"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+hex.workspace = true
+netan-core = { path = "../core" }
+netan-persist = { path = "../persist" }
+netan-report = { path = "../report" }
+osmpbfreader.workspace = true
+sha2.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "netan-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+eframe.workspace = true
+egui.workspace = true
+netan-core = { path = "../core" }
+netan-ingest = { path = "../ingest" }
+netan-persist = { path = "../persist" }
+netan-profile = { path = "../profile" }
+netan-query = { path = "../query" }
+netan-report = { path = "../report" }
+serde_json.workspace = true

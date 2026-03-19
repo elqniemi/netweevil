@@ -1,0 +1,58 @@
+# Rust build artifacts
+/target/
+**/target/
+**/*.rlib
+**/*.rmeta
+
+# Workspace runtime/cache data (local run state, manifests, bundles, reports)
+/.netan/
+
+# Local dataset/extracts and generated run outputs
+*.osm
+*.osm.bz2
+*.osm.pbf
+*.osm.gz
+*.osm.zip
+*.osm.xml
+
+# QGIS plugin + Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# IDE, editor, and OS artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build tooling and test artifacts
+build/
+dist/
+coverage/
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+*.o
+*.obj
+*.dll
+*.so
+*.dylib
+*.exe
+*.out
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*.cache

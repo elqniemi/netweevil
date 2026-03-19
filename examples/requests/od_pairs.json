@@ -1,0 +1,33 @@
+{
+  "pairs": [
+    {
+      "pair_id": "od_demo_001",
+      "origin": {
+        "id": "origin_a",
+        "lon": 6.5665,
+        "lat": 53.2194
+      },
+      "destination": {
+        "id": "destination_b",
+        "lon": 6.5716,
+        "lat": 53.2148
+      }
+    },
+    {
+      "pair_id": "od_demo_002",
+      "origin": {
+        "id": "origin_c",
+        "lon": 6.5636,
+        "lat": 53.2181
+      },
+      "destination": {
+        "id": "destination_d",
+        "lon": 6.5698,
+        "lat": 53.2137
+      }
+    }
+  ],
+  "snap": {
+    "max_distance_m": 500.0
+  }
+}

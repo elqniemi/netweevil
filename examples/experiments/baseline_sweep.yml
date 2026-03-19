@@ -1,0 +1,24 @@
+experiment:
+  id: baseline_sweep
+  label: Baseline research sweep
+  dataset: groningen_2026_03
+
+scenarios:
+  - id: baseline_route
+    profile: ../profiles/car_research_v1.yml
+    analysis: route
+    request: ../requests/route.json
+    out: ../../.netan/runs/experiment-baseline-route.geojson
+
+  - id: baseline_od
+    profile: ../profiles/car_research_v1.yml
+    analysis: od
+    request: ../requests/od_pairs.csv
+    out: ../../.netan/runs/experiment-baseline-od.csv
+
+  - id: baseline_matrix
+    profile: ../profiles/car_research_v1.yml
+    analysis: matrix
+    origins: ../requests/matrix_origins.csv
+    destinations: ../requests/matrix_destinations.csv
+    out: ../../.netan/runs/experiment-baseline-matrix.gpkg
