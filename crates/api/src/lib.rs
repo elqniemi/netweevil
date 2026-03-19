@@ -1,0 +1,842 @@
+use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use anyhow::{Context, Result, bail};
+use axum::extract::{Path as AxumPath, Query, State};
+use axum::http::header;
+use axum::http::{HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use netan_core::{CacheBundleId, CompiledProfileBundle, DatasetId, TopologyBounds, TopologyBundle};
+use netan_persist::{
+    WorkspacePaths, read_compiled_profile_bundle, read_compiled_profile_manifests,
+    read_dataset_manifest, read_topology_bundle, write_compiled_profile_bundle,
+    write_compiled_profile_manifest,
+};
+use netan_profile::{ProfileDocument, ReturnGeometry, compile_profile_bundle, load_profile};
+use netan_query::{
+    MatrixResult, OdPairsDocument, OdResult, PointSetDocument, PreparedRoutingEngine, RouteRequest,
+    RouteResult,
+};
+use netan_report::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use tokio::net::TcpListener;
+use tower_http::cors::CorsLayer;
+use tower_http::trace::TraceLayer;
+use tracing::info;
+
+#[derive(Debug, Clone)]
+pub struct ApiServeOptions {
+    pub bind: SocketAddr,
+    pub dataset_id: String,
+    pub default_profile: PathBuf,
+    pub profiles: Vec<PathBuf>,
+}
+
+#[derive(Clone)]
+struct ApiState {
+    service: Arc<ServiceRuntime>,
+}
+
+struct ServiceRuntime {
+    workspace_root: PathBuf,
+    dataset_manifest: DatasetManifest,
+    topology: Arc<TopologyBundle>,
+    default_profile_id: String,
+    profiles: BTreeMap<String, LoadedProfile>,
+    capabilities: ServiceCapabilities,
+    engine: EngineDescription,
+}
+
+struct LoadedProfile {
+    source_path: PathBuf,
+    document: ProfileDocument,
+    manifest: CompiledProfileManifest,
+    engine: PreparedRoutingEngine,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+struct EngineDescription {
+    route_engine: &'static str,
+    batch_engine: &'static str,
+    acceleration: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ServiceCapabilities {
+    analyses: Vec<&'static str>,
+    geometry: Vec<&'static str>,
+    breakdown_metrics: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct HealthResponse {
+    status: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServiceInfoResponse {
+    workspace_root: String,
+    dataset: DatasetInfo,
+    default_profile_id: String,
+    loaded_profiles: Vec<ProfileInfo>,
+    capabilities: ServiceCapabilities,
+    engine: EngineDescription,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DatasetInfo {
+    dataset_id: String,
+    label: String,
+    source_path: String,
+    source_sha256: String,
+    imported_at: String,
+    #[serde(default)]
+    topology_bounds: Option<TopologyBounds>,
+    #[serde(default)]
+    node_count: Option<u64>,
+    #[serde(default)]
+    edge_count: Option<u64>,
+    #[serde(default)]
+    turn_count: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProfileInfo {
+    profile_id: String,
+    label: String,
+    mode: String,
+    defaults_pack: String,
+    source_path: String,
+    profile_hash: String,
+    created_at: String,
+    edge_count: Option<u64>,
+    default_returns: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RouteExecutionRequest {
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub request: RouteRequest,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OdExecutionRequest {
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub request: OdPairsDocument,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MatrixExecutionRequest {
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub request: MatrixRequest,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MatrixRequest {
+    pub origins: PointSetDocument,
+    pub destinations: PointSetDocument,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RouteExecutionResponse {
+    service: ExecutionContext,
+    result: RouteResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OdExecutionResponse {
+    service: ExecutionContext,
+    result: OdResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MatrixExecutionResponse {
+    service: ExecutionContext,
+    result: MatrixResult,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ResponseFormatQuery {
+    format: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ExecutionContext {
+    dataset_id: String,
+    profile_id: String,
+    profile_hash: String,
+    route_engine: String,
+    batch_engine: String,
+    acceleration: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorResponse {
+    error: String,
+}
+
+struct ApiError {
+    status: StatusCode,
+    message: String,
+}
+
+impl ApiError {
+    fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: message.into(),
+        }
+    }
+
+    fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: message.into(),
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (
+            self.status,
+            Json(ErrorResponse {
+                error: self.message,
+            }),
+        )
+            .into_response()
+    }
+}
+
+pub async fn serve(paths: WorkspacePaths, options: ApiServeOptions) -> Result<()> {
+    let state = ApiState {
+        service: Arc::new(load_service_runtime(&paths, &options)?),
+    };
+    let app = router(state);
+
+    info!(
+        bind = %options.bind,
+        dataset_id = %options.dataset_id,
+        default_profile = %options.default_profile.display(),
+        "starting netan api"
+    );
+
+    let listener = TcpListener::bind(options.bind)
+        .await
+        .with_context(|| format!("binding API listener on {}", options.bind))?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("running API server")
+}
+
+fn router(state: ApiState) -> Router {
+    Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .route("/v1/service", get(service_info))
+        .route("/v1/profiles", get(list_profiles))
+        .route("/v1/profiles/{profile_id}", get(get_profile))
+        .route("/v1/route", post(route_handler))
+        .route("/v1/od", post(od_handler))
+        .route("/v1/matrix", post(matrix_handler))
+        .layer(CorsLayer::permissive())
+        .layer(TraceLayer::new_for_http())
+        .with_state(state)
+}
+
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+fn load_service_runtime(
+    paths: &WorkspacePaths,
+    options: &ApiServeOptions,
+) -> Result<ServiceRuntime> {
+    let dataset_manifest = read_dataset_manifest(paths, &options.dataset_id)
+        .with_context(|| format!("reading dataset manifest for '{}'", options.dataset_id))?;
+    let topology_ref = dataset_manifest
+        .topology_bundle
+        .clone()
+        .context("dataset is missing a topology bundle; run `netan dataset import` first")?;
+    let topology = Arc::new(
+        read_topology_bundle(&topology_ref.path)
+            .with_context(|| format!("reading topology bundle {}", topology_ref.path))?,
+    );
+    let engine = engine_description(topology.as_ref());
+
+    let mut loaded_profiles: BTreeMap<String, LoadedProfile> = BTreeMap::new();
+    let mut requested_paths = Vec::with_capacity(options.profiles.len() + 1);
+    requested_paths.push(options.default_profile.clone());
+    requested_paths.extend(options.profiles.iter().cloned());
+
+    let compiled_manifests = read_compiled_profile_manifests(paths).unwrap_or_default();
+    let mut default_profile_id = None;
+
+    for profile_path in requested_paths {
+        let loaded = load_or_compile_profile(
+            paths,
+            &dataset_manifest,
+            topology_ref.bundle_id.clone(),
+            topology.clone(),
+            &compiled_manifests,
+            &profile_path,
+        )?;
+        let profile_id = loaded.document.profile.id.clone();
+        if profile_path == options.default_profile {
+            default_profile_id = Some(profile_id.clone());
+        }
+        if let Some(existing) = loaded_profiles.get(&profile_id) {
+            if existing.manifest.profile_hash != loaded.manifest.profile_hash {
+                bail!(
+                    "profile id '{}' was loaded from multiple files with different hashes",
+                    profile_id
+                );
+            }
+            continue;
+        }
+        loaded_profiles.insert(profile_id, loaded);
+    }
+
+    let default_profile_id =
+        default_profile_id.context("default profile could not be loaded into the API runtime")?;
+
+    Ok(ServiceRuntime {
+        workspace_root: paths.root.clone(),
+        dataset_manifest,
+        topology,
+        default_profile_id,
+        profiles: loaded_profiles,
+        capabilities: ServiceCapabilities {
+            analyses: vec!["route", "od", "matrix"],
+            geometry: vec!["none", "full", "segments"],
+            breakdown_metrics: vec!["time_s", "distance_m"],
+        },
+        engine,
+    })
+}
+
+fn load_or_compile_profile(
+    paths: &WorkspacePaths,
+    dataset_manifest: &DatasetManifest,
+    topology_bundle_id: CacheBundleId,
+    topology: Arc<TopologyBundle>,
+    compiled_manifests: &[CompiledProfileManifest],
+    profile_path: &Path,
+) -> Result<LoadedProfile> {
+    let document = load_profile(profile_path)
+        .with_context(|| format!("loading {}", profile_path.display()))?;
+    document.validate()?;
+    let profile_hash = document.fingerprint()?;
+
+    let manifest = if let Some(existing) = compiled_manifests.iter().find(|manifest| {
+        manifest.dataset_id.0 == dataset_manifest.dataset_id.0
+            && manifest.profile_hash == profile_hash
+    }) {
+        existing.clone()
+    } else {
+        let compiled_bundle =
+            compile_profile_bundle(&document, topology.as_ref(), topology_bundle_id).with_context(
+                || {
+                    format!(
+                        "compiling profile '{}' for dataset '{}'",
+                        document.profile.id, dataset_manifest.dataset_id.0
+                    )
+                },
+            )?;
+        let compile_id = format!("{}-{}", dataset_manifest.dataset_id.0, &profile_hash[..12]);
+        let bundle_path = paths
+            .metric_bundles_dir
+            .join(format!("metric-{compile_id}.bin"));
+        write_compiled_profile_bundle(&bundle_path, &compiled_bundle)?;
+        let manifest = CompiledProfileManifest {
+            compile_id: compile_id.clone(),
+            dataset_id: DatasetId::new(dataset_manifest.dataset_id.0.clone()),
+            profile_id: document.profile.id.clone(),
+            profile_hash: profile_hash.clone(),
+            defaults_pack: document.profile.defaults_pack.clone(),
+            mode: document.profile.mode,
+            created_at: now_rfc3339()?,
+            topology_bundle_id: Some(compiled_bundle.source_topology_bundle_id.clone()),
+            edge_count: Some(compiled_bundle.edge_metrics.len() as u64),
+            bundle: BundleRef {
+                bundle_id: CacheBundleId::new(format!("metric-{compile_id}")),
+                path: bundle_path.display().to_string(),
+            },
+        };
+        write_compiled_profile_manifest(paths, &manifest)?;
+        manifest
+    };
+
+    let compiled_bundle: CompiledProfileBundle =
+        read_compiled_profile_bundle(&manifest.bundle.path)
+            .with_context(|| format!("reading compiled profile bundle {}", manifest.bundle.path))?;
+    let engine =
+        PreparedRoutingEngine::new(topology, Arc::new(compiled_bundle)).with_context(|| {
+            format!(
+                "preparing in-memory routing engine for profile '{}'",
+                document.profile.id
+            )
+        })?;
+
+    Ok(LoadedProfile {
+        source_path: profile_path.to_path_buf(),
+        document,
+        manifest,
+        engine,
+    })
+}
+
+async fn healthz() -> Json<HealthResponse> {
+    Json(HealthResponse { status: "ok" })
+}
+
+async fn readyz(State(state): State<ApiState>) -> Json<ServiceInfoResponse> {
+    Json(build_service_info(state.service.as_ref()))
+}
+
+async fn service_info(State(state): State<ApiState>) -> Json<ServiceInfoResponse> {
+    Json(build_service_info(state.service.as_ref()))
+}
+
+async fn list_profiles(State(state): State<ApiState>) -> Json<Vec<ProfileInfo>> {
+    Json(build_profile_infos(state.service.as_ref()))
+}
+
+async fn get_profile(
+    State(state): State<ApiState>,
+    AxumPath(profile_id): AxumPath<String>,
+) -> Result<Json<ProfileInfo>, ApiError> {
+    let profile = state
+        .service
+        .profiles
+        .get(&profile_id)
+        .ok_or_else(|| ApiError::not_found(format!("unknown profile_id '{}'", profile_id)))?;
+    Ok(Json(profile_info(profile)))
+}
+
+async fn route_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<ResponseFormatQuery>,
+    Json(payload): Json<RouteExecutionRequest>,
+) -> Result<Response, ApiError> {
+    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let mut request = payload.request;
+    if wants_geojson(&query) {
+        request.returns.geometry = ReturnGeometry::Full;
+    }
+    let result = profile
+        .engine
+        .execute_route(&request)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let service = execution_context(state.service.as_ref(), profile);
+    if wants_geojson(&query) {
+        return geojson_response(route_result_geojson(
+            state.service.as_ref(),
+            &service,
+            &result,
+        ));
+    }
+    Ok(Json(RouteExecutionResponse { service, result }).into_response())
+}
+
+async fn od_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<ResponseFormatQuery>,
+    Json(payload): Json<OdExecutionRequest>,
+) -> Result<Response, ApiError> {
+    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let mut request = payload.request;
+    if wants_geojson(&query) {
+        request.returns.geometry = ReturnGeometry::Full;
+    }
+    let result = profile
+        .engine
+        .execute_od(&request)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let service = execution_context(state.service.as_ref(), profile);
+    if wants_geojson(&query) {
+        return geojson_response(od_result_geojson(&service, &result));
+    }
+    Ok(Json(OdExecutionResponse { service, result }).into_response())
+}
+
+async fn matrix_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<ResponseFormatQuery>,
+    Json(payload): Json<MatrixExecutionRequest>,
+) -> Result<Response, ApiError> {
+    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let mut request = payload.request;
+    if wants_geojson(&query) {
+        request.origins.returns.geometry = ReturnGeometry::Full;
+        request.destinations.returns.geometry = ReturnGeometry::Full;
+    }
+    let result = profile
+        .engine
+        .execute_matrix(&request.origins, &request.destinations)
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let service = execution_context(state.service.as_ref(), profile);
+    if wants_geojson(&query) {
+        return geojson_response(matrix_result_geojson(&service, &result));
+    }
+    Ok(Json(MatrixExecutionResponse { service, result }).into_response())
+}
+
+fn resolve_profile<'a>(
+    service: &'a ServiceRuntime,
+    requested_profile_id: Option<&str>,
+) -> Result<&'a LoadedProfile, ApiError> {
+    let profile_id = requested_profile_id.unwrap_or(&service.default_profile_id);
+    service
+        .profiles
+        .get(profile_id)
+        .ok_or_else(|| ApiError::not_found(format!("unknown profile_id '{}'", profile_id)))
+}
+
+fn build_service_info(service: &ServiceRuntime) -> ServiceInfoResponse {
+    let topology_meta = service.dataset_manifest.topology_meta.as_ref();
+    let topology_bounds = service
+        .topology
+        .spatial_index
+        .as_ref()
+        .map(|index| index.bounds);
+    ServiceInfoResponse {
+        workspace_root: service.workspace_root.display().to_string(),
+        dataset: DatasetInfo {
+            dataset_id: service.dataset_manifest.dataset_id.0.clone(),
+            label: service.dataset_manifest.label.clone(),
+            source_path: service.dataset_manifest.source_path.clone(),
+            source_sha256: service.dataset_manifest.source_sha256.clone(),
+            imported_at: service.dataset_manifest.imported_at.clone(),
+            topology_bounds,
+            node_count: topology_meta.map(|meta| meta.node_count),
+            edge_count: topology_meta.map(|meta| meta.edge_count),
+            turn_count: topology_meta.map(|meta| meta.turn_count),
+        },
+        default_profile_id: service.default_profile_id.clone(),
+        loaded_profiles: build_profile_infos(service),
+        capabilities: service.capabilities.clone(),
+        engine: service.engine,
+    }
+}
+
+fn build_profile_infos(service: &ServiceRuntime) -> Vec<ProfileInfo> {
+    service.profiles.values().map(profile_info).collect()
+}
+
+fn profile_info(profile: &LoadedProfile) -> ProfileInfo {
+    ProfileInfo {
+        profile_id: profile.document.profile.id.clone(),
+        label: profile.document.profile.label.clone(),
+        mode: serde_json::to_string(&profile.document.profile.mode)
+            .unwrap_or_else(|_| "\"unknown\"".to_string())
+            .trim_matches('"')
+            .to_string(),
+        defaults_pack: profile.document.profile.defaults_pack.clone(),
+        source_path: profile.source_path.display().to_string(),
+        profile_hash: profile.manifest.profile_hash.clone(),
+        created_at: profile.manifest.created_at.clone(),
+        edge_count: profile.manifest.edge_count,
+        default_returns: serde_json::to_value(&profile.document.returns).unwrap_or_default(),
+    }
+}
+
+fn execution_context(service: &ServiceRuntime, profile: &LoadedProfile) -> ExecutionContext {
+    ExecutionContext {
+        dataset_id: service.dataset_manifest.dataset_id.0.clone(),
+        profile_id: profile.document.profile.id.clone(),
+        profile_hash: profile.manifest.profile_hash.clone(),
+        route_engine: service.engine.route_engine.to_string(),
+        batch_engine: service.engine.batch_engine.to_string(),
+        acceleration: service.engine.acceleration.to_string(),
+    }
+}
+
+fn engine_description(topology: &TopologyBundle) -> EngineDescription {
+    let has_multi_edge_restrictions = topology
+        .turn_restrictions
+        .iter()
+        .any(|restriction| restriction.edge_path.len() > 2);
+    if has_multi_edge_restrictions {
+        EngineDescription {
+            route_engine: "astar_exact_multi_edge_turns",
+            batch_engine: "astar_exact_multi_edge_turns_repeated",
+            acceleration: "spatial_index+a_star+turn_automaton",
+        }
+    } else {
+        EngineDescription {
+            route_engine: "astar_exact_pairwise_turns",
+            batch_engine: "astar_exact_pairwise_turns_repeated",
+            acceleration: "spatial_index+a_star+turn_automaton",
+        }
+    }
+}
+
+fn wants_geojson(query: &ResponseFormatQuery) -> bool {
+    query
+        .format
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("geojson"))
+}
+
+fn geojson_response(value: Value) -> Result<Response, ApiError> {
+    let body = serde_json::to_vec(&value)
+        .map_err(|error| ApiError::bad_request(format!("serializing GeoJSON response: {error}")))?;
+    Ok((
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/geo+json"),
+        )],
+        body,
+    )
+        .into_response())
+}
+
+fn route_result_geojson(
+    service: &ServiceRuntime,
+    execution: &ExecutionContext,
+    result: &RouteResult,
+) -> Value {
+    let coordinates = if let Some(geometry) = result.geometry.as_ref() {
+        geometry.clone()
+    } else {
+        result
+            .node_path
+            .iter()
+            .filter_map(|node_id| service.topology.nodes.get(*node_id as usize))
+            .map(|node| [node.lon, node.lat])
+            .collect()
+    };
+    json!({
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": coordinates,
+                },
+                "properties": {
+                    "dataset_id": execution.dataset_id,
+                    "profile_id": execution.profile_id,
+                    "profile_hash": execution.profile_hash,
+                    "route_id": result.route_id,
+                    "origin_id": result.origin.point_id,
+                    "destination_id": result.destination.point_id,
+                    "origin_snap_distance_m": result.origin.snap_distance_m,
+                    "destination_snap_distance_m": result.destination.snap_distance_m,
+                    "total_distance_m": result.summary.total_distance_m,
+                    "total_travel_time_s": result.summary.total_travel_time_s,
+                    "total_generalized_cost": result.summary.total_generalized_cost,
+                    "segment_count": result.summary.segment_count,
+                    "warnings": result.warnings,
+                }
+            }
+        ]
+    })
+}
+
+fn od_result_geojson(execution: &ExecutionContext, result: &OdResult) -> Value {
+    let features = result
+        .pairs
+        .iter()
+        .map(|pair| {
+            json!({
+                "type": "Feature",
+                "geometry": pair.geometry.as_ref().map(|geometry| json!({
+                    "type": "LineString",
+                    "coordinates": geometry,
+                })).unwrap_or(Value::Null),
+                "properties": {
+                    "dataset_id": execution.dataset_id,
+                    "profile_id": execution.profile_id,
+                    "profile_hash": execution.profile_hash,
+                    "pair_id": pair.pair_id,
+                    "origin_id": pair.origin_id,
+                    "destination_id": pair.destination_id,
+                    "status": pair.status,
+                    "origin_snap_distance_m": pair.origin_snap_distance_m,
+                    "destination_snap_distance_m": pair.destination_snap_distance_m,
+                    "total_distance_m": pair.total_distance_m,
+                    "total_travel_time_s": pair.total_travel_time_s,
+                    "total_generalized_cost": pair.total_generalized_cost,
+                    "error": pair.error,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "type": "FeatureCollection",
+        "features": features,
+        "metadata": {
+            "dataset_id": execution.dataset_id,
+            "profile_id": execution.profile_id,
+            "profile_hash": execution.profile_hash,
+            "pair_count": result.pair_count,
+            "succeeded_count": result.succeeded_count,
+            "failed_count": result.failed_count,
+            "warnings": result.warnings,
+        }
+    })
+}
+
+fn matrix_result_geojson(execution: &ExecutionContext, result: &MatrixResult) -> Value {
+    let features = result
+        .cells
+        .iter()
+        .map(|cell| {
+            json!({
+                "type": "Feature",
+                "geometry": cell.geometry.as_ref().map(|geometry| json!({
+                    "type": "LineString",
+                    "coordinates": geometry,
+                })).unwrap_or(Value::Null),
+                "properties": {
+                    "dataset_id": execution.dataset_id,
+                    "profile_id": execution.profile_id,
+                    "profile_hash": execution.profile_hash,
+                    "origin_id": cell.origin_id,
+                    "destination_id": cell.destination_id,
+                    "status": cell.status,
+                    "origin_snap_distance_m": cell.origin_snap_distance_m,
+                    "destination_snap_distance_m": cell.destination_snap_distance_m,
+                    "total_distance_m": cell.total_distance_m,
+                    "total_travel_time_s": cell.total_travel_time_s,
+                    "total_generalized_cost": cell.total_generalized_cost,
+                    "error": cell.error,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "type": "FeatureCollection",
+        "features": features,
+        "metadata": {
+            "dataset_id": execution.dataset_id,
+            "profile_id": execution.profile_id,
+            "profile_hash": execution.profile_hash,
+            "origin_count": result.origin_count,
+            "destination_count": result.destination_count,
+            "cell_count": result.cell_count,
+            "succeeded_count": result.succeeded_count,
+            "failed_count": result.failed_count,
+            "warnings": result.warnings,
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        EngineDescription, ExecutionContext, engine_description, matrix_result_geojson,
+        od_result_geojson,
+    };
+    use netan_core::TopologyBundle;
+    use netan_query::{BatchItemStatus, MatrixCellResult, MatrixResult, OdPairResult, OdResult};
+
+    #[test]
+    fn reports_pairwise_engine_when_only_simple_turns_exist() {
+        let topology = TopologyBundle {
+            schema_version: 1,
+            source_path: "test".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![],
+            edges: vec![],
+            turn_restrictions: vec![],
+            names: vec![],
+            spatial_index: None,
+        };
+
+        let engine = engine_description(&topology);
+        assert_eq!(
+            engine.route_engine,
+            EngineDescription {
+                route_engine: "astar_exact_pairwise_turns",
+                batch_engine: "astar_exact_pairwise_turns_repeated",
+                acceleration: "spatial_index+a_star+turn_automaton",
+            }
+            .route_engine
+        );
+    }
+
+    #[test]
+    fn builds_geojson_for_od_results() {
+        let execution = ExecutionContext {
+            dataset_id: "dataset_a".to_string(),
+            profile_id: "car_research_v1".to_string(),
+            profile_hash: "abc123".to_string(),
+            route_engine: "route".to_string(),
+            batch_engine: "batch".to_string(),
+            acceleration: "spatial".to_string(),
+        };
+        let result = OdResult {
+            pair_count: 1,
+            succeeded_count: 1,
+            failed_count: 0,
+            pairs: vec![OdPairResult {
+                pair_id: "pair_1".to_string(),
+                origin_id: "a".to_string(),
+                destination_id: "b".to_string(),
+                status: BatchItemStatus::Succeeded,
+                origin_snap_distance_m: Some(1.0),
+                destination_snap_distance_m: Some(2.0),
+                total_distance_m: Some(100),
+                total_travel_time_s: Some(12.5),
+                total_generalized_cost: Some(13.5),
+                geometry: Some(vec![[2.0, 48.0], [2.1, 48.1]]),
+                error: None,
+            }],
+            warnings: vec!["ok".to_string()],
+        };
+
+        let geojson = od_result_geojson(&execution, &result);
+        assert_eq!(geojson["type"], "FeatureCollection");
+        assert_eq!(geojson["features"][0]["geometry"]["type"], "LineString");
+        assert_eq!(geojson["features"][0]["properties"]["pair_id"], "pair_1");
+    }
+
+    #[test]
+    fn preserves_null_geometry_in_matrix_geojson() {
+        let execution = ExecutionContext {
+            dataset_id: "dataset_a".to_string(),
+            profile_id: "car_research_v1".to_string(),
+            profile_hash: "abc123".to_string(),
+            route_engine: "route".to_string(),
+            batch_engine: "batch".to_string(),
+            acceleration: "spatial".to_string(),
+        };
+        let result = MatrixResult {
+            origin_count: 1,
+            destination_count: 1,
+            cell_count: 1,
+            succeeded_count: 0,
+            failed_count: 1,
+            cells: vec![MatrixCellResult {
+                origin_id: "a".to_string(),
+                destination_id: "b".to_string(),
+                status: BatchItemStatus::Failed,
+                origin_snap_distance_m: None,
+                destination_snap_distance_m: None,
+                total_distance_m: None,
+                total_travel_time_s: None,
+                total_generalized_cost: None,
+                geometry: None,
+                error: Some("no route".to_string()),
+            }],
+            warnings: vec![],
+        };
+
+        let geojson = matrix_result_geojson(&execution, &result);
+        assert!(geojson["features"][0]["geometry"].is_null());
+        assert_eq!(geojson["features"][0]["properties"]["status"], "failed");
+    }
+}

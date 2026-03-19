@@ -92,6 +92,7 @@ The system targets local OSM routing and network analysis with explicit, version
 
 - [x] Replace the placeholder desktop shell with a functional native GUI for dataset import, profile compilation, route/OD/matrix execution, request-file writing, and run inspection
 - [x] Add an in-repo QGIS plugin package that validates/compiles profiles, runs `netan analyze ...`, and loads spatial outputs into QGIS
+- [x] Add a preloadable JSON HTTP API for route, OD, and matrix execution with selectable compiled profiles
 
 - [x] Convert `dataset import` from dataset registration into real PBF ingest
 - [x] Build immutable topology bundles from `.osm.pbf`
@@ -129,4 +130,5 @@ The system targets local OSM routing and network analysis with explicit, version
 - `analyze od` and `analyze matrix` now reuse the same exact route kernel in repeated single-pair mode, writing compact per-pair and per-cell result tables plus succeeded run manifests under `.netan/runs/`.
 - `experiment run` now resolves scenario-local paths relative to the study file, recompiles profiles as needed, executes route/OD/matrix scenarios sequentially, and writes a batch summary JSON with per-scenario status, output paths, run manifest paths, and compact metrics.
 - `report render` now reads the run manifest plus result JSON when available, includes a concrete results section in the rendered report, writes Markdown for `.md`, HTML for `.html`, and writes a small archival report bundle when pointed at a directory-like output path.
+- `api serve` now loads one chosen dataset into memory at startup, preloads and/or compiles the requested profiles into reusable prepared routing engines, exposes JSON endpoints under `/v1/` for route, OD, matrix, and profile metadata, and defaults requests to the configured startup profile when `profile_id` is omitted.
 - The current exact kernel is still intentionally conservative: it models compiled edge costs and persisted prohibited turn sequences, but not turn penalties, many-to-many acceleration, or contraction-based speedups.

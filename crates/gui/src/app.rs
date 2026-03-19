@@ -1,10 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
+use std::thread;
 
 use anyhow::{Context, Result, bail};
 use eframe::egui::{self, Color32, FontFamily, FontId, RichText, Vec2};
 use netan_core::{CacheBundleId, CompiledProfileBundle, TopologyBundle};
-use netan_ingest::{DatasetImportOptions, import_dataset};
+use netan_ingest::{DatasetImportOptions, DatasetImportProgress, import_dataset_with_progress};
 use netan_persist::{
     WorkspacePaths, list_json_files, read_compiled_profile_bundle, read_compiled_profile_manifests,
     read_dataset_manifest, read_dataset_manifests, read_run_manifest, read_topology_bundle,
@@ -190,6 +192,15 @@ struct StatusMessage {
     text: String,
 }
 
+struct PendingDatasetImport {
+    receiver: Receiver<DatasetImportMessage>,
+}
+
+enum DatasetImportMessage {
+    Progress(DatasetImportProgress),
+    Finished(Result<DatasetManifest, String>),
+}
+
 pub struct NetanApp {
     paths: WorkspacePaths,
     nav: NavTab,
@@ -201,6 +212,7 @@ pub struct NetanApp {
     analysis_form: AnalysisForm,
     profile_preview: Option<ProfilePreview>,
     status: StatusMessage,
+    pending_dataset_import: Option<PendingDatasetImport>,
 }
 
 impl NetanApp {
@@ -221,6 +233,7 @@ impl NetanApp {
                 kind: StatusKind::Info,
                 text: "Workspace ready. Use example-relative paths or absolute paths.".to_string(),
             },
+            pending_dataset_import: None,
         };
         if let Err(error) = app.refresh_snapshot() {
             app.set_error(error);
@@ -326,31 +339,88 @@ impl NetanApp {
         if dataset_id.is_empty() {
             bail!("dataset id is required");
         }
-        let manifest = import_dataset(
-            &self.paths,
-            &source_path,
-            DatasetImportOptions {
-                name: dataset_id.to_string(),
-                source: source_path.display().to_string(),
-            },
-        )?;
-        self.selected_dataset_id = manifest.dataset_id.0.clone();
-        self.refresh_snapshot()?;
-        self.set_info(format!(
-            "Imported dataset '{}' with {} nodes and {} directed edges.",
-            manifest.dataset_id.0,
-            manifest
-                .topology_meta
-                .as_ref()
-                .map(|meta| meta.node_count)
-                .unwrap_or_default(),
-            manifest
-                .topology_meta
-                .as_ref()
-                .map(|meta| meta.edge_count)
-                .unwrap_or_default()
-        ));
+        if self.pending_dataset_import.is_some() {
+            bail!("a dataset import is already running");
+        }
+
+        let paths = self.paths.clone();
+        let source = source_path.display().to_string();
+        let name = dataset_id.to_string();
+        let (sender, receiver) = mpsc::channel();
+        self.pending_dataset_import = Some(PendingDatasetImport { receiver });
+        self.set_info(format!("Starting dataset import for '{}'...", name));
+
+        thread::spawn(move || {
+            let progress_sender = sender.clone();
+            let result = import_dataset_with_progress(
+                &paths,
+                &source_path,
+                DatasetImportOptions { name, source },
+                move |event| {
+                    let _ = progress_sender.send(DatasetImportMessage::Progress(event));
+                },
+            )
+            .map_err(|error| error.to_string());
+            let _ = sender.send(DatasetImportMessage::Finished(result));
+        });
         Ok(())
+    }
+
+    fn poll_background_work(&mut self, ctx: &egui::Context) {
+        let mut finished = false;
+        let mut finished_result = None;
+        let mut messages = Vec::new();
+
+        if let Some(import) = self.pending_dataset_import.as_ref() {
+            while let Ok(message) = import.receiver.try_recv() {
+                messages.push(message);
+            }
+        }
+
+        for message in messages {
+            match message {
+                DatasetImportMessage::Progress(progress) => {
+                    self.set_info(progress.message);
+                }
+                DatasetImportMessage::Finished(result) => {
+                    finished = true;
+                    finished_result = Some(result);
+                }
+            }
+        }
+
+        if finished {
+            self.pending_dataset_import = None;
+            match finished_result {
+                Some(Ok(manifest)) => {
+                    self.selected_dataset_id = manifest.dataset_id.0.clone();
+                    if let Err(error) = self.refresh_snapshot() {
+                        self.set_error(error);
+                    } else {
+                        self.set_info(format!(
+                            "Imported dataset '{}' with {} nodes and {} directed edges.",
+                            manifest.dataset_id.0,
+                            manifest
+                                .topology_meta
+                                .as_ref()
+                                .map(|meta| meta.node_count)
+                                .unwrap_or_default(),
+                            manifest
+                                .topology_meta
+                                .as_ref()
+                                .map(|meta| meta.edge_count)
+                                .unwrap_or_default()
+                        ));
+                    }
+                }
+                Some(Err(error)) => self.set_error(anyhow::anyhow!(error)),
+                None => {}
+            }
+        }
+
+        if self.pending_dataset_import.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
     }
 
     fn validate_profile_action(&mut self) -> Result<()> {
@@ -776,10 +846,16 @@ impl NetanApp {
                         egui::TextEdit::singleline(&mut self.dataset_form.dataset_id)
                             .desired_width(240.0),
                     );
-                    if ui.button("Import Dataset").clicked() {
+                    let import_button =
+                        ui.add_enabled(self.pending_dataset_import.is_none(), egui::Button::new("Import Dataset"));
+                    if import_button.clicked() {
                         if let Err(error) = self.import_dataset_action() {
                             self.set_error(error);
                         }
+                    }
+                    if self.pending_dataset_import.is_some() {
+                        ui.add(egui::Spinner::new());
+                        ui.small("building topology...");
                     }
                 });
                 ui.small("Paths can be repository-relative or absolute. Import writes the dataset manifest and topology bundle into `.netan/`.");
@@ -1160,6 +1236,7 @@ impl NetanApp {
 
 impl eframe::App for NetanApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_background_work(ctx);
         self.draw_header(ctx);
         self.draw_sidebar(ctx);
         self.draw_status_bar(ctx);
@@ -1378,6 +1455,7 @@ struct EngineDescription {
     route_summary: &'static str,
     batch_engine: &'static str,
     batch_summary: &'static str,
+    acceleration: &'static str,
 }
 
 fn engine_description(topology: &TopologyBundle) -> EngineDescription {
@@ -1388,16 +1466,18 @@ fn engine_description(topology: &TopologyBundle) -> EngineDescription {
     if has_multi_edge_restrictions {
         EngineDescription {
             route_engine: "astar_exact_multi_edge_turns",
-            route_summary: "Exact forward A* shortest-path search over the compiled directed edge graph with nearest-node snapping and persisted multi-edge turn-restriction sequences. Turn penalties are not modeled yet.",
+            route_summary: "Exact forward A* shortest-path search over the compiled directed edge graph with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences. Turn penalties are not modeled yet.",
             batch_engine: "astar_exact_multi_edge_turns_repeated",
-            batch_summary: "Repeated exact forward A* shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with nearest-node snapping and persisted multi-edge turn-restriction sequences. Turn penalties are not modeled yet.",
+            batch_summary: "Repeated exact forward A* shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences. Turn penalties are not modeled yet.",
+            acceleration: "spatial_index+a_star+turn_automaton",
         }
     } else {
         EngineDescription {
-            route_engine: "bidirectional_dijkstra_exact",
-            route_summary: "Exact bidirectional Dijkstra shortest-path search over the compiled directed edge graph with nearest-node snapping and persisted pairwise turn prohibitions. Turn penalties are not modeled yet.",
-            batch_engine: "bidirectional_dijkstra_exact_repeated",
-            batch_summary: "Repeated exact bidirectional Dijkstra shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with nearest-node snapping and persisted pairwise turn prohibitions. Turn penalties are not modeled yet.",
+            route_engine: "astar_exact_pairwise_turns",
+            route_summary: "Exact forward A* shortest-path search over the compiled directed edge graph with persisted topology spatial indexing for snapping and pairwise turn prohibitions. Turn penalties are not modeled yet.",
+            batch_engine: "astar_exact_pairwise_turns_repeated",
+            batch_summary: "Repeated exact forward A* shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with persisted topology spatial indexing for snapping and pairwise turn prohibitions. Turn penalties are not modeled yet.",
+            acceleration: "spatial_index+a_star+turn_automaton",
         }
     }
 }
@@ -1452,6 +1532,7 @@ fn store_route_run(
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
     )?;
     manifest.algorithm.engine = engine.route_engine.to_string();
+    manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.route_summary.to_string();
     let result_path = out.unwrap_or_else(|| {
         paths
@@ -1489,6 +1570,7 @@ fn store_od_run(
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
     )?;
     manifest.algorithm.engine = engine.batch_engine.to_string();
+    manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.batch_summary.to_string();
     let result_path = out.unwrap_or_else(|| {
         paths
@@ -1532,6 +1614,7 @@ fn store_matrix_run(
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
     )?;
     manifest.algorithm.engine = engine.batch_engine.to_string();
+    manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.batch_summary.to_string();
     let result_path = out.unwrap_or_else(|| {
         paths

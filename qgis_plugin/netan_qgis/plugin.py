@@ -1,8 +1,12 @@
+import csv
 import json
-import sys
-from pathlib import Path, PurePosixPath
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
 
-from qgis.PyQt.QtCore import QProcess, Qt
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QAction,
     QComboBox,
@@ -27,9 +31,9 @@ from qgis.core import Qgis, QgsMessageLog, QgsProject, QgsVectorLayer
 PLUGIN_MENU = "&netan"
 
 
-class ExecutionMode:
-    NATIVE = "Native"
-    WSL = "WSL"
+class ResponseFormat:
+    JSON = "json"
+    GEOJSON = "geojson"
 
 
 class NetanPlugin:
@@ -65,87 +69,76 @@ class NetanDock(QDockWidget):
     def __init__(self, iface):
         super().__init__("netan", iface.mainWindow())
         self.iface = iface
-        self.process = None
-        self.pending_output_qgis_path = None
+        self.service_info = None
+        self.temp_layers_dir = Path(tempfile.gettempdir()) / "netan_qgis_layers"
+        self.temp_layers_dir.mkdir(parents=True, exist_ok=True)
         self.setObjectName("netanDock")
         self.setWidget(self._build_ui())
-        self._apply_mode_defaults()
-        self.refresh_workspace()
+        self.refresh_service()
 
     def _build_ui(self):
         container = QWidget()
         layout = QVBoxLayout(container)
 
         tabs = QTabWidget()
-        tabs.addTab(self._build_workspace_tab(), "Workspace")
+        tabs.addTab(self._build_api_tab(), "API")
         tabs.addTab(self._build_route_tab(), "Route")
         tabs.addTab(self._build_batch_tab(), "Batch")
         layout.addWidget(tabs)
 
         self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
-        self.log_output.setPlaceholderText("Process and plugin log output.")
+        self.log_output.setPlaceholderText("API and plugin log output.")
         layout.addWidget(self.log_output)
 
         return container
 
-    def _build_workspace_tab(self):
+    def _build_api_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
         form = QFormLayout()
-        self.execution_mode_combo = QComboBox()
-        self.execution_mode_combo.addItems([ExecutionMode.NATIVE, ExecutionMode.WSL])
-        self.execution_mode_combo.currentTextChanged.connect(self._on_mode_changed)
-
         default_root = str(Path(__file__).resolve().parents[2])
-        self.qgis_workspace_root_edit = QLineEdit(default_root)
-        self.native_netan_executable_edit = QLineEdit(
-            str(Path(__file__).resolve().parents[2] / "target" / "debug" / "netan")
-        )
-        self.wsl_distro_edit = QLineEdit("Ubuntu")
-        self.wsl_workspace_root_edit = QLineEdit("/home/elmeriniemi/stuff/netan")
-        self.wsl_netan_executable_edit = QLineEdit(
-            "/home/elmeriniemi/stuff/netan/target/debug/netan"
-        )
-        self.dataset_combo = QComboBox()
-        self.profile_path_edit = QLineEdit("examples/profiles/car_research_v1.yml")
+        self.workspace_root_edit = QLineEdit(default_root)
+        self.api_base_url_edit = QLineEdit("http://127.0.0.1:8080")
+        self.timeout_seconds_edit = QLineEdit("30")
 
-        form.addRow("Execution mode", self.execution_mode_combo)
+        self.response_format_combo = QComboBox()
+        self.response_format_combo.addItem("JSON", ResponseFormat.JSON)
+        self.response_format_combo.addItem("GeoJSON", ResponseFormat.GEOJSON)
+
+        self.profile_combo = QComboBox()
+        self.dataset_id_edit = QLineEdit()
+        self.dataset_id_edit.setReadOnly(True)
+        self.default_profile_edit = QLineEdit()
+        self.default_profile_edit.setReadOnly(True)
+        self.dataset_bounds_edit = QLineEdit()
+        self.dataset_bounds_edit.setReadOnly(True)
+
         form.addRow(
-            "QGIS-visible workspace root",
-            self._line_with_browse(self.qgis_workspace_root_edit, browse_dir=True),
+            "Workspace root",
+            self._line_with_browse(self.workspace_root_edit, browse_dir=True),
         )
-        form.addRow(
-            "Native netan executable",
-            self._line_with_browse(self.native_netan_executable_edit, browse_dir=False),
-        )
-        form.addRow("WSL distro", self.wsl_distro_edit)
-        form.addRow("WSL workspace root", self.wsl_workspace_root_edit)
-        form.addRow("WSL netan executable", self.wsl_netan_executable_edit)
-        form.addRow("Dataset", self.dataset_combo)
-        form.addRow(
-            "Profile",
-            self._line_with_browse(self.profile_path_edit, browse_dir=False),
-        )
+        form.addRow("API base URL", self.api_base_url_edit)
+        form.addRow("Timeout seconds", self.timeout_seconds_edit)
+        form.addRow("Response format", self.response_format_combo)
+        form.addRow("Profile", self.profile_combo)
+        form.addRow("Dataset", self.dataset_id_edit)
+        form.addRow("Service default profile", self.default_profile_edit)
+        form.addRow("Dataset bounds", self.dataset_bounds_edit)
         layout.addLayout(form)
 
         button_row = QHBoxLayout()
-        refresh_button = QPushButton("Refresh")
-        refresh_button.clicked.connect(self.refresh_workspace)
-        validate_button = QPushButton("Validate Profile")
-        validate_button.clicked.connect(self.validate_profile)
-        compile_button = QPushButton("Compile Profile")
-        compile_button.clicked.connect(self.compile_profile)
+        refresh_button = QPushButton("Refresh Service")
+        refresh_button.clicked.connect(self.refresh_service)
         button_row.addWidget(refresh_button)
-        button_row.addWidget(validate_button)
-        button_row.addWidget(compile_button)
         layout.addLayout(button_row)
 
         layout.addWidget(
             QLabel(
-                "In WSL mode, QGIS reads files through the Windows-visible workspace root, "
-                "while the CLI runs inside WSL with translated Linux paths."
+                "The plugin talks directly to the running netan API. "
+                "Route, OD, and matrix runs are sent as JSON and loaded back into QGIS "
+                "from the API response."
             )
         )
         layout.addStretch(1)
@@ -164,7 +157,7 @@ class NetanDock(QDockWidget):
             self._line_with_browse(self.route_request_path_edit, browse_dir=False),
         )
         request_layout.addRow(
-            "Output path",
+            "Response path",
             self._line_with_browse(
                 self.route_output_path_edit, browse_dir=False, save_dialog=True
             ),
@@ -217,13 +210,13 @@ class NetanDock(QDockWidget):
         od_group = QGroupBox("OD")
         od_form = QFormLayout(od_group)
         self.od_pairs_path_edit = QLineEdit("examples/requests/od_pairs.csv")
-        self.od_output_path_edit = QLineEdit(".netan/runs/qgis-od.gpkg")
+        self.od_output_path_edit = QLineEdit(".netan/runs/qgis-od.geojson")
         od_form.addRow(
             "Pairs path",
             self._line_with_browse(self.od_pairs_path_edit, browse_dir=False),
         )
         od_form.addRow(
-            "Output path",
+            "Response path",
             self._line_with_browse(self.od_output_path_edit, browse_dir=False, save_dialog=True),
         )
         run_od_button = QPushButton("Run OD")
@@ -234,7 +227,7 @@ class NetanDock(QDockWidget):
         matrix_form = QFormLayout(matrix_group)
         self.matrix_origins_path_edit = QLineEdit("examples/requests/matrix_origins.csv")
         self.matrix_destinations_path_edit = QLineEdit("examples/requests/matrix_destinations.csv")
-        self.matrix_output_path_edit = QLineEdit(".netan/runs/qgis-matrix.gpkg")
+        self.matrix_output_path_edit = QLineEdit(".netan/runs/qgis-matrix.geojson")
         matrix_form.addRow(
             "Origins path",
             self._line_with_browse(self.matrix_origins_path_edit, browse_dir=False),
@@ -244,7 +237,7 @@ class NetanDock(QDockWidget):
             self._line_with_browse(self.matrix_destinations_path_edit, browse_dir=False),
         )
         matrix_form.addRow(
-            "Output path",
+            "Response path",
             self._line_with_browse(
                 self.matrix_output_path_edit, browse_dir=False, save_dialog=True
             ),
@@ -257,22 +250,6 @@ class NetanDock(QDockWidget):
         layout.addWidget(matrix_group)
         layout.addStretch(1)
         return tab
-
-    def _on_mode_changed(self):
-        self._apply_mode_defaults()
-
-    def _apply_mode_defaults(self):
-        is_wsl = self.execution_mode() == ExecutionMode.WSL
-        self.wsl_distro_edit.setEnabled(is_wsl)
-        self.wsl_workspace_root_edit.setEnabled(is_wsl)
-        self.wsl_netan_executable_edit.setEnabled(is_wsl)
-        self.native_netan_executable_edit.setEnabled(not is_wsl)
-
-        if sys.platform == "win32" and is_wsl:
-            distro = self.wsl_distro_edit.text().strip() or "Ubuntu"
-            unc_root = self.wsl_to_qgis_path(self.wsl_workspace_root_edit.text().strip(), distro)
-            if unc_root:
-                self.qgis_workspace_root_edit.setText(unc_root)
 
     def _line_with_browse(self, line_edit, browse_dir=False, save_dialog=False):
         row = QWidget()
@@ -291,343 +268,489 @@ class NetanDock(QDockWidget):
 
     def _browse_directory(self, line_edit):
         chosen = QFileDialog.getExistingDirectory(
-            self, "Select directory", str(self.qgis_workspace_root())
+            self, "Select directory", str(self.workspace_root())
         )
         if chosen:
             line_edit.setText(chosen)
 
     def _browse_file(self, line_edit):
         chosen, _ = QFileDialog.getOpenFileName(
-            self, "Select file", str(self.qgis_workspace_root())
+            self, "Select file", str(self.workspace_root())
         )
         if chosen:
             line_edit.setText(chosen)
 
     def _browse_save_file(self, line_edit):
         chosen, _ = QFileDialog.getSaveFileName(
-            self, "Select output path", str(self.qgis_workspace_root())
+            self, "Select output path", str(self.workspace_root())
         )
         if chosen:
             line_edit.setText(chosen)
 
-    def execution_mode(self):
-        return self.execution_mode_combo.currentText()
+    def workspace_root(self):
+        return Path(self.workspace_root_edit.text().strip() or ".").resolve()
 
-    def qgis_workspace_root(self):
-        return Path(self.qgis_workspace_root_edit.text().strip() or ".").resolve()
-
-    def wsl_workspace_root(self):
-        return self.wsl_workspace_root_edit.text().strip()
-
-    def wsl_distro(self):
-        return self.wsl_distro_edit.text().strip()
-
-    def dataset_id(self):
-        return self.dataset_combo.currentText().strip()
-
-    def resolve_qgis_path(self, raw):
+    def resolve_local_path(self, raw):
         value = raw.strip()
         if not value:
-            return self.qgis_workspace_root()
+            return self.workspace_root()
         path = Path(value)
         if path.is_absolute():
             return path
-        return self.qgis_workspace_root() / path
+        return self.workspace_root() / path
 
-    def resolve_cli_path(self, raw):
-        value = raw.strip()
-        if self.execution_mode() == ExecutionMode.NATIVE:
-            return str(self.resolve_qgis_path(value))
+    def api_base_url(self):
+        return self.api_base_url_edit.text().strip().rstrip("/")
 
-        if not value:
-            return self.wsl_workspace_root()
-        if value.startswith("/"):
-            return value
+    def timeout_seconds(self):
+        raw = self.timeout_seconds_edit.text().strip() or "30"
+        return float(raw)
 
-        qgis_root = self.qgis_workspace_root()
-        input_path = Path(value)
-        if input_path.is_absolute():
-            try:
-                relative = input_path.relative_to(qgis_root)
-            except ValueError:
-                self.log(
-                    "Absolute path is outside the QGIS-visible workspace root; "
-                    "WSL may not be able to access it: {}".format(input_path),
-                    Qgis.Warning,
-                )
-                return str(input_path)
-        else:
-            relative = input_path
+    def selected_profile_id(self):
+        return self.profile_combo.currentData()
 
-        return str(PurePosixPath(self.wsl_workspace_root()) / relative.as_posix())
+    def response_format(self):
+        return self.response_format_combo.currentData()
 
-    def output_qgis_path(self, raw):
-        if self.execution_mode() == ExecutionMode.NATIVE:
-            return self.resolve_qgis_path(raw)
-
-        value = raw.strip()
-        if not value:
-            return self.qgis_workspace_root()
-        if value.startswith("/"):
-            mapped = self.wsl_to_qgis_path(value, self.wsl_distro())
-            return Path(mapped) if mapped else Path(value)
-
-        path = Path(value)
-        if path.is_absolute():
-            return path
-        return self.qgis_workspace_root() / path
-
-    def wsl_to_qgis_path(self, linux_path, distro):
-        linux_path = (linux_path or "").strip()
-        distro = (distro or "").strip()
-        if not linux_path or not distro:
-            return ""
-        posix_path = PurePosixPath(linux_path)
-        if not posix_path.is_absolute():
-            posix_path = PurePosixPath("/") / posix_path
-        return "\\\\wsl$\\{}\\{}".format(distro, str(posix_path).lstrip("/").replace("/", "\\"))
-
-    def netan_program_and_args(self, cli_args):
-        if self.execution_mode() == ExecutionMode.NATIVE:
-            executable = self.resolve_qgis_path(self.native_netan_executable_edit.text())
-            return str(executable), cli_args
-
-        distro = self.wsl_distro()
-        if not distro:
-            raise ValueError("WSL distro is required in WSL mode.")
-        wsl_args = ["-d", distro, "--cd", self.wsl_workspace_root(), "--exec", self.wsl_netan_executable_edit.text().strip()]
-        return "wsl.exe", wsl_args + cli_args
-
-    def refresh_workspace(self):
-        self.dataset_combo.clear()
-        dataset_dir = self.qgis_workspace_root() / ".netan" / "datasets"
-        if not dataset_dir.exists():
-            self.log(
-                "Dataset directory does not exist yet: {}".format(dataset_dir),
-                Qgis.Warning,
+    def service_url(self, suffix, include_format=False):
+        url = "{}{}".format(self.api_base_url(), suffix)
+        if include_format and self.response_format() == ResponseFormat.GEOJSON:
+            return "{}?{}".format(
+                url, urllib.parse.urlencode({"format": ResponseFormat.GEOJSON})
             )
+        return url
+
+    def refresh_service(self):
+        try:
+            service = self.http_get_json(self.service_url("/v1/service"))
+        except Exception as exc:
+            self.service_info = None
+            self.dataset_id_edit.setText("")
+            self.default_profile_edit.setText("")
+            self.dataset_bounds_edit.setText("")
+            self.profile_combo.clear()
+            self.log("Failed to refresh service: {}".format(exc), Qgis.Warning)
             return
 
-        datasets = []
-        for manifest_path in sorted(dataset_dir.glob("*.json")):
-            try:
-                manifest = json.loads(manifest_path.read_text())
-                dataset_id = manifest.get("dataset_id")
-                if isinstance(dataset_id, dict):
-                    dataset_id = dataset_id.get("0") or dataset_id.get("value")
-                if isinstance(dataset_id, str):
-                    datasets.append(dataset_id)
-            except Exception as exc:
-                self.log("Failed to read {}: {}".format(manifest_path, exc), Qgis.Warning)
+        self.service_info = service
+        dataset = service.get("dataset", {})
+        bounds = dataset.get("topology_bounds") or {}
+        bounds_text = ""
+        if bounds:
+            bounds_text = "{min_lon:.6f}, {min_lat:.6f}, {max_lon:.6f}, {max_lat:.6f}".format(
+                min_lon=bounds.get("min_lon", 0.0),
+                min_lat=bounds.get("min_lat", 0.0),
+                max_lon=bounds.get("max_lon", 0.0),
+                max_lat=bounds.get("max_lat", 0.0),
+            )
 
-        for dataset_id in datasets:
-            self.dataset_combo.addItem(dataset_id)
+        self.dataset_id_edit.setText(dataset.get("dataset_id", ""))
+        self.default_profile_edit.setText(service.get("default_profile_id", ""))
+        self.dataset_bounds_edit.setText(bounds_text)
+
+        profiles = service.get("loaded_profiles", [])
+        self.profile_combo.clear()
+        default_profile_id = service.get("default_profile_id", "")
+        self.profile_combo.addItem(
+            "Service default ({})".format(default_profile_id or "none"), ""
+        )
+        for profile in profiles:
+            label = "{} [{}]".format(
+                profile.get("profile_id", "unknown"),
+                profile.get("mode", "unknown"),
+            )
+            self.profile_combo.addItem(label, profile.get("profile_id", ""))
 
         self.log(
-            "Refreshed workspace in {} mode. {} dataset(s) available.".format(
-                self.execution_mode(), len(datasets)
+            "Connected to {}. Dataset '{}' with {} loaded profile(s).".format(
+                self.api_base_url(), dataset.get("dataset_id", "unknown"), len(profiles)
             )
         )
 
-    def validate_profile(self):
-        if not self.resolve_qgis_path(self.profile_path_edit.text()).exists():
-            self.alert(
-                "Profile does not exist: {}".format(
-                    self.resolve_qgis_path(self.profile_path_edit.text())
-                )
-            )
-            return
-        self.start_process(
-            [
-                "profile",
-                "validate",
-                self.resolve_cli_path(self.profile_path_edit.text()),
-            ],
-            load_output=False,
-        )
-
-    def compile_profile(self):
-        if not self.dataset_id():
-            self.alert("Choose a dataset first.")
-            return
-        self.start_process(
-            [
-                "profile",
-                "compile",
-                "--dataset",
-                self.dataset_id(),
-                "--profile",
-                self.resolve_cli_path(self.profile_path_edit.text()),
-            ],
-            load_output=False,
-        )
+    def build_route_request(self):
+        return {
+            "route_id": self.route_id_edit.text().strip(),
+            "origin": {
+                "id": self.origin_id_edit.text().strip(),
+                "lon": float(self.origin_lon_edit.text().strip()),
+                "lat": float(self.origin_lat_edit.text().strip()),
+            },
+            "destination": {
+                "id": self.destination_id_edit.text().strip(),
+                "lon": float(self.destination_lon_edit.text().strip()),
+                "lat": float(self.destination_lat_edit.text().strip()),
+            },
+            "snap": {"max_distance_m": float(self.snap_distance_edit.text().strip())},
+            "returns": {
+                "geometry": "full",
+                "segment_rows": True,
+                "road_type_breakdown": ["time_s", "distance_m"],
+                "surface_breakdown": ["time_s", "distance_m"],
+                "penalty_breakdown": True,
+                "explain_cost_derivation": True,
+            },
+        }
 
     def write_route_request(self):
         try:
-            request = {
-                "route_id": self.route_id_edit.text().strip(),
-                "origin": {
-                    "id": self.origin_id_edit.text().strip(),
-                    "lon": float(self.origin_lon_edit.text().strip()),
-                    "lat": float(self.origin_lat_edit.text().strip()),
-                },
-                "destination": {
-                    "id": self.destination_id_edit.text().strip(),
-                    "lon": float(self.destination_lon_edit.text().strip()),
-                    "lat": float(self.destination_lat_edit.text().strip()),
-                },
-                "snap": {"max_distance_m": float(self.snap_distance_edit.text().strip())},
-                "returns": {
-                    "geometry": "full",
-                    "segment_rows": True,
-                    "road_type_breakdown": ["time_s", "distance_m"],
-                    "surface_breakdown": ["time_s", "distance_m"],
-                    "penalty_breakdown": True,
-                    "explain_cost_derivation": True,
-                },
-            }
+            request = self.build_route_request()
         except ValueError as exc:
             self.alert("Invalid route request values: {}".format(exc))
             return
 
-        request_path = self.resolve_qgis_path(self.route_request_path_edit.text())
+        request_path = self.resolve_local_path(self.route_request_path_edit.text())
         request_path.parent.mkdir(parents=True, exist_ok=True)
-        request_path.write_text(json.dumps(request, indent=2))
+        request_path.write_text(json.dumps(request, indent=2), encoding="utf-8")
         self.log("Wrote route request to {}".format(request_path))
 
     def run_route(self):
-        if not self.dataset_id():
-            self.alert("Choose a dataset first.")
+        if self.service_info is None:
+            self.alert("Refresh the API service first.")
             return
-        self.pending_output_qgis_path = self.output_qgis_path(self.route_output_path_edit.text())
-        self.start_process(
-            [
-                "analyze",
-                "route",
-                "--dataset",
-                self.dataset_id(),
-                "--profile",
-                self.resolve_cli_path(self.profile_path_edit.text()),
-                "--request",
-                self.resolve_cli_path(self.route_request_path_edit.text()),
-                "--out",
-                self.resolve_cli_path(self.route_output_path_edit.text()),
-            ],
-            load_output=True,
+        try:
+            payload = {"request": self.build_route_request()}
+        except ValueError as exc:
+            self.alert("Invalid route request values: {}".format(exc))
+            return
+
+        profile_id = self.selected_profile_id()
+        if profile_id:
+            payload["profile_id"] = profile_id
+
+        self.execute_api_request(
+            endpoint="/v1/route",
+            payload=payload,
+            output_path=self.route_output_path_edit.text(),
+            layer_name=payload["request"]["route_id"] or "netan_route",
+            analysis_kind="route",
         )
 
     def run_od(self):
-        if not self.dataset_id():
-            self.alert("Choose a dataset first.")
+        if self.service_info is None:
+            self.alert("Refresh the API service first.")
             return
-        self.pending_output_qgis_path = self.output_qgis_path(self.od_output_path_edit.text())
-        self.start_process(
-            [
-                "analyze",
-                "od",
-                "--dataset",
-                self.dataset_id(),
-                "--profile",
-                self.resolve_cli_path(self.profile_path_edit.text()),
-                "--pairs",
-                self.resolve_cli_path(self.od_pairs_path_edit.text()),
-                "--out",
-                self.resolve_cli_path(self.od_output_path_edit.text()),
-            ],
-            load_output=True,
+        try:
+            document = self.load_od_document(self.resolve_local_path(self.od_pairs_path_edit.text()))
+        except Exception as exc:
+            self.alert("Failed to load OD input: {}".format(exc))
+            return
+
+        payload = {"request": document}
+        profile_id = self.selected_profile_id()
+        if profile_id:
+            payload["profile_id"] = profile_id
+
+        self.execute_api_request(
+            endpoint="/v1/od",
+            payload=payload,
+            output_path=self.od_output_path_edit.text(),
+            layer_name="netan_od",
+            analysis_kind="od",
         )
 
     def run_matrix(self):
-        if not self.dataset_id():
-            self.alert("Choose a dataset first.")
+        if self.service_info is None:
+            self.alert("Refresh the API service first.")
             return
-        self.pending_output_qgis_path = self.output_qgis_path(self.matrix_output_path_edit.text())
-        self.start_process(
-            [
-                "analyze",
-                "matrix",
-                "--dataset",
-                self.dataset_id(),
-                "--profile",
-                self.resolve_cli_path(self.profile_path_edit.text()),
-                "--origins",
-                self.resolve_cli_path(self.matrix_origins_path_edit.text()),
-                "--destinations",
-                self.resolve_cli_path(self.matrix_destinations_path_edit.text()),
-                "--out",
-                self.resolve_cli_path(self.matrix_output_path_edit.text()),
-            ],
-            load_output=True,
-        )
-
-    def start_process(self, cli_args, load_output):
         try:
-            program, args = self.netan_program_and_args(cli_args)
-        except ValueError as exc:
-            self.alert(str(exc))
+            origins = self.load_point_set_document(
+                self.resolve_local_path(self.matrix_origins_path_edit.text())
+            )
+            destinations = self.load_point_set_document(
+                self.resolve_local_path(self.matrix_destinations_path_edit.text())
+            )
+        except Exception as exc:
+            self.alert("Failed to load matrix input: {}".format(exc))
             return
 
-        if self.execution_mode() == ExecutionMode.NATIVE:
-            if not Path(program).exists():
-                self.alert("netan executable does not exist: {}".format(program))
-                return
-        if self.process is not None and self.process.state() != QProcess.NotRunning:
-            self.alert("A netan process is already running.")
+        payload = {"request": {"origins": origins, "destinations": destinations}}
+        profile_id = self.selected_profile_id()
+        if profile_id:
+            payload["profile_id"] = profile_id
+
+        self.execute_api_request(
+            endpoint="/v1/matrix",
+            payload=payload,
+            output_path=self.matrix_output_path_edit.text(),
+            layer_name="netan_matrix",
+            analysis_kind="matrix",
+        )
+
+    def execute_api_request(self, endpoint, payload, output_path, layer_name, analysis_kind):
+        url = self.service_url(endpoint, include_format=True)
+        self.log("POST {}".format(url))
+        try:
+            content_type, body = self.http_post_json(url, payload)
+        except Exception as exc:
+            self.alert("API request failed: {}".format(exc))
             return
 
-        self.process = QProcess(self)
-        self.process.setWorkingDirectory(str(self.qgis_workspace_root()))
-        self.process.readyReadStandardOutput.connect(self._read_stdout)
-        self.process.readyReadStandardError.connect(self._read_stderr)
-        self.process.finished.connect(
-            lambda exit_code, exit_status: self._process_finished(
-                exit_code, exit_status, load_output
+        local_output_path = self.resolve_local_path(output_path)
+        saved_path = self.save_response(local_output_path, content_type, body)
+        self.log("Saved API response to {}".format(saved_path))
+
+        if "geo+json" in content_type or saved_path.suffix.lower() == ".geojson":
+            self.load_output_layer(saved_path, layer_name)
+            return
+
+        try:
+            response_json = json.loads(body.decode("utf-8"))
+        except Exception as exc:
+            self.alert("Failed to parse API JSON response: {}".format(exc))
+            return
+
+        geojson = self.analysis_json_to_geojson(analysis_kind, response_json)
+        if geojson is None:
+            self.log(
+                "Response saved, but no spatial geometry could be built from the API result.",
+                Qgis.Warning,
+            )
+            return
+
+        temp_path = self.write_temp_geojson(layer_name, geojson)
+        self.load_output_layer(temp_path, layer_name)
+
+    def load_od_document(self, path):
+        suffix = path.suffix.lower()
+        if suffix == ".csv":
+            return self.load_od_csv(path)
+        if suffix == ".json":
+            parsed = self.read_json(path)
+            if isinstance(parsed, dict):
+                if "pairs" in parsed:
+                    parsed.setdefault("snap", {"max_distance_m": 500.0})
+                    parsed.setdefault("returns", {"geometry": "full"})
+                    return parsed
+            if isinstance(parsed, list):
+                return {
+                    "pairs": parsed,
+                    "snap": {"max_distance_m": 500.0},
+                    "returns": {"geometry": "full"},
+                }
+        raise ValueError("OD input must be .csv or .json for API mode.")
+
+    def load_point_set_document(self, path):
+        suffix = path.suffix.lower()
+        if suffix == ".csv":
+            return self.load_point_set_csv(path)
+        if suffix == ".json":
+            parsed = self.read_json(path)
+            if isinstance(parsed, dict):
+                if "points" in parsed:
+                    parsed.setdefault("snap", {"max_distance_m": 500.0})
+                    parsed.setdefault("returns", {"geometry": "full"})
+                    return parsed
+            if isinstance(parsed, list):
+                return {
+                    "points": parsed,
+                    "snap": {"max_distance_m": 500.0},
+                    "returns": {"geometry": "full"},
+                }
+        raise ValueError("Point-set input must be .csv or .json for API mode.")
+
+    def load_od_csv(self, path):
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            pairs = []
+            for row in reader:
+                pair_id = self.first_value(row, ["id", "pair_id"])
+                source_x = float(
+                    self.first_value(row, ["source_x", "source_lon", "origin_x", "origin_lon"])
+                )
+                source_y = float(
+                    self.first_value(row, ["source_y", "source_lat", "origin_y", "origin_lat"])
+                )
+                target_x = float(
+                    self.first_value(
+                        row,
+                        ["target_x", "target_lon", "destination_x", "destination_lon"],
+                    )
+                )
+                target_y = float(
+                    self.first_value(
+                        row,
+                        ["target_y", "target_lat", "destination_y", "destination_lat"],
+                    )
+                )
+                pairs.append(
+                    {
+                        "pair_id": pair_id,
+                        "origin": {
+                            "id": "{}:source".format(pair_id),
+                            "lon": source_x,
+                            "lat": source_y,
+                        },
+                        "destination": {
+                            "id": "{}:target".format(pair_id),
+                            "lon": target_x,
+                            "lat": target_y,
+                        },
+                    }
+                )
+        return {
+            "pairs": pairs,
+            "snap": {"max_distance_m": 500.0},
+            "returns": {"geometry": "full"},
+        }
+
+    def load_point_set_csv(self, path):
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            points = []
+            for row in reader:
+                points.append(
+                    {
+                        "id": self.first_value(row, ["id"]),
+                        "lon": float(self.first_value(row, ["x", "lon", "longitude"])),
+                        "lat": float(self.first_value(row, ["y", "lat", "latitude"])),
+                    }
+                )
+        return {
+            "points": points,
+            "snap": {"max_distance_m": 500.0},
+            "returns": {"geometry": "full"},
+        }
+
+    def first_value(self, row, accepted_columns):
+        for column in accepted_columns:
+            value = row.get(column)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        raise ValueError(
+            "Missing required column. Expected one of: {}".format(
+                ", ".join(accepted_columns)
             )
         )
 
-        self.log("Running: {} {}".format(program, " ".join(args)))
-        self.process.start(program, args)
+    def read_json(self, path):
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle)
 
-    def _read_stdout(self):
-        if self.process is None:
-            return
-        text = bytes(self.process.readAllStandardOutput()).decode(
-            "utf-8", errors="replace"
-        ).strip()
-        if text:
-            self.log(text)
+    def http_get_json(self, url):
+        request = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(request, timeout=self.timeout_seconds()) as response:
+            body = response.read().decode("utf-8")
+            return json.loads(body)
 
-    def _read_stderr(self):
-        if self.process is None:
-            return
-        text = bytes(self.process.readAllStandardError()).decode(
-            "utf-8", errors="replace"
-        ).strip()
-        if text:
-            self.log(text, Qgis.Warning)
+    def http_post_json(self, url, payload):
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/geo+json, application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds()) as response:
+                return response.headers.get_content_type(), response.read()
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            try:
+                parsed = json.loads(error_body)
+                message = parsed.get("error") or error_body
+            except Exception:
+                message = error_body or str(exc)
+            raise RuntimeError(message)
 
-    def _process_finished(self, exit_code, exit_status, load_output):
-        if exit_code != 0 or exit_status != QProcess.NormalExit:
-            self.log(
-                "netan process failed with exit code {}".format(exit_code), Qgis.Critical
+    def save_response(self, output_path, content_type, body):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if "geo+json" in content_type:
+            if output_path.suffix.lower() != ".geojson":
+                output_path = output_path.with_suffix(".geojson")
+            output_path.write_bytes(body)
+            return output_path
+
+        if output_path.suffix.lower() != ".json":
+            output_path = output_path.with_suffix(".json")
+        output_path.write_bytes(body)
+        return output_path
+
+    def analysis_json_to_geojson(self, analysis_kind, response_json):
+        service = response_json.get("service", {})
+        result = response_json.get("result", {})
+        if analysis_kind == "route":
+            geometry = result.get("geometry")
+            if not geometry:
+                return None
+            return {
+                "type": "FeatureCollection",
+                "features": [
+                    {
+                        "type": "Feature",
+                        "geometry": {"type": "LineString", "coordinates": geometry},
+                        "properties": {
+                            "dataset_id": service.get("dataset_id"),
+                            "profile_id": service.get("profile_id"),
+                            "profile_hash": service.get("profile_hash"),
+                            "route_id": result.get("route_id"),
+                            "total_distance_m": result.get("summary", {}).get("total_distance_m"),
+                            "total_travel_time_s": result.get("summary", {}).get(
+                                "total_travel_time_s"
+                            ),
+                            "total_generalized_cost": result.get("summary", {}).get(
+                                "total_generalized_cost"
+                            ),
+                            "segment_count": result.get("summary", {}).get("segment_count"),
+                            "origin_point_id": result.get("origin", {}).get("point_id"),
+                            "destination_point_id": result.get("destination", {}).get("point_id"),
+                            "origin_snap_distance_m": result.get("origin", {}).get(
+                                "snap_distance_m"
+                            ),
+                            "destination_snap_distance_m": result.get("destination", {}).get(
+                                "snap_distance_m"
+                            ),
+                        },
+                    }
+                ],
+            }
+
+        items = result.get("pairs") if analysis_kind == "od" else result.get("cells")
+        if not isinstance(items, list):
+            return None
+
+        features = []
+        for item in items:
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": self.item_geometry(item.get("geometry")),
+                    "properties": {
+                        "dataset_id": service.get("dataset_id"),
+                        "profile_id": service.get("profile_id"),
+                        "profile_hash": service.get("profile_hash"),
+                        "pair_id": item.get("pair_id"),
+                        "origin_id": item.get("origin_id"),
+                        "destination_id": item.get("destination_id"),
+                        "status": item.get("status"),
+                        "origin_snap_distance_m": item.get("origin_snap_distance_m"),
+                        "destination_snap_distance_m": item.get("destination_snap_distance_m"),
+                        "total_distance_m": item.get("total_distance_m"),
+                        "total_travel_time_s": item.get("total_travel_time_s"),
+                        "total_generalized_cost": item.get("total_generalized_cost"),
+                        "error": item.get("error"),
+                    },
+                }
             )
-            return
 
-        self.log("netan process completed successfully.")
-        if load_output and self.pending_output_qgis_path is not None:
-            self.load_output_layer(self.pending_output_qgis_path)
-        self.refresh_workspace()
+        return {"type": "FeatureCollection", "features": features}
 
-    def load_output_layer(self, output_path):
+    def item_geometry(self, coordinates):
+        if not coordinates:
+            return None
+        return {"type": "LineString", "coordinates": coordinates}
+
+    def write_temp_geojson(self, layer_name, geojson):
+        safe_name = layer_name.replace(" ", "_") or "netan_layer"
+        path = self.temp_layers_dir / "{}.geojson".format(safe_name)
+        path.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
+        return path
+
+    def load_output_layer(self, output_path, layer_name=None):
         output_path = Path(output_path)
-        suffix = output_path.suffix.lower()
-        if suffix not in {".geojson", ".gpkg", ".geoparquet", ".gpq"}:
-            self.log(
-                "Output is not a spatial layer QGIS can auto-load: {}".format(output_path)
-            )
-            return
-
-        layer = QgsVectorLayer(str(output_path), output_path.stem, "ogr")
+        layer = QgsVectorLayer(str(output_path), layer_name or output_path.stem, "ogr")
         if not layer.isValid():
             self.log("Failed to load layer {}".format(output_path), Qgis.Warning)
             return

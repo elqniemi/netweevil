@@ -1,0 +1,32 @@
+{
+  "request": {
+    "route_id": "idf_car_bastille_to_la_defense",
+    "origin": {
+      "id": "bastille",
+      "lon": 2.3693,
+      "lat": 48.8530
+    },
+    "destination": {
+      "id": "la_defense",
+      "lon": 2.2369,
+      "lat": 48.8919
+    },
+    "snap": {
+      "max_distance_m": 500.0
+    },
+    "returns": {
+      "geometry": "full",
+      "segment_rows": true,
+      "road_type_breakdown": [
+        "time_s",
+        "distance_m"
+      ],
+      "surface_breakdown": [
+        "time_s",
+        "distance_m"
+      ],
+      "penalty_breakdown": true,
+      "explain_cost_derivation": true
+    }
+  }
+}

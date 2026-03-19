@@ -127,12 +127,37 @@ pub struct TopologyBundleMeta {
     pub skipped_way_count: u64,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct TopologyBounds {
+    pub min_lon: f64,
+    pub min_lat: f64,
+    pub max_lon: f64,
+    pub max_lat: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopologyNode {
     pub node_id: NodeId,
     pub osm_node_id: i64,
     pub lon: f64,
     pub lat: f64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct SpatialIndexCell {
+    pub node_start: u32,
+    pub node_len: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeSpatialIndex {
+    pub bounds: TopologyBounds,
+    pub columns: u32,
+    pub rows: u32,
+    pub cell_width_deg: f64,
+    pub cell_height_deg: f64,
+    pub cells: Vec<SpatialIndexCell>,
+    pub node_ids: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -146,4 +171,6 @@ pub struct TopologyBundle {
     pub turn_restrictions: Vec<TurnRestriction>,
     #[serde(default)]
     pub names: Vec<String>,
+    #[serde(default)]
+    pub spatial_index: Option<NodeSpatialIndex>,
 }

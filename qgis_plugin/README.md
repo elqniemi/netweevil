@@ -1,32 +1,28 @@
 # netan QGIS Plugin
 
-This plugin wraps the local `netan` CLI from inside QGIS.
+This plugin now talks directly to the running `netan` API.
 
-It is meant for the current repository layout:
-
-- one local workspace root
-- one `.netan/` state directory
-- one `netan` executable built from this repo
-
-The plugin is now written to be usable in both QGIS 3 and QGIS 4, and it supports two execution modes:
-
-- `Native`: QGIS and `netan` run on the same OS
-- `WSL`: Windows QGIS launches the Linux `netan` binary through `wsl.exe`
+It no longer shells out to the CLI. QGIS sends JSON requests to the API, receives JSON or GeoJSON responses, and loads the returned geometries into the map immediately.
 
 ## What It Does
 
-- refreshes dataset manifests from `.netan/datasets/`
-- validates and compiles profiles against the selected dataset
+- connects to a running `netan api serve` instance
+- reads the loaded dataset and available profiles from `/v1/service`
 - writes route request JSON from typed coordinates
-- runs `route`, `od`, and `matrix` analyses through the CLI
-- loads `.geojson`, `.gpkg`, and `.geoparquet` outputs into QGIS after a successful run
+- submits route, OD, and matrix requests to the API
+- loads route, OD, and matrix geometries into QGIS from API responses
+- supports both normal JSON responses and direct GeoJSON responses
 
 ## Install In QGIS
 
-1. Build the CLI:
+1. Start the API:
 
 ```bash
-cargo build -p netan-cli
+cargo run -p netan-cli -- api serve \
+  --dataset ile_de_france_2026_03 \
+  --default-profile examples/profiles/car_research_v1.yml \
+  --profile examples/profiles/pedestrian_research_v1.yml \
+  --bind 127.0.0.1:8080
 ```
 
 2. Copy or symlink [`netan_qgis`](/home/elmeriniemi/stuff/netan/qgis_plugin/netan_qgis) into your QGIS profile plugin directory.
@@ -51,146 +47,49 @@ cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netan_
 
 Set these fields in the dock:
 
-- `Execution mode`: `Native` or `WSL`
-- `QGIS-visible workspace root`:
-  - Linux native example: `/home/elmeriniemi/stuff/netan`
-  - Windows + WSL example: `\\wsl$\Ubuntu\home\elmeriniemi\stuff\netan`
-- `Native netan executable` for native mode, usually `/home/elmeriniemi/stuff/netan/target/debug/netan`
-- `WSL distro`, `WSL workspace root`, and `WSL netan executable` for WSL mode
-- `Dataset`: choose an imported dataset after pressing `Refresh`
-- `Profile`: point at a YAML/TOML profile such as `examples/profiles/car_research_v1.yml`
+- `Workspace root`: local root used only for browsing and saving request/response files
+- `API base URL`: for example `http://127.0.0.1:8080`
+- `Timeout seconds`
+- `Response format`: `JSON` or `GeoJSON`
+- `Profile`: either the service default or any profile preloaded by the API
 
-If the dataset has not been imported yet, do that once from the CLI or the native GUI first.
+Then press `Refresh Service`.
+
+The plugin will show:
+
+- the dataset currently loaded by the API
+- the API default profile
+- the available profile list
+- the loaded dataset bounds when available
 
 ## Windows QGIS + WSL
 
-Yes, you can use this from Windows QGIS even if you build and run `netan` inside WSL.
+This is simpler now than the old CLI integration. Run the API wherever `netan` lives, then point QGIS at that HTTP endpoint.
 
-Use these settings:
+Examples:
 
-- `Execution mode`: `WSL`
-- `QGIS-visible workspace root`: `\\wsl$\Ubuntu\home\elmeriniemi\stuff\netan`
-- `WSL distro`: `Ubuntu`
-- `WSL workspace root`: `/home/elmeriniemi/stuff/netan`
-- `WSL netan executable`: `/home/elmeriniemi/stuff/netan/target/debug/netan`
-
-How it works:
-
-- QGIS reads manifests and output layers through the Windows-visible `\\wsl$` path.
-- The plugin launches `wsl.exe` and runs the Linux `netan` binary inside your distro.
-- Relative paths like `examples/profiles/car_research_v1.yml` or `.netan/runs/qgis-route.geojson` are translated automatically.
-
-This is the simplest path if your repo and build artifacts live inside WSL.
-
-If you want the cleanest Windows integration, build a native Windows `netan.exe` and use `Native` mode instead.
-
-## Full Windows Example
-
-This example shows both supported Windows flows for QGIS 4.
-
-### A. Windows QGIS 4 calling into WSL
-
-1. Build the CLI in WSL:
-
-```bash
-cd /home/elmeriniemi/stuff/netan
-cargo build -p netan-cli
-```
-
-2. Optionally copy the repo to Windows without the Rust build directory:
-
-```bash
-cd /home/elmeriniemi/stuff/netan
-mkdir -p /windownloads/netan
-for p in .* *; do
-  [ "$p" = "." ] || [ "$p" = ".." ] || [ "$p" = "target" ] || cp -a -- "$p" /windownloads/netan/
-done
-```
-
-3. Install the plugin into the Windows QGIS 4 profile:
-
-```powershell
-New-Item -ItemType Directory -Force "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins"
-cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netan_qgis" "\\wsl$\Ubuntu\home\elmeriniemi\stuff\netan\qgis_plugin\netan_qgis"
-```
-
-4. Open QGIS 4 and enable the plugin.
-
-5. Configure the dock with:
-
-- `Execution mode`: `WSL`
-- `QGIS-visible workspace root`: `\\wsl$\Ubuntu\home\elmeriniemi\stuff\netan`
-- `WSL distro`: `Ubuntu`
-- `WSL workspace root`: `/home/elmeriniemi/stuff/netan`
-- `WSL netan executable`: `/home/elmeriniemi/stuff/netan/target/debug/netan`
-- `Profile`: `examples/profiles/car_research_v1.yml`
-
-6. Press `Refresh`, select `groningen_2026_03`, then run:
-
-- route output: `.netan/runs/qgis-route.geojson`
-- OD output: `.netan/runs/qgis-od.gpkg`
-- matrix output: `.netan/runs/qgis-matrix.gpkg`
-
-### B. Windows QGIS 4 with native `netan.exe`
-
-1. Copy the repo to Windows:
-
-```bash
-cd /home/elmeriniemi/stuff/netan
-mkdir -p /windownloads/netan
-for p in .* *; do
-  [ "$p" = "." ] || [ "$p" = ".." ] || [ "$p" = "target" ] || cp -a -- "$p" /windownloads/netan/
-done
-```
-
-2. Build the Windows executable from PowerShell:
-
-```powershell
-cd C:\path\to\netan
-cargo build -p netan-cli
-```
-
-3. Install the plugin:
-
-```powershell
-New-Item -ItemType Directory -Force "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins"
-cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netan_qgis" "C:\path\to\netan\qgis_plugin\netan_qgis"
-```
-
-4. Configure the dock with:
-
-- `Execution mode`: `Native`
-- `QGIS-visible workspace root`: `C:\path\to\netan`
-- `Native netan executable`: `C:\path\to\netan\target\debug\netan.exe`
-- `Profile`: `examples/profiles/car_research_v1.yml`
-
-5. Import data and compile a profile if needed:
-
-```powershell
-cd C:\path\to\netan
-.\target\debug\netan.exe dataset import datasets\groningen-260317.osm.pbf --name groningen_2026_03
-.\target\debug\netan.exe profile compile --dataset groningen_2026_03 --profile examples\profiles\car_research_v1.yml
-```
-
-6. Use the plugin normally from QGIS 4.
+- API inside WSL, QGIS on Windows:
+  - `API base URL`: `http://127.0.0.1:8080` if you expose it locally from WSL
+  - `Workspace root`: any Windows-accessible folder you want to use for request and response files
+- Native Linux QGIS:
+  - `API base URL`: `http://127.0.0.1:8080`
+  - `Workspace root`: `/home/elmeriniemi/stuff/netan`
 
 ## Example Flows
 
 ### Route
 
 1. Open the plugin dock.
-2. Set the execution mode and the matching workspace/executable fields.
-3. Press `Refresh`.
-4. Pick `groningen_2026_03` as the dataset.
-5. Set profile to `examples/profiles/car_research_v1.yml`.
-6. Press `Compile Profile`.
-7. In the `Route` tab, set:
+2. Set `Workspace root` and `API base URL`.
+3. Press `Refresh Service`.
+4. Choose either the service default profile or a specific loaded profile.
+5. In the `Route` tab, set:
    - request path: `examples/requests/route_from_qgis.json`
-   - output path: `.netan/runs/qgis-route.geojson`
+   - response path: `.netan/runs/qgis-route.geojson`
    - origin: `6.5665, 53.2194`
    - destination: `6.5716, 53.2148`
-8. Press `Write Request`.
-9. Press `Run Route`.
+6. Press `Write Request`.
+7. Press `Run Route`.
 
 The resulting line layer loads into QGIS automatically.
 
@@ -199,7 +98,7 @@ The resulting line layer loads into QGIS automatically.
 Use:
 
 - pairs path: `examples/requests/od_pairs.csv`
-- output path: `.netan/runs/qgis-od.gpkg`
+- response path: `.netan/runs/qgis-od.geojson`
 
 Then press `Run OD`.
 
@@ -209,13 +108,15 @@ Use:
 
 - origins path: `examples/requests/matrix_origins.csv`
 - destinations path: `examples/requests/matrix_destinations.csv`
-- output path: `.netan/runs/qgis-matrix.gpkg`
+- response path: `.netan/runs/qgis-matrix.geojson`
 
 Then press `Run Matrix`.
 
 ## Notes
 
-- The plugin does not embed the Rust engine; it shells out to the local CLI.
-- Relative paths are resolved against the configured workspace root for the active mode.
-- Only spatial outputs are auto-loaded into QGIS.
+- The plugin does not embed the Rust engine; it calls the running HTTP API.
+- Relative request/input/output paths are resolved against the configured workspace root.
+- OD and matrix CSV inputs are parsed locally and sent to the API as JSON.
+- YAML request files are not supported by the plugin in API mode.
+- When `Response format` is `JSON`, the plugin still builds a temporary GeoJSON layer locally when geometry is present in the API response.
 - In WSL mode, output layers are loaded back into QGIS through `\\wsl$\<distro>\...`.

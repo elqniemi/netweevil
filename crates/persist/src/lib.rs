@@ -1,9 +1,12 @@
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use flate2::Compression;
+use flate2::read::GzDecoder;
+use flate2::write::GzEncoder;
 use memmap2::Mmap;
 use netan_core::{CompiledProfileBundle, TopologyBundle};
 use netan_report::{CompiledProfileManifest, DatasetManifest, RunManifest};
@@ -91,10 +94,19 @@ pub fn read_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
 }
 
 pub fn write_topology_bundle(path: impl AsRef<Path>, bundle: &TopologyBundle) -> Result<()> {
-    write_binary(path, bundle)
+    write_binary_gzip(path, bundle)
 }
 
 pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
+    let path = path.as_ref();
+    if path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
+        || path_has_gzip_magic(path)?
+    {
+        return read_binary_gzip(path);
+    }
     read_binary_mmap(path)
 }
 
@@ -124,12 +136,49 @@ fn write_binary<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Result<()> {
         .with_context(|| format!("flushing binary {}", path.display()))
 }
 
+fn write_binary_gzip<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("creating directory {}", parent.display()))?;
+    }
+    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
+    let writer = BufWriter::new(file);
+    let mut encoder = GzEncoder::new(writer, Compression::default());
+    bincode::serialize_into(&mut encoder, value)
+        .with_context(|| format!("serializing compressed binary {}", path.display()))?;
+    encoder
+        .try_finish()
+        .with_context(|| format!("finishing compressed binary {}", path.display()))
+}
+
 fn read_binary_mmap<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
     let path = path.as_ref();
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mmap = unsafe { Mmap::map(&file) }
         .with_context(|| format!("memory-mapping {}", path.display()))?;
     bincode::deserialize(&mmap).with_context(|| format!("parsing binary bundle {}", path.display()))
+}
+
+fn read_binary_gzip<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
+    let path = path.as_ref();
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut decoder = GzDecoder::new(file);
+    let mut bytes = Vec::new();
+    decoder
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("decompressing {}", path.display()))?;
+    bincode::deserialize(&bytes)
+        .with_context(|| format!("parsing compressed binary bundle {}", path.display()))
+}
+
+fn path_has_gzip_magic(path: &Path) -> Result<bool> {
+    let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mut magic = [0_u8; 2];
+    let read = file
+        .read(&mut magic)
+        .with_context(|| format!("reading {}", path.display()))?;
+    Ok(read == magic.len() && magic == [0x1f, 0x8b])
 }
 
 #[cfg(test)]
@@ -162,40 +211,42 @@ mod tests {
                     lat: 53.3,
                 },
             ],
-            edges: vec![DirectedEdge {
-                edge_id: EdgeId(0),
-                from: NodeId(0),
-                to: NodeId(1),
-                source_way_id: 200,
-                length_m: 123,
-                duration_s: None,
-                road_class: RoadClass::Path,
-                surface: SurfaceClass::Gravel,
-                smoothness: SmoothnessClass::Bad,
-                access_mask: AccessMask::new(AccessMask::FOOT),
-                is_toll: false,
-                name_index: Some(0),
-                geometry_offset: 0,
-                geometry_len: 0,
-                flags: 0,
-            },
-            DirectedEdge {
-                edge_id: EdgeId(1),
-                from: NodeId(1),
-                to: NodeId(0),
-                source_way_id: 201,
-                length_m: 456,
-                duration_s: Some(45.0),
-                road_class: RoadClass::Residential,
-                surface: SurfaceClass::Paved,
-                smoothness: SmoothnessClass::Good,
-                access_mask: AccessMask::new(AccessMask::CAR | AccessMask::FOOT),
-                is_toll: true,
-                name_index: None,
-                geometry_offset: 0,
-                geometry_len: 0,
-                flags: 1,
-            }],
+            edges: vec![
+                DirectedEdge {
+                    edge_id: EdgeId(0),
+                    from: NodeId(0),
+                    to: NodeId(1),
+                    source_way_id: 200,
+                    length_m: 123,
+                    duration_s: None,
+                    road_class: RoadClass::Path,
+                    surface: SurfaceClass::Gravel,
+                    smoothness: SmoothnessClass::Bad,
+                    access_mask: AccessMask::new(AccessMask::FOOT),
+                    is_toll: false,
+                    name_index: Some(0),
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+                DirectedEdge {
+                    edge_id: EdgeId(1),
+                    from: NodeId(1),
+                    to: NodeId(0),
+                    source_way_id: 201,
+                    length_m: 456,
+                    duration_s: Some(45.0),
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Paved,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR | AccessMask::FOOT),
+                    is_toll: true,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 1,
+                },
+            ],
             turn_restrictions: vec![TurnRestriction {
                 relation_id: 300,
                 kind: TurnRestrictionKind::NoTurn,
@@ -203,13 +254,14 @@ mod tests {
                 mode_mask: AccessMask::new(AccessMask::FOOT),
             }],
             names: vec!["path name".to_string()],
+            spatial_index: None,
         };
 
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netan-persist-topology-{unique}.bin"));
+        let path = std::env::temp_dir().join(format!("netan-persist-topology-{unique}.bin.gz"));
 
         write_topology_bundle(&path, &bundle).expect("bundle should serialize");
         let round_tripped = read_topology_bundle(&path).expect("bundle should deserialize");

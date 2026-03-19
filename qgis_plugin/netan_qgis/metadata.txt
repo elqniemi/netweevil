@@ -2,11 +2,11 @@
 name=netan
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99.0
-description=Run local netan routing analyses and load spatial outputs into QGIS 3 and QGIS 4.
-version=0.2.0
+description=Run netan API route, OD, and matrix analyses and load JSON or GeoJSON responses directly into QGIS 3 and QGIS 4.
+version=0.3.0
 author=OpenAI Codex
 email=none@example.invalid
-about=Refresh datasets, compile profiles, write route requests, run route/OD/matrix analyses, and load GeoJSON/GeoPackage/GeoParquet outputs. Supports native execution and Windows QGIS calling into WSL.
+about=Connects QGIS directly to the netan HTTP API, discovers the loaded dataset and profiles, submits route/OD/matrix JSON requests, and loads resulting geometries from API JSON or GeoJSON responses.
 category=Vector
 hasProcessingProvider=no
 

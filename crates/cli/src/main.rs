@@ -1,12 +1,16 @@
 use std::env;
 use std::fs;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
+use netan_api::{ApiServeOptions, serve as serve_api};
 use netan_core::{CacheBundleId, CompiledProfileBundle, TopologyBundle};
 use netan_gui::launch;
-use netan_ingest::{DatasetImportOptions, import_dataset};
+use netan_ingest::{
+    DatasetImportOptions, DatasetImportProgress, DatasetImportStage, import_dataset_with_progress,
+};
 use netan_persist::{
     WorkspacePaths, read_compiled_profile_bundle, read_compiled_profile_manifests,
     read_dataset_manifest, read_dataset_manifests, read_run_manifest, read_topology_bundle,
@@ -73,6 +77,7 @@ struct EngineDescription {
     route_summary: &'static str,
     batch_engine: &'static str,
     batch_summary: &'static str,
+    acceleration: &'static str,
 }
 
 fn main() -> Result<()> {
@@ -112,6 +117,9 @@ fn main() -> Result<()> {
         },
         Command::Cache { command: cache } => match cache {
             CacheCommand::List => cache_list(&paths),
+        },
+        Command::Api { command: api } => match api {
+            ApiCommand::Serve(args) => api_serve(paths, args),
         },
         Command::Gui => launch(paths),
     }
@@ -153,6 +161,10 @@ enum Command {
     Cache {
         #[command(subcommand)]
         command: CacheCommand,
+    },
+    Api {
+        #[command(subcommand)]
+        command: ApiCommand,
     },
     Gui,
 }
@@ -209,6 +221,23 @@ enum CacheCommand {
     List,
 }
 
+#[derive(Subcommand, Debug)]
+enum ApiCommand {
+    Serve(ApiServeArgs),
+}
+
+#[derive(Args, Debug)]
+struct ApiServeArgs {
+    #[arg(long)]
+    dataset: String,
+    #[arg(long)]
+    default_profile: PathBuf,
+    #[arg(long, default_value = "127.0.0.1:8080")]
+    bind: SocketAddr,
+    #[arg(long = "profile")]
+    profiles: Vec<PathBuf>,
+}
+
 #[derive(Args, Debug)]
 struct RouteArgs {
     #[arg(long)]
@@ -248,13 +277,15 @@ struct MatrixArgs {
 }
 
 fn dataset_import(paths: &WorkspacePaths, args: DatasetImportArgs) -> Result<()> {
-    let manifest = import_dataset(
+    let mut progress_line_len = 0_usize;
+    let manifest = import_dataset_with_progress(
         paths,
         &args.source,
         DatasetImportOptions {
             name: args.name,
             source: args.source.display().to_string(),
         },
+        |event| render_import_progress(&event, &mut progress_line_len),
     )?;
     println!(
         "imported dataset '{}' with {} nodes and {} directed edges (sha256 {})",
@@ -272,6 +303,21 @@ fn dataset_import(paths: &WorkspacePaths, args: DatasetImportArgs) -> Result<()>
         manifest.source_sha256
     );
     Ok(())
+}
+
+fn render_import_progress(event: &DatasetImportProgress, last_line_len: &mut usize) {
+    let mut line = format!("[{}] {}", event.stage.label(), event.message);
+    if matches!(event.stage, DatasetImportStage::Complete) {
+        line.push_str(" [done]");
+    }
+    let padding = last_line_len.saturating_sub(line.len());
+    eprint!("\r{line}{:padding$}", "");
+    if matches!(event.stage, DatasetImportStage::Complete) {
+        eprintln!();
+        *last_line_len = 0;
+    } else {
+        *last_line_len = line.len();
+    }
 }
 
 fn dataset_list(paths: &WorkspacePaths) -> Result<()> {
@@ -548,6 +594,7 @@ fn store_route_run(
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
     )?;
     manifest.algorithm.engine = engine.route_engine.to_string();
+    manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.route_summary.to_string();
     let result_path = out.unwrap_or_else(|| {
         paths
@@ -595,6 +642,7 @@ fn store_od_run(
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
     )?;
     manifest.algorithm.engine = engine.batch_engine.to_string();
+    manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.batch_summary.to_string();
     let result_path = out.unwrap_or_else(|| {
         paths
@@ -646,6 +694,7 @@ fn store_matrix_run(
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
     )?;
     manifest.algorithm.engine = engine.batch_engine.to_string();
+    manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.batch_summary.to_string();
     let result_path = out.unwrap_or_else(|| {
         paths
@@ -825,6 +874,19 @@ fn cache_list(paths: &WorkspacePaths) -> Result<()> {
     Ok(())
 }
 
+fn api_serve(paths: WorkspacePaths, args: ApiServeArgs) -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new().context("creating API runtime")?;
+    runtime.block_on(serve_api(
+        paths,
+        ApiServeOptions {
+            bind: args.bind,
+            dataset_id: args.dataset,
+            default_profile: args.default_profile,
+            profiles: args.profiles,
+        },
+    ))
+}
+
 fn load_route_execution_inputs(
     paths: &WorkspacePaths,
     dataset_id: &str,
@@ -875,16 +937,18 @@ fn engine_description(topology: &TopologyBundle) -> EngineDescription {
     if has_multi_edge_restrictions {
         EngineDescription {
             route_engine: "astar_exact_multi_edge_turns",
-            route_summary: "Exact forward A* shortest-path search over the compiled directed edge graph with nearest-node snapping and persisted multi-edge turn-restriction sequences. This fallback is used when via-way or other multi-edge restrictions require longer state than the bidirectional engine models. Turn penalties are not modeled yet.",
+            route_summary: "Exact forward A* shortest-path search over the compiled directed edge graph with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences. Turn penalties are not modeled yet.",
             batch_engine: "astar_exact_multi_edge_turns_repeated",
-            batch_summary: "Repeated exact forward A* shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with nearest-node snapping and persisted multi-edge turn-restriction sequences. This fallback is used when via-way or other multi-edge restrictions require longer state than the bidirectional engine models. Turn penalties are not modeled yet.",
+            batch_summary: "Repeated exact forward A* shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences. Turn penalties are not modeled yet.",
+            acceleration: "spatial_index+a_star+turn_automaton",
         }
     } else {
         EngineDescription {
-            route_engine: "bidirectional_dijkstra_exact",
-            route_summary: "Exact bidirectional Dijkstra shortest-path search over the compiled directed edge graph with nearest-node snapping and persisted pairwise turn prohibitions. Turn penalties are not modeled yet.",
-            batch_engine: "bidirectional_dijkstra_exact_repeated",
-            batch_summary: "Repeated exact bidirectional Dijkstra shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with nearest-node snapping and persisted pairwise turn prohibitions. Turn penalties are not modeled yet.",
+            route_engine: "astar_exact_pairwise_turns",
+            route_summary: "Exact forward A* shortest-path search over the compiled directed edge graph with persisted topology spatial indexing for snapping and pairwise turn prohibitions. Turn penalties are not modeled yet.",
+            batch_engine: "astar_exact_pairwise_turns_repeated",
+            batch_summary: "Repeated exact forward A* shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with persisted topology spatial indexing for snapping and pairwise turn prohibitions. Turn penalties are not modeled yet.",
+            acceleration: "spatial_index+a_star+turn_automaton",
         }
     }
 }

@@ -1,12 +1,16 @@
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use anyhow::{Context, Result, bail};
 use netan_core::{
     AccessMask, BuildStage, CacheBundleId, DatasetId, DirectedEdge, EdgeId, NodeId, RoadClass,
-    SmoothnessClass, SurfaceClass, TopologyBundle, TopologyBundleMeta, TopologyNode,
-    TurnRestriction, TurnRestrictionKind,
+    SmoothnessClass, SpatialIndexCell, SurfaceClass, TopologyBounds, TopologyBundle,
+    TopologyBundleMeta, TopologyNode, TurnRestriction, TurnRestrictionKind,
 };
 use netan_persist::{WorkspacePaths, write_dataset_manifest, write_topology_bundle};
 use netan_report::{BundleRef, DatasetManifest, now_rfc3339};
@@ -20,11 +24,55 @@ pub struct DatasetImportOptions {
     pub source: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatasetImportStage {
+    HashSource,
+    ScanRoutableObjects,
+    LoadNodeCoords,
+    BuildTopology,
+    WriteTopologyBundle,
+    WriteManifest,
+    Complete,
+}
+
+impl DatasetImportStage {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::HashSource => "Hash Source",
+            Self::ScanRoutableObjects => "Scan Routable Objects",
+            Self::LoadNodeCoords => "Load Node Coords",
+            Self::BuildTopology => "Build Topology",
+            Self::WriteTopologyBundle => "Write Topology Bundle",
+            Self::WriteManifest => "Write Dataset Manifest",
+            Self::Complete => "Complete",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DatasetImportProgress {
+    pub stage: DatasetImportStage,
+    pub stage_percent: Option<f64>,
+    pub message: String,
+}
+
 pub fn import_dataset(
     paths: &WorkspacePaths,
     source_path: impl AsRef<Path>,
     options: DatasetImportOptions,
 ) -> Result<DatasetManifest> {
+    import_dataset_with_progress(paths, source_path, options, |_| {})
+}
+
+pub fn import_dataset_with_progress<F>(
+    paths: &WorkspacePaths,
+    source_path: impl AsRef<Path>,
+    options: DatasetImportOptions,
+    mut progress: F,
+) -> Result<DatasetManifest>
+where
+    F: FnMut(DatasetImportProgress),
+{
     let source_path = source_path.as_ref();
     if !source_path.exists() {
         bail!("dataset source does not exist: {}", source_path.display());
@@ -36,13 +84,28 @@ pub fn import_dataset(
         .metadata()
         .with_context(|| format!("reading metadata for {}", source_path.display()))?
         .len();
-    let sha256 = sha256_file(file)?;
+    emit_progress(
+        &mut progress,
+        DatasetImportStage::HashSource,
+        Some(0.0),
+        format!("Hashing source {}", source_path.display()),
+    );
+    let sha256 = sha256_file(file, size, &mut progress)?;
     let dataset_id = DatasetId::new(options.name);
     let bundle_id = CacheBundleId::new(format!("topology-{}-{}", dataset_id.0, &sha256[..12]));
     let bundle_path = paths
         .topology_bundles_dir
-        .join(format!("{}.bin", bundle_id.0));
-    let (bundle, topology_meta) = build_topology_bundle(source_path, &sha256)?;
+        .join(format!("{}.bin.gz", bundle_id.0));
+    let (bundle, topology_meta) = build_topology_bundle(source_path, size, &sha256, &mut progress)?;
+    emit_progress(
+        &mut progress,
+        DatasetImportStage::WriteTopologyBundle,
+        None,
+        format!(
+            "Writing compressed topology bundle {}",
+            bundle_path.display()
+        ),
+    );
     write_topology_bundle(&bundle_path, &bundle)?;
 
     let manifest = DatasetManifest {
@@ -60,14 +123,44 @@ pub fn import_dataset(
         topology_meta: Some(topology_meta),
     };
 
+    emit_progress(
+        &mut progress,
+        DatasetImportStage::WriteManifest,
+        None,
+        format!("Writing dataset manifest for '{}'", manifest.dataset_id.0),
+    );
     write_dataset_manifest(paths, &manifest)?;
+    emit_progress(
+        &mut progress,
+        DatasetImportStage::Complete,
+        Some(100.0),
+        format!(
+            "Imported dataset '{}' with {} nodes and {} directed edges",
+            manifest.dataset_id.0,
+            manifest
+                .topology_meta
+                .as_ref()
+                .map(|meta| meta.node_count)
+                .unwrap_or_default(),
+            manifest
+                .topology_meta
+                .as_ref()
+                .map(|meta| meta.edge_count)
+                .unwrap_or_default()
+        ),
+    );
     Ok(manifest)
 }
 
-fn sha256_file(file: File) -> Result<String> {
+fn sha256_file<F>(file: File, source_size_bytes: u64, progress: &mut F) -> Result<String>
+where
+    F: FnMut(DatasetImportProgress),
+{
     let mut reader = BufReader::new(file);
     let mut buffer = [0_u8; 64 * 1024];
     let mut hasher = Sha256::new();
+    let mut reporter = PercentReporter::starting_at_zero();
+    let mut total_read = 0_u64;
     loop {
         let read = reader
             .read(&mut buffer)
@@ -75,8 +168,22 @@ fn sha256_file(file: File) -> Result<String> {
         if read == 0 {
             break;
         }
+        total_read += read as u64;
         hasher.update(&buffer[..read]);
+        reporter.emit_if_needed(
+            total_read,
+            source_size_bytes,
+            DatasetImportStage::HashSource,
+            progress,
+            |percent| format!("Hashing source {:.0}%", percent),
+        );
     }
+    emit_progress(
+        progress,
+        DatasetImportStage::HashSource,
+        Some(100.0),
+        "Hashing source 100%".to_string(),
+    );
     Ok(hex::encode(hasher.finalize()))
 }
 
@@ -132,17 +239,32 @@ struct ObjectCounts {
 
 fn build_topology_bundle(
     source_path: &Path,
+    source_size_bytes: u64,
     source_sha256: &str,
+    progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<(TopologyBundle, TopologyBundleMeta)> {
     let (pending_ways, restriction_candidates, needed_nodes, counts) =
-        scan_routable_objects(source_path)?;
-    let node_coords = load_node_coords(source_path, &needed_nodes)?;
-    let (nodes, node_lookup) = build_nodes(&pending_ways, &node_coords);
+        scan_routable_objects(source_path, source_size_bytes, progress)?;
+    let node_coords = load_node_coords(source_path, source_size_bytes, &needed_nodes, progress)?;
+    let (nodes, node_lookup) = build_nodes(&node_coords);
     let name_lookup = build_name_lookup(&pending_ways);
+
+    emit_progress(
+        progress,
+        DatasetImportStage::BuildTopology,
+        Some(0.0),
+        format!(
+            "Building topology from {} routable ways and {} node coordinates",
+            pending_ways.len(),
+            node_coords.len()
+        ),
+    );
+    let spatial_index = build_spatial_index(&nodes);
 
     let mut edges = Vec::new();
     let mut skipped_way_count = 0_u64;
-    for way in &pending_ways {
+    let mut build_reporter = PercentReporter::starting_at_zero();
+    for (way_index, way) in pending_ways.iter().enumerate() {
         let name_index = way
             .name
             .as_ref()
@@ -228,6 +350,21 @@ fn build_topology_bundle(
                 });
             }
         }
+
+        build_reporter.emit_if_needed(
+            (way_index + 1) as u64,
+            pending_ways.len() as u64,
+            DatasetImportStage::BuildTopology,
+            progress,
+            |percent| {
+                format!(
+                    "Building topology {:.0}% ({}/{})",
+                    percent,
+                    way_index + 1,
+                    pending_ways.len()
+                )
+            },
+        );
     }
 
     let turn_restrictions =
@@ -239,13 +376,14 @@ fn build_topology_bundle(
     }
 
     let bundle = TopologyBundle {
-        schema_version: 4,
+        schema_version: 5,
         source_path: source_path.display().to_string(),
         source_sha256: source_sha256.to_string(),
         nodes,
         edges,
         turn_restrictions,
         names,
+        spatial_index,
     };
     let meta = TopologyBundleMeta {
         node_count: bundle.nodes.len() as u64,
@@ -263,6 +401,8 @@ fn build_topology_bundle(
 
 fn scan_routable_objects(
     source_path: &Path,
+    source_size_bytes: u64,
+    progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<(
     Vec<PendingWay>,
     Vec<TurnRestrictionCandidate>,
@@ -271,11 +411,21 @@ fn scan_routable_objects(
 )> {
     let file = File::open(source_path)
         .with_context(|| format!("opening dataset source {}", source_path.display()))?;
-    let mut reader = OsmPbfReader::new(file);
+    let bytes_read = Arc::new(AtomicU64::new(0));
+    let counting_file = CountingReader::new(file, Arc::clone(&bytes_read));
+    let mut reader = OsmPbfReader::new(counting_file);
     let mut ways = Vec::new();
     let mut restriction_candidates = Vec::new();
     let mut node_ids = HashSet::new();
     let mut counts = ObjectCounts::default();
+    let mut reporter = PercentReporter::starting_at_zero();
+
+    emit_progress(
+        progress,
+        DatasetImportStage::ScanRoutableObjects,
+        Some(0.0),
+        "Scanning routable OSM objects 0%".to_string(),
+    );
 
     for object in reader.iter() {
         match object.context("reading PBF object")? {
@@ -317,19 +467,57 @@ fn scan_routable_objects(
                 }
             }
         }
+
+        reporter.emit_if_needed(
+            bytes_read.load(Ordering::Relaxed),
+            source_size_bytes,
+            DatasetImportStage::ScanRoutableObjects,
+            progress,
+            |percent| {
+                format!(
+                    "Scanning routable OSM objects {:.0}% ({} ways kept, {} restrictions)",
+                    percent,
+                    ways.len(),
+                    restriction_candidates.len()
+                )
+            },
+        );
     }
+
+    emit_progress(
+        progress,
+        DatasetImportStage::ScanRoutableObjects,
+        Some(100.0),
+        format!(
+            "Scanning routable OSM objects 100% ({} ways kept, {} restrictions)",
+            ways.len(),
+            restriction_candidates.len()
+        ),
+    );
 
     Ok((ways, restriction_candidates, node_ids, counts))
 }
 
 fn load_node_coords(
     source_path: &Path,
+    _source_size_bytes: u64,
     needed_nodes: &HashSet<i64>,
+    progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<HashMap<i64, (f64, f64)>> {
     let file = File::open(source_path)
         .with_context(|| format!("opening dataset source {}", source_path.display()))?;
-    let mut reader = OsmPbfReader::new(file);
+    let bytes_read = Arc::new(AtomicU64::new(0));
+    let counting_file = CountingReader::new(file, Arc::clone(&bytes_read));
+    let mut reader = OsmPbfReader::new(counting_file);
     let mut coords = HashMap::with_capacity(needed_nodes.len());
+    let mut reporter = PercentReporter::new();
+
+    emit_progress(
+        progress,
+        DatasetImportStage::LoadNodeCoords,
+        Some(0.0),
+        format!("Loading node coordinates 0% (0/{})", needed_nodes.len()),
+    );
 
     for object in reader.iter() {
         let OsmObj::Node(node) = object.context("reading PBF node")? else {
@@ -338,24 +526,46 @@ fn load_node_coords(
         let node_id = node.id.0;
         if needed_nodes.contains(&node_id) {
             coords.insert(node_id, (node.lon(), node.lat()));
+            if coords.len() == needed_nodes.len() {
+                break;
+            }
         }
+
+        reporter.emit_if_needed(
+            coords.len() as u64,
+            needed_nodes.len() as u64,
+            DatasetImportStage::LoadNodeCoords,
+            progress,
+            |percent| {
+                format!(
+                    "Loading node coordinates {:.0}% ({}/{})",
+                    percent,
+                    coords.len(),
+                    needed_nodes.len()
+                )
+            },
+        );
     }
+
+    emit_progress(
+        progress,
+        DatasetImportStage::LoadNodeCoords,
+        Some(100.0),
+        format!(
+            "Loading node coordinates 100% ({}/{})",
+            coords.len(),
+            needed_nodes.len()
+        ),
+    );
 
     Ok(coords)
 }
 
 fn build_nodes(
-    ways: &[PendingWay],
     node_coords: &HashMap<i64, (f64, f64)>,
 ) -> (Vec<TopologyNode>, HashMap<i64, (NodeId, f64, f64)>) {
-    let mut used_nodes = BTreeSet::new();
-    for way in ways {
-        for node_id in &way.node_ids {
-            if node_coords.contains_key(node_id) {
-                used_nodes.insert(*node_id);
-            }
-        }
-    }
+    let mut used_nodes = node_coords.keys().copied().collect::<Vec<_>>();
+    used_nodes.sort_unstable();
 
     let mut nodes = Vec::with_capacity(used_nodes.len());
     let mut lookup = HashMap::with_capacity(used_nodes.len());
@@ -377,18 +587,193 @@ fn build_nodes(
 }
 
 fn build_name_lookup(ways: &[PendingWay]) -> BTreeMap<String, u32> {
-    let mut distinct_names = BTreeSet::new();
-    for way in ways {
-        if let Some(name) = &way.name {
-            distinct_names.insert(name.clone());
-        }
-    }
+    let mut distinct_names = ways
+        .iter()
+        .filter_map(|way| way.name.clone())
+        .collect::<Vec<_>>();
+    distinct_names.sort_unstable();
+    distinct_names.dedup();
 
     distinct_names
         .into_iter()
         .enumerate()
         .map(|(index, name)| (name, index as u32))
         .collect()
+}
+
+fn build_spatial_index(nodes: &[TopologyNode]) -> Option<netan_core::NodeSpatialIndex> {
+    const TARGET_CELL_SPAN_M: f64 = 750.0;
+    const METERS_PER_DEGREE_LAT: f64 = 111_320.0;
+
+    let first = nodes.first()?;
+    let mut bounds = TopologyBounds {
+        min_lon: first.lon,
+        min_lat: first.lat,
+        max_lon: first.lon,
+        max_lat: first.lat,
+    };
+    for node in nodes.iter().skip(1) {
+        bounds.min_lon = bounds.min_lon.min(node.lon);
+        bounds.min_lat = bounds.min_lat.min(node.lat);
+        bounds.max_lon = bounds.max_lon.max(node.lon);
+        bounds.max_lat = bounds.max_lat.max(node.lat);
+    }
+
+    let mid_lat = ((bounds.min_lat + bounds.max_lat) / 2.0).to_radians();
+    let cos_lat = mid_lat.cos().abs().max(0.2);
+    let cell_height_deg = (TARGET_CELL_SPAN_M / METERS_PER_DEGREE_LAT).max(f64::EPSILON);
+    let cell_width_deg = (TARGET_CELL_SPAN_M / (METERS_PER_DEGREE_LAT * cos_lat)).max(f64::EPSILON);
+    let columns =
+        (((bounds.max_lon - bounds.min_lon) / cell_width_deg).floor() as u32).saturating_add(1);
+    let rows =
+        (((bounds.max_lat - bounds.min_lat) / cell_height_deg).floor() as u32).saturating_add(1);
+    let cell_count = columns as usize * rows as usize;
+    let mut counts = vec![0_u32; cell_count];
+
+    for node in nodes {
+        counts[spatial_cell_index(
+            &bounds,
+            columns,
+            rows,
+            cell_width_deg,
+            cell_height_deg,
+            node.lon,
+            node.lat,
+        )] += 1;
+    }
+
+    let mut cells = vec![SpatialIndexCell::default(); cell_count];
+    let mut next_offset = 0_u32;
+    for (cell, count) in cells.iter_mut().zip(&counts) {
+        cell.node_start = next_offset;
+        cell.node_len = *count;
+        next_offset += *count;
+    }
+
+    let mut write_positions = cells
+        .iter()
+        .map(|cell| cell.node_start as usize)
+        .collect::<Vec<_>>();
+    let mut node_ids = vec![0_u32; nodes.len()];
+    for node in nodes {
+        let cell_index = spatial_cell_index(
+            &bounds,
+            columns,
+            rows,
+            cell_width_deg,
+            cell_height_deg,
+            node.lon,
+            node.lat,
+        );
+        let write_index = write_positions[cell_index];
+        node_ids[write_index] = node.node_id.0;
+        write_positions[cell_index] += 1;
+    }
+
+    Some(netan_core::NodeSpatialIndex {
+        bounds,
+        columns,
+        rows,
+        cell_width_deg,
+        cell_height_deg,
+        cells,
+        node_ids,
+    })
+}
+
+fn spatial_cell_index(
+    bounds: &TopologyBounds,
+    columns: u32,
+    rows: u32,
+    cell_width_deg: f64,
+    cell_height_deg: f64,
+    lon: f64,
+    lat: f64,
+) -> usize {
+    let column = (((lon - bounds.min_lon) / cell_width_deg).floor() as i64)
+        .clamp(0, columns.saturating_sub(1) as i64) as usize;
+    let row = (((lat - bounds.min_lat) / cell_height_deg).floor() as i64)
+        .clamp(0, rows.saturating_sub(1) as i64) as usize;
+    row * columns as usize + column
+}
+
+fn emit_progress(
+    progress: &mut impl FnMut(DatasetImportProgress),
+    stage: DatasetImportStage,
+    stage_percent: Option<f64>,
+    message: String,
+) {
+    progress(DatasetImportProgress {
+        stage,
+        stage_percent,
+        message,
+    });
+}
+
+struct PercentReporter {
+    last_bucket: Option<u32>,
+}
+
+impl PercentReporter {
+    fn new() -> Self {
+        Self { last_bucket: None }
+    }
+
+    fn starting_at_zero() -> Self {
+        Self {
+            last_bucket: Some(0),
+        }
+    }
+
+    fn emit_if_needed<F>(
+        &mut self,
+        completed: u64,
+        total: u64,
+        stage: DatasetImportStage,
+        progress: &mut impl FnMut(DatasetImportProgress),
+        message: F,
+    ) where
+        F: FnOnce(f64) -> String,
+    {
+        if total == 0 {
+            return;
+        }
+        let percent = ((completed as f64 / total as f64) * 100.0).clamp(0.0, 100.0);
+        if percent >= 100.0 {
+            return;
+        }
+        let bucket = (percent / 5.0).floor() as u32;
+        if self.last_bucket == Some(bucket) {
+            return;
+        }
+        self.last_bucket = Some(bucket);
+        let quantized_percent = (bucket * 5) as f64;
+        emit_progress(
+            progress,
+            stage,
+            Some(quantized_percent),
+            message(quantized_percent),
+        );
+    }
+}
+
+struct CountingReader<R> {
+    inner: R,
+    bytes_read: Arc<AtomicU64>,
+}
+
+impl<R> CountingReader<R> {
+    fn new(inner: R, bytes_read: Arc<AtomicU64>) -> Self {
+        Self { inner, bytes_read }
+    }
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        self.bytes_read.fetch_add(read as u64, Ordering::Relaxed);
+        Ok(read)
+    }
 }
 
 fn build_turn_restrictions(

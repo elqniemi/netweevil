@@ -4,7 +4,8 @@ pub mod metrics;
 
 pub use dataset::{BuildStage, CacheBundleId, DatasetId, TravelMode};
 pub use graph::{
-    AccessMask, DirectedEdge, EdgeId, NodeId, RoadClass, SmoothnessClass, SurfaceClass,
-    TopologyBundle, TopologyBundleMeta, TopologyNode, TurnRestriction, TurnRestrictionKind,
+    AccessMask, DirectedEdge, EdgeId, NodeId, NodeSpatialIndex, RoadClass, SmoothnessClass,
+    SpatialIndexCell, SurfaceClass, TopologyBounds, TopologyBundle, TopologyBundleMeta,
+    TopologyNode, TurnRestriction, TurnRestrictionKind,
 };
 pub use metrics::{CompiledEdgeMetric, CompiledProfileBundle};

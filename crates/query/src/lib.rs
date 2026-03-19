@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use netan_core::{CompiledProfileBundle, RoadClass, SurfaceClass, TopologyBundle};
@@ -481,37 +482,70 @@ pub struct MatrixResult {
     pub warnings: Vec<String>,
 }
 
-pub fn execute_route(
-    topology: &TopologyBundle,
-    metrics: &CompiledProfileBundle,
-    request: &RouteRequest,
-) -> Result<RouteResult> {
-    if topology.edges.len() != metrics.edge_metrics.len() {
-        bail!(
-            "topology edge count ({}) does not match compiled metric count ({})",
-            topology.edges.len(),
-            metrics.edge_metrics.len()
-        );
-    }
-
-    let routing_graph = build_routing_graph(topology, metrics)?;
-    execute_route_with_graph(topology, metrics, &routing_graph, request)
+pub struct PreparedRoutingEngine {
+    topology: Arc<TopologyBundle>,
+    metrics: Arc<CompiledProfileBundle>,
+    routing_graph: RoutingGraph,
 }
 
-pub fn execute_od(
-    topology: &TopologyBundle,
-    metrics: &CompiledProfileBundle,
-    document: &OdPairsDocument,
-) -> Result<OdResult> {
-    if topology.edges.len() != metrics.edge_metrics.len() {
-        bail!(
-            "topology edge count ({}) does not match compiled metric count ({})",
-            topology.edges.len(),
-            metrics.edge_metrics.len()
-        );
+impl PreparedRoutingEngine {
+    pub fn new(topology: Arc<TopologyBundle>, metrics: Arc<CompiledProfileBundle>) -> Result<Self> {
+        validate_execution_inputs(topology.as_ref(), metrics.as_ref())?;
+        let routing_graph = build_routing_graph(topology.as_ref(), metrics.as_ref())?;
+        Ok(Self {
+            topology,
+            metrics,
+            routing_graph,
+        })
     }
 
-    let routing_graph = build_routing_graph(topology, metrics)?;
+    pub fn topology(&self) -> &TopologyBundle {
+        self.topology.as_ref()
+    }
+
+    pub fn metrics(&self) -> &CompiledProfileBundle {
+        self.metrics.as_ref()
+    }
+
+    pub fn execute_route(&self, request: &RouteRequest) -> Result<RouteResult> {
+        execute_route_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.routing_graph,
+            request,
+        )
+    }
+
+    pub fn execute_od(&self, document: &OdPairsDocument) -> Result<OdResult> {
+        execute_od_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.routing_graph,
+            document,
+        )
+    }
+
+    pub fn execute_matrix(
+        &self,
+        origins: &PointSetDocument,
+        destinations: &PointSetDocument,
+    ) -> Result<MatrixResult> {
+        execute_matrix_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.routing_graph,
+            origins,
+            destinations,
+        )
+    }
+}
+
+fn execute_od_with_graph(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    document: &OdPairsDocument,
+) -> Result<OdResult> {
     let mut pairs = Vec::with_capacity(document.pairs.len());
     let mut succeeded_count = 0_usize;
 
@@ -523,7 +557,7 @@ pub fn execute_od(
             snap: document.snap.clone(),
             returns: document.returns.clone(),
         };
-        match execute_route_with_graph(topology, metrics, &routing_graph, &request) {
+        match execute_route_with_graph(topology, metrics, routing_graph, &request) {
             Ok(route) => {
                 succeeded_count += 1;
                 pairs.push(OdPairResult {
@@ -569,21 +603,13 @@ pub fn execute_od(
     })
 }
 
-pub fn execute_matrix(
+fn execute_matrix_with_graph(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
     origins: &PointSetDocument,
     destinations: &PointSetDocument,
 ) -> Result<MatrixResult> {
-    if topology.edges.len() != metrics.edge_metrics.len() {
-        bail!(
-            "topology edge count ({}) does not match compiled metric count ({})",
-            topology.edges.len(),
-            metrics.edge_metrics.len()
-        );
-    }
-
-    let routing_graph = build_routing_graph(topology, metrics)?;
     let snap_max_distance_m = origins
         .snap
         .max_distance_m
@@ -603,7 +629,7 @@ pub fn execute_matrix(
                 },
                 returns: returns.clone(),
             };
-            match execute_route_with_graph(topology, metrics, &routing_graph, &request) {
+            match execute_route_with_graph(topology, metrics, routing_graph, &request) {
                 Ok(route) => {
                     succeeded_count += 1;
                     cells.push(MatrixCellResult {
@@ -648,6 +674,51 @@ pub fn execute_matrix(
             "Matrix execution currently repeats the exact single-route solver per origin/destination cell. Turn restrictions are modeled when present in the topology bundle; turn penalties are not modeled yet.".to_string(),
         ],
     })
+}
+
+pub fn execute_route(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    request: &RouteRequest,
+) -> Result<RouteResult> {
+    validate_execution_inputs(topology, metrics)?;
+    let routing_graph = build_routing_graph(topology, metrics)?;
+    execute_route_with_graph(topology, metrics, &routing_graph, request)
+}
+
+pub fn execute_od(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    document: &OdPairsDocument,
+) -> Result<OdResult> {
+    validate_execution_inputs(topology, metrics)?;
+    let routing_graph = build_routing_graph(topology, metrics)?;
+    execute_od_with_graph(topology, metrics, &routing_graph, document)
+}
+
+pub fn execute_matrix(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    origins: &PointSetDocument,
+    destinations: &PointSetDocument,
+) -> Result<MatrixResult> {
+    validate_execution_inputs(topology, metrics)?;
+    let routing_graph = build_routing_graph(topology, metrics)?;
+    execute_matrix_with_graph(topology, metrics, &routing_graph, origins, destinations)
+}
+
+fn validate_execution_inputs(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+) -> Result<()> {
+    if topology.edges.len() != metrics.edge_metrics.len() {
+        bail!(
+            "topology edge count ({}) does not match compiled metric count ({})",
+            topology.edges.len(),
+            metrics.edge_metrics.len()
+        );
+    }
+    Ok(())
 }
 
 fn execute_route_with_graph(
@@ -825,12 +896,8 @@ struct RoutePath {
 
 struct RoutingGraph {
     outgoing: Vec<Vec<usize>>,
-    incoming: Vec<Vec<usize>>,
     edge_costs: Vec<f64>,
-    pairwise_prohibited_turns: Vec<Vec<usize>>,
-    reverse_pairwise_prohibited_turns: Vec<Vec<usize>>,
     automaton: RestrictionAutomaton,
-    has_multi_edge_restrictions: bool,
     min_cost_per_meter: f64,
     origin_eligible: Vec<bool>,
     destination_eligible: Vec<bool>,
@@ -955,10 +1022,7 @@ fn build_routing_graph(
     metrics: &CompiledProfileBundle,
 ) -> Result<RoutingGraph> {
     let mut outgoing = vec![Vec::<usize>::new(); topology.nodes.len()];
-    let mut incoming = vec![Vec::<usize>::new(); topology.nodes.len()];
     let mut destination_eligible = vec![false; topology.nodes.len()];
-    let mut pairwise_prohibited_turns = vec![Vec::<usize>::new(); topology.edges.len()];
-    let mut reverse_pairwise_prohibited_turns = vec![Vec::<usize>::new(); topology.edges.len()];
     let mut edge_costs = vec![f64::INFINITY; topology.edges.len()];
     let mut min_cost_per_meter = f64::INFINITY;
 
@@ -966,7 +1030,6 @@ fn build_routing_graph(
         let metric = &metrics.edge_metrics[edge_index];
         if let (Some(cost), Some(_)) = (metric.generalized_cost, metric.travel_time_s) {
             outgoing[edge.from.0 as usize].push(edge_index);
-            incoming[edge.to.0 as usize].push(edge_index);
             destination_eligible[edge.to.0 as usize] = true;
             edge_costs[edge_index] = cost;
             if edge.length_m > 0 {
@@ -990,32 +1053,14 @@ fn build_routing_graph(
         if sequence.len() < 2 {
             continue;
         }
-        if sequence.len() == 2 {
-            pairwise_prohibited_turns[sequence[0]].push(sequence[1]);
-            reverse_pairwise_prohibited_turns[sequence[1]].push(sequence[0]);
-        }
         restricted_sequences.push(sequence);
-    }
-    for turns in &mut pairwise_prohibited_turns {
-        turns.sort_unstable();
-        turns.dedup();
-    }
-    for turns in &mut reverse_pairwise_prohibited_turns {
-        turns.sort_unstable();
-        turns.dedup();
     }
 
     let origin_eligible = outgoing.iter().map(|edges| !edges.is_empty()).collect();
     Ok(RoutingGraph {
         outgoing,
-        incoming,
         edge_costs,
-        pairwise_prohibited_turns,
-        reverse_pairwise_prohibited_turns,
         automaton: RestrictionAutomaton::build(&restricted_sequences),
-        has_multi_edge_restrictions: restricted_sequences
-            .iter()
-            .any(|sequence| sequence.len() > 2),
         min_cost_per_meter: if min_cost_per_meter.is_finite() {
             min_cost_per_meter
         } else {
@@ -1035,21 +1080,12 @@ fn route_between_candidates(
 ) -> Result<(SnappedPoint, SnappedPoint, RoutePath)> {
     for origin in origin_candidates {
         for destination in destination_candidates {
-            let path = if routing_graph.has_multi_edge_restrictions {
-                astar_with_restriction_sequences(
-                    topology,
-                    routing_graph,
-                    origin.snapped_node_id as usize,
-                    destination.snapped_node_id as usize,
-                )?
-            } else {
-                bidirectional_dijkstra_between_nodes(
-                    topology,
-                    routing_graph,
-                    origin.snapped_node_id as usize,
-                    destination.snapped_node_id as usize,
-                )?
-            };
+            let path = astar_with_restriction_sequences(
+                topology,
+                routing_graph,
+                origin.snapped_node_id as usize,
+                destination.snapped_node_id as usize,
+            )?;
             if let Some(path) = path {
                 let path = finalize_route_path(topology, metrics, path.edge_indexes);
                 return Ok((origin.clone(), destination.clone(), path));
@@ -1058,172 +1094,6 @@ fn route_between_candidates(
     }
 
     bail!("no route found between the snapped origin and destination")
-}
-
-fn bidirectional_dijkstra_between_nodes(
-    topology: &TopologyBundle,
-    routing_graph: &RoutingGraph,
-    source: usize,
-    target: usize,
-) -> Result<Option<RoutePath>> {
-    if source >= topology.nodes.len() || target >= topology.nodes.len() {
-        bail!("source or target node is out of bounds for the topology bundle");
-    }
-    if source == target {
-        return Ok(Some(RoutePath {
-            edge_indexes: Vec::new(),
-            total_distance_m: 0,
-            total_travel_time_s: 0.0,
-            total_generalized_cost: 0.0,
-        }));
-    }
-
-    let mut forward_dist = vec![f64::INFINITY; topology.edges.len()];
-    let mut reverse_dist = vec![f64::INFINITY; topology.edges.len()];
-    let mut forward_prev = vec![None; topology.edges.len()];
-    let mut reverse_next = vec![None; topology.edges.len()];
-    let mut forward_heap = BinaryHeap::new();
-    let mut reverse_heap = BinaryHeap::new();
-    let mut best_total_cost = f64::INFINITY;
-    let mut best_meeting_edge = None;
-
-    for &edge_index in &routing_graph.outgoing[source] {
-        let cost = routing_graph.edge_costs[edge_index];
-        if !cost.is_finite() {
-            continue;
-        }
-        forward_dist[edge_index] = cost;
-        forward_heap.push(State {
-            edge_index,
-            automaton_state: 0,
-            cost,
-            score: cost,
-        });
-    }
-
-    for &edge_index in &routing_graph.incoming[target] {
-        let cost = routing_graph.edge_costs[edge_index];
-        if !cost.is_finite() {
-            continue;
-        }
-        reverse_dist[edge_index] = cost;
-        reverse_heap.push(State {
-            edge_index,
-            automaton_state: 0,
-            cost,
-            score: cost,
-        });
-    }
-
-    while let (Some(forward_top), Some(reverse_top)) = (forward_heap.peek(), reverse_heap.peek()) {
-        if forward_top.cost + reverse_top.cost >= best_total_cost {
-            break;
-        }
-
-        let expand_forward = forward_top.cost <= reverse_top.cost;
-        if expand_forward {
-            let Some(State {
-                edge_index,
-                automaton_state: _,
-                cost,
-                score: _,
-            }) = forward_heap.pop()
-            else {
-                continue;
-            };
-            if cost > forward_dist[edge_index] {
-                continue;
-            }
-            if reverse_dist[edge_index].is_finite() {
-                let total = cost + reverse_dist[edge_index] - routing_graph.edge_costs[edge_index];
-                if total < best_total_cost {
-                    best_total_cost = total;
-                    best_meeting_edge = Some(edge_index);
-                }
-            }
-
-            let node_index = topology.edges[edge_index].to.0 as usize;
-            for &next_edge in &routing_graph.outgoing[node_index] {
-                if !is_pairwise_turn_allowed(routing_graph, edge_index, next_edge) {
-                    continue;
-                }
-                let next_cost = cost + routing_graph.edge_costs[next_edge];
-                if next_cost < forward_dist[next_edge] {
-                    forward_dist[next_edge] = next_cost;
-                    forward_prev[next_edge] = Some(edge_index);
-                    forward_heap.push(State {
-                        edge_index: next_edge,
-                        automaton_state: 0,
-                        cost: next_cost,
-                        score: next_cost,
-                    });
-                }
-            }
-        } else {
-            let Some(State {
-                edge_index,
-                automaton_state: _,
-                cost,
-                score: _,
-            }) = reverse_heap.pop()
-            else {
-                continue;
-            };
-            if cost > reverse_dist[edge_index] {
-                continue;
-            }
-            if forward_dist[edge_index].is_finite() {
-                let total = forward_dist[edge_index] + cost - routing_graph.edge_costs[edge_index];
-                if total < best_total_cost {
-                    best_total_cost = total;
-                    best_meeting_edge = Some(edge_index);
-                }
-            }
-
-            let node_index = topology.edges[edge_index].from.0 as usize;
-            for &previous_edge in &routing_graph.incoming[node_index] {
-                if !is_reverse_pairwise_turn_allowed(routing_graph, edge_index, previous_edge) {
-                    continue;
-                }
-                let next_cost = cost + routing_graph.edge_costs[previous_edge];
-                if next_cost < reverse_dist[previous_edge] {
-                    reverse_dist[previous_edge] = next_cost;
-                    reverse_next[previous_edge] = Some(edge_index);
-                    reverse_heap.push(State {
-                        edge_index: previous_edge,
-                        automaton_state: 0,
-                        cost: next_cost,
-                        score: next_cost,
-                    });
-                }
-            }
-        }
-    }
-
-    let Some(meeting_edge) = best_meeting_edge else {
-        return Ok(None);
-    };
-
-    let mut edge_indexes = Vec::new();
-    let mut cursor = Some(meeting_edge);
-    while let Some(edge_index) = cursor {
-        edge_indexes.push(edge_index);
-        cursor = forward_prev[edge_index];
-    }
-    edge_indexes.reverse();
-
-    let mut cursor = reverse_next[meeting_edge];
-    while let Some(edge_index) = cursor {
-        edge_indexes.push(edge_index);
-        cursor = reverse_next[edge_index];
-    }
-
-    Ok(Some(RoutePath {
-        edge_indexes,
-        total_distance_m: 0,
-        total_travel_time_s: 0.0,
-        total_generalized_cost: best_total_cost,
-    }))
 }
 
 fn astar_with_restriction_sequences(
@@ -1388,26 +1258,6 @@ fn finalize_route_path(
     }
 }
 
-fn is_pairwise_turn_allowed(
-    routing_graph: &RoutingGraph,
-    from_edge_index: usize,
-    to_edge_index: usize,
-) -> bool {
-    routing_graph.pairwise_prohibited_turns[from_edge_index]
-        .binary_search(&to_edge_index)
-        .is_err()
-}
-
-fn is_reverse_pairwise_turn_allowed(
-    routing_graph: &RoutingGraph,
-    current_edge_index: usize,
-    previous_edge_index: usize,
-) -> bool {
-    routing_graph.reverse_pairwise_prohibited_turns[current_edge_index]
-        .binary_search(&previous_edge_index)
-        .is_err()
-}
-
 fn heuristic_cost(
     topology: &TopologyBundle,
     routing_graph: &RoutingGraph,
@@ -1429,6 +1279,24 @@ fn snap_candidates(
     max_distance_m: f64,
 ) -> Result<Vec<SnappedPoint>> {
     const MAX_SNAP_CANDIDATES: usize = 8;
+
+    if let Some(spatial_index) = topology.spatial_index.as_ref() {
+        let candidates = spatial_snap_candidates(
+            topology,
+            spatial_index,
+            point,
+            eligible_nodes,
+            max_distance_m,
+        );
+        if !candidates.is_empty() {
+            return Ok(materialize_snap_candidates(
+                topology,
+                point,
+                candidates,
+                MAX_SNAP_CANDIDATES,
+            ));
+        }
+    }
 
     let mut candidates: Vec<_> = topology
         .nodes
@@ -1454,18 +1322,114 @@ fn snap_candidates(
         );
     }
 
-    Ok(candidates
+    Ok(materialize_snap_candidates(
+        topology,
+        point,
+        candidates
+            .into_iter()
+            .map(|(node, snap_distance_m)| (node.node_id.0, snap_distance_m))
+            .collect(),
+        MAX_SNAP_CANDIDATES,
+    ))
+}
+
+fn spatial_snap_candidates(
+    topology: &TopologyBundle,
+    spatial_index: &netan_core::NodeSpatialIndex,
+    point: &LabeledPoint,
+    eligible_nodes: &[bool],
+    max_distance_m: f64,
+) -> Vec<(u32, f64)> {
+    let Some((center_col, center_row)) =
+        spatial_index_cell_for_point(spatial_index, point.lon, point.lat)
+    else {
+        return Vec::new();
+    };
+    let cell_height_m = haversine_meters(
+        point.lon,
+        point.lat,
+        point.lon,
+        point.lat + spatial_index.cell_height_deg,
+    )
+    .max(1.0);
+    let cell_width_m = haversine_meters(
+        point.lon,
+        point.lat,
+        point.lon + spatial_index.cell_width_deg,
+        point.lat,
+    )
+    .max(1.0);
+    let ring_limit = ((max_distance_m / cell_height_m.min(cell_width_m)).ceil() as i32).max(1) + 1;
+    let mut candidates = Vec::new();
+
+    for row in center_row - ring_limit..=center_row + ring_limit {
+        if !(0..spatial_index.rows as i32).contains(&row) {
+            continue;
+        }
+        for col in center_col - ring_limit..=center_col + ring_limit {
+            if !(0..spatial_index.columns as i32).contains(&col) {
+                continue;
+            }
+            let cell =
+                &spatial_index.cells[row as usize * spatial_index.columns as usize + col as usize];
+            let start = cell.node_start as usize;
+            let end = start + cell.node_len as usize;
+            for &node_id in &spatial_index.node_ids[start..end] {
+                if !eligible_nodes[node_id as usize] {
+                    continue;
+                }
+                let node = &topology.nodes[node_id as usize];
+                let distance_m = haversine_meters(point.lon, point.lat, node.lon, node.lat);
+                if distance_m <= max_distance_m {
+                    candidates.push((node_id, distance_m));
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
+fn spatial_index_cell_for_point(
+    spatial_index: &netan_core::NodeSpatialIndex,
+    lon: f64,
+    lat: f64,
+) -> Option<(i32, i32)> {
+    if spatial_index.columns == 0 || spatial_index.rows == 0 {
+        return None;
+    }
+    let col = (((lon - spatial_index.bounds.min_lon) / spatial_index.cell_width_deg).floor()
+        as i32)
+        .clamp(0, spatial_index.columns as i32 - 1);
+    let row = (((lat - spatial_index.bounds.min_lat) / spatial_index.cell_height_deg).floor()
+        as i32)
+        .clamp(0, spatial_index.rows as i32 - 1);
+    Some((col, row))
+}
+
+fn materialize_snap_candidates(
+    topology: &TopologyBundle,
+    point: &LabeledPoint,
+    mut candidates: Vec<(u32, f64)>,
+    max_candidates: usize,
+) -> Vec<SnappedPoint> {
+    candidates.sort_by(|(_, left), (_, right)| left.total_cmp(right));
+    candidates.truncate(max_candidates);
+    candidates
         .into_iter()
-        .map(|(node, snap_distance_m)| SnappedPoint {
-            point_id: point.id.clone(),
-            requested_lon: point.lon,
-            requested_lat: point.lat,
-            snapped_node_id: node.node_id.0,
-            snapped_lon: node.lon,
-            snapped_lat: node.lat,
-            snap_distance_m,
+        .map(|(node_id, snap_distance_m)| {
+            let node = &topology.nodes[node_id as usize];
+            SnappedPoint {
+                point_id: point.id.clone(),
+                requested_lon: point.lon,
+                requested_lat: point.lat,
+                snapped_node_id: node_id,
+                snapped_lon: node.lon,
+                snapped_lat: node.lat,
+                snap_distance_m,
+            }
         })
-        .collect())
+        .collect()
 }
 
 fn build_breakdowns(
@@ -1590,17 +1554,20 @@ fn haversine_meters(from_lon: f64, from_lat: f64, to_lon: f64, to_lat: f64) -> f
 #[cfg(test)]
 mod tests {
     use super::{
-        AnalysisKind, OdPair, OdPairsDocument, PointSetDocument, RouteRequest, SnapOptions,
-        execute_matrix, execute_od, execute_route, load_experiment, load_od_pairs, load_point_set,
+        AnalysisKind, OdPair, OdPairsDocument, PointSetDocument, PreparedRoutingEngine,
+        RouteRequest, SnapOptions, execute_matrix, execute_od, execute_route, load_experiment,
+        load_od_pairs, load_point_set,
     };
     use netan_core::{
         AccessMask, CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, DirectedEdge, EdgeId,
-        NodeId, RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle, TopologyNode, TravelMode,
-        TurnRestriction, TurnRestrictionKind,
+        NodeId, NodeSpatialIndex, RoadClass, SmoothnessClass, SpatialIndexCell, SurfaceClass,
+        TopologyBounds, TopologyBundle, TopologyNode, TravelMode, TurnRestriction,
+        TurnRestrictionKind,
     };
     use netan_profile::{BreakdownMetric, ReturnConfig, ReturnGeometry};
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -1670,6 +1637,34 @@ mod tests {
                 .and_then(|value| value.distance_m),
             Some(300)
         );
+    }
+
+    #[test]
+    fn prepared_engine_reuses_prebuilt_graph() {
+        let engine =
+            PreparedRoutingEngine::new(Arc::new(test_topology()), Arc::new(test_metrics()))
+                .expect("prepared engine builds");
+        let request = RouteRequest {
+            route_id: "prepared-route".to_string(),
+            origin: super::LabeledPoint {
+                id: "a".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "c".to_string(),
+                lon: 6.002,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            returns: ReturnConfig::default(),
+        };
+
+        let route = engine.execute_route(&request).expect("route succeeds");
+        assert_eq!(route.edge_path, vec![0, 1]);
+        assert_eq!(route.summary.total_distance_m, 300);
     }
 
     #[test]
@@ -1980,6 +1975,7 @@ scenarios:
             ],
             turn_restrictions: vec![],
             names: vec![],
+            spatial_index: Some(spatial_index_for_all_nodes(3, 6.0, 53.0, 6.002, 53.0)),
         }
     }
 
@@ -2135,6 +2131,33 @@ scenarios:
                 mode_mask: AccessMask::new(AccessMask::CAR),
             }],
             names: vec![],
+            spatial_index: Some(spatial_index_for_all_nodes(4, 6.0, 53.0, 6.003, 53.0)),
+        }
+    }
+
+    fn spatial_index_for_all_nodes(
+        node_count: u32,
+        min_lon: f64,
+        min_lat: f64,
+        max_lon: f64,
+        max_lat: f64,
+    ) -> NodeSpatialIndex {
+        NodeSpatialIndex {
+            bounds: TopologyBounds {
+                min_lon,
+                min_lat,
+                max_lon,
+                max_lat,
+            },
+            columns: 1,
+            rows: 1,
+            cell_width_deg: (max_lon - min_lon).max(0.001),
+            cell_height_deg: (max_lat - min_lat).max(0.001),
+            cells: vec![SpatialIndexCell {
+                node_start: 0,
+                node_len: node_count,
+            }],
+            node_ids: (0..node_count).collect(),
         }
     }
 

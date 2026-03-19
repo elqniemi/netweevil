@@ -1,0 +1,38 @@
+{
+  "request": {
+    "pairs": [
+      {
+        "pair_id": "idf_pair_1",
+        "origin": {
+          "id": "gare_du_nord",
+          "lon": 2.3553,
+          "lat": 48.8809
+        },
+        "destination": {
+          "id": "orsay",
+          "lon": 2.3255,
+          "lat": 48.8600
+        }
+      },
+      {
+        "pair_id": "idf_pair_2",
+        "origin": {
+          "id": "versailles_chateau",
+          "lon": 2.1204,
+          "lat": 48.8049
+        },
+        "destination": {
+          "id": "orly_airport_area",
+          "lon": 2.3790,
+          "lat": 48.7283
+        }
+      }
+    ],
+    "snap": {
+      "max_distance_m": 500.0
+    },
+    "returns": {
+      "geometry": "full"
+    }
+  }
+}

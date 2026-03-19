@@ -559,6 +559,7 @@ mod tests {
             }],
             turn_restrictions: vec![],
             names: vec![],
+            spatial_index: None,
         };
 
         let compiled =
@@ -601,6 +602,7 @@ mod tests {
             edges: vec![],
             turn_restrictions: vec![],
             names: vec![],
+            spatial_index: None,
         };
 
         let error =
@@ -673,6 +675,7 @@ mod tests {
             ],
             turn_restrictions: vec![],
             names: vec![],
+            spatial_index: None,
         };
 
         let compiled =
@@ -775,6 +778,7 @@ mod tests {
             }],
             turn_restrictions: vec![],
             names: vec![],
+            spatial_index: None,
         }
     }
 }

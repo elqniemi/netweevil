@@ -1,0 +1,33 @@
+{
+  "profile_id": "pedestrian_research_v1",
+  "request": {
+    "route_id": "idf_foot_luxembourg_to_notre_dame",
+    "origin": {
+      "id": "luxembourg_garden",
+      "lon": 2.3372,
+      "lat": 48.8462
+    },
+    "destination": {
+      "id": "notre_dame",
+      "lon": 2.3499,
+      "lat": 48.8530
+    },
+    "snap": {
+      "max_distance_m": 250.0
+    },
+    "returns": {
+      "geometry": "full",
+      "segment_rows": true,
+      "road_type_breakdown": [
+        "time_s",
+        "distance_m"
+      ],
+      "surface_breakdown": [
+        "time_s",
+        "distance_m"
+      ],
+      "penalty_breakdown": true,
+      "explain_cost_derivation": true
+    }
+  }
+}
