@@ -13,13 +13,15 @@ use netan_ingest::{
 };
 use netan_persist::{
     WorkspacePaths, read_compiled_profile_bundle, read_compiled_profile_manifests,
-    read_dataset_manifest, read_dataset_manifests, read_run_manifest, read_topology_bundle,
-    write_compiled_profile_bundle, write_compiled_profile_manifest, write_json, write_run_manifest,
+    read_dataset_manifest, read_dataset_manifests, read_edge_name_bundle, read_run_manifest,
+    read_topology_bundle, write_compiled_profile_bundle, write_compiled_profile_manifest,
+    write_json, write_run_manifest,
 };
 use netan_profile::{ProfileDocument, ReturnGeometry, compile_profile_bundle, load_profile};
 use netan_query::{
     AnalysisKind, MatrixResult, OdResult, RouteResult, execute_matrix, execute_od, execute_route,
-    load_experiment, load_od_pairs, load_point_set, load_route_request,
+    execute_route_with_edge_names, load_experiment, load_od_pairs, load_point_set,
+    load_route_request,
 };
 use netan_report::{
     BundleRef, CompiledProfileManifest, RunKind, RunStatus, SoftwareInfo, load_run_result_summary,
@@ -476,8 +478,17 @@ fn run_route_analysis(
     let (topology, compiled_manifest, compiled_bundle) =
         load_route_execution_inputs(paths, dataset_id, profile)?;
     let engine = engine_description(&topology);
-    let result = execute_route(&topology, &compiled_bundle, &request)
-        .with_context(|| format!("executing route '{}'", request.route_id))?;
+    let edge_names = if request.returns.segment_rows {
+        load_edge_names(paths, dataset_id)?
+    } else {
+        None
+    };
+    let result = if let Some(edge_names) = edge_names.as_ref() {
+        execute_route_with_edge_names(&topology, &compiled_bundle, &request, edge_names)
+    } else {
+        execute_route(&topology, &compiled_bundle, &request)
+    }
+    .with_context(|| format!("executing route '{}'", request.route_id))?;
     store_route_run(
         paths,
         dataset_id,
@@ -919,6 +930,20 @@ fn load_route_execution_inputs(
             )
         })?;
     Ok((topology, compiled_manifest, compiled_bundle))
+}
+
+fn load_edge_names(paths: &WorkspacePaths, dataset_id: &str) -> Result<Option<Vec<String>>> {
+    let dataset_manifest = read_dataset_manifest(paths, dataset_id)
+        .with_context(|| format!("reading dataset manifest for '{dataset_id}'"))?;
+    if let Some(bundle_ref) = dataset_manifest.edge_name_bundle.as_ref() {
+        let bundle = read_edge_name_bundle(&bundle_ref.path)
+            .with_context(|| format!("reading edge-name bundle {}", bundle_ref.path))?;
+        return Ok(Some(bundle.names));
+    }
+    anyhow::bail!(
+        "dataset '{}' is missing the edge-name bundle required by the current format; remove the old cached dataset and re-import it",
+        dataset_id
+    )
 }
 
 fn software_info() -> SoftwareInfo {

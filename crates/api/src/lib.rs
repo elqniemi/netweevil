@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use axum::extract::{Path as AxumPath, Query, State};
@@ -13,8 +13,8 @@ use axum::{Json, Router};
 use netan_core::{CacheBundleId, CompiledProfileBundle, DatasetId, TopologyBounds, TopologyBundle};
 use netan_persist::{
     WorkspacePaths, read_compiled_profile_bundle, read_compiled_profile_manifests,
-    read_dataset_manifest, read_topology_bundle, write_compiled_profile_bundle,
-    write_compiled_profile_manifest,
+    read_dataset_manifest, read_edge_name_bundle, read_topology_bundle,
+    write_compiled_profile_bundle, write_compiled_profile_manifest,
 };
 use netan_profile::{ProfileDocument, ReturnGeometry, compile_profile_bundle, load_profile};
 use netan_query::{
@@ -46,6 +46,7 @@ struct ServiceRuntime {
     workspace_root: PathBuf,
     dataset_manifest: DatasetManifest,
     topology: Arc<TopologyBundle>,
+    edge_names: OnceLock<Option<Arc<[String]>>>,
     default_profile_id: String,
     profiles: BTreeMap<String, LoadedProfile>,
     capabilities: ServiceCapabilities,
@@ -202,6 +203,13 @@ impl ApiError {
             message: message.into(),
         }
     }
+
+    fn internal(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: message.into(),
+        }
+    }
 }
 
 impl IntoResponse for ApiError {
@@ -340,6 +348,7 @@ fn load_service_runtime(
         workspace_root: paths.root.clone(),
         dataset_manifest,
         topology,
+        edge_names: OnceLock::new(),
         default_profile_id,
         profiles: loaded_profiles,
         capabilities: ServiceCapabilities {
@@ -468,13 +477,22 @@ async fn route_handler(
     if wants_geojson(&query) {
         request.returns.geometry = ReturnGeometry::Full;
     }
-    let result = profile
-        .engine
-        .execute_route(&request)
-        .map_err(|error| {
-            warn!(endpoint = "route", route_id = %request.route_id, %error, "request failed");
-            ApiError::bad_request(error.to_string())
-        })?;
+    let edge_names = if request.returns.segment_rows {
+        load_edge_names(state.service.as_ref())?
+    } else {
+        None
+    };
+    let result = (if let Some(edge_names) = edge_names.as_deref() {
+        profile
+            .engine
+            .execute_route_with_edge_names(&request, edge_names)
+    } else {
+        profile.engine.execute_route(&request)
+    })
+    .map_err(|error| {
+        warn!(endpoint = "route", route_id = %request.route_id, %error, "request failed");
+        ApiError::bad_request(error.to_string())
+    })?;
     info!(
         endpoint = "route",
         route_id = %result.route_id,
@@ -513,13 +531,10 @@ async fn od_handler(
     if wants_geojson(&query) {
         request.returns.geometry = ReturnGeometry::Full;
     }
-    let result = profile
-        .engine
-        .execute_od(&request)
-        .map_err(|error| {
-            warn!(endpoint = "od", %error, "request failed");
-            ApiError::bad_request(error.to_string())
-        })?;
+    let result = profile.engine.execute_od(&request).map_err(|error| {
+        warn!(endpoint = "od", %error, "request failed");
+        ApiError::bad_request(error.to_string())
+    })?;
     info!(
         endpoint = "od",
         pair_count = result.pair_count,
@@ -587,6 +602,32 @@ fn resolve_profile<'a>(
         .profiles
         .get(profile_id)
         .ok_or_else(|| ApiError::not_found(format!("unknown profile_id '{}'", profile_id)))
+}
+
+fn load_edge_names(service: &ServiceRuntime) -> Result<Option<Arc<[String]>>, ApiError> {
+    if let Some(edge_names) = service.edge_names.get() {
+        return Ok(edge_names.clone());
+    }
+
+    let Some(bundle_ref) = service.dataset_manifest.edge_name_bundle.as_ref() else {
+        return Err(ApiError::internal(format!(
+            "dataset '{}' is missing the edge-name bundle required by the current format; remove the old cached dataset and re-import it",
+            service.dataset_manifest.dataset_id.0
+        )));
+    };
+    let loaded = {
+        info!(bundle = %bundle_ref.path, "loading edge-name bundle");
+        let bundle = read_edge_name_bundle(&bundle_ref.path).map_err(|error| {
+            ApiError::internal(format!(
+                "reading edge-name bundle {}: {error}",
+                bundle_ref.path
+            ))
+        })?;
+        Some(Arc::<[String]>::from(bundle.names))
+    };
+
+    let _ = service.edge_names.set(loaded.clone());
+    Ok(loaded)
 }
 
 fn build_service_info(service: &ServiceRuntime) -> ServiceInfoResponse {
@@ -827,7 +868,7 @@ mod tests {
         EngineDescription, ExecutionContext, engine_description, matrix_result_geojson,
         od_result_geojson,
     };
-    use netan_core::TopologyBundle;
+    use netan_core::{EdgeBasedTopology, TopologyBundle};
     use netan_query::{BatchItemStatus, MatrixCellResult, MatrixResult, OdPairResult, OdResult};
 
     #[test]
@@ -840,6 +881,7 @@ mod tests {
             edges: vec![],
             turn_restrictions: vec![],
             names: vec![],
+            edge_based_topology: EdgeBasedTopology::default(),
             spatial_index: None,
         };
 

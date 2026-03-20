@@ -8,11 +8,14 @@ use std::sync::{
 
 use anyhow::{Context, Result, bail};
 use netan_core::{
-    AccessMask, BuildStage, CacheBundleId, DatasetId, DirectedEdge, EdgeId, NodeId, RoadClass,
+    AccessMask, BuildStage, CacheBundleId, DatasetId, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
+    EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId, EdgeNameBundle, NodeId, RoadClass,
     SmoothnessClass, SpatialIndexCell, SurfaceClass, TopologyBounds, TopologyBundle,
     TopologyBundleMeta, TopologyNode, TurnRestriction, TurnRestrictionKind,
 };
-use netan_persist::{WorkspacePaths, write_dataset_manifest, write_topology_bundle};
+use netan_persist::{
+    WorkspacePaths, write_dataset_manifest, write_edge_name_bundle, write_topology_bundle,
+};
 use netan_report::{BundleRef, DatasetManifest, now_rfc3339};
 use osmpbfreader::{OsmId, OsmObj, OsmPbfReader, Relation, Tags};
 use sha2::{Digest, Sha256};
@@ -95,18 +98,31 @@ where
     let bundle_id = CacheBundleId::new(format!("topology-{}-{}", dataset_id.0, &sha256[..12]));
     let bundle_path = paths
         .topology_bundles_dir
-        .join(format!("{}.bin.gz", bundle_id.0));
-    let (bundle, topology_meta) = build_topology_bundle(source_path, size, &sha256, &mut progress)?;
+        .join(format!("{}.bin", bundle_id.0));
+    let edge_name_bundle_id =
+        CacheBundleId::new(format!("edge-names-{}-{}", dataset_id.0, &sha256[..12]));
+    let edge_name_bundle_path = paths
+        .edge_name_bundles_dir
+        .join(format!("{}.bin", edge_name_bundle_id.0));
+    let (bundle, edge_name_bundle, topology_meta) =
+        build_topology_bundle(source_path, size, &sha256, &mut progress)?;
+    emit_progress(
+        &mut progress,
+        DatasetImportStage::WriteTopologyBundle,
+        None,
+        format!("Writing topology bundle {}", bundle_path.display()),
+    );
+    write_topology_bundle(&bundle_path, &bundle)?;
     emit_progress(
         &mut progress,
         DatasetImportStage::WriteTopologyBundle,
         None,
         format!(
-            "Writing compressed topology bundle {}",
-            bundle_path.display()
+            "Writing edge-name bundle {}",
+            edge_name_bundle_path.display()
         ),
     );
-    write_topology_bundle(&bundle_path, &bundle)?;
+    write_edge_name_bundle(&edge_name_bundle_path, &edge_name_bundle)?;
 
     let manifest = DatasetManifest {
         dataset_id,
@@ -119,6 +135,10 @@ where
         topology_bundle: Some(BundleRef {
             bundle_id,
             path: bundle_path.display().to_string(),
+        }),
+        edge_name_bundle: Some(BundleRef {
+            bundle_id: edge_name_bundle_id,
+            path: edge_name_bundle_path.display().to_string(),
         }),
         topology_meta: Some(topology_meta),
     };
@@ -197,6 +217,7 @@ struct PendingWay {
     smoothness: SmoothnessClass,
     access_mask: AccessMask,
     is_toll: bool,
+    is_roundabout: bool,
     direction: EdgeDirection,
     name: Option<String>,
 }
@@ -242,8 +263,8 @@ fn build_topology_bundle(
     source_size_bytes: u64,
     source_sha256: &str,
     progress: &mut impl FnMut(DatasetImportProgress),
-) -> Result<(TopologyBundle, TopologyBundleMeta)> {
-    let (pending_ways, restriction_candidates, needed_nodes, counts) =
+) -> Result<(TopologyBundle, EdgeNameBundle, TopologyBundleMeta)> {
+    let (pending_ways, restriction_candidates, needed_nodes, traffic_signal_nodes, counts) =
         scan_routable_objects(source_path, source_size_bytes, progress)?;
     let node_coords = load_node_coords(source_path, source_size_bytes, &needed_nodes, progress)?;
     let (nodes, node_lookup) = build_nodes(&node_coords);
@@ -287,7 +308,7 @@ fn build_topology_bundle(
             };
 
             let length_m = haversine_meters(from_lon, from_lat, to_lon, to_lat).round() as u32;
-            segments.push((from_id, to_id, length_m));
+            segments.push((from_id, to_id, from, to, length_m));
         }
 
         if segments.is_empty() {
@@ -297,12 +318,24 @@ fn build_topology_bundle(
 
         let total_length_m = segments
             .iter()
-            .map(|(_, _, length_m)| *length_m as u64)
+            .map(|(_, _, _, _, length_m)| *length_m as u64)
             .sum();
         let segment_count = segments.len() as u32;
-        for (from_id, to_id, length_m) in segments {
+        for (from_id, to_id, from_osm_id, to_osm_id, length_m) in segments {
             let duration_s =
                 apportioned_duration_s(way.duration_s, length_m, total_length_m, segment_count);
+            let mut forward_flags = 0_u32;
+            let mut reverse_flags = 0_u32;
+            if way.is_roundabout {
+                forward_flags |= EDGE_FLAG_ROUNDABOUT;
+                reverse_flags |= EDGE_FLAG_ROUNDABOUT;
+            }
+            if traffic_signal_nodes.contains(&to_osm_id) {
+                forward_flags |= EDGE_FLAG_TARGET_TRAFFIC_SIGNAL;
+            }
+            if traffic_signal_nodes.contains(&from_osm_id) {
+                reverse_flags |= EDGE_FLAG_TARGET_TRAFFIC_SIGNAL;
+            }
 
             if matches!(
                 way.direction,
@@ -323,7 +356,7 @@ fn build_topology_bundle(
                     name_index,
                     geometry_offset: 0,
                     geometry_len: 0,
-                    flags: 0,
+                    flags: forward_flags,
                 });
             }
 
@@ -346,7 +379,7 @@ fn build_topology_bundle(
                     name_index,
                     geometry_offset: 0,
                     geometry_len: 0,
-                    flags: 0,
+                    flags: reverse_flags,
                 });
             }
         }
@@ -375,14 +408,19 @@ fn build_topology_bundle(
         names[index as usize] = name;
     }
 
+    let edge_name_bundle = EdgeNameBundle { names };
+
+    let edge_based_topology = build_edge_based_topology(nodes.len(), &edges);
+
     let bundle = TopologyBundle {
-        schema_version: 5,
+        schema_version: 6,
         source_path: source_path.display().to_string(),
         source_sha256: source_sha256.to_string(),
         nodes,
         edges,
         turn_restrictions,
-        names,
+        names: Vec::new(),
+        edge_based_topology,
         spatial_index,
     };
     let meta = TopologyBundleMeta {
@@ -396,7 +434,56 @@ fn build_topology_bundle(
         routable_way_count: pending_ways.len() as u64,
         skipped_way_count,
     };
-    Ok((bundle, meta))
+    Ok((bundle, edge_name_bundle, meta))
+}
+
+fn build_edge_based_topology(node_count: usize, edges: &[DirectedEdge]) -> EdgeBasedTopology {
+    let mut out_degree = vec![0_u32; node_count];
+    let mut head = vec![0_u32; edges.len()];
+    for (edge_index, edge) in edges.iter().enumerate() {
+        out_degree[edge.from.0 as usize] += 1;
+        head[edge_index] = edge.to.0;
+    }
+
+    let mut node_first_out = vec![0_u32; node_count + 1];
+    for (node_index, degree) in out_degree.iter().enumerate() {
+        node_first_out[node_index + 1] = node_first_out[node_index] + degree;
+    }
+
+    let mut node_edge_order = vec![0_u32; edges.len()];
+    let mut write_positions = node_first_out[..node_count].to_vec();
+    for (edge_index, edge) in edges.iter().enumerate() {
+        let write_index = &mut write_positions[edge.from.0 as usize];
+        node_edge_order[*write_index as usize] = edge_index as u32;
+        *write_index += 1;
+    }
+
+    let mut edge_transition_first_out = vec![0_u32; edges.len() + 1];
+    for edge_index in 0..edges.len() {
+        let head_node = head[edge_index] as usize;
+        edge_transition_first_out[edge_index + 1] = edge_transition_first_out[edge_index]
+            + (node_first_out[head_node + 1] - node_first_out[head_node]);
+    }
+
+    let mut edge_transition_edges = vec![0_u32; edge_transition_first_out[edges.len()] as usize];
+    let mut transition_write_positions = edge_transition_first_out[..edges.len()].to_vec();
+    for edge_index in 0..edges.len() {
+        let head_node = head[edge_index] as usize;
+        for &next_edge in &node_edge_order
+            [node_first_out[head_node] as usize..node_first_out[head_node + 1] as usize]
+        {
+            let write_index = &mut transition_write_positions[edge_index];
+            edge_transition_edges[*write_index as usize] = next_edge;
+            *write_index += 1;
+        }
+    }
+
+    EdgeBasedTopology {
+        node_first_out,
+        node_edge_order,
+        edge_transition_first_out,
+        edge_transition_edges,
+    }
 }
 
 fn scan_routable_objects(
@@ -406,6 +493,7 @@ fn scan_routable_objects(
 ) -> Result<(
     Vec<PendingWay>,
     Vec<TurnRestrictionCandidate>,
+    HashSet<i64>,
     HashSet<i64>,
     ObjectCounts,
 )> {
@@ -417,6 +505,7 @@ fn scan_routable_objects(
     let mut ways = Vec::new();
     let mut restriction_candidates = Vec::new();
     let mut node_ids = HashSet::new();
+    let mut traffic_signal_nodes = HashSet::new();
     let mut counts = ObjectCounts::default();
     let mut reporter = PercentReporter::starting_at_zero();
 
@@ -429,7 +518,12 @@ fn scan_routable_objects(
 
     for object in reader.iter() {
         match object.context("reading PBF object")? {
-            OsmObj::Node(_) => counts.nodes += 1,
+            OsmObj::Node(node) => {
+                counts.nodes += 1;
+                if is_traffic_signal_node(&node.tags) {
+                    traffic_signal_nodes.insert(node.id.0);
+                }
+            }
             OsmObj::Way(way) => {
                 counts.ways += 1;
                 let Some((road_class, access_mask)) = classify_way(&way.tags) else {
@@ -448,6 +542,7 @@ fn scan_routable_objects(
                     smoothness: classify_smoothness(&way.tags),
                     access_mask,
                     is_toll: classify_toll(&way.tags),
+                    is_roundabout: tag(&way.tags, "junction") == Some("roundabout"),
                     direction: classify_direction(&way.tags, road_class),
                     name: way.tags.get("name").map(ToString::to_string),
                 };
@@ -495,7 +590,13 @@ fn scan_routable_objects(
         ),
     );
 
-    Ok((ways, restriction_candidates, node_ids, counts))
+    Ok((
+        ways,
+        restriction_candidates,
+        node_ids,
+        traffic_signal_nodes,
+        counts,
+    ))
 }
 
 fn load_node_coords(
@@ -1152,20 +1253,14 @@ fn apportioned_duration_s(
 fn classify_way(tags: &Tags) -> Option<(RoadClass, AccessMask)> {
     if let Some(highway) = tag(tags, "highway") {
         let road_class = classify_highway(highway)?;
-        return Some((road_class, classify_access(highway, tag(tags, "route"))));
+        return Some((
+            road_class,
+            classify_access(tags, highway, tag(tags, "route")),
+        ));
     }
 
     if tag(tags, "route") == Some("ferry") || tag(tags, "ferry").is_some() {
-        return Some((
-            RoadClass::Ferry,
-            AccessMask::new(
-                AccessMask::CAR
-                    | AccessMask::BICYCLE
-                    | AccessMask::FOOT
-                    | AccessMask::TRANSIT
-                    | AccessMask::HGV,
-            ),
-        ));
+        return Some((RoadClass::Ferry, classify_access(tags, "", Some("ferry"))));
     }
 
     None
@@ -1223,9 +1318,10 @@ fn classify_toll(tags: &Tags) -> bool {
     matches!(tag(tags, "toll"), Some("yes" | "true" | "1"))
 }
 
-fn classify_access(highway: &str, route: Option<&str>) -> AccessMask {
+fn classify_access(tags: &Tags, highway: &str, route: Option<&str>) -> AccessMask {
     if route == Some("ferry") {
-        return AccessMask::new(
+        return apply_access_overrides(
+            tags,
             AccessMask::CAR
                 | AccessMask::BICYCLE
                 | AccessMask::FOOT
@@ -1245,7 +1341,75 @@ fn classify_access(highway: &str, route: Option<&str>) -> AccessMask {
         "bridleway" => AccessMask::FOOT,
         _ => AccessMask::CAR | AccessMask::BICYCLE | AccessMask::FOOT,
     };
+    apply_access_overrides(tags, bits)
+}
+
+fn apply_access_overrides(tags: &Tags, base_bits: u16) -> AccessMask {
+    let mut bits = base_bits;
+
+    if tag_is_restricted(tags, "access") {
+        bits = 0;
+    }
+    if tag_is_restricted(tags, "vehicle") {
+        bits &= !(AccessMask::CAR | AccessMask::BICYCLE | AccessMask::TRANSIT | AccessMask::HGV);
+    }
+    if tag_is_restricted(tags, "motor_vehicle") {
+        bits &= !(AccessMask::CAR | AccessMask::TRANSIT | AccessMask::HGV);
+    }
+    if tag_is_restricted(tags, "motorcar") {
+        bits &= !AccessMask::CAR;
+    }
+    if tag_is_restricted(tags, "bicycle") {
+        bits &= !AccessMask::BICYCLE;
+    }
+    if tag_is_restricted(tags, "foot") {
+        bits &= !AccessMask::FOOT;
+    }
+    if tag_is_restricted(tags, "psv") || tag_is_restricted(tags, "bus") {
+        bits &= !AccessMask::TRANSIT;
+    }
+    if tag_is_restricted(tags, "hgv") {
+        bits &= !AccessMask::HGV;
+    }
+
+    if tag_is_allowed(tags, "vehicle") {
+        bits |= AccessMask::CAR | AccessMask::BICYCLE | AccessMask::TRANSIT | AccessMask::HGV;
+    }
+    if tag_is_allowed(tags, "motor_vehicle") {
+        bits |= AccessMask::CAR | AccessMask::TRANSIT | AccessMask::HGV;
+    }
+    if tag_is_allowed(tags, "motorcar") {
+        bits |= AccessMask::CAR;
+    }
+    if tag_is_allowed(tags, "bicycle") {
+        bits |= AccessMask::BICYCLE;
+    }
+    if tag_is_allowed(tags, "foot") {
+        bits |= AccessMask::FOOT;
+    }
+    if tag_is_allowed(tags, "psv") || tag_is_allowed(tags, "bus") {
+        bits |= AccessMask::TRANSIT;
+    }
+    if tag_is_allowed(tags, "hgv") {
+        bits |= AccessMask::HGV;
+    }
+
     AccessMask::new(bits)
+}
+
+fn tag_is_restricted(tags: &Tags, key: &str) -> bool {
+    matches!(tag(tags, key), Some("no" | "private"))
+}
+
+fn tag_is_allowed(tags: &Tags, key: &str) -> bool {
+    matches!(
+        tag(tags, key),
+        Some("yes" | "designated" | "official" | "permissive")
+    )
+}
+
+fn is_traffic_signal_node(tags: &Tags) -> bool {
+    tag(tags, "highway") == Some("traffic_signals")
 }
 
 fn classify_direction(tags: &Tags, road_class: RoadClass) -> EdgeDirection {
@@ -1576,13 +1740,42 @@ mod tests {
 
     #[test]
     fn infers_access_masks() {
+        let empty = Tags::new();
         assert_eq!(
-            classify_access("motorway", None),
+            classify_access(&empty, "motorway", None),
             AccessMask::new(AccessMask::CAR | AccessMask::HGV)
         );
         assert_eq!(
-            classify_access("cycleway", None),
+            classify_access(&empty, "cycleway", None),
             AccessMask::new(AccessMask::BICYCLE | AccessMask::FOOT)
+        );
+    }
+
+    #[test]
+    fn applies_mode_specific_access_overrides() {
+        let restricted = Tags::from_iter([
+            ("access".into(), "no".into()),
+            ("foot".into(), "yes".into()),
+        ]);
+        assert_eq!(
+            classify_access(&restricted, "residential", None),
+            AccessMask::new(AccessMask::FOOT)
+        );
+
+        let bicycle_forbidden = Tags::from_iter([("bicycle".into(), "no".into())]);
+        assert_eq!(
+            classify_access(&bicycle_forbidden, "cycleway", None),
+            AccessMask::new(AccessMask::FOOT)
+        );
+
+        let ferry_foot_only = Tags::from_iter([
+            ("route".into(), "ferry".into()),
+            ("motor_vehicle".into(), "no".into()),
+            ("bicycle".into(), "no".into()),
+        ]);
+        assert_eq!(
+            classify_access(&ferry_foot_only, "", Some("ferry")),
+            AccessMask::new(AccessMask::FOOT)
         );
     }
 
@@ -1834,6 +2027,7 @@ mod tests {
             smoothness: Default::default(),
             access_mask: AccessMask::new(AccessMask::CAR),
             is_toll: false,
+            is_roundabout: false,
             direction: EdgeDirection::Both,
             name: None,
         }

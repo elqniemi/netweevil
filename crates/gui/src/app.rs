@@ -9,13 +9,15 @@ use netan_core::{CacheBundleId, CompiledProfileBundle, TopologyBundle};
 use netan_ingest::{DatasetImportOptions, DatasetImportProgress, import_dataset_with_progress};
 use netan_persist::{
     WorkspacePaths, list_json_files, read_compiled_profile_bundle, read_compiled_profile_manifests,
-    read_dataset_manifest, read_dataset_manifests, read_run_manifest, read_topology_bundle,
-    write_compiled_profile_bundle, write_compiled_profile_manifest, write_run_manifest,
+    read_dataset_manifest, read_dataset_manifests, read_edge_name_bundle, read_run_manifest,
+    read_topology_bundle, write_compiled_profile_bundle, write_compiled_profile_manifest,
+    write_run_manifest,
 };
 use netan_profile::{ProfileDocument, ReturnGeometry, compile_profile_bundle, load_profile};
 use netan_query::{
     LabeledPoint, MatrixResult, OdResult, PointSetDocument, RouteRequest, RouteResult, SnapOptions,
-    execute_matrix, execute_od, execute_route, load_od_pairs, load_point_set, load_route_request,
+    execute_matrix, execute_od, execute_route, execute_route_with_edge_names, load_od_pairs,
+    load_point_set, load_route_request,
 };
 use netan_report::{
     BundleRef, CompiledProfileManifest, DatasetManifest, RunKind, RunManifest, RunResultSummary,
@@ -542,7 +544,16 @@ impl NetanApp {
                 {
                     request.returns.geometry = ReturnGeometry::Full;
                 }
-                let result = execute_route(&topology, &compiled_bundle, &request)?;
+                let edge_names = if request.returns.segment_rows {
+                    load_edge_names(&self.paths, &dataset_id)?
+                } else {
+                    None
+                };
+                let result = if let Some(edge_names) = edge_names.as_ref() {
+                    execute_route_with_edge_names(&topology, &compiled_bundle, &request, edge_names)
+                } else {
+                    execute_route(&topology, &compiled_bundle, &request)
+                }?;
                 let manifest = store_route_run(
                     &self.paths,
                     &dataset_id,
@@ -1447,6 +1458,20 @@ fn load_or_compile_execution_inputs(
             )
         })?;
     Ok((topology, compiled_manifest, compiled_bundle))
+}
+
+fn load_edge_names(paths: &WorkspacePaths, dataset_id: &str) -> Result<Option<Vec<String>>> {
+    let dataset_manifest = read_dataset_manifest(paths, dataset_id)
+        .with_context(|| format!("reading dataset manifest for '{dataset_id}'"))?;
+    if let Some(bundle_ref) = dataset_manifest.edge_name_bundle.as_ref() {
+        let bundle = read_edge_name_bundle(&bundle_ref.path)
+            .with_context(|| format!("reading edge-name bundle {}", bundle_ref.path))?;
+        return Ok(Some(bundle.names));
+    }
+    bail!(
+        "dataset '{}' is missing the edge-name bundle required by the current format; remove the old cached dataset and re-import it",
+        dataset_id
+    )
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -4,8 +4,8 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use netan_core::{
-    CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, DirectedEdge, RoadClass,
-    SmoothnessClass, SurfaceClass, TopologyBundle, TravelMode,
+    CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, CompiledTurnCostConfig, DirectedEdge,
+    RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle, TravelMode,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -296,10 +296,18 @@ pub fn compile_profile_bundle(
     }
 
     Ok(CompiledProfileBundle {
-        schema_version: 2,
+        schema_version: 3,
         profile_id: profile.profile.id.clone(),
         profile_hash,
         mode: profile.profile.mode,
+        turn_costs: CompiledTurnCostConfig {
+            left_penalty_s: profile.turns.left_penalty_s,
+            right_penalty_s: profile.turns.right_penalty_s,
+            uturn_penalty_s: profile.turns.uturn_penalty_s,
+            traffic_signal_penalty_s: profile.turns.traffic_signal_penalty_s,
+            roundabout_entry_penalty_s: profile.turns.roundabout_entry_penalty_s,
+            cost_time_weight: profile.cost.time_weight,
+        },
         source_topology_bundle_id,
         edge_metrics,
     })
@@ -713,6 +721,31 @@ mod tests {
         assert_eq!(compiled.edge_metrics.len(), 1);
         assert_eq!(compiled.edge_metrics[0].travel_time_s, None);
         assert_eq!(compiled.edge_metrics[0].generalized_cost, None);
+    }
+
+    #[test]
+    fn stores_turn_costs_in_compiled_profile_bundle() {
+        let mut profile = ferry_profile(true);
+        profile.turns.left_penalty_s = 7.0;
+        profile.turns.right_penalty_s = 3.0;
+        profile.turns.uturn_penalty_s = 25.0;
+        profile.turns.traffic_signal_penalty_s = 4.0;
+        profile.turns.roundabout_entry_penalty_s = 2.0;
+        profile.cost.time_weight = 1.5;
+
+        let compiled = compile_profile_bundle(
+            &profile,
+            &ferry_topology(Some(900.0)),
+            CacheBundleId::new("topology-test"),
+        )
+        .expect("compile succeeds");
+
+        assert_eq!(compiled.turn_costs.left_penalty_s, 7.0);
+        assert_eq!(compiled.turn_costs.right_penalty_s, 3.0);
+        assert_eq!(compiled.turn_costs.uturn_penalty_s, 25.0);
+        assert_eq!(compiled.turn_costs.traffic_signal_penalty_s, 4.0);
+        assert_eq!(compiled.turn_costs.roundabout_entry_penalty_s, 2.0);
+        assert_eq!(compiled.turn_costs.cost_time_weight, 1.5);
     }
 
     fn tag_match<const N: usize>(pairs: [(&str, &str); N]) -> TagMatch {

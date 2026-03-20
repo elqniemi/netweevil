@@ -77,6 +77,69 @@ Inspect persistent state:
 cargo run -p netan-cli -- cache list
 ```
 
+## Current Dataset Format
+
+The current fast path expects freshly imported datasets in the new bundle layout:
+
+- `.netan/bundles/topology/*.bin`
+- `.netan/bundles/names/*.bin`
+- `.netan/bundles/metrics/*.bin`
+
+Older gzip topology bundles and older dataset imports are no longer part of the supported execution path. Rebuild cached datasets before using the API or running new analyses:
+
+```bash
+rm -rf .netan/datasets .netan/bundles/topology .netan/bundles/names .netan/bundles/metrics .netan/compiled_profiles
+mkdir -p .netan/bundles/topology .netan/bundles/names .netan/bundles/metrics .netan/datasets .netan/compiled_profiles
+
+cargo run -p netan-cli -- dataset import datasets/groningen-260317.osm.pbf --name groningen_2026_03
+cargo run -p netan-cli -- profile compile --dataset groningen_2026_03 --profile examples/profiles/car_research_v1.yml
+```
+
+## Fast API Flow
+
+For the lowest warm-query latency on the current exact engine:
+
+- import the dataset again with the current format
+- compile every profile you want to use before startup
+- start the API with `--default-profile` plus extra `--profile` flags to preload profiles
+- use JSON responses, not `format=geojson`
+- keep route requests summary-only unless you explicitly need geometry or segment rows
+
+Example:
+
+```bash
+cargo run -p netan-cli -- api serve \
+  --dataset groningen_2026_03 \
+  --default-profile examples/profiles/car_research_v1.yml \
+  --profile examples/profiles/pedestrian_research_v1.yml \
+  --bind 127.0.0.1:8080
+```
+
+Fast summary-only route request:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/route \
+  -H 'content-type: application/json' \
+  --data '{
+    "request": {
+      "route_id": "fast_route_001",
+      "origin": { "id": "a", "lon": 6.5665, "lat": 53.2194 },
+      "destination": { "id": "b", "lon": 6.5716, "lat": 53.2148 },
+      "returns": {
+        "geometry": "none",
+        "segment_rows": false,
+        "road_type_breakdown": [],
+        "surface_breakdown": [],
+        "penalty_breakdown": false,
+        "explain_cost_derivation": false
+      }
+    }
+  }'
+```
+
+That path keeps edge names cold, avoids geometry materialization, and uses the prepared in-memory routing engine plus scratch reuse.
+Pure summary-only route responses now also omit `node_path` and `edge_path`, so the API does not serialize full path ID arrays unless you request richer route detail.
+
 ## Native GUI
 
 Launch the desktop app:

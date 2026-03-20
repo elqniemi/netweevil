@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+pub const EDGE_FLAG_ROUNDABOUT: u32 = 1 << 0;
+pub const EDGE_FLAG_TARGET_TRAFFIC_SIGNAL: u32 = 1 << 1;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub u32);
 
@@ -160,6 +163,24 @@ pub struct NodeSpatialIndex {
     pub node_ids: Vec<u32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EdgeNameBundle {
+    #[serde(default)]
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EdgeBasedTopology {
+    #[serde(default)]
+    pub node_first_out: Vec<u32>,
+    #[serde(default)]
+    pub node_edge_order: Vec<u32>,
+    #[serde(default)]
+    pub edge_transition_first_out: Vec<u32>,
+    #[serde(default)]
+    pub edge_transition_edges: Vec<u32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopologyBundle {
     pub schema_version: u32,
@@ -171,6 +192,8 @@ pub struct TopologyBundle {
     pub turn_restrictions: Vec<TurnRestriction>,
     #[serde(default)]
     pub names: Vec<String>,
+    #[serde(default)]
+    pub edge_based_topology: EdgeBasedTopology,
     #[serde(default)]
     pub spatial_index: Option<NodeSpatialIndex>,
 }

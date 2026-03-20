@@ -1,14 +1,14 @@
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{BufWriter, Read, Write};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
-use flate2::Compression;
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
+use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
-use netan_core::{CompiledProfileBundle, TopologyBundle};
+use netan_core::{
+    CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, EdgeNameBundle, TopologyBundle,
+    TravelMode,
+};
 use netan_report::{CompiledProfileManifest, DatasetManifest, RunManifest};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -19,6 +19,7 @@ pub struct WorkspacePaths {
     pub state_dir: PathBuf,
     pub bundles_dir: PathBuf,
     pub topology_bundles_dir: PathBuf,
+    pub edge_name_bundles_dir: PathBuf,
     pub metric_bundles_dir: PathBuf,
     pub datasets_dir: PathBuf,
     pub compiled_profiles_dir: PathBuf,
@@ -34,6 +35,7 @@ impl WorkspacePaths {
             root,
             bundles_dir: state_dir.join("bundles"),
             topology_bundles_dir: state_dir.join("bundles").join("topology"),
+            edge_name_bundles_dir: state_dir.join("bundles").join("names"),
             metric_bundles_dir: state_dir.join("bundles").join("metrics"),
             datasets_dir: state_dir.join("datasets"),
             compiled_profiles_dir: state_dir.join("compiled_profiles"),
@@ -50,6 +52,7 @@ impl WorkspacePaths {
             &self.state_dir,
             &self.bundles_dir,
             &self.topology_bundles_dir,
+            &self.edge_name_bundles_dir,
             &self.metric_bundles_dir,
             &self.datasets_dir,
             &self.compiled_profiles_dir,
@@ -94,7 +97,11 @@ pub fn read_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
 }
 
 pub fn write_topology_bundle(path: impl AsRef<Path>, bundle: &TopologyBundle) -> Result<()> {
-    write_binary_gzip(path, bundle)
+    write_binary(path, bundle)
+}
+
+pub fn write_edge_name_bundle(path: impl AsRef<Path>, bundle: &EdgeNameBundle) -> Result<()> {
+    write_binary(path, bundle)
 }
 
 pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
@@ -103,10 +110,15 @@ pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
         .extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
-        || path_has_gzip_magic(path)?
     {
-        return read_binary_gzip(path);
+        bail!(
+            "legacy gzip topology bundles are no longer supported; re-import the dataset to write the current .bin topology format"
+        );
     }
+    read_binary_mmap(path)
+}
+
+pub fn read_edge_name_bundle(path: impl AsRef<Path>) -> Result<EdgeNameBundle> {
     read_binary_mmap(path)
 }
 
@@ -118,7 +130,41 @@ pub fn write_compiled_profile_bundle(
 }
 
 pub fn read_compiled_profile_bundle(path: impl AsRef<Path>) -> Result<CompiledProfileBundle> {
-    read_binary_mmap(path)
+    let path = path.as_ref();
+    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let mmap = unsafe { Mmap::map(&file) }
+        .with_context(|| format!("memory-mapping {}", path.display()))?;
+    bincode::deserialize(&mmap)
+        .or_else(|_| {
+            bincode::deserialize::<LegacyCompiledProfileBundle>(&mmap)
+                .map(CompiledProfileBundle::from)
+        })
+        .with_context(|| format!("parsing compiled profile bundle {}", path.display()))
+}
+
+#[derive(serde::Deserialize)]
+struct LegacyCompiledProfileBundle {
+    schema_version: u32,
+    profile_id: String,
+    profile_hash: String,
+    #[serde(default)]
+    mode: TravelMode,
+    source_topology_bundle_id: CacheBundleId,
+    edge_metrics: Vec<CompiledEdgeMetric>,
+}
+
+impl From<LegacyCompiledProfileBundle> for CompiledProfileBundle {
+    fn from(value: LegacyCompiledProfileBundle) -> Self {
+        Self {
+            schema_version: value.schema_version,
+            profile_id: value.profile_id,
+            profile_hash: value.profile_hash,
+            mode: value.mode,
+            turn_costs: Default::default(),
+            source_topology_bundle_id: value.source_topology_bundle_id,
+            edge_metrics: value.edge_metrics,
+        }
+    }
 }
 
 fn write_binary<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Result<()> {
@@ -136,22 +182,6 @@ fn write_binary<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Result<()> {
         .with_context(|| format!("flushing binary {}", path.display()))
 }
 
-fn write_binary_gzip<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Result<()> {
-    let path = path.as_ref();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating directory {}", parent.display()))?;
-    }
-    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    let writer = BufWriter::new(file);
-    let mut encoder = GzEncoder::new(writer, Compression::default());
-    bincode::serialize_into(&mut encoder, value)
-        .with_context(|| format!("serializing compressed binary {}", path.display()))?;
-    encoder
-        .try_finish()
-        .with_context(|| format!("finishing compressed binary {}", path.display()))
-}
-
 fn read_binary_mmap<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
     let path = path.as_ref();
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
@@ -160,33 +190,17 @@ fn read_binary_mmap<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
     bincode::deserialize(&mmap).with_context(|| format!("parsing binary bundle {}", path.display()))
 }
 
-fn read_binary_gzip<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
-    let path = path.as_ref();
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut decoder = GzDecoder::new(file);
-    let mut bytes = Vec::new();
-    decoder
-        .read_to_end(&mut bytes)
-        .with_context(|| format!("decompressing {}", path.display()))?;
-    bincode::deserialize(&bytes)
-        .with_context(|| format!("parsing compressed binary bundle {}", path.display()))
-}
-
-fn path_has_gzip_magic(path: &Path) -> Result<bool> {
-    let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut magic = [0_u8; 2];
-    let read = file
-        .read(&mut magic)
-        .with_context(|| format!("reading {}", path.display()))?;
-    Ok(read == magic.len() && magic == [0x1f, 0x8b])
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{read_topology_bundle, write_topology_bundle};
+    use super::{
+        read_compiled_profile_bundle, read_edge_name_bundle, read_topology_bundle, write_binary,
+        write_edge_name_bundle, write_topology_bundle,
+    };
     use netan_core::{
-        AccessMask, DirectedEdge, EdgeId, NodeId, RoadClass, SmoothnessClass, SurfaceClass,
-        TopologyBundle, TopologyNode, TurnRestriction, TurnRestrictionKind,
+        AccessMask, CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle,
+        CompiledTurnCostConfig, DirectedEdge, EdgeId, EdgeNameBundle, NodeId, RoadClass,
+        SmoothnessClass, SurfaceClass, TopologyBundle, TopologyNode, TravelMode, TurnRestriction,
+        TurnRestrictionKind,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -254,6 +268,7 @@ mod tests {
                 mode_mask: AccessMask::new(AccessMask::FOOT),
             }],
             names: vec!["path name".to_string()],
+            edge_based_topology: Default::default(),
             spatial_index: None,
         };
 
@@ -261,7 +276,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netan-persist-topology-{unique}.bin.gz"));
+        let path = std::env::temp_dir().join(format!("netan-persist-topology-{unique}.bin"));
 
         write_topology_bundle(&path, &bundle).expect("bundle should serialize");
         let round_tripped = read_topology_bundle(&path).expect("bundle should deserialize");
@@ -279,6 +294,108 @@ mod tests {
         assert_eq!(round_tripped.edges[0].duration_s, None);
         assert_eq!(round_tripped.edges[1].duration_s, Some(45.0));
         assert!(round_tripped.edges[1].is_toll);
+
+        fs::remove_file(path).expect("temporary bundle should be removed");
+    }
+
+    #[test]
+    fn round_trips_edge_name_bundle_binary() {
+        let bundle = EdgeNameBundle {
+            names: vec!["main street".to_string(), "harbor road".to_string()],
+        };
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("netan-persist-edge-names-{unique}.bin"));
+
+        write_edge_name_bundle(&path, &bundle).expect("bundle should serialize");
+        let round_tripped =
+            read_edge_name_bundle(&path).expect("edge-name bundle should deserialize");
+
+        assert_eq!(round_tripped.names, bundle.names);
+
+        fs::remove_file(path).expect("temporary bundle should be removed");
+    }
+
+    #[test]
+    fn reads_legacy_compiled_profile_bundle_binary() {
+        #[derive(serde::Serialize)]
+        struct LegacyCompiledProfileBundle {
+            schema_version: u32,
+            profile_id: String,
+            profile_hash: String,
+            mode: TravelMode,
+            source_topology_bundle_id: CacheBundleId,
+            edge_metrics: Vec<CompiledEdgeMetric>,
+        }
+
+        let bundle = LegacyCompiledProfileBundle {
+            schema_version: 2,
+            profile_id: "test".to_string(),
+            profile_hash: "abc".to_string(),
+            mode: TravelMode::Car,
+            source_topology_bundle_id: CacheBundleId::new("topology-test"),
+            edge_metrics: vec![CompiledEdgeMetric {
+                edge_id: EdgeId(0),
+                travel_time_s: Some(12.0),
+                generalized_cost: Some(12.0),
+            }],
+        };
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("netan-persist-metrics-{unique}.bin"));
+
+        write_binary(&path, &bundle).expect("bundle should serialize");
+        let round_tripped =
+            read_compiled_profile_bundle(&path).expect("legacy bundle should deserialize");
+
+        assert_eq!(round_tripped.profile_id, "test");
+        assert_eq!(round_tripped.turn_costs.left_penalty_s, 0.0);
+        assert_eq!(round_tripped.edge_metrics.len(), 1);
+
+        fs::remove_file(path).expect("temporary bundle should be removed");
+    }
+
+    #[test]
+    fn round_trips_compiled_profile_bundle_with_turn_costs() {
+        let bundle = CompiledProfileBundle {
+            schema_version: 3,
+            profile_id: "test".to_string(),
+            profile_hash: "abc".to_string(),
+            mode: TravelMode::Car,
+            turn_costs: CompiledTurnCostConfig {
+                left_penalty_s: 7.0,
+                right_penalty_s: 3.0,
+                uturn_penalty_s: 20.0,
+                traffic_signal_penalty_s: 4.0,
+                roundabout_entry_penalty_s: 2.0,
+                cost_time_weight: 1.5,
+            },
+            source_topology_bundle_id: CacheBundleId::new("topology-test"),
+            edge_metrics: vec![CompiledEdgeMetric {
+                edge_id: EdgeId(0),
+                travel_time_s: Some(12.0),
+                generalized_cost: Some(18.0),
+            }],
+        };
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("netan-persist-metrics-{unique}.bin"));
+
+        write_binary(&path, &bundle).expect("bundle should serialize");
+        let round_tripped = read_compiled_profile_bundle(&path).expect("bundle should deserialize");
+
+        assert_eq!(round_tripped.turn_costs.left_penalty_s, 7.0);
+        assert_eq!(round_tripped.turn_costs.cost_time_weight, 1.5);
+        assert_eq!(round_tripped.edge_metrics.len(), 1);
 
         fs::remove_file(path).expect("temporary bundle should be removed");
     }
