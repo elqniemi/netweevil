@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Debug, Clone)]
 pub struct ApiServeOptions {
@@ -261,15 +261,28 @@ fn load_service_runtime(
     paths: &WorkspacePaths,
     options: &ApiServeOptions,
 ) -> Result<ServiceRuntime> {
+    info!(dataset_id = %options.dataset_id, "loading dataset manifest");
     let dataset_manifest = read_dataset_manifest(paths, &options.dataset_id)
         .with_context(|| format!("reading dataset manifest for '{}'", options.dataset_id))?;
     let topology_ref = dataset_manifest
         .topology_bundle
         .clone()
         .context("dataset is missing a topology bundle; run `netan dataset import` first")?;
+
+    info!(
+        bundle = %topology_ref.path,
+        "loading topology bundle"
+    );
     let topology = Arc::new(
         read_topology_bundle(&topology_ref.path)
             .with_context(|| format!("reading topology bundle {}", topology_ref.path))?,
+    );
+    let topology_meta = dataset_manifest.topology_meta.as_ref();
+    info!(
+        nodes = topology_meta.map(|m| m.node_count).unwrap_or(0),
+        edges = topology_meta.map(|m| m.edge_count).unwrap_or(0),
+        turns = topology_meta.map(|m| m.turn_count).unwrap_or(0),
+        "topology loaded"
     );
     let engine = engine_description(topology.as_ref());
 
@@ -282,6 +295,7 @@ fn load_service_runtime(
     let mut default_profile_id = None;
 
     for profile_path in requested_paths {
+        info!(path = %profile_path.display(), "loading profile");
         let loaded = load_or_compile_profile(
             paths,
             &dataset_manifest,
@@ -291,6 +305,12 @@ fn load_service_runtime(
             &profile_path,
         )?;
         let profile_id = loaded.document.profile.id.clone();
+        info!(
+            profile_id = %profile_id,
+            hash = %loaded.manifest.profile_hash,
+            edge_count = loaded.manifest.edge_count.unwrap_or(0),
+            "profile ready"
+        );
         if profile_path == options.default_profile {
             default_profile_id = Some(profile_id.clone());
         }
@@ -308,6 +328,13 @@ fn load_service_runtime(
 
     let default_profile_id =
         default_profile_id.context("default profile could not be loaded into the API runtime")?;
+
+    info!(
+        profile_count = loaded_profiles.len(),
+        default_profile = %default_profile_id,
+        route_engine = %engine.route_engine,
+        "network ready"
+    );
 
     Ok(ServiceRuntime {
         workspace_root: paths.root.clone(),
@@ -429,6 +456,14 @@ async fn route_handler(
     Json(payload): Json<RouteExecutionRequest>,
 ) -> Result<Response, ApiError> {
     let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let profile_id = &profile.document.profile.id;
+    info!(
+        endpoint = "route",
+        profile_id = %profile_id,
+        route_id = %payload.request.route_id,
+        format = query.format.as_deref().unwrap_or("json"),
+        "request"
+    );
     let mut request = payload.request;
     if wants_geojson(&query) {
         request.returns.geometry = ReturnGeometry::Full;
@@ -436,7 +471,18 @@ async fn route_handler(
     let result = profile
         .engine
         .execute_route(&request)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        .map_err(|error| {
+            warn!(endpoint = "route", route_id = %request.route_id, %error, "request failed");
+            ApiError::bad_request(error.to_string())
+        })?;
+    info!(
+        endpoint = "route",
+        route_id = %result.route_id,
+        distance_m = result.summary.total_distance_m,
+        time_s = result.summary.total_travel_time_s,
+        segments = result.summary.segment_count,
+        "response"
+    );
     let service = execution_context(state.service.as_ref(), profile);
     if wants_geojson(&query) {
         return geojson_response(route_result_geojson(
@@ -454,6 +500,15 @@ async fn od_handler(
     Json(payload): Json<OdExecutionRequest>,
 ) -> Result<Response, ApiError> {
     let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let profile_id = &profile.document.profile.id;
+    let pair_count = payload.request.pairs.len();
+    info!(
+        endpoint = "od",
+        profile_id = %profile_id,
+        pair_count = pair_count,
+        format = query.format.as_deref().unwrap_or("json"),
+        "request"
+    );
     let mut request = payload.request;
     if wants_geojson(&query) {
         request.returns.geometry = ReturnGeometry::Full;
@@ -461,7 +516,17 @@ async fn od_handler(
     let result = profile
         .engine
         .execute_od(&request)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        .map_err(|error| {
+            warn!(endpoint = "od", %error, "request failed");
+            ApiError::bad_request(error.to_string())
+        })?;
+    info!(
+        endpoint = "od",
+        pair_count = result.pair_count,
+        succeeded = result.succeeded_count,
+        failed = result.failed_count,
+        "response"
+    );
     let service = execution_context(state.service.as_ref(), profile);
     if wants_geojson(&query) {
         return geojson_response(od_result_geojson(&service, &result));
@@ -475,6 +540,18 @@ async fn matrix_handler(
     Json(payload): Json<MatrixExecutionRequest>,
 ) -> Result<Response, ApiError> {
     let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let profile_id = &profile.document.profile.id;
+    let origin_count = payload.request.origins.points.len();
+    let destination_count = payload.request.destinations.points.len();
+    info!(
+        endpoint = "matrix",
+        profile_id = %profile_id,
+        origins = origin_count,
+        destinations = destination_count,
+        cells = origin_count * destination_count,
+        format = query.format.as_deref().unwrap_or("json"),
+        "request"
+    );
     let mut request = payload.request;
     if wants_geojson(&query) {
         request.origins.returns.geometry = ReturnGeometry::Full;
@@ -483,7 +560,17 @@ async fn matrix_handler(
     let result = profile
         .engine
         .execute_matrix(&request.origins, &request.destinations)
-        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+        .map_err(|error| {
+            warn!(endpoint = "matrix", %error, "request failed");
+            ApiError::bad_request(error.to_string())
+        })?;
+    info!(
+        endpoint = "matrix",
+        cells = result.cell_count,
+        succeeded = result.succeeded_count,
+        failed = result.failed_count,
+        "response"
+    );
     let service = execution_context(state.service.as_ref(), profile);
     if wants_geojson(&query) {
         return geojson_response(matrix_result_geojson(&service, &result));

@@ -1,17 +1,20 @@
 # netan QGIS Plugin
 
-This plugin now talks directly to the running `netan` API.
+This plugin talks directly to the running `netan` API.
 
-It no longer shells out to the CLI. QGIS sends JSON requests to the API, receives JSON or GeoJSON responses, and loads the returned geometries into the map immediately.
+It does not shell out to the CLI. QGIS sends JSON requests to the API, receives JSON or GeoJSON responses, and loads the returned geometries into the map immediately.
 
 ## What It Does
 
 - connects to a running `netan api serve` instance
 - reads the loaded dataset and available profiles from `/v1/service`
-- writes route request JSON from typed coordinates
+- lets you pick route start and end points directly from the QGIS map canvas
+- can pull route points from a selected point feature in the active layer
 - submits route, OD, and matrix requests to the API
 - loads route, OD, and matrix geometries into QGIS from API responses
+- can build matrix origins and destinations from loaded QGIS point layers
 - supports both normal JSON responses and direct GeoJSON responses
+- remembers connection and analysis settings between QGIS sessions
 
 ## Install In QGIS
 
@@ -83,13 +86,12 @@ Examples:
 2. Set `Workspace root` and `API base URL`.
 3. Press `Refresh Service`.
 4. Choose either the service default profile or a specific loaded profile.
-5. In the `Route` tab, set:
-   - request path: `examples/requests/route_from_qgis.json`
-   - response path: `.netan/runs/qgis-route.geojson`
-   - origin: `6.5665, 53.2194`
-   - destination: `6.5716, 53.2148`
-6. Press `Write Request`.
-7. Press `Run Route`.
+5. In the `Route` tab, set a route id if you want something more specific than the default.
+6. Click `Pick Start`, then click on the map canvas.
+7. Click `Pick End`, then click on the map canvas.
+8. Optionally use `From Selected Feature` if you already have a point selected in the active point layer.
+9. Optionally press `Save Request` if you want the route JSON on disk.
+10. Press `Run Route`.
 
 The resulting line layer loads into QGIS automatically.
 
@@ -97,18 +99,19 @@ The resulting line layer loads into QGIS automatically.
 
 Use:
 
-- pairs path: `examples/requests/od_pairs.csv`
+- pairs file: `examples/requests/od_pairs.csv`
 - response path: `.netan/runs/qgis-od.geojson`
 
 Then press `Run OD`.
 
 ### Matrix
 
-Use:
+Use either loaded point layers or files:
 
-- origins path: `examples/requests/matrix_origins.csv`
-- destinations path: `examples/requests/matrix_destinations.csv`
-- response path: `.netan/runs/qgis-matrix.geojson`
+- set `Origins` and `Destinations` source to `Loaded point layer` to build the matrix from QGIS layers already in the project
+- optionally choose an ID field and `Use selected features only`
+- or switch either side to `CSV or JSON file`
+- set response path: `.netan/runs/qgis-matrix.geojson`
 
 Then press `Run Matrix`.
 
@@ -117,6 +120,7 @@ Then press `Run Matrix`.
 - The plugin does not embed the Rust engine; it calls the running HTTP API.
 - Relative request/input/output paths are resolved against the configured workspace root.
 - OD and matrix CSV inputs are parsed locally and sent to the API as JSON.
+- Route points are transformed from the current map or layer CRS into WGS84 before being sent to the API.
 - YAML request files are not supported by the plugin in API mode.
 - When `Response format` is `JSON`, the plugin still builds a temporary GeoJSON layer locally when geometry is present in the API response.
 - In WSL mode, output layers are loaded back into QGIS through `\\wsl$\<distro>\...`.
