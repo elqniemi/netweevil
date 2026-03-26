@@ -177,6 +177,12 @@ Exit criteria:
 
 ### Phase 5: Dataset-Level CCH Preprocessing
 
+Status: In progress.
+
+Completed in this phase:
+
+- [x] dataset imports now persist a dataset-level acceleration bundle with a deterministic edge-state order plus upward/downward oriented transition topology
+
 At dataset import time:
 
 - compute nested-dissection ordering
@@ -188,6 +194,12 @@ Exit criteria:
 - dataset import writes raw topology, cold tiles, and the CCH topology bundle
 
 ### Phase 6: Profile-Level Customization
+
+Status: In progress.
+
+Completed in this phase:
+
+- [x] profile compilation now persists customized upward/downward arc weights aligned with the dataset acceleration bundle
 
 At profile compile time:
 
@@ -203,12 +215,13 @@ Exit criteria:
 
 ### Phase 7: Accelerated Query Engine
 
-Implement:
+Status: In progress.
 
-- edge snapping with phantom-node handling
-- CCH route queries
-- path unpacking
-- on-demand geometry fetch from cold bundles
+Completed in this phase:
+
+- [x] route snapping now supports interior edge phantoms so first/last edge costs, summaries, segments, and geometry are partial-edge aware
+- [x] route geometry is still assembled on demand from the persisted topology node coordinates instead of being materialized eagerly in the hot path
+- [ ] query-time reuse of persisted acceleration data remains disabled until the bundle is upgraded from oriented transition scaffolding to a real shortcut-capable structure
 
 Exit criteria:
 
@@ -302,4 +315,5 @@ These are the first concrete tasks to execute now:
 - [x] Added per-batch snap candidate reuse for repeated OD endpoints.
 - [x] Reused scratch allocations in the multi-edge automaton fallback path.
 - [x] Avoided duplicate exact solves for repeated snapped node pairs during single-route candidate evaluation.
+- [x] Replaced the normal unrestricted exact hot path with bidirectional edge-based search
 - [x] Summary-only route responses now omit `node_path` and `edge_path` payloads unless richer route detail is requested.

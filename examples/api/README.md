@@ -6,6 +6,7 @@ The current API path expects datasets imported with the new uncompressed bundle 
 
 - topology: `.netan/bundles/topology/*.bin`
 - edge names: `.netan/bundles/names/*.bin`
+- acceleration: `.netan/bundles/acceleration/*.bin`
 - compiled profile metrics: `.netan/bundles/metrics/*.bin`
 
 If you have older cached datasets from the previous format, remove them first and re-import.
@@ -13,8 +14,8 @@ If you have older cached datasets from the previous format, remove them first an
 Remove the old cache state for a clean rebuild:
 
 ```bash
-rm -rf .netan/datasets .netan/bundles/topology .netan/bundles/names .netan/bundles/metrics .netan/compiled_profiles
-mkdir -p .netan/bundles/topology .netan/bundles/names .netan/bundles/metrics .netan/datasets .netan/compiled_profiles
+rm -rf .netan/datasets .netan/bundles/topology .netan/bundles/names .netan/bundles/acceleration .netan/bundles/metrics .netan/compiled_profiles
+mkdir -p .netan/bundles/topology .netan/bundles/names .netan/bundles/acceleration .netan/bundles/metrics .netan/datasets .netan/compiled_profiles
 ```
 
 Import the dataset again in the new format:

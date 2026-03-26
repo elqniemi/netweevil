@@ -27,6 +27,8 @@ pub struct DatasetManifest {
     #[serde(default)]
     pub edge_name_bundle: Option<BundleRef>,
     #[serde(default)]
+    pub acceleration_bundle: Option<BundleRef>,
+    #[serde(default)]
     pub topology_meta: Option<TopologyBundleMeta>,
 }
 

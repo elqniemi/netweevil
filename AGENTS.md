@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This repository is a Rust workspace centered on one shared routing engine with two front ends.
+This repository is a Rust workspace centered on one shared routing engine with CLI, API, and QGIS surfaces.
 
 - `crates/core`: graph primitives, IDs, and shared network types
 - `crates/ingest`: dataset import and future OSM PBF topology build
@@ -11,7 +11,8 @@ This repository is a Rust workspace centered on one shared routing engine with t
 - `crates/persist`: local cache/state layout under `.netan/`
 - `crates/report`: dataset/profile/run manifests and report rendering
 - `crates/cli`: `netan` CLI entry point
-- `crates/gui`: minimal native `egui` shell
+- `crates/api`: preloadable HTTP API
+- `qgis_plugin/`: QGIS plugin package
 - `examples/`: sample profiles and requests
 - `datasets/`: local OSM extracts for development only
 
@@ -28,7 +29,7 @@ Track roadmap and implementation status in `PROGRESS.md`.
 
 ## Coding Style & Naming Conventions
 
-Use default Rust style with `cargo fmt`; do not hand-format around it. Prefer small modules, explicit types, and deterministic behavior. Use `snake_case` for functions, files, and modules; `PascalCase` for structs and enums; `SCREAMING_SNAKE_CASE` for constants. Keep serialized config fields stable and human-readable because CLI and GUI must share the exact same schema.
+Use default Rust style with `cargo fmt`; do not hand-format around it. Prefer small modules, explicit types, and deterministic behavior. Use `snake_case` for functions, files, and modules; `PascalCase` for structs and enums; `SCREAMING_SNAKE_CASE` for constants. Keep serialized config fields stable and human-readable because CLI, API, and QGIS flows must share the exact same schema.
 
 ## Testing Guidelines
 
@@ -41,8 +42,8 @@ There is no existing commit history yet. Start with short, imperative commit sub
 - a clear summary of behavior changed
 - affected crates and commands used for verification
 - linked issue or research task when applicable
-- screenshots only for GUI-visible changes
+- screenshots only for QGIS-visible changes
 
 ## Reproducibility & Configuration
 
-Do not introduce hidden GUI-only state or opaque defaults. Any user-facing option should serialize to file-backed config or manifest output. Preserve provenance fields, hashes, and version metadata so runs remain defensible for academic use.
+Do not introduce hidden UI-only state or opaque defaults. Any user-facing option should serialize to file-backed config or manifest output. Preserve provenance fields, hashes, and version metadata so runs remain defensible for academic use.

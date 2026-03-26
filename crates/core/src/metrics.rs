@@ -28,6 +28,37 @@ pub struct CompiledEdgeMetric {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompiledAcceleration {
+    pub schema_version: u32,
+    pub source_acceleration_bundle_id: CacheBundleId,
+    pub algorithm: String,
+    #[serde(default)]
+    pub edge_order: Vec<u32>,
+    #[serde(default)]
+    pub edge_rank: Vec<u32>,
+    #[serde(default)]
+    pub upward_first_out: Vec<u32>,
+    #[serde(default)]
+    pub upward_head: Vec<u32>,
+    #[serde(default)]
+    pub upward_weight: Vec<f64>,
+    #[serde(default)]
+    pub upward_path_first_out: Vec<u32>,
+    #[serde(default)]
+    pub upward_path_edges: Vec<u32>,
+    #[serde(default)]
+    pub downward_first_out: Vec<u32>,
+    #[serde(default)]
+    pub downward_head: Vec<u32>,
+    #[serde(default)]
+    pub downward_weight: Vec<f64>,
+    #[serde(default)]
+    pub downward_path_first_out: Vec<u32>,
+    #[serde(default)]
+    pub downward_path_edges: Vec<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompiledProfileBundle {
     pub schema_version: u32,
     pub profile_id: String,
@@ -37,5 +68,7 @@ pub struct CompiledProfileBundle {
     #[serde(default)]
     pub turn_costs: CompiledTurnCostConfig,
     pub source_topology_bundle_id: CacheBundleId,
+    #[serde(default)]
+    pub acceleration: Option<CompiledAcceleration>,
     pub edge_metrics: Vec<CompiledEdgeMetric>,
 }

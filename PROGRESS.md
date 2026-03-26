@@ -5,7 +5,8 @@
 Build a Rust-first network analysis tool with one native core powering:
 
 - a reproducible CLI for research and batch execution
-- a minimal native desktop GUI for interactive setup and export
+- a preloadable HTTP API for interactive and remote execution
+- a QGIS plugin for spatial workflows on top of the API
 
 The system targets local OSM routing and network analysis with explicit, versioned configuration, persistent caches, and outputs that are easy to cite in academic work.
 
@@ -21,7 +22,7 @@ The system targets local OSM routing and network analysis with explicit, version
   - `persist`
   - `report`
   - `cli`
-  - `gui`
+  - `api`
 - [x] Define shared schema for:
   - profile configuration
   - route request input
@@ -39,8 +40,7 @@ The system targets local OSM routing and network analysis with explicit, version
   - `experiment run`
   - `report render`
   - `cache list`
-  - `gui`
-- [x] Add a minimal native `egui` desktop shell with panes matching the intended product shape
+  - `api serve`
 - [x] Add example research profile and route request files
 - [x] Add a cache/workspace layout under `.netan/`
 - [x] Smoke-test the initial scaffold with:
@@ -68,7 +68,7 @@ The system targets local OSM routing and network analysis with explicit, version
 3. Implement exact routing and path reconstruction
 4. Implement explicit defaults packs and profile compilation
 5. Implement exports and research manifests
-6. Harden the native GUI
+6. Harden the API and QGIS workflow
 7. Add persistent mmap bundle loading
 8. Add acceleration structures
 9. Add many-to-many and scenario sweeps
@@ -76,8 +76,8 @@ The system targets local OSM routing and network analysis with explicit, version
 
 ## Notes
 
-- The current code intentionally treats CLI and GUI state as serialized configuration first.
-- Hidden GUI-only state is out of scope.
+- The current code intentionally treats CLI, API, and QGIS state as serialized configuration first.
+- Hidden UI-only state is out of scope.
 - Deterministic outputs and explicit provenance are product requirements, not polish items.
 - Verified locally on 2026-03-18: the workspace builds, the example profile validates, `dataset import` scans `datasets/groningen-260317.osm.pbf` into a topology bundle with 493,348 nodes and 1,033,012 directed edges, `profile compile` writes a separate metric bundle with 1,033,012 edge metrics, `analyze route` solves `examples/requests/route.json` with 27.0 m / 36.5 m snaps, 1,665 m total distance, and 152.496 s total travel time, `analyze od` completes 2 example pairs, and `analyze matrix` completes a 2x2 example matrix.
 - Verified locally on 2026-03-18: `cargo test` passes after adding ferry-duration ingest and profile compilation handling.
@@ -90,8 +90,8 @@ The system targets local OSM routing and network analysis with explicit, version
 
 ### Newly Completed
 
-- [x] Replace the placeholder desktop shell with a functional native GUI for dataset import, profile compilation, route/OD/matrix execution, request-file writing, and run inspection
-- [x] Add an in-repo QGIS plugin package that validates/compiles profiles, runs `netan analyze ...`, and loads spatial outputs into QGIS
+- [x] Remove the deprecated native GUI crate and make the QGIS plugin plus HTTP API the supported interactive workflow
+- [x] Add an in-repo QGIS plugin package that talks directly to the HTTP API and loads spatial outputs into QGIS
 - [x] Add a preloadable JSON HTTP API for route, OD, and matrix execution with selectable compiled profiles
 
 - [x] Convert `dataset import` from dataset registration into real PBF ingest
@@ -120,16 +120,19 @@ The system targets local OSM routing and network analysis with explicit, version
 
 - `dataset import` now scans `.osm.pbf` input, extracts a first-pass directed topology bundle, and writes a binary bundle under `.netan/bundles/topology/` for mmap-backed loading.
 - `dataset import` now writes edge names to a separate binary bundle under `.netan/bundles/names/`, so prepared routing can keep cold labels out of the hot topology load.
+- `dataset import` now also writes a dataset-level acceleration bundle under `.netan/bundles/acceleration/`, containing a deterministic order over the edge-transition graph plus upward/downward oriented transition topology for future CCH preprocessing.
 - The topology bundle remains correctness-first: directed edges, persisted raw edge-based adjacency/successor topology, expanded node-based and via-way prohibited turn sequences, optional ferry-duration metadata, per-edge roundabout and traffic-signal flags, road/surface classes, and name tables are persisted, while geometry payloads remain pending.
 - Route execution now reads the cold edge-name bundle only when segment-row output is requested, and dataset-backed execution now expects the current format rather than older in-topology-name imports.
 - Prepared routing engines now reuse persisted edge-based bundle topology directly; older dataset imports must be rebuilt into the current format instead of relying on startup rebuild compatibility.
 - `profile compile` now reads the topology bundle and writes a separate binary metric bundle under `.netan/bundles/metrics/`, keeping profile-aware weights distinct from the immutable topology artifact while enabling mmap-backed loading at execution time.
+- `profile compile` now also reads the dataset acceleration bundle when present and persists customized upward/downward acceleration-arc weights inside the compiled profile bundle.
 - Ferry durations now prefer tagged OSM durations when available, are apportioned across emitted ferry segments during ingest, and fall back to inferred speed-based duration only when `ferry.infer_duration_when_missing` is enabled.
 - Turn restriction ingest now parses `type=restriction` relations with `from` way, `via` node or ordered `via` way members, and `to` way members, expands `no_*` and `only_*` restrictions into prohibited edge sequences, and stores them in the topology bundle with broader mode-mask coverage.
 - `analyze od` now accepts CSV files with `id,source_x,source_y,target_x,target_y`, and `analyze matrix` now accepts CSV origin/destination point sets with `id,x,y`.
 - Result output format is now inferred from the `--out` extension: `.json`, `.csv`, `.geojson`, `.gpkg`, `.parquet`, and `.geoparquet` are supported for route, OD, and matrix runs.
 - Route spatial exports write the solved path geometry, while OD and matrix spatial exports write requested desire lines with batch metrics attached as feature attributes.
-- `analyze route` now loads the compiled topology and metric bundles through mmap-backed binary readers, snaps origin/destination to traversable nodes, runs exact edge-based A* over precomputed in-memory edge-to-edge transitions for the normal hot path, falls back to the automaton-augmented exact search only for multi-edge via-way restriction sequences, reconstructs the edge/node path, and writes a result plus succeeded run manifest under `.netan/runs/`.
+- `analyze route` now loads the compiled topology and metric bundles through mmap-backed binary readers, snaps origin/destination to traversable nodes or interior edge phantoms, runs exact bidirectional edge-based search for the normal hot path, falls back to the automaton-augmented exact search only for multi-edge via-way restriction sequences, reconstructs the original edge/node path, and writes a result plus succeeded run manifest under `.netan/runs/`.
+- Unrestricted route queries now keep first/last edge summaries plus geometry partial-edge aware for phantom snaps; persisted oriented acceleration topology remains stored for later work but is not currently used on the hot query path.
 - `analyze od` and `analyze matrix` now reuse the same exact route kernel in repeated single-pair mode, writing compact per-pair and per-cell result tables plus succeeded run manifests under `.netan/runs/`.
 - `experiment run` now resolves scenario-local paths relative to the study file, recompiles profiles as needed, executes route/OD/matrix scenarios sequentially, and writes a batch summary JSON with per-scenario status, output paths, run manifest paths, and compact metrics.
 - `report render` now reads the run manifest plus result JSON when available, includes a concrete results section in the rendered report, writes Markdown for `.md`, HTML for `.html`, and writes a small archival report bundle when pointed at a directory-like output path.

@@ -8,13 +8,15 @@ use std::sync::{
 
 use anyhow::{Context, Result, bail};
 use netan_core::{
-    AccessMask, BuildStage, CacheBundleId, DatasetId, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
-    EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId, EdgeNameBundle, NodeId, RoadClass,
-    SmoothnessClass, SpatialIndexCell, SurfaceClass, TopologyBounds, TopologyBundle,
-    TopologyBundleMeta, TopologyNode, TurnRestriction, TurnRestrictionKind,
+    AccessMask, BuildStage, CacheBundleId, DatasetAccelerationBundle, DatasetId, DirectedEdge,
+    EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId,
+    EdgeNameBundle, NodeId, RoadClass, SmoothnessClass, SpatialIndexCell, SurfaceClass,
+    TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyNode, TurnRestriction,
+    TurnRestrictionKind,
 };
 use netan_persist::{
-    WorkspacePaths, write_dataset_manifest, write_edge_name_bundle, write_topology_bundle,
+    WorkspacePaths, write_acceleration_bundle, write_dataset_manifest, write_edge_name_bundle,
+    write_topology_bundle,
 };
 use netan_report::{BundleRef, DatasetManifest, now_rfc3339};
 use osmpbfreader::{OsmId, OsmObj, OsmPbfReader, Relation, Tags};
@@ -104,8 +106,14 @@ where
     let edge_name_bundle_path = paths
         .edge_name_bundles_dir
         .join(format!("{}.bin", edge_name_bundle_id.0));
+    let acceleration_bundle_id =
+        CacheBundleId::new(format!("acceleration-{}-{}", dataset_id.0, &sha256[..12]));
+    let acceleration_bundle_path = paths
+        .acceleration_bundles_dir
+        .join(format!("{}.bin", acceleration_bundle_id.0));
     let (bundle, edge_name_bundle, topology_meta) =
         build_topology_bundle(source_path, size, &sha256, &mut progress)?;
+    let acceleration_bundle = build_dataset_acceleration_bundle(&bundle, bundle_id.clone());
     emit_progress(
         &mut progress,
         DatasetImportStage::WriteTopologyBundle,
@@ -123,6 +131,16 @@ where
         ),
     );
     write_edge_name_bundle(&edge_name_bundle_path, &edge_name_bundle)?;
+    emit_progress(
+        &mut progress,
+        DatasetImportStage::WriteTopologyBundle,
+        None,
+        format!(
+            "Writing acceleration bundle {}",
+            acceleration_bundle_path.display()
+        ),
+    );
+    write_acceleration_bundle(&acceleration_bundle_path, &acceleration_bundle)?;
 
     let manifest = DatasetManifest {
         dataset_id,
@@ -139,6 +157,10 @@ where
         edge_name_bundle: Some(BundleRef {
             bundle_id: edge_name_bundle_id,
             path: edge_name_bundle_path.display().to_string(),
+        }),
+        acceleration_bundle: Some(BundleRef {
+            bundle_id: acceleration_bundle_id,
+            path: acceleration_bundle_path.display().to_string(),
         }),
         topology_meta: Some(topology_meta),
     };
@@ -483,6 +505,106 @@ fn build_edge_based_topology(node_count: usize, edges: &[DirectedEdge]) -> EdgeB
         node_edge_order,
         edge_transition_first_out,
         edge_transition_edges,
+    }
+}
+
+fn build_dataset_acceleration_bundle(
+    topology: &TopologyBundle,
+    source_topology_bundle_id: CacheBundleId,
+) -> DatasetAccelerationBundle {
+    let transition_topology = &topology.edge_based_topology;
+    let edge_count = topology.edges.len();
+    let mut in_degree = vec![0_u32; edge_count];
+    let mut out_degree = vec![0_u32; edge_count];
+
+    if transition_topology.edge_transition_first_out.len() == edge_count + 1 {
+        for edge_index in 0..edge_count {
+            let start = transition_topology.edge_transition_first_out[edge_index] as usize;
+            let end = transition_topology.edge_transition_first_out[edge_index + 1] as usize;
+            let degree = end.saturating_sub(start) as u32;
+            out_degree[edge_index] = degree;
+            for &next_edge in &transition_topology.edge_transition_edges[start..end] {
+                if let Some(entry) = in_degree.get_mut(next_edge as usize) {
+                    *entry += 1;
+                }
+            }
+        }
+    }
+
+    let mut edge_order = (0..edge_count as u32).collect::<Vec<_>>();
+    edge_order.sort_unstable_by_key(|&edge_index| {
+        let edge = &topology.edges[edge_index as usize];
+        (
+            out_degree[edge_index as usize] + in_degree[edge_index as usize],
+            out_degree[edge_index as usize],
+            in_degree[edge_index as usize],
+            edge.from.0,
+            edge.to.0,
+            edge_index,
+        )
+    });
+
+    let mut edge_rank = vec![0_u32; edge_count];
+    for (rank, &edge_index) in edge_order.iter().enumerate() {
+        edge_rank[edge_index as usize] = rank as u32;
+    }
+
+    let mut upward_degree = vec![0_u32; edge_count];
+    let mut downward_degree = vec![0_u32; edge_count];
+    if transition_topology.edge_transition_first_out.len() == edge_count + 1 {
+        for edge_index in 0..edge_count {
+            let start = transition_topology.edge_transition_first_out[edge_index] as usize;
+            let end = transition_topology.edge_transition_first_out[edge_index + 1] as usize;
+            for &next_edge in &transition_topology.edge_transition_edges[start..end] {
+                if edge_rank[edge_index] < edge_rank[next_edge as usize] {
+                    upward_degree[edge_index] += 1;
+                } else {
+                    downward_degree[edge_index] += 1;
+                }
+            }
+        }
+    }
+
+    let mut upward_first_out = vec![0_u32; edge_count + 1];
+    let mut downward_first_out = vec![0_u32; edge_count + 1];
+    for edge_index in 0..edge_count {
+        upward_first_out[edge_index + 1] = upward_first_out[edge_index] + upward_degree[edge_index];
+        downward_first_out[edge_index + 1] =
+            downward_first_out[edge_index] + downward_degree[edge_index];
+    }
+
+    let mut upward_head = vec![0_u32; upward_first_out[edge_count] as usize];
+    let mut downward_head = vec![0_u32; downward_first_out[edge_count] as usize];
+    let mut upward_write_positions = upward_first_out[..edge_count].to_vec();
+    let mut downward_write_positions = downward_first_out[..edge_count].to_vec();
+    if transition_topology.edge_transition_first_out.len() == edge_count + 1 {
+        for edge_index in 0..edge_count {
+            let start = transition_topology.edge_transition_first_out[edge_index] as usize;
+            let end = transition_topology.edge_transition_first_out[edge_index + 1] as usize;
+            for &next_edge in &transition_topology.edge_transition_edges[start..end] {
+                if edge_rank[edge_index] < edge_rank[next_edge as usize] {
+                    let write_index = &mut upward_write_positions[edge_index];
+                    upward_head[*write_index as usize] = next_edge;
+                    *write_index += 1;
+                } else {
+                    let write_index = &mut downward_write_positions[edge_index];
+                    downward_head[*write_index as usize] = next_edge;
+                    *write_index += 1;
+                }
+            }
+        }
+    }
+
+    DatasetAccelerationBundle {
+        schema_version: 1,
+        source_topology_bundle_id,
+        algorithm: "edge_based_transition_order_v1".to_string(),
+        edge_order,
+        edge_rank,
+        upward_first_out,
+        upward_head,
+        downward_first_out,
+        downward_head,
     }
 }
 
@@ -1720,12 +1842,13 @@ fn haversine_meters(from_lon: f64, from_lat: f64, to_lon: f64, to_lat: f64) -> f
 mod tests {
     use super::{
         EdgeDirection, PendingWay, RestrictionKind, TurnRestrictionCandidate, ViaSpec,
-        apportioned_duration_s, build_turn_restrictions, classify_access, classify_direction,
-        classify_highway, haversine_meters, parse_duration_seconds,
-        parse_turn_restriction_relation,
+        apportioned_duration_s, build_dataset_acceleration_bundle, build_edge_based_topology,
+        build_turn_restrictions, classify_access, classify_direction, classify_highway,
+        haversine_meters, parse_duration_seconds, parse_turn_restriction_relation,
     };
     use netan_core::{
-        AccessMask, DirectedEdge, EdgeId, NodeId, RoadClass, SurfaceClass, TurnRestrictionKind,
+        AccessMask, CacheBundleId, DirectedEdge, EdgeId, NodeId, RoadClass, SurfaceClass,
+        TopologyBundle, TopologyNode, TurnRestrictionKind,
     };
     use osmpbfreader::{NodeId as OsmNodeId, OsmId, Ref, Relation, RelationId, Tags, WayId};
     use std::collections::HashMap;
@@ -2015,6 +2138,58 @@ mod tests {
             restrictions[2].edge_path,
             vec![EdgeId(0), EdgeId(1), EdgeId(2), EdgeId(6)]
         );
+    }
+
+    #[test]
+    fn builds_ordered_edge_transition_acceleration_bundle() {
+        let edges = vec![edge(0, 0, 1, 10), edge(1, 1, 2, 11), edge(2, 2, 3, 12)];
+        let topology = TopologyBundle {
+            schema_version: 1,
+            source_path: "test".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![
+                TopologyNode {
+                    node_id: NodeId(0),
+                    osm_node_id: 100,
+                    lon: 0.0,
+                    lat: 0.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(1),
+                    osm_node_id: 101,
+                    lon: 1.0,
+                    lat: 0.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(2),
+                    osm_node_id: 102,
+                    lon: 2.0,
+                    lat: 0.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(3),
+                    osm_node_id: 103,
+                    lon: 3.0,
+                    lat: 0.0,
+                },
+            ],
+            edges: edges.clone(),
+            turn_restrictions: vec![],
+            names: vec![],
+            edge_based_topology: build_edge_based_topology(4, &edges),
+            spatial_index: None,
+        };
+
+        let bundle =
+            build_dataset_acceleration_bundle(&topology, CacheBundleId::new("topology-test"));
+
+        assert_eq!(bundle.algorithm, "edge_based_transition_order_v1");
+        assert_eq!(bundle.edge_order, vec![2, 0, 1]);
+        assert_eq!(bundle.edge_rank, vec![1, 2, 0]);
+        assert_eq!(bundle.upward_first_out, vec![0, 1, 1, 1]);
+        assert_eq!(bundle.upward_head, vec![1]);
+        assert_eq!(bundle.downward_first_out, vec![0, 0, 1, 1]);
+        assert_eq!(bundle.downward_head, vec![2]);
     }
 
     fn pending_way(osm_way_id: i64, node_ids: &[i64]) -> PendingWay {

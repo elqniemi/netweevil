@@ -6,18 +6,19 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand};
 use netan_api::{ApiServeOptions, serve as serve_api};
-use netan_core::{CacheBundleId, CompiledProfileBundle, TopologyBundle};
-use netan_gui::launch;
+use netan_core::{CacheBundleId, CompiledProfileBundle, DatasetAccelerationBundle, TopologyBundle};
 use netan_ingest::{
     DatasetImportOptions, DatasetImportProgress, DatasetImportStage, import_dataset_with_progress,
 };
 use netan_persist::{
-    WorkspacePaths, read_compiled_profile_bundle, read_compiled_profile_manifests,
-    read_dataset_manifest, read_dataset_manifests, read_edge_name_bundle, read_run_manifest,
-    read_topology_bundle, write_compiled_profile_bundle, write_compiled_profile_manifest,
-    write_json, write_run_manifest,
+    WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
+    read_compiled_profile_manifests, read_dataset_manifest, read_dataset_manifests,
+    read_edge_name_bundle, read_run_manifest, read_topology_bundle, write_compiled_profile_bundle,
+    write_compiled_profile_manifest, write_json, write_run_manifest,
 };
-use netan_profile::{ProfileDocument, ReturnGeometry, compile_profile_bundle, load_profile};
+use netan_profile::{
+    ProfileDocument, ReturnGeometry, compile_profile_bundle_with_acceleration, load_profile,
+};
 use netan_query::{
     AnalysisKind, MatrixResult, OdResult, RouteResult, execute_matrix, execute_od, execute_route,
     execute_route_with_edge_names, load_experiment, load_od_pairs, load_point_set,
@@ -123,7 +124,6 @@ fn main() -> Result<()> {
         Command::Api { command: api } => match api {
             ApiCommand::Serve(args) => api_serve(paths, args),
         },
-        Command::Gui => launch(paths),
     }
 }
 
@@ -168,7 +168,6 @@ enum Command {
         #[command(subcommand)]
         command: ApiCommand,
     },
-    Gui,
 }
 
 #[derive(Subcommand, Debug)]
@@ -354,15 +353,29 @@ fn profile_compile(paths: &WorkspacePaths, dataset: &str, profile_path: &Path) -
         .context("dataset is missing a topology bundle; run `netan dataset import` first")?;
     let topology: TopologyBundle = read_topology_bundle(&topology_ref.path)
         .with_context(|| format!("reading topology bundle {}", topology_ref.path))?;
-    let compiled_bundle =
-        compile_profile_bundle(&profile, &topology, topology_ref.bundle_id.clone()).with_context(
-            || {
-                format!(
-                    "compiling profile '{}' for dataset '{dataset}'",
-                    profile.profile.id
-                )
-            },
-        )?;
+    let acceleration: Option<(DatasetAccelerationBundle, CacheBundleId)> = dataset_manifest
+        .acceleration_bundle
+        .as_ref()
+        .map(|bundle_ref| {
+            read_acceleration_bundle(&bundle_ref.path)
+                .with_context(|| format!("reading acceleration bundle {}", bundle_ref.path))
+                .map(|bundle| (bundle, bundle_ref.bundle_id.clone()))
+        })
+        .transpose()?;
+    let compiled_bundle = compile_profile_bundle_with_acceleration(
+        &profile,
+        &topology,
+        topology_ref.bundle_id.clone(),
+        acceleration
+            .as_ref()
+            .map(|(bundle, bundle_id)| (bundle, bundle_id.clone())),
+    )
+    .with_context(|| {
+        format!(
+            "compiling profile '{}' for dataset '{dataset}'",
+            profile.profile.id
+        )
+    })?;
     let profile_hash = profile.fingerprint()?;
     let compile_id = format!("{dataset}-{}", &profile_hash[..12]);
     let bundle_path = paths
@@ -962,18 +975,18 @@ fn engine_description(topology: &TopologyBundle) -> EngineDescription {
     if has_multi_edge_restrictions {
         EngineDescription {
             route_engine: "astar_exact_multi_edge_turns",
-            route_summary: "Exact forward A* shortest-path search over the compiled directed edge graph with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences. Turn penalties are not modeled yet.",
+            route_summary: "Exact forward A* shortest-path search over the compiled directed edge graph with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences.",
             batch_engine: "astar_exact_multi_edge_turns_repeated",
-            batch_summary: "Repeated exact forward A* shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences. Turn penalties are not modeled yet.",
+            batch_summary: "Repeated exact forward A* shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences.",
             acceleration: "spatial_index+a_star+turn_automaton",
         }
     } else {
         EngineDescription {
-            route_engine: "astar_exact_pairwise_turns",
-            route_summary: "Exact forward A* shortest-path search over the compiled directed edge graph with persisted topology spatial indexing for snapping and pairwise turn prohibitions. Turn penalties are not modeled yet.",
-            batch_engine: "astar_exact_pairwise_turns_repeated",
-            batch_summary: "Repeated exact forward A* shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with persisted topology spatial indexing for snapping and pairwise turn prohibitions. Turn penalties are not modeled yet.",
-            acceleration: "spatial_index+a_star+turn_automaton",
+            route_engine: "bidirectional_exact_pairwise_turns",
+            route_summary: "Exact bidirectional shortest-path search over the compiled directed edge graph with edge-phantom snapping for endpoints and pairwise turn prohibitions.",
+            batch_engine: "bidirectional_exact_pairwise_turns_repeated",
+            batch_summary: "Repeated exact bidirectional shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with edge-phantom snapping for endpoints and pairwise turn prohibitions.",
+            acceleration: "spatial_index+edge_phantoms",
         }
     }
 }

@@ -4,8 +4,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use netan_core::{
-    CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, CompiledTurnCostConfig, DirectedEdge,
-    RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle, TravelMode,
+    CacheBundleId, CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle,
+    CompiledTurnCostConfig, DatasetAccelerationBundle, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
+    EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle,
+    TravelMode,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -261,6 +263,15 @@ pub fn compile_profile_bundle(
     topology: &TopologyBundle,
     source_topology_bundle_id: CacheBundleId,
 ) -> Result<CompiledProfileBundle> {
+    compile_profile_bundle_with_acceleration(profile, topology, source_topology_bundle_id, None)
+}
+
+pub fn compile_profile_bundle_with_acceleration(
+    profile: &ProfileDocument,
+    topology: &TopologyBundle,
+    source_topology_bundle_id: CacheBundleId,
+    acceleration: Option<(&DatasetAccelerationBundle, CacheBundleId)>,
+) -> Result<CompiledProfileBundle> {
     ensure_supported_matchers(profile)?;
     let profile_hash = profile.fingerprint()?;
     let mode_bit = mode_access_bit(profile.profile.mode);
@@ -309,8 +320,90 @@ pub fn compile_profile_bundle(
             cost_time_weight: profile.cost.time_weight,
         },
         source_topology_bundle_id,
+        acceleration: acceleration.map(|(bundle, bundle_id)| {
+            compile_acceleration(bundle, bundle_id, topology, &edge_metrics, profile)
+        }),
         edge_metrics,
     })
+}
+
+fn compile_acceleration(
+    bundle: &DatasetAccelerationBundle,
+    source_acceleration_bundle_id: CacheBundleId,
+    topology: &TopologyBundle,
+    edge_metrics: &[CompiledEdgeMetric],
+    profile: &ProfileDocument,
+) -> CompiledAcceleration {
+    let upward_weight = compile_oriented_transition_weights(
+        topology,
+        edge_metrics,
+        profile,
+        &bundle.upward_first_out,
+        &bundle.upward_head,
+    );
+    let downward_weight = compile_oriented_transition_weights(
+        topology,
+        edge_metrics,
+        profile,
+        &bundle.downward_first_out,
+        &bundle.downward_head,
+    );
+    let upward_path_first_out = (0..=bundle.upward_head.len() as u32).collect::<Vec<_>>();
+    let downward_path_first_out = (0..=bundle.downward_head.len() as u32).collect::<Vec<_>>();
+
+    CompiledAcceleration {
+        schema_version: 1,
+        source_acceleration_bundle_id,
+        algorithm: format!("{}+oriented_paths_v1", bundle.algorithm),
+        edge_order: bundle.edge_order.clone(),
+        edge_rank: bundle.edge_rank.clone(),
+        upward_first_out: bundle.upward_first_out.clone(),
+        upward_head: bundle.upward_head.clone(),
+        upward_weight,
+        upward_path_first_out,
+        upward_path_edges: bundle.upward_head.clone(),
+        downward_first_out: bundle.downward_first_out.clone(),
+        downward_head: bundle.downward_head.clone(),
+        downward_weight,
+        downward_path_first_out,
+        downward_path_edges: bundle.downward_head.clone(),
+    }
+}
+
+fn compile_oriented_transition_weights(
+    topology: &TopologyBundle,
+    edge_metrics: &[CompiledEdgeMetric],
+    profile: &ProfileDocument,
+    first_out: &[u32],
+    head: &[u32],
+) -> Vec<f64> {
+    let mut weights = vec![f64::INFINITY; head.len()];
+    if first_out.len() != topology.edges.len() + 1 {
+        return weights;
+    }
+    for edge_index in 0..topology.edges.len() {
+        let start = first_out[edge_index] as usize;
+        let end = first_out[edge_index + 1] as usize;
+        for slot in start..end {
+            let next_edge = head[slot] as usize;
+            let Some(next_cost) = edge_metrics[next_edge].generalized_cost else {
+                continue;
+            };
+            weights[slot] = next_cost
+                + transition_turn_penalty_cost(
+                    topology,
+                    edge_index,
+                    next_edge,
+                    profile.turns.left_penalty_s,
+                    profile.turns.right_penalty_s,
+                    profile.turns.uturn_penalty_s,
+                    profile.turns.traffic_signal_penalty_s,
+                    profile.turns.roundabout_entry_penalty_s,
+                    profile.cost.time_weight,
+                );
+        }
+    }
+    weights
 }
 
 fn edge_travel_time_s(profile: &ProfileDocument, edge: &DirectedEdge) -> Option<f64> {
@@ -502,15 +595,142 @@ fn is_major_highway(road_class: RoadClass) -> bool {
     )
 }
 
+fn transition_turn_penalty_cost(
+    topology: &TopologyBundle,
+    previous_edge_index: usize,
+    next_edge_index: usize,
+    left_penalty_s: f64,
+    right_penalty_s: f64,
+    uturn_penalty_s: f64,
+    traffic_signal_penalty_s: f64,
+    roundabout_entry_penalty_s: f64,
+    cost_time_weight: f64,
+) -> f64 {
+    transition_turn_penalty_seconds(
+        topology,
+        previous_edge_index,
+        next_edge_index,
+        left_penalty_s,
+        right_penalty_s,
+        uturn_penalty_s,
+        traffic_signal_penalty_s,
+        roundabout_entry_penalty_s,
+    ) * cost_time_weight
+}
+
+fn transition_turn_penalty_seconds(
+    topology: &TopologyBundle,
+    previous_edge_index: usize,
+    next_edge_index: usize,
+    left_penalty_s: f64,
+    right_penalty_s: f64,
+    uturn_penalty_s: f64,
+    traffic_signal_penalty_s: f64,
+    roundabout_entry_penalty_s: f64,
+) -> f64 {
+    let previous = &topology.edges[previous_edge_index];
+    let next = &topology.edges[next_edge_index];
+
+    if previous.to != next.from {
+        return 0.0;
+    }
+
+    let mut penalty_s = 0.0;
+    if previous.flags & EDGE_FLAG_TARGET_TRAFFIC_SIGNAL != 0 {
+        penalty_s += traffic_signal_penalty_s;
+    }
+    if previous.flags & EDGE_FLAG_ROUNDABOUT == 0 && next.flags & EDGE_FLAG_ROUNDABOUT != 0 {
+        penalty_s += roundabout_entry_penalty_s;
+    }
+
+    if previous.from == next.to {
+        return penalty_s + uturn_penalty_s;
+    }
+
+    if previous.source_way_id == next.source_way_id {
+        return penalty_s;
+    }
+
+    penalty_s
+        + match classify_turn(topology, previous_edge_index, next_edge_index) {
+            TurnDirection::Straight => 0.0,
+            TurnDirection::Left => left_penalty_s,
+            TurnDirection::Right => right_penalty_s,
+            TurnDirection::Uturn => uturn_penalty_s,
+        }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TurnDirection {
+    Straight,
+    Left,
+    Right,
+    Uturn,
+}
+
+fn classify_turn(
+    topology: &TopologyBundle,
+    previous_edge_index: usize,
+    next_edge_index: usize,
+) -> TurnDirection {
+    const STRAIGHT_THRESHOLD_RAD: f64 = 30.0_f64.to_radians();
+    const UTURN_THRESHOLD_RAD: f64 = 150.0_f64.to_radians();
+
+    let previous = &topology.edges[previous_edge_index];
+    let next = &topology.edges[next_edge_index];
+    let from = &topology.nodes[previous.from.0 as usize];
+    let via = &topology.nodes[previous.to.0 as usize];
+    let to = &topology.nodes[next.to.0 as usize];
+
+    let in_x = projected_delta_x(from.lon, via.lat, via.lon);
+    let in_y = projected_delta_y(from.lat, via.lat);
+    let out_x = projected_delta_x(via.lon, via.lat, to.lon);
+    let out_y = projected_delta_y(via.lat, to.lat);
+
+    let in_norm = (in_x * in_x + in_y * in_y).sqrt();
+    let out_norm = (out_x * out_x + out_y * out_y).sqrt();
+    if in_norm <= f64::EPSILON || out_norm <= f64::EPSILON {
+        return TurnDirection::Straight;
+    }
+
+    let dot = ((in_x * out_x + in_y * out_y) / (in_norm * out_norm)).clamp(-1.0, 1.0);
+    let cross = in_x * out_y - in_y * out_x;
+    let angle = cross.atan2(dot);
+    let abs_angle = angle.abs();
+
+    if abs_angle <= STRAIGHT_THRESHOLD_RAD {
+        TurnDirection::Straight
+    } else if abs_angle >= UTURN_THRESHOLD_RAD {
+        TurnDirection::Uturn
+    } else if angle > 0.0 {
+        TurnDirection::Left
+    } else {
+        TurnDirection::Right
+    }
+}
+
+fn projected_delta_x(from_lon: f64, reference_lat: f64, to_lon: f64) -> f64 {
+    let earth_radius_m = 6_371_000.0_f64;
+    let lon_delta = (to_lon - from_lon).to_radians();
+    lon_delta * reference_lat.to_radians().cos() * earth_radius_m
+}
+
+fn projected_delta_y(from_lat: f64, to_lat: f64) -> f64 {
+    let earth_radius_m = 6_371_000.0_f64;
+    (to_lat - from_lat).to_radians() * earth_radius_m
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         CostConfig, ExcludeRule, FactorRule, FerryConfig, Objective, PreferencesConfig,
         ProfileDocument, ProfileHeader, ReturnConfig, SpeedRule, TagMatch, compile_profile_bundle,
+        compile_profile_bundle_with_acceleration,
     };
     use netan_core::{
-        AccessMask, CacheBundleId, DirectedEdge, EdgeId, NodeId, RoadClass, SmoothnessClass,
-        SurfaceClass, TopologyBundle, TravelMode,
+        AccessMask, CacheBundleId, DatasetAccelerationBundle, DirectedEdge, EdgeBasedTopology,
+        EdgeId, NodeId, RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle, TopologyNode,
+        TravelMode,
     };
     use std::collections::BTreeMap;
 
@@ -567,6 +787,7 @@ mod tests {
             }],
             turn_restrictions: vec![],
             names: vec![],
+            edge_based_topology: EdgeBasedTopology::default(),
             spatial_index: None,
         };
 
@@ -610,6 +831,7 @@ mod tests {
             edges: vec![],
             turn_restrictions: vec![],
             names: vec![],
+            edge_based_topology: EdgeBasedTopology::default(),
             spatial_index: None,
         };
 
@@ -683,6 +905,7 @@ mod tests {
             ],
             turn_restrictions: vec![],
             names: vec![],
+            edge_based_topology: EdgeBasedTopology::default(),
             spatial_index: None,
         };
 
@@ -748,6 +971,110 @@ mod tests {
         assert_eq!(compiled.turn_costs.cost_time_weight, 1.5);
     }
 
+    #[test]
+    fn compiles_acceleration_weights_from_dataset_bundle() {
+        let profile = ferry_profile(true);
+        let topology = TopologyBundle {
+            schema_version: 3,
+            source_path: "test.osm.pbf".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![
+                TopologyNode {
+                    node_id: NodeId(0),
+                    osm_node_id: 1,
+                    lon: 0.0,
+                    lat: 0.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(1),
+                    osm_node_id: 2,
+                    lon: 1.0,
+                    lat: 0.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(2),
+                    osm_node_id: 3,
+                    lon: 2.0,
+                    lat: 0.0,
+                },
+            ],
+            edges: vec![
+                DirectedEdge {
+                    edge_id: EdgeId(0),
+                    from: NodeId(0),
+                    to: NodeId(1),
+                    source_way_id: 10,
+                    length_m: 1_000,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+                DirectedEdge {
+                    edge_id: EdgeId(1),
+                    from: NodeId(1),
+                    to: NodeId(2),
+                    source_way_id: 11,
+                    length_m: 1_000,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+            ],
+            turn_restrictions: vec![],
+            names: vec![],
+            edge_based_topology: EdgeBasedTopology {
+                node_first_out: vec![0, 1, 2, 2],
+                node_edge_order: vec![0, 1],
+                edge_transition_first_out: vec![0, 1, 1],
+                edge_transition_edges: vec![1],
+            },
+            spatial_index: None,
+        };
+        let acceleration = DatasetAccelerationBundle {
+            schema_version: 1,
+            source_topology_bundle_id: CacheBundleId::new("topology-test"),
+            algorithm: "edge_based_transition_order_v1".to_string(),
+            edge_order: vec![0, 1],
+            edge_rank: vec![0, 1],
+            upward_first_out: vec![0, 1, 1],
+            upward_head: vec![1],
+            downward_first_out: vec![0, 0, 0],
+            downward_head: vec![],
+        };
+
+        let compiled = compile_profile_bundle_with_acceleration(
+            &profile,
+            &topology,
+            CacheBundleId::new("topology-test"),
+            Some((&acceleration, CacheBundleId::new("accel-test"))),
+        )
+        .expect("compile succeeds");
+
+        let compiled_acceleration = compiled.acceleration.expect("acceleration compiled");
+        assert_eq!(
+            compiled_acceleration.source_acceleration_bundle_id.0,
+            "accel-test"
+        );
+        assert_eq!(compiled_acceleration.upward_head, vec![1]);
+        assert_eq!(compiled_acceleration.upward_weight.len(), 1);
+        assert!(compiled_acceleration.upward_weight[0].is_finite());
+        assert!(compiled_acceleration.downward_weight.is_empty());
+    }
+
     fn tag_match<const N: usize>(pairs: [(&str, &str); N]) -> TagMatch {
         let mut tags = BTreeMap::new();
         for (key, value) in pairs {
@@ -811,6 +1138,7 @@ mod tests {
             }],
             turn_restrictions: vec![],
             names: vec![],
+            edge_based_topology: EdgeBasedTopology::default(),
             spatial_index: None,
         }
     }

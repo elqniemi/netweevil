@@ -15,7 +15,6 @@ anyhow.workspace = true
 clap.workspace = true
 netan-api = { path = "../api" }
 netan-core = { path = "../core" }
-netan-gui = { path = "../gui" }
 netan-ingest = { path = "../ingest" }
 netan-persist = { path = "../persist" }
 netan-profile = { path = "../profile" }

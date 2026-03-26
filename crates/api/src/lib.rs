@@ -10,13 +10,18 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use netan_core::{CacheBundleId, CompiledProfileBundle, DatasetId, TopologyBounds, TopologyBundle};
-use netan_persist::{
-    WorkspacePaths, read_compiled_profile_bundle, read_compiled_profile_manifests,
-    read_dataset_manifest, read_edge_name_bundle, read_topology_bundle,
-    write_compiled_profile_bundle, write_compiled_profile_manifest,
+use netan_core::{
+    CacheBundleId, CompiledProfileBundle, DatasetAccelerationBundle, DatasetId, TopologyBounds,
+    TopologyBundle,
 };
-use netan_profile::{ProfileDocument, ReturnGeometry, compile_profile_bundle, load_profile};
+use netan_persist::{
+    WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
+    read_compiled_profile_manifests, read_dataset_manifest, read_edge_name_bundle,
+    read_topology_bundle, write_compiled_profile_bundle, write_compiled_profile_manifest,
+};
+use netan_profile::{
+    ProfileDocument, ReturnGeometry, compile_profile_bundle_with_acceleration, load_profile,
+};
 use netan_query::{
     MatrixResult, OdPairsDocument, OdResult, PointSetDocument, PreparedRoutingEngine, RouteRequest,
     RouteResult,
@@ -379,15 +384,29 @@ fn load_or_compile_profile(
     }) {
         existing.clone()
     } else {
-        let compiled_bundle =
-            compile_profile_bundle(&document, topology.as_ref(), topology_bundle_id).with_context(
-                || {
-                    format!(
-                        "compiling profile '{}' for dataset '{}'",
-                        document.profile.id, dataset_manifest.dataset_id.0
-                    )
-                },
-            )?;
+        let acceleration: Option<(DatasetAccelerationBundle, CacheBundleId)> = dataset_manifest
+            .acceleration_bundle
+            .as_ref()
+            .map(|bundle_ref| {
+                read_acceleration_bundle(&bundle_ref.path)
+                    .with_context(|| format!("reading acceleration bundle {}", bundle_ref.path))
+                    .map(|bundle| (bundle, bundle_ref.bundle_id.clone()))
+            })
+            .transpose()?;
+        let compiled_bundle = compile_profile_bundle_with_acceleration(
+            &document,
+            topology.as_ref(),
+            topology_bundle_id,
+            acceleration
+                .as_ref()
+                .map(|(bundle, bundle_id)| (bundle, bundle_id.clone())),
+        )
+        .with_context(|| {
+            format!(
+                "compiling profile '{}' for dataset '{}'",
+                document.profile.id, dataset_manifest.dataset_id.0
+            )
+        })?;
         let compile_id = format!("{}-{}", dataset_manifest.dataset_id.0, &profile_hash[..12]);
         let bundle_path = paths
             .metric_bundles_dir
@@ -702,9 +721,9 @@ fn engine_description(topology: &TopologyBundle) -> EngineDescription {
         }
     } else {
         EngineDescription {
-            route_engine: "astar_exact_pairwise_turns",
-            batch_engine: "astar_exact_pairwise_turns_repeated",
-            acceleration: "spatial_index+a_star+turn_automaton",
+            route_engine: "bidirectional_exact_pairwise_turns",
+            batch_engine: "bidirectional_exact_pairwise_turns_repeated",
+            acceleration: "spatial_index+edge_phantoms",
         }
     }
 }
@@ -889,9 +908,9 @@ mod tests {
         assert_eq!(
             engine.route_engine,
             EngineDescription {
-                route_engine: "astar_exact_pairwise_turns",
-                batch_engine: "astar_exact_pairwise_turns_repeated",
-                acceleration: "spatial_index+a_star+turn_automaton",
+                route_engine: "bidirectional_exact_pairwise_turns",
+                batch_engine: "bidirectional_exact_pairwise_turns_repeated",
+                acceleration: "spatial_index+edge_phantoms",
             }
             .route_engine
         );

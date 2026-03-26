@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 use netan_core::{
-    CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, EdgeNameBundle, TopologyBundle,
-    TravelMode,
+    CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, DatasetAccelerationBundle,
+    EdgeNameBundle, TopologyBundle, TravelMode,
 };
 use netan_report::{CompiledProfileManifest, DatasetManifest, RunManifest};
 use serde::Serialize;
@@ -20,6 +20,7 @@ pub struct WorkspacePaths {
     pub bundles_dir: PathBuf,
     pub topology_bundles_dir: PathBuf,
     pub edge_name_bundles_dir: PathBuf,
+    pub acceleration_bundles_dir: PathBuf,
     pub metric_bundles_dir: PathBuf,
     pub datasets_dir: PathBuf,
     pub compiled_profiles_dir: PathBuf,
@@ -36,6 +37,7 @@ impl WorkspacePaths {
             bundles_dir: state_dir.join("bundles"),
             topology_bundles_dir: state_dir.join("bundles").join("topology"),
             edge_name_bundles_dir: state_dir.join("bundles").join("names"),
+            acceleration_bundles_dir: state_dir.join("bundles").join("acceleration"),
             metric_bundles_dir: state_dir.join("bundles").join("metrics"),
             datasets_dir: state_dir.join("datasets"),
             compiled_profiles_dir: state_dir.join("compiled_profiles"),
@@ -53,6 +55,7 @@ impl WorkspacePaths {
             &self.bundles_dir,
             &self.topology_bundles_dir,
             &self.edge_name_bundles_dir,
+            &self.acceleration_bundles_dir,
             &self.metric_bundles_dir,
             &self.datasets_dir,
             &self.compiled_profiles_dir,
@@ -104,6 +107,13 @@ pub fn write_edge_name_bundle(path: impl AsRef<Path>, bundle: &EdgeNameBundle) -
     write_binary(path, bundle)
 }
 
+pub fn write_acceleration_bundle(
+    path: impl AsRef<Path>,
+    bundle: &DatasetAccelerationBundle,
+) -> Result<()> {
+    write_binary(path, bundle)
+}
+
 pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
     let path = path.as_ref();
     if path
@@ -119,6 +129,10 @@ pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
 }
 
 pub fn read_edge_name_bundle(path: impl AsRef<Path>) -> Result<EdgeNameBundle> {
+    read_binary_mmap(path)
+}
+
+pub fn read_acceleration_bundle(path: impl AsRef<Path>) -> Result<DatasetAccelerationBundle> {
     read_binary_mmap(path)
 }
 
@@ -162,6 +176,7 @@ impl From<LegacyCompiledProfileBundle> for CompiledProfileBundle {
             mode: value.mode,
             turn_costs: Default::default(),
             source_topology_bundle_id: value.source_topology_bundle_id,
+            acceleration: None,
             edge_metrics: value.edge_metrics,
         }
     }
@@ -193,9 +208,11 @@ fn read_binary_mmap<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::{
-        read_compiled_profile_bundle, read_edge_name_bundle, read_topology_bundle, write_binary,
-        write_edge_name_bundle, write_topology_bundle,
+        read_acceleration_bundle, read_compiled_profile_bundle, read_edge_name_bundle,
+        read_topology_bundle, write_acceleration_bundle, write_binary, write_edge_name_bundle,
+        write_topology_bundle,
     };
+    use netan_core::DatasetAccelerationBundle;
     use netan_core::{
         AccessMask, CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle,
         CompiledTurnCostConfig, DirectedEdge, EdgeId, EdgeNameBundle, NodeId, RoadClass,
@@ -320,6 +337,40 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_acceleration_bundle_binary() {
+        let bundle = DatasetAccelerationBundle {
+            schema_version: 1,
+            source_topology_bundle_id: CacheBundleId::new("topology-test"),
+            algorithm: "edge_based_transition_order_v1".to_string(),
+            edge_order: vec![0, 2, 1],
+            edge_rank: vec![0, 2, 1],
+            upward_first_out: vec![0, 1, 1, 1],
+            upward_head: vec![2],
+            downward_first_out: vec![0, 0, 1, 1],
+            downward_head: vec![0],
+        };
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("netan-persist-acceleration-{unique}.bin"));
+
+        write_acceleration_bundle(&path, &bundle).expect("bundle should serialize");
+        let round_tripped =
+            read_acceleration_bundle(&path).expect("acceleration bundle should deserialize");
+
+        assert_eq!(round_tripped.schema_version, bundle.schema_version);
+        assert_eq!(round_tripped.algorithm, bundle.algorithm);
+        assert_eq!(round_tripped.edge_order, bundle.edge_order);
+        assert_eq!(round_tripped.edge_rank, bundle.edge_rank);
+        assert_eq!(round_tripped.upward_head, bundle.upward_head);
+        assert_eq!(round_tripped.downward_head, bundle.downward_head);
+
+        fs::remove_file(path).expect("temporary bundle should be removed");
+    }
+
+    #[test]
     fn reads_legacy_compiled_profile_bundle_binary() {
         #[derive(serde::Serialize)]
         struct LegacyCompiledProfileBundle {
@@ -377,6 +428,7 @@ mod tests {
                 cost_time_weight: 1.5,
             },
             source_topology_bundle_id: CacheBundleId::new("topology-test"),
+            acceleration: None,
             edge_metrics: vec![CompiledEdgeMetric {
                 edge_id: EdgeId(0),
                 travel_time_s: Some(12.0),
