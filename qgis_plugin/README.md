@@ -88,14 +88,15 @@ Examples:
 2. Set `Workspace root` and `API base URL`.
 3. Press `Refresh Service`.
 4. Choose either the service default profile or a specific loaded profile.
-5. In the `Route` tab, set a route id if you want something more specific than the default.
+5. In the `Route` tab, keep the generated route id or set your own.
 6. Click `Pick Start`, then click on the map canvas.
 7. Click `Pick End`, then click on the map canvas.
 8. Optionally use `From Selected Feature` if you already have a point selected in the active point layer.
-9. Optionally press `Save Request` if you want the route JSON on disk.
-10. Press `Run Route`.
+9. Choose the returned route detail you want, including segment rows, road-type totals, and surface totals.
+10. Optionally press `Save Request` if you want the route JSON on disk.
+11. Press `Run Route`.
 
-The resulting line layer loads into QGIS automatically.
+The plugin loads the route into a grouped set of QGIS layers and tables automatically. When the API returns them, the group includes the main route, segment rows, hop segments, violations, road-type breakdowns, and surface breakdowns. After a successful run, the default route id advances so the next query does not overwrite the previous route name.
 
 ### OD
 
@@ -133,8 +134,8 @@ The plugin saves the raw API response and loads grouped sublayers back into QGIS
 
 ### Advanced Route And Batch Controls
 
-- `Route` and `Batch` each have a collapsed `Advanced Controls` section.
-- Disconnected-network policies are available there for route, OD, and matrix requests.
+- `Route` exposes a dedicated `Returned route detail` section for geometry mode, segment rows, and route breakdown request flags.
+- `Route`, `Batch`, and `Service Area` keep disconnected-network policies under collapsible connectivity controls.
 - Unsafe degraded-routing options remain under a separate collapsed `Unsafe Failure Modes` section and are off by default.
 - The plugin shows a preflight confirmation before sending a request with unsafe failure modes enabled.
 - Diagnostics now include suggested next actions in the dock log when the API returns them.
@@ -146,6 +147,7 @@ The plugin saves the raw API response and loads grouped sublayers back into QGIS
 - OD and matrix CSV inputs are parsed locally and sent to the API as JSON.
 - Route points are transformed from the current map or layer CRS into WGS84 before being sent to the API.
 - YAML request files are not supported by the plugin in API mode.
-- When `Response format` is `JSON`, the plugin still builds a temporary GeoJSON layer locally when geometry is present in the API response.
+- Route detail layers use JSON responses internally when needed, even if the dock is set to `GeoJSON`, so the plugin can still load segment rows and breakdown tables.
+- When `Response format` is `JSON`, the plugin still builds temporary GeoJSON layers locally when geometry is present in the API response.
 - Service-area outputs are loaded into grouped sublayers so thresholds and geometry modes stay inspectable in QGIS.
 - In WSL mode, output layers are loaded back into QGIS through `\\wsl$\<distro>\...`.

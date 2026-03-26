@@ -1,5 +1,6 @@
 import csv
 import json
+import re
 import tempfile
 import urllib.error
 import urllib.parse
@@ -32,6 +33,7 @@ from qgis.core import (
     QgsCategorizedSymbolRenderer,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
+    QgsDistanceArea,
     QgsFillSymbol,
     QgsFeatureRequest,
     QgsLineSymbol,
@@ -262,7 +264,8 @@ class NetanDock(QDockWidget):
 
         description = QLabel(
             "This plugin talks directly to the running netan API. "
-            "Pick route points from the map canvas, or build batch analyses from QGIS layers."
+            "Pick route points from the map canvas, or build batch analyses from QGIS layers. "
+            "Route detail layers use JSON internally when needed so segmented rows and breakdown tables remain available in QGIS."
         )
         description.setWordWrap(True)
         layout.addWidget(description)
@@ -589,10 +592,23 @@ class NetanDock(QDockWidget):
         options_group = QGroupBox("Route options")
         options_form = QFormLayout(options_group)
         self.route_id_edit = QLineEdit("qgis_route_001")
+        self.route_auto_increment_check = QCheckBox("Prepare a fresh route id after each run")
+        self.route_auto_increment_check.setChecked(True)
+        self.route_auto_output_path_check = QCheckBox("Keep response path in sync with route id")
+        self.route_auto_output_path_check.setChecked(True)
         self.snap_distance_edit = QLineEdit("500")
-        self.route_output_path_edit = QLineEdit(".netan/runs/qgis-route.geojson")
+        self.route_output_path_edit = QLineEdit(".netan/runs/routes/qgis_route_001.json")
         self.route_request_path_edit = QLineEdit("examples/requests/route_from_qgis.json")
-        options_form.addRow("Route id", self.route_id_edit)
+        route_id_row = QWidget()
+        route_id_layout = QHBoxLayout(route_id_row)
+        route_id_layout.setContentsMargins(0, 0, 0, 0)
+        route_id_layout.addWidget(self.route_id_edit)
+        new_route_id_button = QPushButton("New")
+        new_route_id_button.clicked.connect(self.prepare_next_route_defaults)
+        route_id_layout.addWidget(new_route_id_button)
+        options_form.addRow("Route id", route_id_row)
+        options_form.addRow("", self.route_auto_increment_check)
+        options_form.addRow("", self.route_auto_output_path_check)
         options_form.addRow("Snap distance m", self.snap_distance_edit)
         options_form.addRow(
             "Response path",
@@ -606,7 +622,46 @@ class NetanDock(QDockWidget):
         )
         layout.addWidget(options_group)
 
-        route_advanced_toggle = QPushButton("Show Advanced Controls")
+        return_group = QGroupBox("Returned route detail")
+        return_form = QFormLayout(return_group)
+        self.route_geometry_combo = QComboBox()
+        self.route_geometry_combo.addItem("No route geometry", "none")
+        self.route_geometry_combo.addItem("Full route geometry", "full")
+        self.route_geometry_combo.addItem("Segment-friendly geometry", "segments")
+        self.route_geometry_combo.setCurrentIndex(1)
+        self.route_segment_rows_check = QCheckBox("Return one row per traversed road segment")
+        self.route_segment_rows_check.setChecked(True)
+        self.route_road_distance_check = QCheckBox("Road-type distance totals")
+        self.route_road_distance_check.setChecked(True)
+        self.route_road_time_check = QCheckBox("Road-type time totals")
+        self.route_road_time_check.setChecked(True)
+        self.route_surface_distance_check = QCheckBox("Surface distance totals")
+        self.route_surface_distance_check.setChecked(True)
+        self.route_surface_time_check = QCheckBox("Surface time totals")
+        self.route_surface_time_check.setChecked(True)
+        self.route_penalty_breakdown_check = QCheckBox("Penalty breakdown request flag")
+        self.route_penalty_breakdown_check.setChecked(True)
+        self.route_explain_cost_derivation_check = QCheckBox(
+            "Explain cost derivation request flag"
+        )
+        self.route_explain_cost_derivation_check.setChecked(True)
+        detail_note = QLabel(
+            "The plugin will load the route line, segment rows, hop segments, violations, and road/surface breakdown tables when the API returns them. "
+            "Penalty and explain flags are exposed here, but the current API only reports penalty totals in the route summary."
+        )
+        detail_note.setWordWrap(True)
+        return_form.addRow("Geometry", self.route_geometry_combo)
+        return_form.addRow("", self.route_segment_rows_check)
+        return_form.addRow("", self.route_road_distance_check)
+        return_form.addRow("", self.route_road_time_check)
+        return_form.addRow("", self.route_surface_distance_check)
+        return_form.addRow("", self.route_surface_time_check)
+        return_form.addRow("", self.route_penalty_breakdown_check)
+        return_form.addRow("", self.route_explain_cost_derivation_check)
+        return_form.addRow("", detail_note)
+        layout.addWidget(return_group)
+
+        route_advanced_toggle = QPushButton("Show Connectivity + Fallback")
         route_advanced_toggle.setCheckable(True)
         route_advanced_widget = self._build_advanced_controls(
             "route", include_failure_modes=True
@@ -615,7 +670,9 @@ class NetanDock(QDockWidget):
         route_advanced_toggle.toggled.connect(route_advanced_widget.setVisible)
         route_advanced_toggle.toggled.connect(
             lambda checked, button=route_advanced_toggle: button.setText(
-                "Hide Advanced Controls" if checked else "Show Advanced Controls"
+                "Hide Connectivity + Fallback"
+                if checked
+                else "Show Connectivity + Fallback"
             )
         )
         self.route_advanced_toggle = route_advanced_toggle
@@ -652,6 +709,12 @@ class NetanDock(QDockWidget):
         button_row.addWidget(save_request_button)
         button_row.addWidget(run_route_button)
         layout.addLayout(button_row)
+
+        self.route_id_edit.textChanged.connect(self.sync_route_output_path_from_route_id)
+        self.route_auto_output_path_check.toggled.connect(
+            self.sync_route_output_path_from_route_id
+        )
+        self.sync_route_output_path_from_route_id()
 
         layout.addStretch(1)
         return tab
@@ -898,9 +961,10 @@ class NetanDock(QDockWidget):
     def response_format(self):
         return self.response_format_combo.currentData()
 
-    def service_url(self, suffix, include_format=False):
+    def service_url(self, suffix, include_format=False, response_format=None):
         url = "{}{}".format(self.api_base_url(), suffix)
-        if include_format and self.response_format() == ResponseFormat.GEOJSON:
+        selected_format = response_format or self.response_format()
+        if include_format and selected_format == ResponseFormat.GEOJSON:
             return "{}?{}".format(
                 url, urllib.parse.urlencode({"format": ResponseFormat.GEOJSON})
             )
@@ -1331,6 +1395,55 @@ class NetanDock(QDockWidget):
         if preset:
             self.service_area_hull_aggressiveness_edit.setText(preset)
 
+    def next_numbered_id(self, value, fallback_prefix):
+        text = (value or "").strip()
+        if not text:
+            return "{}_001".format(fallback_prefix)
+        match = re.match(r"^(.*?)(\d+)$", text)
+        if match:
+            prefix, digits = match.groups()
+            return "{}{:0{}d}".format(prefix, int(digits) + 1, len(digits))
+        clean = text.rstrip("_- ")
+        return "{}_001".format(clean or fallback_prefix)
+
+    def route_output_path_for_id(self, route_id):
+        clean_route_id = (route_id or "qgis_route_001").strip() or "qgis_route_001"
+        return ".netan/runs/routes/{}.json".format(clean_route_id)
+
+    def sync_route_output_path_from_route_id(self, *_args):
+        if not self.route_auto_output_path_check.isChecked():
+            return
+        self.route_output_path_edit.setText(
+            self.route_output_path_for_id(self.route_id_edit.text())
+        )
+
+    def prepare_next_route_defaults(self):
+        self.route_id_edit.setText(self.next_numbered_id(self.route_id_edit.text(), "qgis_route"))
+
+    def selected_breakdown_metrics(self, distance_check, time_check):
+        metrics = []
+        if distance_check.isChecked():
+            metrics.append("distance_m")
+        if time_check.isChecked():
+            metrics.append("time_s")
+        return metrics
+
+    def build_route_returns(self):
+        return {
+            "geometry": self.route_geometry_combo.currentData() or "full",
+            "segment_rows": self.route_segment_rows_check.isChecked(),
+            "road_type_breakdown": self.selected_breakdown_metrics(
+                self.route_road_distance_check,
+                self.route_road_time_check,
+            ),
+            "surface_breakdown": self.selected_breakdown_metrics(
+                self.route_surface_distance_check,
+                self.route_surface_time_check,
+            ),
+            "penalty_breakdown": self.route_penalty_breakdown_check.isChecked(),
+            "explain_cost_derivation": self.route_explain_cost_derivation_check.isChecked(),
+        }
+
     def update_point_markers(self):
         self.update_point_marker(
             self.origin_marker,
@@ -1618,14 +1731,7 @@ class NetanDock(QDockWidget):
             "snap": {"max_distance_m": float(self.snap_distance_edit.text().strip())},
             "connectivity": self.build_connectivity_policy("route"),
             "fallback": self.build_fallback_policy("route"),
-            "returns": {
-                "geometry": "full",
-                "segment_rows": True,
-                "road_type_breakdown": ["time_s", "distance_m"],
-                "surface_breakdown": ["time_s", "distance_m"],
-                "penalty_breakdown": True,
-                "explain_cost_derivation": True,
-            },
+            "returns": self.build_route_returns(),
         }
 
     def write_route_request(self):
@@ -1664,13 +1770,20 @@ class NetanDock(QDockWidget):
             payload["profile_id"] = profile_id
 
         self.save_settings()
-        self.execute_api_request(
+        if self.response_format() == ResponseFormat.GEOJSON:
+            self.log(
+                "Route requests use JSON internally so segmented rows, hops, violations, and breakdown tables remain available."
+            )
+        if self.execute_api_request(
             endpoint="/v1/route",
             payload=payload,
             output_path=self.route_output_path_edit.text(),
             layer_name=payload["request"]["route_id"] or "netan_route",
             analysis_kind="route",
-        )
+            response_format_override=ResponseFormat.JSON,
+        ):
+            if self.route_auto_increment_check.isChecked():
+                self.prepare_next_route_defaults()
 
     def run_od(self):
         if self.service_info is None:
@@ -1906,14 +2019,26 @@ class NetanDock(QDockWidget):
         value = feature.attributes()[index]
         return str(value).strip() if value is not None else ""
 
-    def execute_api_request(self, endpoint, payload, output_path, layer_name, analysis_kind):
-        url = self.service_url(endpoint, include_format=True)
+    def execute_api_request(
+        self,
+        endpoint,
+        payload,
+        output_path,
+        layer_name,
+        analysis_kind,
+        response_format_override=None,
+    ):
+        url = self.service_url(
+            endpoint,
+            include_format=True,
+            response_format=response_format_override,
+        )
         self.log("POST {}".format(url))
         try:
             content_type, body = self.http_post_json(url, payload)
         except Exception as exc:
             self.alert("API request failed: {}".format(exc))
-            return
+            return False
 
         local_output_path = self.resolve_local_path(output_path)
         saved_path = self.save_response(local_output_path, content_type, body)
@@ -1932,25 +2057,29 @@ class NetanDock(QDockWidget):
                 loaded_layer = self.load_output_layer(saved_path, layer_name)
                 if loaded_layer is not None:
                     self.set_last_output_layers([loaded_layer])
-                return
+                return True
 
             self.log_geojson_messages(analysis_kind, geojson)
             if analysis_kind == "service_area":
                 self.load_service_area_layers(geojson, layer_name)
-                return
+                return True
 
             loaded_layer = self.load_output_layer(saved_path, layer_name)
             if loaded_layer is not None:
                 self.set_last_output_layers([loaded_layer])
-            return
+            return True
 
         try:
             response_json = json.loads(body.decode("utf-8"))
         except Exception as exc:
             self.alert("Failed to parse API JSON response: {}".format(exc))
-            return
+            return False
 
         self.log_analysis_messages(analysis_kind, response_json)
+
+        if analysis_kind == "route":
+            self.load_route_layers(response_json, layer_name)
+            return True
 
         geojson = self.analysis_json_to_geojson(analysis_kind, response_json)
         if geojson is None:
@@ -1958,16 +2087,17 @@ class NetanDock(QDockWidget):
                 "Response saved, but no spatial geometry could be built from the API result.",
                 Qgis.Warning,
             )
-            return
+            return True
 
         if analysis_kind == "service_area":
             self.load_service_area_layers(geojson, layer_name)
-            return
+            return True
 
         temp_path = self.write_temp_geojson(layer_name, geojson)
         loaded_layer = self.load_output_layer(temp_path, layer_name)
         if loaded_layer is not None:
             self.set_last_output_layers([loaded_layer])
+        return True
 
     def load_od_document(self, path):
         suffix = path.suffix.lower()
@@ -2138,6 +2268,386 @@ class NetanDock(QDockWidget):
         output_path.write_bytes(body)
         return output_path
 
+    def json_text(self, value):
+        return json.dumps(value, sort_keys=True) if value not in [None, ""] else ""
+
+    def route_summary_feature_collection(self, service, result):
+        summary = result.get("summary") or {}
+        geometry = result.get("geometry")
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": self.item_geometry(geometry),
+                    "properties": {
+                        "dataset_id": service.get("dataset_id"),
+                        "profile_id": service.get("profile_id"),
+                        "profile_hash": service.get("profile_hash"),
+                        "route_id": result.get("route_id"),
+                        "outcome": result.get("outcome"),
+                        "fallback_used": result.get("fallback_used"),
+                        "network_distance_m": summary.get("network_distance_m"),
+                        "network_travel_time_s": summary.get("network_travel_time_s"),
+                        "network_generalized_cost": summary.get(
+                            "network_generalized_cost"
+                        ),
+                        "illegal_movement_penalty_s": summary.get(
+                            "illegal_movement_penalty_s"
+                        ),
+                        "illegal_movement_penalty_cost": summary.get(
+                            "illegal_movement_penalty_cost"
+                        ),
+                        "violation_count": summary.get("violation_count"),
+                        "violation_types_json": self.json_text(
+                            summary.get("violation_types") or []
+                        ),
+                        "total_distance_m": summary.get("total_distance_m"),
+                        "total_travel_time_s": summary.get("total_travel_time_s"),
+                        "total_generalized_cost": summary.get(
+                            "total_generalized_cost"
+                        ),
+                        "segment_count": summary.get("segment_count"),
+                        "origin_point_id": result.get("origin", {}).get("point_id"),
+                        "destination_point_id": result.get("destination", {}).get(
+                            "point_id"
+                        ),
+                        "origin_component_id": result.get("origin", {}).get(
+                            "component_id"
+                        ),
+                        "destination_component_id": result.get("destination", {}).get(
+                            "component_id"
+                        ),
+                        "origin_snap_distance_m": result.get("origin", {}).get(
+                            "snap_distance_m"
+                        ),
+                        "destination_snap_distance_m": result.get("destination", {}).get(
+                            "snap_distance_m"
+                        ),
+                        "origin_hop_distance_m": result.get("origin_hop_distance_m"),
+                        "destination_hop_distance_m": result.get(
+                            "destination_hop_distance_m"
+                        ),
+                        "warnings_json": self.json_text(result.get("warnings") or []),
+                    },
+                }
+            ],
+        }
+
+    def route_distance_area(self):
+        distance = QgsDistanceArea()
+        try:
+            distance.setSourceCrs(
+                self.wgs84,
+                QgsProject.instance().transformContext(),
+            )
+        except Exception:
+            pass
+        try:
+            distance.setEllipsoid("WGS84")
+        except Exception:
+            pass
+        return distance
+
+    def point_at_distance(self, coordinates, cumulative_lengths, distance_m):
+        if distance_m <= 0.0:
+            return list(coordinates[0])
+        if distance_m >= cumulative_lengths[-1]:
+            return list(coordinates[-1])
+        for index in range(len(cumulative_lengths) - 1):
+            start_distance = cumulative_lengths[index]
+            end_distance = cumulative_lengths[index + 1]
+            if distance_m <= end_distance + 1.0e-9:
+                if end_distance - start_distance <= 1.0e-9:
+                    return list(coordinates[index + 1])
+                ratio = (distance_m - start_distance) / (end_distance - start_distance)
+                start = coordinates[index]
+                end = coordinates[index + 1]
+                return [
+                    start[0] + (end[0] - start[0]) * ratio,
+                    start[1] + (end[1] - start[1]) * ratio,
+                ]
+        return list(coordinates[-1])
+
+    def dedupe_coordinates(self, coordinates):
+        if not coordinates:
+            return coordinates
+        deduped = [coordinates[0]]
+        for coordinate in coordinates[1:]:
+            previous = deduped[-1]
+            if (
+                abs(previous[0] - coordinate[0]) > 1.0e-12
+                or abs(previous[1] - coordinate[1]) > 1.0e-12
+            ):
+                deduped.append(coordinate)
+        return deduped
+
+    def slice_route_geometry(self, coordinates, cumulative_lengths, start_m, end_m):
+        if not coordinates:
+            return None
+        if end_m <= start_m + 1.0e-9:
+            point = self.point_at_distance(coordinates, cumulative_lengths, start_m)
+            return [point, point]
+        sliced = [self.point_at_distance(coordinates, cumulative_lengths, start_m)]
+        for index in range(1, len(coordinates) - 1):
+            distance_m = cumulative_lengths[index]
+            if start_m < distance_m < end_m:
+                sliced.append(list(coordinates[index]))
+        sliced.append(self.point_at_distance(coordinates, cumulative_lengths, end_m))
+        return self.dedupe_coordinates(sliced)
+
+    def split_route_geometry_by_distance(self, coordinates, segment_lengths_m):
+        if len(coordinates) < 2 or not segment_lengths_m:
+            return [None for _ in segment_lengths_m]
+        distance = self.route_distance_area()
+        cumulative_lengths = [0.0]
+        for start, end in zip(coordinates, coordinates[1:]):
+            segment_distance = distance.measureLine(
+                QgsPointXY(start[0], start[1]),
+                QgsPointXY(end[0], end[1]),
+            )
+            cumulative_lengths.append(cumulative_lengths[-1] + max(segment_distance, 0.0))
+        total_geometry_length = cumulative_lengths[-1]
+        total_segment_length = sum(max(float(length), 0.0) for length in segment_lengths_m)
+        if total_geometry_length <= 0.0 or total_segment_length <= 0.0:
+            return [None for _ in segment_lengths_m]
+        scale = total_geometry_length / total_segment_length
+        segment_geometries = []
+        start_m = 0.0
+        for index, length_m in enumerate(segment_lengths_m):
+            scaled_length = max(float(length_m), 0.0) * scale
+            end_m = total_geometry_length if index == len(segment_lengths_m) - 1 else min(
+                total_geometry_length, start_m + scaled_length
+            )
+            segment_geometries.append(
+                self.slice_route_geometry(
+                    coordinates,
+                    cumulative_lengths,
+                    start_m,
+                    end_m,
+                )
+            )
+            start_m = end_m
+        return segment_geometries
+
+    def route_segment_feature_collection(self, service, result):
+        segments = result.get("segments") or []
+        if not segments:
+            return {"type": "FeatureCollection", "features": []}
+        route_geometry = result.get("geometry") or []
+        segment_geometries = self.split_route_geometry_by_distance(
+            route_geometry,
+            [segment.get("length_m") or 0 for segment in segments],
+        )
+        features = []
+        for index, segment in enumerate(segments, start=1):
+            geometry = None
+            if index - 1 < len(segment_geometries):
+                geometry = self.item_geometry(segment_geometries[index - 1])
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": {
+                        "dataset_id": service.get("dataset_id"),
+                        "profile_id": service.get("profile_id"),
+                        "profile_hash": service.get("profile_hash"),
+                        "route_id": result.get("route_id"),
+                        "segment_index": index,
+                        "edge_id": segment.get("edge_id"),
+                        "from_node_id": segment.get("from_node_id"),
+                        "to_node_id": segment.get("to_node_id"),
+                        "source_way_id": segment.get("source_way_id"),
+                        "length_m": segment.get("length_m"),
+                        "travel_time_s": segment.get("travel_time_s"),
+                        "generalized_cost": segment.get("generalized_cost"),
+                        "road_class": segment.get("road_class"),
+                        "surface": segment.get("surface"),
+                        "name": segment.get("name"),
+                        "violation_type": segment.get("violation_type"),
+                    },
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
+
+    def route_hop_feature_collection(self, service, result):
+        features = []
+        for index, hop in enumerate(result.get("hop_segments") or [], start=1):
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": self.item_geometry(hop.get("geometry")),
+                    "properties": {
+                        "dataset_id": service.get("dataset_id"),
+                        "profile_id": service.get("profile_id"),
+                        "profile_hash": service.get("profile_hash"),
+                        "route_id": result.get("route_id"),
+                        "hop_index": index,
+                        "endpoint": hop.get("endpoint"),
+                        "distance_m": hop.get("distance_m"),
+                    },
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
+
+    def route_violation_feature_collection(self, service, result):
+        features = []
+        for index, violation in enumerate(result.get("violations") or [], start=1):
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": None,
+                    "properties": {
+                        "dataset_id": service.get("dataset_id"),
+                        "profile_id": service.get("profile_id"),
+                        "profile_hash": service.get("profile_hash"),
+                        "route_id": result.get("route_id"),
+                        "violation_index": index,
+                        "violation_type": violation.get("violation_type"),
+                        "edge_id": violation.get("edge_id"),
+                        "from_edge_id": violation.get("from_edge_id"),
+                        "to_edge_id": violation.get("to_edge_id"),
+                        "distance_m": violation.get("distance_m"),
+                        "penalty_s": violation.get("penalty_s"),
+                        "penalty_generalized_cost": violation.get(
+                            "penalty_generalized_cost"
+                        ),
+                    },
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
+
+    def route_breakdown_feature_collection(
+        self,
+        service,
+        result,
+        breakdown_type,
+        breakdown_values,
+    ):
+        features = []
+        for category, metrics in sorted((breakdown_values or {}).items()):
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": None,
+                    "properties": {
+                        "dataset_id": service.get("dataset_id"),
+                        "profile_id": service.get("profile_id"),
+                        "profile_hash": service.get("profile_hash"),
+                        "route_id": result.get("route_id"),
+                        "breakdown_type": breakdown_type,
+                        "category": category,
+                        "distance_m": (metrics or {}).get("distance_m"),
+                        "time_s": (metrics or {}).get("time_s"),
+                    },
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
+
+    def apply_route_line_style(self, layer, color, width, line_style="solid"):
+        if QgsWkbTypes.geometryType(layer.wkbType()) != QgsWkbTypes.LineGeometry:
+            return
+        symbol = QgsLineSymbol.createSimple(
+            {
+                "line_color": color,
+                "line_width": str(width),
+                "line_style": line_style,
+            }
+        )
+        layer.renderer().setSymbol(symbol)
+        layer.triggerRepaint()
+
+    def load_route_layers(self, response_json, layer_name):
+        service = response_json.get("service") or {}
+        result = response_json.get("result") or {}
+        route_id = result.get("route_id") or layer_name or "netan_route"
+        root = QgsProject.instance().layerTreeRoot()
+        existing_group = root.findGroup(route_id)
+        if existing_group is not None:
+            for tree_layer in existing_group.findLayers():
+                QgsProject.instance().removeMapLayer(tree_layer.layerId())
+            root.removeChildNode(existing_group)
+        group = root.addGroup(route_id)
+
+        breakdowns = result.get("breakdowns") or {}
+        layer_specs = [
+            ("route", self.route_summary_feature_collection(service, result), "#0b7285", 1.4, "solid"),
+            (
+                "segments",
+                self.route_segment_feature_collection(service, result),
+                "#2b8a3e",
+                0.9,
+                "solid",
+            ),
+            (
+                "hop_segments",
+                self.route_hop_feature_collection(service, result),
+                "#d9480f",
+                1.1,
+                "dash",
+            ),
+            (
+                "violations",
+                self.route_violation_feature_collection(service, result),
+                None,
+                None,
+                None,
+            ),
+            (
+                "road_type_breakdown",
+                self.route_breakdown_feature_collection(
+                    service,
+                    result,
+                    "road_class",
+                    breakdowns.get("road_class"),
+                ),
+                None,
+                None,
+                None,
+            ),
+            (
+                "surface_breakdown",
+                self.route_breakdown_feature_collection(
+                    service,
+                    result,
+                    "surface",
+                    breakdowns.get("surface"),
+                ),
+                None,
+                None,
+                None,
+            ),
+        ]
+
+        loaded_layers = []
+        for sublayer_name, geojson, color, width, line_style in layer_specs:
+            features = geojson.get("features") or []
+            if not features:
+                continue
+            temp_path = self.write_temp_geojson(
+                "{}_{}".format(route_id, sublayer_name),
+                geojson,
+            )
+            layer = QgsVectorLayer(str(temp_path), sublayer_name, "ogr")
+            if not layer.isValid():
+                self.log("Failed to load layer {}".format(temp_path), Qgis.Warning)
+                continue
+            if color is not None:
+                self.apply_route_line_style(layer, color, width, line_style)
+            QgsProject.instance().addMapLayer(layer, False)
+            group.addLayer(layer)
+            loaded_layers.append(layer)
+            self.log(
+                "Loaded route layer '{}' with {} feature(s).".format(
+                    sublayer_name, len(features)
+                )
+            )
+
+        if loaded_layers:
+            self.set_last_output_layers(loaded_layers)
+        else:
+            self.log("Route response had no loadable layers or tables.", Qgis.Warning)
+
     def analysis_json_to_geojson(self, analysis_kind, response_json):
         service = response_json.get("service", {})
         result = response_json.get("result", {})
@@ -2275,7 +2785,7 @@ class NetanDock(QDockWidget):
         return {"type": "LineString", "coordinates": coordinates}
 
     def write_temp_geojson(self, layer_name, geojson):
-        safe_name = layer_name.replace(" ", "_") or "netan_layer"
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", layer_name).strip("_") or "netan_layer"
         path = self.temp_layers_dir / "{}.geojson".format(safe_name)
         path.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
         return path
@@ -2591,13 +3101,21 @@ class NetanDock(QDockWidget):
         if not layers:
             self.alert("The last output layers are no longer available in the project.")
             return
-        self.iface.mapCanvas().setExtent(self.combined_extent(layers))
+        extent = self.combined_extent(layers)
+        if extent is None:
+            self.alert("The last output only contains non-spatial tables.")
+            return
+        self.iface.mapCanvas().setExtent(extent)
         self.iface.mapCanvas().refresh()
 
     def combined_extent(self, layers):
         extent = None
         for layer in layers:
+            if hasattr(layer, "isSpatial") and not layer.isSpatial():
+                continue
             layer_extent = layer.extent()
+            if layer_extent.isEmpty():
+                continue
             if extent is None:
                 extent = layer_extent
             else:
@@ -2745,9 +3263,19 @@ class NetanDock(QDockWidget):
             "response_format": self.response_format(),
             "profile_id": self.selected_profile_id() or "",
             "route_id": self.route_id_edit.text().strip(),
+            "route_auto_increment": self.route_auto_increment_check.isChecked(),
+            "route_auto_output_path": self.route_auto_output_path_check.isChecked(),
             "route_output_path": self.route_output_path_edit.text().strip(),
             "route_request_path": self.route_request_path_edit.text().strip(),
             "snap_distance": self.snap_distance_edit.text().strip(),
+            "route_geometry": self.route_geometry_combo.currentData(),
+            "route_segment_rows": self.route_segment_rows_check.isChecked(),
+            "route_road_distance": self.route_road_distance_check.isChecked(),
+            "route_road_time": self.route_road_time_check.isChecked(),
+            "route_surface_distance": self.route_surface_distance_check.isChecked(),
+            "route_surface_time": self.route_surface_time_check.isChecked(),
+            "route_penalty_breakdown": self.route_penalty_breakdown_check.isChecked(),
+            "route_explain_cost_derivation": self.route_explain_cost_derivation_check.isChecked(),
             "origin_id": self.origin_id_edit.text().strip(),
             "origin_lon": self.origin_lon_edit.text().strip(),
             "origin_lat": self.origin_lat_edit.text().strip(),
@@ -2813,6 +3341,12 @@ class NetanDock(QDockWidget):
             self.read_setting("response_format", ResponseFormat.JSON),
         )
         self.route_id_edit.setText(self.read_setting("route_id", self.route_id_edit.text()))
+        self.route_auto_increment_check.setChecked(
+            self.read_bool_setting("route_auto_increment", True)
+        )
+        self.route_auto_output_path_check.setChecked(
+            self.read_bool_setting("route_auto_output_path", True)
+        )
         self.route_output_path_edit.setText(
             self.read_setting("route_output_path", self.route_output_path_edit.text())
         )
@@ -2821,6 +3355,31 @@ class NetanDock(QDockWidget):
         )
         self.snap_distance_edit.setText(
             self.read_setting("snap_distance", self.snap_distance_edit.text())
+        )
+        self.set_combo_by_data(
+            self.route_geometry_combo,
+            self.read_setting("route_geometry", "full"),
+        )
+        self.route_segment_rows_check.setChecked(
+            self.read_bool_setting("route_segment_rows", True)
+        )
+        self.route_road_distance_check.setChecked(
+            self.read_bool_setting("route_road_distance", True)
+        )
+        self.route_road_time_check.setChecked(
+            self.read_bool_setting("route_road_time", True)
+        )
+        self.route_surface_distance_check.setChecked(
+            self.read_bool_setting("route_surface_distance", True)
+        )
+        self.route_surface_time_check.setChecked(
+            self.read_bool_setting("route_surface_time", True)
+        )
+        self.route_penalty_breakdown_check.setChecked(
+            self.read_bool_setting("route_penalty_breakdown", True)
+        )
+        self.route_explain_cost_derivation_check.setChecked(
+            self.read_bool_setting("route_explain_cost_derivation", True)
         )
         self.origin_id_edit.setText(
             self.read_setting("origin_id", self.origin_id_edit.text())
@@ -2981,6 +3540,13 @@ class NetanDock(QDockWidget):
         self.load_advanced_settings("service_area", include_failure_modes=False)
         if not self.service_area_hull_aggressiveness_edit.text().strip():
             self.sync_service_area_hull_preset()
+        if not self.route_id_edit.text().strip():
+            self.route_id_edit.setText("qgis_route_001")
+        if (
+            self.route_auto_output_path_check.isChecked()
+            and not self.route_output_path_edit.text().strip()
+        ):
+            self.sync_route_output_path_from_route_id()
 
     def restore_layer_selection(self, layer_combo, layer_id):
         if not layer_id:
