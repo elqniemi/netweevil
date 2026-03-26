@@ -22,19 +22,24 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
     QPushButton,
     QPlainTextEdit,
+    QScrollArea,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 from qgis.core import (
     Qgis,
+    QgsCategorizedSymbolRenderer,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
+    QgsFillSymbol,
     QgsFeatureRequest,
+    QgsLineSymbol,
     QgsMapLayerProxyModel,
     QgsMessageLog,
     QgsPointXY,
     QgsProject,
+    QgsRendererCategory,
     QgsVectorLayer,
     QgsWkbTypes,
 )
@@ -58,6 +63,7 @@ class MatrixSourceMode:
 class PickTarget:
     ORIGIN = "origin"
     DESTINATION = "destination"
+    SERVICE_AREA_ORIGIN = "service_area_origin"
 
 
 def qt_enum_value(owner, scoped_enum_name, member_name):
@@ -83,6 +89,10 @@ def qt_widget_attribute(member_name):
 
 def dock_widget_feature(member_name):
     return qt_enum_value(QDockWidget, "DockWidgetFeature", member_name)
+
+
+def message_box_button(member_name):
+    return qt_enum_value(QMessageBox, "StandardButton", member_name)
 
 
 class NetanPlugin:
@@ -140,6 +150,7 @@ class NetanDock(QDockWidget):
         self.pick_target = None
         self.origin_marker = None
         self.destination_marker = None
+        self.last_output_layer_ids = []
 
         self.setObjectName("netanDock")
         self.setAllowedAreas(
@@ -169,18 +180,37 @@ class NetanDock(QDockWidget):
         layout.setContentsMargins(8, 8, 8, 8)
 
         self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_api_tab(), "API")
-        self.tabs.addTab(self._build_route_tab(), "Route")
-        self.tabs.addTab(self._build_batch_tab(), "Batch")
+        self.tabs.addTab(self._wrap_tab_scroll(self._build_api_tab()), "API")
+        self.tabs.addTab(self._wrap_tab_scroll(self._build_route_tab()), "Route")
+        self.tabs.addTab(self._wrap_tab_scroll(self._build_batch_tab()), "Batch")
+        self.tabs.addTab(
+            self._wrap_tab_scroll(self._build_service_area_tab()), "Service Area"
+        )
         layout.addWidget(self.tabs)
+
+        action_row = QHBoxLayout()
+        zoom_output_button = QPushButton("Zoom To Last Output")
+        zoom_output_button.clicked.connect(self.zoom_to_last_output)
+        clear_log_button = QPushButton("Clear Log")
+        action_row.addWidget(zoom_output_button)
+        action_row.addWidget(clear_log_button)
+        action_row.addStretch(1)
+        layout.addLayout(action_row)
 
         self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setPlaceholderText("API and plugin log output.")
         self.log_output.document().setMaximumBlockCount(200)
+        clear_log_button.clicked.connect(self.log_output.clear)
         layout.addWidget(self.log_output, stretch=1)
 
         return container
+
+    def _wrap_tab_scroll(self, widget):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(widget)
+        return scroll
 
     def _build_api_tab(self):
         tab = QWidget()
@@ -239,6 +269,312 @@ class NetanDock(QDockWidget):
         layout.addStretch(1)
         return tab
 
+    def _build_advanced_controls(self, prefix, include_failure_modes):
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        connectivity_group = QGroupBox("Disconnected-network handling")
+        connectivity_form = QFormLayout(connectivity_group)
+        connectivity_mode_combo = QComboBox()
+        connectivity_mode_combo.addItem("Strict", "strict")
+        connectivity_mode_combo.addItem("Ignore unreachable", "ignore_unreachable")
+        connectivity_mode_combo.addItem(
+            "Hop origin to reachable component",
+            "hop_origin_to_nearest_reachable_component",
+        )
+        connectivity_mode_combo.addItem(
+            "Hop destination to reachable component",
+            "hop_destination_to_nearest_reachable_component",
+        )
+        connectivity_mode_combo.addItem("Hop either end", "hop_either_end")
+        max_hop_distance_edit = QLineEdit("")
+        report_hop_distance_check = QCheckBox("Report hop distance separately")
+        connectivity_form.addRow("Policy", connectivity_mode_combo)
+        connectivity_form.addRow("Max hop distance m", max_hop_distance_edit)
+        connectivity_form.addRow("", report_hop_distance_check)
+        layout.addWidget(connectivity_group)
+
+        setattr(self, "{}_connectivity_mode_combo".format(prefix), connectivity_mode_combo)
+        setattr(self, "{}_max_hop_distance_edit".format(prefix), max_hop_distance_edit)
+        setattr(
+            self,
+            "{}_report_hop_distance_check".format(prefix),
+            report_hop_distance_check,
+        )
+
+        if include_failure_modes:
+            unsafe_note = QLabel(
+                "Unsafe failure modes are off by default. Enable them only for explicit degraded-routing analysis."
+            )
+            unsafe_note.setWordWrap(True)
+            layout.addWidget(unsafe_note)
+
+            unsafe_toggle = QPushButton("Show Unsafe Failure Modes")
+            unsafe_toggle.setCheckable(True)
+            unsafe_widget = QWidget()
+            unsafe_widget.hide()
+            unsafe_layout = QVBoxLayout(unsafe_widget)
+            unsafe_layout.setContentsMargins(0, 0, 0, 0)
+
+            failure_group = QGroupBox("Unsafe failure modes")
+            failure_form = QFormLayout(failure_group)
+            allow_reverse_oneway_check = QCheckBox("Allow reverse oneway traversal")
+            allow_illegal_turn_check = QCheckBox("Allow illegal turns")
+            ignore_turn_restrictions_check = QCheckBox("Ignore turn restrictions")
+            allow_uturn_check = QCheckBox("Allow normally forbidden U-turns")
+            auto_relax_unreachable_check = QCheckBox(
+                "Auto resolve unreachable with least-permissive degraded route"
+            )
+            reverse_penalty_edit = QLineEdit("")
+            illegal_turn_penalty_edit = QLineEdit("")
+            ignored_restriction_penalty_edit = QLineEdit("")
+            forbidden_uturn_penalty_edit = QLineEdit("")
+            max_illegal_distance_edit = QLineEdit("")
+            max_illegal_turns_edit = QLineEdit("")
+            failure_form.addRow("", auto_relax_unreachable_check)
+            failure_form.addRow("", allow_reverse_oneway_check)
+            failure_form.addRow("", allow_illegal_turn_check)
+            failure_form.addRow("", ignore_turn_restrictions_check)
+            failure_form.addRow("", allow_uturn_check)
+            failure_form.addRow("Reverse oneway penalty s", reverse_penalty_edit)
+            failure_form.addRow("Illegal turn penalty s", illegal_turn_penalty_edit)
+            failure_form.addRow(
+                "Ignored restriction penalty s",
+                ignored_restriction_penalty_edit,
+            )
+            failure_form.addRow("Forbidden U-turn penalty s", forbidden_uturn_penalty_edit)
+            failure_form.addRow("Max illegal distance m", max_illegal_distance_edit)
+            failure_form.addRow("Max illegal turns", max_illegal_turns_edit)
+            unsafe_layout.addWidget(failure_group)
+            layout.addWidget(unsafe_toggle)
+            layout.addWidget(unsafe_widget)
+
+            unsafe_toggle.toggled.connect(unsafe_widget.setVisible)
+            unsafe_toggle.toggled.connect(
+                lambda checked, button=unsafe_toggle: button.setText(
+                    "Hide Unsafe Failure Modes" if checked else "Show Unsafe Failure Modes"
+                )
+            )
+
+            setattr(self, "{}_unsafe_toggle".format(prefix), unsafe_toggle)
+            setattr(
+                self,
+                "{}_allow_reverse_oneway_check".format(prefix),
+                allow_reverse_oneway_check,
+            )
+            setattr(
+                self,
+                "{}_auto_relax_unreachable_check".format(prefix),
+                auto_relax_unreachable_check,
+            )
+            setattr(
+                self,
+                "{}_allow_illegal_turn_check".format(prefix),
+                allow_illegal_turn_check,
+            )
+            setattr(
+                self,
+                "{}_ignore_turn_restrictions_check".format(prefix),
+                ignore_turn_restrictions_check,
+            )
+            setattr(self, "{}_allow_uturn_check".format(prefix), allow_uturn_check)
+            setattr(
+                self,
+                "{}_reverse_penalty_edit".format(prefix),
+                reverse_penalty_edit,
+            )
+            setattr(
+                self,
+                "{}_illegal_turn_penalty_edit".format(prefix),
+                illegal_turn_penalty_edit,
+            )
+            setattr(
+                self,
+                "{}_ignored_restriction_penalty_edit".format(prefix),
+                ignored_restriction_penalty_edit,
+            )
+            setattr(
+                self,
+                "{}_forbidden_uturn_penalty_edit".format(prefix),
+                forbidden_uturn_penalty_edit,
+            )
+            setattr(
+                self,
+                "{}_max_illegal_distance_edit".format(prefix),
+                max_illegal_distance_edit,
+            )
+            setattr(
+                self,
+                "{}_max_illegal_turns_edit".format(prefix),
+                max_illegal_turns_edit,
+            )
+
+        return container
+
+    def _build_service_area_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        summary = QLabel(
+            "Build one service-area request with multiple origins and thresholds, then load grouped network and polygon outputs back into QGIS."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        options_group = QGroupBox("Service-area options")
+        options_form = QFormLayout(options_group)
+        self.service_area_analysis_id_edit = QLineEdit("qgis_service_area_001")
+        self.service_area_snap_distance_edit = QLineEdit("500")
+        self.service_area_output_path_edit = QLineEdit(
+            ".netan/runs/qgis-service-area.geojson"
+        )
+        self.service_area_request_path_edit = QLineEdit(
+            "examples/requests/service_area_from_qgis.json"
+        )
+        self.service_area_output_mode_combo = QComboBox()
+        self.service_area_output_mode_combo.addItem("Network", "network")
+        self.service_area_output_mode_combo.addItem("Polygon", "polygon")
+        self.service_area_output_mode_combo.addItem("Both", "both")
+        self.service_area_band_mode_combo = QComboBox()
+        self.service_area_band_mode_combo.addItem("Cumulative", "cumulative")
+        self.service_area_band_mode_combo.addItem("Ring", "ring")
+        self.service_area_boundary_mode_combo = QComboBox()
+        self.service_area_boundary_mode_combo.addItem("Overlap", "overlap")
+        self.service_area_boundary_mode_combo.addItem("Cut At Boundary", "cut_at_boundary")
+        self.service_area_multi_origin_mode_combo = QComboBox()
+        self.service_area_multi_origin_mode_combo.addItem("Merge", "merge")
+        self.service_area_multi_origin_mode_combo.addItem("Overlap", "overlap")
+        self.service_area_multi_origin_mode_combo.addItem("Cut", "cut")
+        options_form.addRow("Analysis id", self.service_area_analysis_id_edit)
+        options_form.addRow("Snap distance m", self.service_area_snap_distance_edit)
+        options_form.addRow("Output mode", self.service_area_output_mode_combo)
+        options_form.addRow("Band mode", self.service_area_band_mode_combo)
+        options_form.addRow("Boundary mode", self.service_area_boundary_mode_combo)
+        options_form.addRow("Multi-origin mode", self.service_area_multi_origin_mode_combo)
+        options_form.addRow(
+            "Response path",
+            self._line_with_browse(
+                self.service_area_output_path_edit, browse_dir=False, save_dialog=True
+            ),
+        )
+        options_form.addRow(
+            "Optional request JSON",
+            self._line_with_browse(
+                self.service_area_request_path_edit, browse_dir=False, save_dialog=True
+            ),
+        )
+        layout.addWidget(options_group)
+
+        threshold_group = QGroupBox("Thresholds")
+        threshold_form = QFormLayout(threshold_group)
+        self.service_area_thresholds_edit = QLineEdit("300, 600")
+        self.service_area_threshold_metric_combo = QComboBox()
+        self.service_area_threshold_metric_combo.addItem("Distance (m)", "distance_m")
+        self.service_area_threshold_metric_combo.addItem("Travel time (s)", "travel_time_s")
+        threshold_hint = QLabel(
+            "Enter comma-separated limits once per request. The selected unit applies to every threshold in this list."
+        )
+        threshold_hint.setWordWrap(True)
+        threshold_form.addRow("Limits", self.service_area_thresholds_edit)
+        threshold_form.addRow("Unit", self.service_area_threshold_metric_combo)
+        threshold_form.addRow("", threshold_hint)
+        layout.addWidget(threshold_group)
+
+        polygon_group = QGroupBox("Polygon generation")
+        polygon_form = QFormLayout(polygon_group)
+        self.service_area_hull_preset_combo = QComboBox()
+        self.service_area_hull_preset_combo.addItem("Conservative", "0.75")
+        self.service_area_hull_preset_combo.addItem("Balanced", "1.00")
+        self.service_area_hull_preset_combo.addItem("Aggressive", "1.50")
+        self.service_area_hull_aggressiveness_edit = QLineEdit("1.0")
+        self.service_area_simplification_edit = QLineEdit("20")
+        polygon_form.addRow("Hull preset", self.service_area_hull_preset_combo)
+        polygon_form.addRow("Hull aggressiveness", self.service_area_hull_aggressiveness_edit)
+        polygon_form.addRow(
+            "Simplification tolerance m", self.service_area_simplification_edit
+        )
+        self.service_area_hull_preset_combo.currentIndexChanged.connect(
+            self.sync_service_area_hull_preset
+        )
+        layout.addWidget(polygon_group)
+
+        origins_group = QGroupBox("Origins")
+        origins_layout = QVBoxLayout(origins_group)
+        origins_note = QLabel(
+            "Use one origin per line in the form id,lon,lat. You can append map-picked points, selected point features, or the current route endpoints."
+        )
+        origins_note.setWordWrap(True)
+        origins_layout.addWidget(origins_note)
+        self.service_area_origins_edit = QPlainTextEdit()
+        self.service_area_origins_edit.setPlaceholderText(
+            "origin_a,6.566500,53.219400\norigin_b,6.563600,53.218100"
+        )
+        self.service_area_origins_edit.setMaximumBlockCount(500)
+        origins_layout.addWidget(self.service_area_origins_edit)
+        self.service_area_pick_status_label = QLabel(
+            "Pick On Map appends one origin. Selected point features are transformed into WGS84 automatically."
+        )
+        self.service_area_pick_status_label.setWordWrap(True)
+        origins_layout.addWidget(self.service_area_pick_status_label)
+        origin_button_row = QHBoxLayout()
+        pick_origin_button = QPushButton("Pick On Map")
+        pick_origin_button.clicked.connect(
+            lambda: self.begin_point_pick(PickTarget.SERVICE_AREA_ORIGIN)
+        )
+        add_selected_button = QPushButton("Add Selected Features")
+        add_selected_button.clicked.connect(self.add_service_area_origins_from_selected_features)
+        use_route_start_button = QPushButton("Use Route Start")
+        use_route_start_button.clicked.connect(self.use_route_start_for_service_area)
+        use_route_both_button = QPushButton("Use Route Start + End")
+        use_route_both_button.clicked.connect(self.use_route_points_for_service_area)
+        reuse_last_origins_button = QPushButton("Reuse Last Origins")
+        reuse_last_origins_button.clicked.connect(self.reuse_last_service_area_origins)
+        clear_origins_button = QPushButton("Clear Origins")
+        clear_origins_button.clicked.connect(self.clear_service_area_origins)
+        origin_button_row.addWidget(pick_origin_button)
+        origin_button_row.addWidget(add_selected_button)
+        origin_button_row.addWidget(use_route_start_button)
+        origin_button_row.addWidget(use_route_both_button)
+        origin_button_row.addWidget(reuse_last_origins_button)
+        origin_button_row.addWidget(clear_origins_button)
+        origins_layout.addLayout(origin_button_row)
+        layout.addWidget(origins_group)
+
+        service_area_advanced_toggle = QPushButton("Show Connectivity Controls")
+        service_area_advanced_toggle.setCheckable(True)
+        service_area_advanced_widget = self._build_advanced_controls(
+            "service_area", include_failure_modes=False
+        )
+        service_area_advanced_widget.hide()
+        service_area_advanced_toggle.toggled.connect(service_area_advanced_widget.setVisible)
+        service_area_advanced_toggle.toggled.connect(
+            lambda checked, button=service_area_advanced_toggle: button.setText(
+                "Hide Connectivity Controls"
+                if checked
+                else "Show Connectivity Controls"
+            )
+        )
+        self.service_area_advanced_toggle = service_area_advanced_toggle
+        layout.addWidget(service_area_advanced_toggle)
+        layout.addWidget(service_area_advanced_widget)
+
+        button_row = QHBoxLayout()
+        save_request_button = QPushButton("Save Request")
+        save_request_button.clicked.connect(self.write_service_area_request)
+        reuse_last_thresholds_button = QPushButton("Reuse Last Thresholds")
+        reuse_last_thresholds_button.clicked.connect(self.reuse_last_service_area_thresholds)
+        run_service_area_button = QPushButton("Run Service Area")
+        run_service_area_button.clicked.connect(self.run_service_area)
+        button_row.addWidget(save_request_button)
+        button_row.addWidget(reuse_last_thresholds_button)
+        button_row.addStretch(1)
+        button_row.addWidget(run_service_area_button)
+        layout.addLayout(button_row)
+
+        layout.addStretch(1)
+        return tab
+
     def _build_route_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -269,6 +605,22 @@ class NetanDock(QDockWidget):
             self._line_with_browse(self.route_request_path_edit, browse_dir=False, save_dialog=True),
         )
         layout.addWidget(options_group)
+
+        route_advanced_toggle = QPushButton("Show Advanced Controls")
+        route_advanced_toggle.setCheckable(True)
+        route_advanced_widget = self._build_advanced_controls(
+            "route", include_failure_modes=True
+        )
+        route_advanced_widget.hide()
+        route_advanced_toggle.toggled.connect(route_advanced_widget.setVisible)
+        route_advanced_toggle.toggled.connect(
+            lambda checked, button=route_advanced_toggle: button.setText(
+                "Hide Advanced Controls" if checked else "Show Advanced Controls"
+            )
+        )
+        self.route_advanced_toggle = route_advanced_toggle
+        layout.addWidget(route_advanced_toggle)
+        layout.addWidget(route_advanced_widget)
 
         self.pick_status_label = QLabel("Pick Start or Pick End, then click on the map.")
         self.pick_status_label.setWordWrap(True)
@@ -387,6 +739,23 @@ class NetanDock(QDockWidget):
 
         layout.addWidget(od_group)
         layout.addWidget(matrix_group)
+
+        batch_advanced_toggle = QPushButton("Show Advanced Controls")
+        batch_advanced_toggle.setCheckable(True)
+        batch_advanced_widget = self._build_advanced_controls(
+            "batch", include_failure_modes=True
+        )
+        batch_advanced_widget.hide()
+        batch_advanced_toggle.toggled.connect(batch_advanced_widget.setVisible)
+        batch_advanced_toggle.toggled.connect(
+            lambda checked, button=batch_advanced_toggle: button.setText(
+                "Hide Advanced Controls" if checked else "Show Advanced Controls"
+            )
+        )
+        self.batch_advanced_toggle = batch_advanced_toggle
+        layout.addWidget(batch_advanced_toggle)
+        layout.addWidget(batch_advanced_widget)
+
         layout.addStretch(1)
         return tab
 
@@ -644,8 +1013,14 @@ class NetanDock(QDockWidget):
         if current_tool != self.point_picker_tool:
             self.previous_map_tool = current_tool
         self.iface.mapCanvas().setMapTool(self.point_picker_tool)
-        label = "start" if target == PickTarget.ORIGIN else "end"
-        self.pick_status_label.setText("Click the {} point on the map.".format(label))
+        if target == PickTarget.ORIGIN:
+            self.pick_status_label.setText("Click the start point on the map.")
+        elif target == PickTarget.DESTINATION:
+            self.pick_status_label.setText("Click the end point on the map.")
+        else:
+            self.service_area_pick_status_label.setText(
+                "Click one service-area origin on the map."
+            )
 
     def ensure_point_picker_tool(self):
         if self.point_picker_tool is not None:
@@ -674,10 +1049,20 @@ class NetanDock(QDockWidget):
             lat=wgs84_point.y(),
             point_id=self.default_point_id(self.pick_target),
         )
-        label = "start" if self.pick_target == PickTarget.ORIGIN else "end"
-        self.pick_status_label.setText(
-            "Set the {} point from the map canvas.".format(label)
-        )
+        if self.pick_target == PickTarget.SERVICE_AREA_ORIGIN:
+            self.append_service_area_origin(
+                self.default_point_id(self.pick_target),
+                wgs84_point.x(),
+                wgs84_point.y(),
+            )
+            self.service_area_pick_status_label.setText(
+                "Added one service-area origin from the map canvas."
+            )
+        else:
+            label = "start" if self.pick_target == PickTarget.ORIGIN else "end"
+            self.pick_status_label.setText(
+                "Set the {} point from the map canvas.".format(label)
+            )
         self.finish_point_pick()
 
     def finish_point_pick(self):
@@ -752,10 +1137,21 @@ class NetanDock(QDockWidget):
         if target == PickTarget.ORIGIN:
             existing = self.origin_id_edit.text().strip()
             return existing or "origin"
+        if target == PickTarget.SERVICE_AREA_ORIGIN:
+            count = len(
+                [
+                    line
+                    for line in self.service_area_origins_edit.toPlainText().splitlines()
+                    if line.strip()
+                ]
+            )
+            return "origin_{:03d}".format(count + 1)
         existing = self.destination_id_edit.text().strip()
         return existing or "destination"
 
     def set_route_point(self, target, lon, lat, point_id):
+        if target == PickTarget.SERVICE_AREA_ORIGIN:
+            return
         if target == PickTarget.ORIGIN:
             self.origin_id_edit.setText(point_id)
             self.origin_lon_edit.setText("{:.6f}".format(lon))
@@ -797,6 +1193,143 @@ class NetanDock(QDockWidget):
             widget.clear()
         self.pick_status_label.setText("Pick Start or Pick End, then click on the map.")
         self.update_point_markers()
+
+    def clear_service_area_origins(self):
+        self.service_area_origins_edit.clear()
+        self.service_area_pick_status_label.setText(
+            "Cleared the service-area origin list."
+        )
+
+    def service_area_origin_count(self):
+        return len(self.parse_service_area_origin_lines())
+
+    def parse_service_area_origin_lines(self):
+        origins = []
+        for raw_line in self.service_area_origins_edit.toPlainText().splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            parts = [part.strip() for part in line.split(",")]
+            if len(parts) != 3:
+                raise ValueError(
+                    "Each service-area origin line must be id,lon,lat. Invalid line: {}".format(
+                        raw_line
+                    )
+                )
+            origins.append(parts)
+        return origins
+
+    def append_service_area_origin(self, point_id, lon, lat):
+        lines = self.service_area_origins_edit.toPlainText().splitlines()
+        lines.append("{},{:.6f},{:.6f}".format(point_id, lon, lat))
+        self.service_area_origins_edit.setPlainText("\n".join(line for line in lines if line.strip()))
+
+    def add_service_area_origins_from_selected_features(self):
+        layer = self.iface.activeLayer()
+        if layer is None:
+            self.alert("Select a point layer with one or more selected features first.")
+            return
+        if QgsWkbTypes.geometryType(layer.wkbType()) != QgsWkbTypes.PointGeometry:
+            self.alert("The active layer must be a point layer.")
+            return
+        selected_ids = layer.selectedFeatureIds()
+        if not selected_ids:
+            self.alert("Select one or more point features in the active layer.")
+            return
+
+        try:
+            transform = QgsCoordinateTransform(layer.crs(), self.wgs84, QgsProject.instance())
+            added = 0
+            for feature in layer.getSelectedFeatures():
+                point = self.feature_point(feature)
+                wgs84_point = transform.transform(point)
+                self.append_service_area_origin(
+                    self.feature_label(feature, "origin"),
+                    wgs84_point.x(),
+                    wgs84_point.y(),
+                )
+                added += 1
+        except Exception as exc:
+            self.alert("Failed to append selected service-area origins: {}".format(exc))
+            return
+
+        self.service_area_pick_status_label.setText(
+            "Added {} origin(s) from '{}'.".format(added, layer.name())
+        )
+
+    def use_route_start_for_service_area(self):
+        try:
+            lon = float(self.origin_lon_edit.text().strip())
+            lat = float(self.origin_lat_edit.text().strip())
+        except ValueError:
+            self.alert("Set the route start point first.")
+            return
+        self.append_service_area_origin(
+            self.origin_id_edit.text().strip() or "origin",
+            lon,
+            lat,
+        )
+        self.service_area_pick_status_label.setText(
+            "Appended the current route start as a service-area origin."
+        )
+
+    def use_route_points_for_service_area(self):
+        added = 0
+        for point_id_widget, lon_widget, lat_widget, fallback_id in [
+            (self.origin_id_edit, self.origin_lon_edit, self.origin_lat_edit, "origin"),
+            (
+                self.destination_id_edit,
+                self.destination_lon_edit,
+                self.destination_lat_edit,
+                "destination",
+            ),
+        ]:
+            try:
+                lon = float(lon_widget.text().strip())
+                lat = float(lat_widget.text().strip())
+            except ValueError:
+                continue
+            self.append_service_area_origin(
+                point_id_widget.text().strip() or fallback_id,
+                lon,
+                lat,
+            )
+            added += 1
+
+        if added == 0:
+            self.alert("Set the route start or end point first.")
+            return
+
+        self.service_area_pick_status_label.setText(
+            "Appended {} route point(s) as service-area origins.".format(added)
+        )
+
+    def reuse_last_service_area_origins(self):
+        raw = self.read_setting("service_area_last_origins", "")
+        if not raw.strip():
+            self.alert("No prior service-area origins have been saved yet.")
+            return
+        self.service_area_origins_edit.setPlainText(raw)
+        self.service_area_pick_status_label.setText(
+            "Restored the last saved service-area origins."
+        )
+
+    def reuse_last_service_area_thresholds(self):
+        raw_limits = self.read_setting("service_area_last_thresholds", "")
+        if not raw_limits.strip():
+            self.alert("No prior service-area thresholds have been saved yet.")
+            return
+        self.service_area_thresholds_edit.setText(raw_limits)
+        self.set_combo_by_data(
+            self.service_area_threshold_metric_combo,
+            self.read_setting("service_area_last_threshold_metric", "travel_time_s"),
+        )
+        self.log("Restored the last saved service-area threshold list.")
+
+    def sync_service_area_hull_preset(self):
+        preset = self.service_area_hull_preset_combo.currentData()
+        if preset:
+            self.service_area_hull_aggressiveness_edit.setText(preset)
 
     def update_point_markers(self):
         self.update_point_marker(
@@ -848,6 +1381,226 @@ class NetanDock(QDockWidget):
         marker.setCenter(canvas_point)
         marker.show()
 
+    def parse_optional_float(self, raw_value, label):
+        text = raw_value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError as exc:
+            raise ValueError("{} must be a number".format(label)) from exc
+
+    def parse_optional_int(self, raw_value, label):
+        text = raw_value.strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError as exc:
+            raise ValueError("{} must be an integer".format(label)) from exc
+
+    def build_connectivity_policy(self, prefix):
+        policy = {
+            "disconnected": getattr(self, "{}_connectivity_mode_combo".format(prefix)).currentData()
+            or "strict"
+        }
+        max_hop_distance = self.parse_optional_float(
+            getattr(self, "{}_max_hop_distance_edit".format(prefix)).text(),
+            "Max hop distance",
+        )
+        if max_hop_distance is not None:
+            policy["max_hop_distance_m"] = max_hop_distance
+        if getattr(self, "{}_report_hop_distance_check".format(prefix)).isChecked():
+            policy["report_hop_distance_separately"] = True
+        return policy
+
+    def build_fallback_policy(self, prefix):
+        allow_reverse_oneway = getattr(
+            self, "{}_allow_reverse_oneway_check".format(prefix)
+        ).isChecked()
+        allow_illegal_turn = getattr(
+            self, "{}_allow_illegal_turn_check".format(prefix)
+        ).isChecked()
+        ignore_turn_restrictions = getattr(
+            self, "{}_ignore_turn_restrictions_check".format(prefix)
+        ).isChecked()
+        allow_uturn = getattr(self, "{}_allow_uturn_check".format(prefix)).isChecked()
+        penalties = {}
+        reverse_penalty = self.parse_optional_float(
+            getattr(self, "{}_reverse_penalty_edit".format(prefix)).text(),
+            "Reverse oneway penalty",
+        )
+        illegal_turn_penalty = self.parse_optional_float(
+            getattr(self, "{}_illegal_turn_penalty_edit".format(prefix)).text(),
+            "Illegal turn penalty",
+        )
+        ignored_restriction_penalty = self.parse_optional_float(
+            getattr(self, "{}_ignored_restriction_penalty_edit".format(prefix)).text(),
+            "Ignored restriction penalty",
+        )
+        forbidden_uturn_penalty = self.parse_optional_float(
+            getattr(self, "{}_forbidden_uturn_penalty_edit".format(prefix)).text(),
+            "Forbidden U-turn penalty",
+        )
+        if reverse_penalty is not None:
+            penalties["reverse_oneway_penalty_s"] = reverse_penalty
+        if illegal_turn_penalty is not None:
+            penalties["illegal_turn_penalty_s"] = illegal_turn_penalty
+        if ignored_restriction_penalty is not None:
+            penalties["ignored_turn_restriction_penalty_s"] = ignored_restriction_penalty
+        if forbidden_uturn_penalty is not None:
+            penalties["forbidden_uturn_penalty_s"] = forbidden_uturn_penalty
+
+        policy = {
+            "allow_reverse_oneway": allow_reverse_oneway,
+            "allow_illegal_turn": allow_illegal_turn,
+            "ignore_turn_restrictions": ignore_turn_restrictions,
+            "allow_uturn_where_normally_forbidden": allow_uturn,
+            "auto_relax_unreachable": getattr(
+                self, "{}_auto_relax_unreachable_check".format(prefix)
+            ).isChecked(),
+        }
+        if penalties:
+            policy["penalties"] = penalties
+
+        max_illegal_distance = self.parse_optional_float(
+            getattr(self, "{}_max_illegal_distance_edit".format(prefix)).text(),
+            "Max illegal distance",
+        )
+        if max_illegal_distance is not None:
+            policy["max_illegal_distance_m"] = max_illegal_distance
+
+        max_illegal_turns = self.parse_optional_int(
+            getattr(self, "{}_max_illegal_turns_edit".format(prefix)).text(),
+            "Max illegal turns",
+        )
+        if max_illegal_turns is not None:
+            policy["max_illegal_turns"] = max_illegal_turns
+
+        return policy
+
+    def has_unsafe_failure_modes(self, prefix):
+        policy = self.build_fallback_policy(prefix)
+        return any(
+            policy.get(flag)
+            for flag in [
+                "allow_reverse_oneway",
+                "allow_illegal_turn",
+                "ignore_turn_restrictions",
+                "allow_uturn_where_normally_forbidden",
+                "auto_relax_unreachable",
+            ]
+        )
+
+    def confirm_unsafe_failure_modes(self, prefix, analysis_label):
+        if not self.has_unsafe_failure_modes(prefix):
+            return True
+
+        policy = self.build_fallback_policy(prefix)
+        enabled = []
+        for key, label in [
+            (
+                "auto_relax_unreachable",
+                "auto least-permissive degraded route recovery",
+            ),
+            ("allow_reverse_oneway", "reverse oneway"),
+            ("allow_illegal_turn", "illegal turns"),
+            ("ignore_turn_restrictions", "ignored turn restrictions"),
+            ("allow_uturn_where_normally_forbidden", "forbidden U-turns"),
+        ]:
+            if policy.get(key):
+                enabled.append(label)
+
+        reply = QMessageBox.warning(
+            self,
+            "netan unsafe analysis",
+            "This {} request enables unsafe degraded-routing modes: {}.\n\n"
+            "These options are explicit fallback analysis only. Continue?".format(
+                analysis_label, ", ".join(enabled)
+            ),
+            message_box_button("Yes") | message_box_button("No"),
+            message_box_button("No"),
+        )
+        return reply == message_box_button("Yes")
+
+    def build_service_area_thresholds(self):
+        metric = self.service_area_threshold_metric_combo.currentData() or "travel_time_s"
+        thresholds = []
+        for index, value in enumerate(self.service_area_thresholds_edit.text().split(","), start=1):
+            raw = value.strip()
+            if not raw:
+                continue
+            try:
+                limit = float(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    "Service-area threshold '{}' is not a number".format(raw)
+                ) from exc
+            threshold_id = "{}_{:02d}".format(metric, index)
+            thresholds.append({"id": threshold_id, "limit": limit, "metric": metric})
+
+        if not thresholds:
+            raise ValueError("Enter at least one service-area threshold.")
+        return thresholds
+
+    def build_service_area_origins(self):
+        origins = []
+        for point_id, lon_text, lat_text in self.parse_service_area_origin_lines():
+            try:
+                lon = float(lon_text)
+                lat = float(lat_text)
+            except ValueError as exc:
+                raise ValueError(
+                    "Service-area origin '{}' has invalid lon/lat values".format(point_id)
+                ) from exc
+            origins.append({"id": point_id, "lon": lon, "lat": lat})
+
+        if not origins:
+            raise ValueError("Enter at least one service-area origin.")
+        return origins
+
+    def build_service_area_request(self):
+        output_mode = self.service_area_output_mode_combo.currentData() or "both"
+        request = {
+            "analysis_id": self.service_area_analysis_id_edit.text().strip()
+            or "qgis_service_area",
+            "origins": self.build_service_area_origins(),
+            "thresholds": self.build_service_area_thresholds(),
+            "snap": {
+                "max_distance_m": float(self.service_area_snap_distance_edit.text().strip())
+            },
+            "connectivity": self.build_connectivity_policy("service_area"),
+            "fallback": {
+                "allow_reverse_oneway": False,
+                "allow_illegal_turn": False,
+                "ignore_turn_restrictions": False,
+                "allow_uturn_where_normally_forbidden": False,
+            },
+            "output_mode": output_mode,
+            "band_mode": self.service_area_band_mode_combo.currentData() or "cumulative",
+            "boundary_mode": self.service_area_boundary_mode_combo.currentData() or "overlap",
+            "multi_origin_mode": self.service_area_multi_origin_mode_combo.currentData()
+            or "merge",
+            "polygon": {
+                "hull_aggressiveness": float(
+                    self.service_area_hull_aggressiveness_edit.text().strip() or "1.0"
+                )
+            },
+            "returns": {
+                "geometry": True,
+                "attributes": True,
+                "per_threshold_summary": True,
+                "diagnostics": True,
+            },
+        }
+        simplification_tolerance = self.parse_optional_float(
+            self.service_area_simplification_edit.text(),
+            "Service-area simplification tolerance",
+        )
+        if simplification_tolerance is not None:
+            request["polygon"]["simplification_tolerance_m"] = simplification_tolerance
+        return request
+
     def build_route_request(self):
         route_id = self.route_id_edit.text().strip() or "qgis_route"
         return {
@@ -863,6 +1616,8 @@ class NetanDock(QDockWidget):
                 "lat": float(self.destination_lat_edit.text().strip()),
             },
             "snap": {"max_distance_m": float(self.snap_distance_edit.text().strip())},
+            "connectivity": self.build_connectivity_policy("route"),
+            "fallback": self.build_fallback_policy("route"),
             "returns": {
                 "geometry": "full",
                 "segment_rows": True,
@@ -895,6 +1650,14 @@ class NetanDock(QDockWidget):
         except ValueError as exc:
             self.alert("Invalid route request values: {}".format(exc))
             return
+        try:
+            allowed = self.confirm_unsafe_failure_modes("route", "route")
+        except ValueError as exc:
+            self.alert("Invalid route advanced options: {}".format(exc))
+            return
+        if not allowed:
+            self.log("Cancelled the route request before sending unsafe fallback options.")
+            return
 
         profile_id = self.selected_profile_id()
         if profile_id:
@@ -917,8 +1680,18 @@ class NetanDock(QDockWidget):
             document = self.load_od_document(
                 self.resolve_local_path(self.od_pairs_path_edit.text())
             )
+            document["connectivity"] = self.build_connectivity_policy("batch")
+            document["fallback"] = self.build_fallback_policy("batch")
         except Exception as exc:
             self.alert("Failed to load OD input: {}".format(exc))
+            return
+        try:
+            allowed = self.confirm_unsafe_failure_modes("batch", "OD")
+        except ValueError as exc:
+            self.alert("Invalid batch advanced options: {}".format(exc))
+            return
+        if not allowed:
+            self.log("Cancelled the OD request before sending unsafe fallback options.")
             return
 
         payload = {"request": document}
@@ -954,8 +1727,22 @@ class NetanDock(QDockWidget):
                 self.matrix_destinations_selected_only_check,
                 self.matrix_destinations_path_edit,
             )
+            connectivity = self.build_connectivity_policy("batch")
+            fallback = self.build_fallback_policy("batch")
         except Exception as exc:
             self.alert("Failed to load matrix input: {}".format(exc))
+            return
+        origins["connectivity"] = connectivity
+        origins["fallback"] = fallback
+        destinations["connectivity"] = connectivity
+        destinations["fallback"] = fallback
+        try:
+            allowed = self.confirm_unsafe_failure_modes("batch", "matrix")
+        except ValueError as exc:
+            self.alert("Invalid batch advanced options: {}".format(exc))
+            return
+        if not allowed:
+            self.log("Cancelled the matrix request before sending unsafe fallback options.")
             return
 
         payload = {"request": {"origins": origins, "destinations": destinations}}
@@ -971,6 +1758,66 @@ class NetanDock(QDockWidget):
             layer_name="netan_matrix",
             analysis_kind="matrix",
         )
+
+    def write_service_area_request(self):
+        try:
+            request = self.build_service_area_request()
+        except ValueError as exc:
+            self.alert("Invalid service-area request values: {}".format(exc))
+            return
+
+        request_path = self.resolve_local_path(self.service_area_request_path_edit.text())
+        request_path.parent.mkdir(parents=True, exist_ok=True)
+        request_path.write_text(json.dumps(request, indent=2), encoding="utf-8")
+        self.log("Wrote service-area request to {}".format(request_path))
+        self.remember_service_area_request(request)
+        self.save_settings()
+
+    def run_service_area(self):
+        if self.service_info is None:
+            self.alert("Refresh the API service first.")
+            return
+        try:
+            request = self.build_service_area_request()
+        except ValueError as exc:
+            self.alert("Invalid service-area request values: {}".format(exc))
+            return
+
+        payload = {"request": request}
+        profile_id = self.selected_profile_id()
+        if profile_id:
+            payload["profile_id"] = profile_id
+
+        self.remember_service_area_request(request)
+        self.save_settings()
+        self.execute_api_request(
+            endpoint="/v1/service-area",
+            payload=payload,
+            output_path=self.service_area_output_path_edit.text(),
+            layer_name=request["analysis_id"] or "netan_service_area",
+            analysis_kind="service_area",
+        )
+
+    def remember_service_area_request(self, request):
+        settings = QSettings()
+        origin_lines = [
+            "{id},{lon:.6f},{lat:.6f}".format(**origin) for origin in request.get("origins", [])
+        ]
+        threshold_limits = ",".join(
+            "{:.6f}".format(threshold["limit"]).rstrip("0").rstrip(".")
+            for threshold in request.get("thresholds", [])
+        )
+        settings.setValue(
+            "{}/service_area_last_origins".format(SETTINGS_PREFIX), "\n".join(origin_lines)
+        )
+        settings.setValue(
+            "{}/service_area_last_thresholds".format(SETTINGS_PREFIX), threshold_limits
+        )
+        if request.get("thresholds"):
+            settings.setValue(
+                "{}/service_area_last_threshold_metric".format(SETTINGS_PREFIX),
+                request["thresholds"][0].get("metric", "travel_time_s"),
+            )
 
     def load_matrix_source(
         self, mode_combo, layer_combo, id_field_combo, selected_only_check, path_edit
@@ -1073,7 +1920,28 @@ class NetanDock(QDockWidget):
         self.log("Saved API response to {}".format(saved_path))
 
         if "geo+json" in content_type or saved_path.suffix.lower() == ".geojson":
-            self.load_output_layer(saved_path, layer_name)
+            try:
+                geojson = json.loads(body.decode("utf-8"))
+            except Exception as exc:
+                self.log(
+                    "Failed to parse GeoJSON response for logging; loading the raw layer instead: {}".format(
+                        exc
+                    ),
+                    Qgis.Warning,
+                )
+                loaded_layer = self.load_output_layer(saved_path, layer_name)
+                if loaded_layer is not None:
+                    self.set_last_output_layers([loaded_layer])
+                return
+
+            self.log_geojson_messages(analysis_kind, geojson)
+            if analysis_kind == "service_area":
+                self.load_service_area_layers(geojson, layer_name)
+                return
+
+            loaded_layer = self.load_output_layer(saved_path, layer_name)
+            if loaded_layer is not None:
+                self.set_last_output_layers([loaded_layer])
             return
 
         try:
@@ -1081,6 +1949,8 @@ class NetanDock(QDockWidget):
         except Exception as exc:
             self.alert("Failed to parse API JSON response: {}".format(exc))
             return
+
+        self.log_analysis_messages(analysis_kind, response_json)
 
         geojson = self.analysis_json_to_geojson(analysis_kind, response_json)
         if geojson is None:
@@ -1090,8 +1960,14 @@ class NetanDock(QDockWidget):
             )
             return
 
+        if analysis_kind == "service_area":
+            self.load_service_area_layers(geojson, layer_name)
+            return
+
         temp_path = self.write_temp_geojson(layer_name, geojson)
-        self.load_output_layer(temp_path, layer_name)
+        loaded_layer = self.load_output_layer(temp_path, layer_name)
+        if loaded_layer is not None:
+            self.set_last_output_layers([loaded_layer])
 
     def load_od_document(self, path):
         suffix = path.suffix.lower()
@@ -1232,6 +2108,19 @@ class NetanDock(QDockWidget):
             try:
                 parsed = json.loads(error_body)
                 message = parsed.get("error") or error_body
+                diagnostics = parsed.get("diagnostics") or []
+                if diagnostics:
+                    detail_lines = []
+                    for diagnostic in diagnostics:
+                        detail_lines.append(
+                            "{}: {}".format(
+                                diagnostic.get("code", "diagnostic"),
+                                diagnostic.get("message", ""),
+                            ).strip()
+                        )
+                        for action in diagnostic.get("suggested_actions") or []:
+                            detail_lines.append("next: {}".format(action))
+                    message = "{}\n{}".format(message, "\n".join(detail_lines))
             except Exception:
                 message = error_body or str(exc)
             raise RuntimeError(message)
@@ -1267,6 +2156,8 @@ class NetanDock(QDockWidget):
                             "profile_id": service.get("profile_id"),
                             "profile_hash": service.get("profile_hash"),
                             "route_id": result.get("route_id"),
+                            "outcome": result.get("outcome"),
+                            "fallback_used": result.get("fallback_used"),
                             "total_distance_m": result.get("summary", {}).get("total_distance_m"),
                             "total_travel_time_s": result.get("summary", {}).get(
                                 "total_travel_time_s"
@@ -1277,15 +2168,69 @@ class NetanDock(QDockWidget):
                             "segment_count": result.get("summary", {}).get("segment_count"),
                             "origin_point_id": result.get("origin", {}).get("point_id"),
                             "destination_point_id": result.get("destination", {}).get("point_id"),
+                            "origin_component_id": result.get("origin", {}).get("component_id"),
+                            "destination_component_id": result.get("destination", {}).get(
+                                "component_id"
+                            ),
                             "origin_snap_distance_m": result.get("origin", {}).get(
                                 "snap_distance_m"
                             ),
                             "destination_snap_distance_m": result.get("destination", {}).get(
                                 "snap_distance_m"
                             ),
+                            "origin_hop_distance_m": result.get("origin_hop_distance_m"),
+                            "destination_hop_distance_m": result.get(
+                                "destination_hop_distance_m"
+                            ),
                         },
                     }
                 ],
+            }
+
+        if analysis_kind == "service_area":
+            features = []
+            for feature in result.get("features") or []:
+                features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": feature.get("geometry"),
+                        "properties": {
+                            "dataset_id": service.get("dataset_id"),
+                            "profile_id": service.get("profile_id"),
+                            "profile_hash": service.get("profile_hash"),
+                            "analysis_id": result.get("analysis_id"),
+                            "origin_id": feature.get("origin_id"),
+                            "threshold_id": feature.get("threshold_id"),
+                            "band_start_limit": feature.get("band_start_limit"),
+                            "threshold_limit": feature.get("threshold_limit"),
+                            "threshold_metric": feature.get("threshold_metric"),
+                            "geometry_type": feature.get("geometry_type"),
+                            "fallback_used": feature.get("fallback_used"),
+                            "origin_component_id": feature.get("origin_component_id"),
+                            "origin_hop_distance_m": feature.get("origin_hop_distance_m"),
+                            "reachable_network_length_m": feature.get(
+                                "reachable_network_length_m"
+                            ),
+                            "reachable_edge_count": feature.get("reachable_edge_count"),
+                        },
+                    }
+                )
+            return {
+                "type": "FeatureCollection",
+                "features": features,
+                "metadata": {
+                    "dataset_id": service.get("dataset_id"),
+                    "profile_id": service.get("profile_id"),
+                    "profile_hash": service.get("profile_hash"),
+                    "analysis_id": result.get("analysis_id"),
+                    "outcome": result.get("outcome"),
+                    "origin_count": result.get("origin_count"),
+                    "processed_origin_count": result.get("processed_origin_count"),
+                    "skipped_origin_count": result.get("skipped_origin_count"),
+                    "fallback_origin_count": result.get("fallback_origin_count"),
+                    "threshold_count": result.get("threshold_count"),
+                    "warnings": result.get("warnings") or [],
+                },
             }
 
         items = result.get("pairs") if analysis_kind == "od" else result.get("cells")
@@ -1306,6 +2251,12 @@ class NetanDock(QDockWidget):
                         "origin_id": item.get("origin_id"),
                         "destination_id": item.get("destination_id"),
                         "status": item.get("status"),
+                        "outcome": item.get("outcome"),
+                        "fallback_used": item.get("fallback_used"),
+                        "origin_component_id": item.get("origin_component_id"),
+                        "destination_component_id": item.get("destination_component_id"),
+                        "origin_hop_distance_m": item.get("origin_hop_distance_m"),
+                        "destination_hop_distance_m": item.get("destination_hop_distance_m"),
                         "origin_snap_distance_m": item.get("origin_snap_distance_m"),
                         "destination_snap_distance_m": item.get("destination_snap_distance_m"),
                         "total_distance_m": item.get("total_distance_m"),
@@ -1336,15 +2287,322 @@ class NetanDock(QDockWidget):
         layer = QgsVectorLayer(str(output_path), display_name, "ogr")
         if not layer.isValid():
             self.log("Failed to load layer {}".format(output_path), Qgis.Warning)
-            return
+            return None
         QgsProject.instance().addMapLayer(layer)
         self.log("Loaded layer {}".format(output_path))
+        return layer
+
+    def load_service_area_layers(self, geojson, layer_name):
+        features = geojson.get("features") or []
+        if not features:
+            self.log("Service-area response had no spatial features to load.", Qgis.Warning)
+            return
+
+        metadata = geojson.get("metadata") or {}
+        analysis_id = metadata.get("analysis_id") or layer_name or "netan_service_area"
+        root = QgsProject.instance().layerTreeRoot()
+        existing_group = root.findGroup(analysis_id)
+        if existing_group is not None:
+            for tree_layer in existing_group.findLayers():
+                QgsProject.instance().removeMapLayer(tree_layer.layerId())
+            root.removeChildNode(existing_group)
+        group = root.addGroup(analysis_id)
+
+        grouped = {}
+        threshold_order = []
+        for feature in features:
+            properties = feature.get("properties") or {}
+            geometry_type = properties.get("geometry_type") or "unknown"
+            threshold_key = self.service_area_threshold_label(properties)
+            key = (threshold_key, geometry_type)
+            if key not in grouped:
+                grouped[key] = []
+                threshold_order.append(key)
+            grouped[key].append(feature)
+
+        loaded_layers = []
+        for threshold_index, key in enumerate(threshold_order):
+            threshold_label, geometry_type = key
+            sublayer_name = "{} {}".format(geometry_type, threshold_label).strip()
+            temp_geojson = {"type": "FeatureCollection", "features": grouped[key]}
+            temp_path = self.write_temp_geojson(
+                "{}_{}".format(analysis_id, sublayer_name.replace(" ", "_")),
+                temp_geojson,
+            )
+            layer = QgsVectorLayer(str(temp_path), sublayer_name, "ogr")
+            if not layer.isValid():
+                self.log("Failed to load layer {}".format(temp_path), Qgis.Warning)
+                continue
+            self.apply_service_area_style(layer, grouped[key], geometry_type, threshold_index)
+            QgsProject.instance().addMapLayer(layer, False)
+            group.addLayer(layer)
+            loaded_layers.append(layer)
+            self.log(
+                "Loaded service-area layer '{}' with {} feature(s).".format(
+                    sublayer_name, len(grouped[key])
+                )
+            )
+
+        if loaded_layers:
+            self.set_last_output_layers(loaded_layers)
+
+    def service_area_threshold_label(self, properties):
+        threshold_id = properties.get("threshold_id")
+        if threshold_id:
+            return str(threshold_id)
+        threshold_limit = properties.get("threshold_limit")
+        metric = properties.get("threshold_metric") or "threshold"
+        if threshold_limit is None:
+            return str(metric)
+        band_start = properties.get("band_start_limit")
+        if band_start is not None:
+            return "{} {}-{}".format(metric, band_start, threshold_limit)
+        return "{} {}".format(metric, threshold_limit)
+
+    def apply_service_area_style(self, layer, features, geometry_type, threshold_index):
+        base_colors = [
+            "#0b6e4f",
+            "#137547",
+            "#1d6fa5",
+            "#9f4f0f",
+            "#9a275a",
+            "#6358d5",
+        ]
+        base_color = base_colors[threshold_index % len(base_colors)]
+        multiple_origins = sorted(
+            {
+                str((feature.get("properties") or {}).get("origin_id"))
+                for feature in features
+                if (feature.get("properties") or {}).get("origin_id") not in [None, ""]
+            }
+        )
+        ring_band = any(
+            (feature.get("properties") or {}).get("band_start_limit") is not None
+            for feature in features
+        )
+
+        if len(multiple_origins) > 1:
+            categories = []
+            for origin_index, origin_id in enumerate(multiple_origins):
+                color = base_colors[(threshold_index + origin_index) % len(base_colors)]
+                if geometry_type == "network":
+                    symbol = QgsLineSymbol.createSimple(
+                        {
+                            "line_color": color,
+                            "line_width": "0.9",
+                            "line_style": "dash" if ring_band else "solid",
+                        }
+                    )
+                else:
+                    symbol = QgsFillSymbol.createSimple(
+                        {
+                            "color": color,
+                            "outline_color": color,
+                            "outline_style": "dash" if ring_band else "solid",
+                            "outline_width": "0.7",
+                        }
+                    )
+                categories.append(QgsRendererCategory(origin_id, symbol, origin_id))
+            renderer = QgsCategorizedSymbolRenderer("origin_id", categories)
+            layer.setRenderer(renderer)
+        else:
+            if geometry_type == "network":
+                symbol = QgsLineSymbol.createSimple(
+                    {
+                        "line_color": base_color,
+                        "line_width": "1.1",
+                        "line_style": "dash" if ring_band else "solid",
+                    }
+                )
+            else:
+                symbol = QgsFillSymbol.createSimple(
+                    {
+                        "color": base_color,
+                        "outline_color": base_color,
+                        "outline_style": "dash" if ring_band else "solid",
+                        "outline_width": "0.7",
+                    }
+                )
+            layer.renderer().setSymbol(symbol)
+        layer.triggerRepaint()
+
+    def log_analysis_messages(self, analysis_kind, response_json):
+        result = response_json.get("result") or {}
+        warnings = result.get("warnings") or []
+        for warning in warnings:
+            self.log("{} warning: {}".format(analysis_kind, warning), Qgis.Warning)
+
+        diagnostics = result.get("diagnostics") or []
+        for diagnostic in diagnostics:
+            level = Qgis.Warning
+            if diagnostic.get("severity") == "error":
+                level = Qgis.Critical
+            self.log(
+                "{} diagnostic [{}]: {}".format(
+                    analysis_kind,
+                    diagnostic.get("code", "diagnostic"),
+                    diagnostic.get("message", ""),
+                ),
+                level,
+            )
+            for action in diagnostic.get("suggested_actions") or []:
+                self.log(
+                    "{} next action: {}".format(analysis_kind, action),
+                    Qgis.Warning,
+                )
+
+        if analysis_kind == "route":
+            self.log(
+                "route outcome={} fallback_used={} violations={}.".format(
+                    result.get("outcome", "unknown"),
+                    result.get("fallback_used", False),
+                    len(result.get("violations") or []),
+                )
+            )
+            violations = result.get("violations") or []
+            for violation in violations:
+                self.log(
+                    "route violation [{}]: penalty_s={}".format(
+                        violation.get("violation_type", "unknown"),
+                        violation.get("penalty_s", 0.0),
+                    ),
+                    Qgis.Warning,
+                )
+            return
+
+        if analysis_kind == "service_area":
+            self.log(
+                "service_area outcome={} processed_origins={} skipped_origins={} fallback_origins={} features={}.".format(
+                    result.get("outcome", "unknown"),
+                    result.get("processed_origin_count", 0),
+                    result.get("skipped_origin_count", 0),
+                    result.get("fallback_origin_count", 0),
+                    len(result.get("features") or []),
+                )
+            )
+            return
+
+        items = result.get("pairs") if analysis_kind == "od" else result.get("cells")
+        if not isinstance(items, list):
+            return
+        counts = {}
+        outcomes = {}
+        fallback_count = 0
+        for item in items:
+            status = item.get("status", "unknown")
+            counts[status] = counts.get(status, 0) + 1
+            outcome = item.get("outcome", "unknown")
+            outcomes[outcome] = outcomes.get(outcome, 0) + 1
+            if item.get("fallback_used"):
+                fallback_count += 1
+        self.log(
+            "{} summary: statuses={} outcomes={} fallback_items={}.".format(
+                analysis_kind, counts, outcomes, fallback_count
+            )
+        )
+        for item in items:
+            item_diagnostics = item.get("diagnostics") or []
+            if item_diagnostics:
+                item_id = item.get("pair_id") or "{}->{}".format(
+                    item.get("origin_id", "?"), item.get("destination_id", "?")
+                )
+                for diagnostic in item_diagnostics:
+                    level = Qgis.Warning
+                    if diagnostic.get("severity") == "error":
+                        level = Qgis.Critical
+                    self.log(
+                        "{} item {} diagnostic [{}]: {}".format(
+                            analysis_kind,
+                            item_id,
+                            diagnostic.get("code", "diagnostic"),
+                            diagnostic.get("message", ""),
+                        ),
+                        level,
+                    )
+                    for action in diagnostic.get("suggested_actions") or []:
+                        self.log(
+                            "{} item {} next action: {}".format(
+                                analysis_kind,
+                                item_id,
+                                action,
+                            ),
+                            Qgis.Warning,
+                        )
+
+    def log_geojson_messages(self, analysis_kind, geojson):
+        metadata = geojson.get("metadata") or {}
+        warnings = metadata.get("warnings") or []
+        for warning in warnings:
+            self.log("{} warning: {}".format(analysis_kind, warning), Qgis.Warning)
+        features = geojson.get("features") or []
+        if analysis_kind == "route" and features:
+            properties = features[0].get("properties") or {}
+            self.log(
+                "route outcome={} fallback_used={} violations={}.".format(
+                    properties.get("outcome", "unknown"),
+                    properties.get("fallback_used", False),
+                    properties.get("violation_count", 0),
+                )
+            )
+        elif analysis_kind in ["od", "matrix"] and features:
+            status_counts = {}
+            outcome_counts = {}
+            fallback_count = 0
+            for feature in features:
+                properties = feature.get("properties") or {}
+                status = properties.get("status", "unknown")
+                outcome = properties.get("outcome", "unknown")
+                status_counts[status] = status_counts.get(status, 0) + 1
+                outcome_counts[outcome] = outcome_counts.get(outcome, 0) + 1
+                if properties.get("fallback_used"):
+                    fallback_count += 1
+            self.log(
+                "{} summary: statuses={} outcomes={} fallback_items={}.".format(
+                    analysis_kind, status_counts, outcome_counts, fallback_count
+                )
+            )
+        if metadata:
+            summary = ", ".join(
+                "{}={}".format(key, value)
+                for key, value in metadata.items()
+                if key not in ["warnings"] and value not in [None, "", []]
+            )
+            if summary:
+                self.log("{} summary: {}.".format(analysis_kind, summary))
 
     def remove_existing_result_layer(self, layer_name):
         project = QgsProject.instance()
         for layer in list(project.mapLayers().values()):
             if layer.name() == layer_name:
                 project.removeMapLayer(layer.id())
+
+    def set_last_output_layers(self, layers):
+        self.last_output_layer_ids = [layer.id() for layer in layers if layer is not None]
+
+    def zoom_to_last_output(self):
+        if not self.last_output_layer_ids:
+            self.alert("No output layers have been loaded in this session yet.")
+            return
+        layers = []
+        for layer_id in self.last_output_layer_ids:
+            layer = QgsProject.instance().mapLayer(layer_id)
+            if layer is not None:
+                layers.append(layer)
+        if not layers:
+            self.alert("The last output layers are no longer available in the project.")
+            return
+        self.iface.mapCanvas().setExtent(self.combined_extent(layers))
+        self.iface.mapCanvas().refresh()
+
+    def combined_extent(self, layers):
+        extent = None
+        for layer in layers:
+            layer_extent = layer.extent()
+            if extent is None:
+                extent = layer_extent
+            else:
+                extent.combineExtentWith(layer_extent)
+        return extent
 
     def log(self, message, level=Qgis.Info):
         QgsMessageLog.logMessage(message, "netan", level)
@@ -1365,6 +2623,118 @@ class NetanDock(QDockWidget):
         self.save_settings()
         self.cleanup()
         super().closeEvent(event)
+
+    def save_advanced_settings(self, settings, prefix, include_failure_modes):
+        values = {
+            "{}_advanced_visible".format(prefix): getattr(
+                self, "{}_advanced_toggle".format(prefix)
+            ).isChecked(),
+            "{}_connectivity_mode".format(prefix): getattr(
+                self, "{}_connectivity_mode_combo".format(prefix)
+            ).currentData(),
+            "{}_max_hop_distance".format(prefix): getattr(
+                self, "{}_max_hop_distance_edit".format(prefix)
+            ).text().strip(),
+            "{}_report_hop_distance".format(prefix): getattr(
+                self, "{}_report_hop_distance_check".format(prefix)
+            ).isChecked(),
+        }
+        if include_failure_modes:
+            values.update(
+                {
+                    "{}_unsafe_visible".format(prefix): getattr(
+                        self, "{}_unsafe_toggle".format(prefix)
+                    ).isChecked(),
+                    "{}_auto_relax_unreachable".format(prefix): getattr(
+                        self, "{}_auto_relax_unreachable_check".format(prefix)
+                    ).isChecked(),
+                    "{}_allow_reverse_oneway".format(prefix): getattr(
+                        self, "{}_allow_reverse_oneway_check".format(prefix)
+                    ).isChecked(),
+                    "{}_allow_illegal_turn".format(prefix): getattr(
+                        self, "{}_allow_illegal_turn_check".format(prefix)
+                    ).isChecked(),
+                    "{}_ignore_turn_restrictions".format(prefix): getattr(
+                        self, "{}_ignore_turn_restrictions_check".format(prefix)
+                    ).isChecked(),
+                    "{}_allow_uturn".format(prefix): getattr(
+                        self, "{}_allow_uturn_check".format(prefix)
+                    ).isChecked(),
+                    "{}_reverse_penalty".format(prefix): getattr(
+                        self, "{}_reverse_penalty_edit".format(prefix)
+                    ).text().strip(),
+                    "{}_illegal_turn_penalty".format(prefix): getattr(
+                        self, "{}_illegal_turn_penalty_edit".format(prefix)
+                    ).text().strip(),
+                    "{}_ignored_restriction_penalty".format(prefix): getattr(
+                        self, "{}_ignored_restriction_penalty_edit".format(prefix)
+                    ).text().strip(),
+                    "{}_forbidden_uturn_penalty".format(prefix): getattr(
+                        self, "{}_forbidden_uturn_penalty_edit".format(prefix)
+                    ).text().strip(),
+                    "{}_max_illegal_distance".format(prefix): getattr(
+                        self, "{}_max_illegal_distance_edit".format(prefix)
+                    ).text().strip(),
+                    "{}_max_illegal_turns".format(prefix): getattr(
+                        self, "{}_max_illegal_turns_edit".format(prefix)
+                    ).text().strip(),
+                }
+            )
+        for key, value in values.items():
+            settings.setValue("{}/{}".format(SETTINGS_PREFIX, key), value)
+
+    def load_advanced_settings(self, prefix, include_failure_modes):
+        self.set_combo_by_data(
+            getattr(self, "{}_connectivity_mode_combo".format(prefix)),
+            self.read_setting("{}_connectivity_mode".format(prefix), "strict"),
+        )
+        getattr(self, "{}_max_hop_distance_edit".format(prefix)).setText(
+            self.read_setting("{}_max_hop_distance".format(prefix), "")
+        )
+        getattr(self, "{}_report_hop_distance_check".format(prefix)).setChecked(
+            self.read_bool_setting("{}_report_hop_distance".format(prefix), False)
+        )
+        getattr(self, "{}_advanced_toggle".format(prefix)).setChecked(
+            self.read_bool_setting("{}_advanced_visible".format(prefix), False)
+        )
+
+        if include_failure_modes:
+            getattr(self, "{}_auto_relax_unreachable_check".format(prefix)).setChecked(
+                self.read_bool_setting("{}_auto_relax_unreachable".format(prefix), False)
+            )
+            getattr(self, "{}_allow_reverse_oneway_check".format(prefix)).setChecked(
+                self.read_bool_setting("{}_allow_reverse_oneway".format(prefix), False)
+            )
+            getattr(self, "{}_allow_illegal_turn_check".format(prefix)).setChecked(
+                self.read_bool_setting("{}_allow_illegal_turn".format(prefix), False)
+            )
+            getattr(self, "{}_ignore_turn_restrictions_check".format(prefix)).setChecked(
+                self.read_bool_setting("{}_ignore_turn_restrictions".format(prefix), False)
+            )
+            getattr(self, "{}_allow_uturn_check".format(prefix)).setChecked(
+                self.read_bool_setting("{}_allow_uturn".format(prefix), False)
+            )
+            getattr(self, "{}_reverse_penalty_edit".format(prefix)).setText(
+                self.read_setting("{}_reverse_penalty".format(prefix), "")
+            )
+            getattr(self, "{}_illegal_turn_penalty_edit".format(prefix)).setText(
+                self.read_setting("{}_illegal_turn_penalty".format(prefix), "")
+            )
+            getattr(
+                self, "{}_ignored_restriction_penalty_edit".format(prefix)
+            ).setText(self.read_setting("{}_ignored_restriction_penalty".format(prefix), ""))
+            getattr(self, "{}_forbidden_uturn_penalty_edit".format(prefix)).setText(
+                self.read_setting("{}_forbidden_uturn_penalty".format(prefix), "")
+            )
+            getattr(self, "{}_max_illegal_distance_edit".format(prefix)).setText(
+                self.read_setting("{}_max_illegal_distance".format(prefix), "")
+            )
+            getattr(self, "{}_max_illegal_turns_edit".format(prefix)).setText(
+                self.read_setting("{}_max_illegal_turns".format(prefix), "")
+            )
+            getattr(self, "{}_unsafe_toggle".format(prefix)).setChecked(
+                self.read_bool_setting("{}_unsafe_visible".format(prefix), False)
+            )
 
     def save_settings(self):
         settings = QSettings()
@@ -1395,9 +2765,27 @@ class NetanDock(QDockWidget):
             "matrix_destinations_path": self.matrix_destinations_path_edit.text().strip(),
             "matrix_destinations_id_field": self.matrix_destinations_id_field_combo.currentText().strip(),
             "matrix_destinations_selected_only": self.matrix_destinations_selected_only_check.isChecked(),
+            "service_area_analysis_id": self.service_area_analysis_id_edit.text().strip(),
+            "service_area_snap_distance": self.service_area_snap_distance_edit.text().strip(),
+            "service_area_output_path": self.service_area_output_path_edit.text().strip(),
+            "service_area_request_path": self.service_area_request_path_edit.text().strip(),
+            "service_area_output_mode": self.service_area_output_mode_combo.currentData(),
+            "service_area_band_mode": self.service_area_band_mode_combo.currentData(),
+            "service_area_boundary_mode": self.service_area_boundary_mode_combo.currentData(),
+            "service_area_multi_origin_mode": self.service_area_multi_origin_mode_combo.currentData(),
+            "service_area_thresholds": self.service_area_thresholds_edit.text().strip(),
+            "service_area_threshold_metric": self.service_area_threshold_metric_combo.currentData(),
+            "service_area_hull_preset": self.service_area_hull_preset_combo.currentData(),
+            "service_area_hull_aggressiveness": self.service_area_hull_aggressiveness_edit.text().strip(),
+            "service_area_simplification": self.service_area_simplification_edit.text().strip(),
+            "service_area_origins": self.service_area_origins_edit.toPlainText().strip(),
         }
         for key, value in values.items():
             settings.setValue("{}/{}".format(SETTINGS_PREFIX, key), value)
+
+        self.save_advanced_settings(settings, "route", include_failure_modes=True)
+        self.save_advanced_settings(settings, "batch", include_failure_modes=True)
+        self.save_advanced_settings(settings, "service_area", include_failure_modes=False)
 
         if self.matrix_origins_layer_combo.currentLayer() is not None:
             settings.setValue(
@@ -1453,6 +2841,45 @@ class NetanDock(QDockWidget):
         self.matrix_output_path_edit.setText(
             self.read_setting("matrix_output_path", self.matrix_output_path_edit.text())
         )
+        self.service_area_analysis_id_edit.setText(
+            self.read_setting(
+                "service_area_analysis_id", self.service_area_analysis_id_edit.text()
+            )
+        )
+        self.service_area_snap_distance_edit.setText(
+            self.read_setting(
+                "service_area_snap_distance", self.service_area_snap_distance_edit.text()
+            )
+        )
+        self.service_area_output_path_edit.setText(
+            self.read_setting(
+                "service_area_output_path", self.service_area_output_path_edit.text()
+            )
+        )
+        self.service_area_request_path_edit.setText(
+            self.read_setting(
+                "service_area_request_path", self.service_area_request_path_edit.text()
+            )
+        )
+        self.service_area_thresholds_edit.setText(
+            self.read_setting(
+                "service_area_thresholds", self.service_area_thresholds_edit.text()
+            )
+        )
+        self.service_area_hull_aggressiveness_edit.setText(
+            self.read_setting(
+                "service_area_hull_aggressiveness",
+                self.service_area_hull_aggressiveness_edit.text(),
+            )
+        )
+        self.service_area_simplification_edit.setText(
+            self.read_setting(
+                "service_area_simplification", self.service_area_simplification_edit.text()
+            )
+        )
+        self.service_area_origins_edit.setPlainText(
+            self.read_setting("service_area_origins", self.service_area_origins_edit.toPlainText())
+        )
         self.matrix_origins_path_edit.setText(
             self.read_setting("matrix_origins_path", self.matrix_origins_path_edit.text())
         )
@@ -1474,6 +2901,36 @@ class NetanDock(QDockWidget):
         self.set_combo_by_data(
             self.matrix_destinations_mode_combo,
             self.read_setting("matrix_destinations_mode", MatrixSourceMode.LAYER),
+        )
+        self.set_combo_by_data(
+            self.service_area_output_mode_combo,
+            self.read_setting("service_area_output_mode", "both"),
+        )
+        self.set_combo_by_data(
+            self.service_area_band_mode_combo,
+            self.read_setting("service_area_band_mode", "cumulative"),
+        )
+        self.set_combo_by_data(
+            self.service_area_boundary_mode_combo,
+            self.read_setting("service_area_boundary_mode", "overlap"),
+        )
+        self.set_combo_by_data(
+            self.service_area_multi_origin_mode_combo,
+            self.read_setting("service_area_multi_origin_mode", "merge"),
+        )
+        self.set_combo_by_data(
+            self.service_area_threshold_metric_combo,
+            self.read_setting("service_area_threshold_metric", "travel_time_s"),
+        )
+        self.set_combo_by_data(
+            self.service_area_hull_preset_combo,
+            self.read_setting("service_area_hull_preset", "1.00"),
+        )
+        self.service_area_hull_aggressiveness_edit.setText(
+            self.read_setting(
+                "service_area_hull_aggressiveness",
+                self.service_area_hull_aggressiveness_edit.text(),
+            )
         )
         self.restore_layer_selection(
             self.matrix_origins_layer_combo,
@@ -1519,6 +2976,11 @@ class NetanDock(QDockWidget):
             self.matrix_destinations_path_edit.parentWidget(),
             self.matrix_destinations_file_label,
         )
+        self.load_advanced_settings("route", include_failure_modes=True)
+        self.load_advanced_settings("batch", include_failure_modes=True)
+        self.load_advanced_settings("service_area", include_failure_modes=False)
+        if not self.service_area_hull_aggressiveness_edit.text().strip():
+            self.sync_service_area_hull_preset()
 
     def restore_layer_selection(self, layer_combo, layer_id):
         if not layer_id:

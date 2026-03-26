@@ -21,14 +21,14 @@ use netan_profile::{
     compile_profile_bundle_with_acceleration_with_progress, load_profile,
 };
 use netan_query::{
-    AnalysisKind, MatrixResult, OdResult, RouteResult, execute_matrix, execute_od, execute_route,
-    execute_route_with_edge_names, load_experiment, load_od_pairs, load_point_set,
-    load_route_request,
+    AnalysisKind, MatrixResult, OdResult, RouteResult, ServiceAreaResult, analysis_failure,
+    execute_matrix, execute_od, execute_route, execute_route_with_edge_names, execute_service_area,
+    load_experiment, load_od_pairs, load_point_set, load_route_request, load_service_area_request,
 };
 use netan_report::{
     BundleRef, CompiledProfileManifest, RunKind, RunStatus, SoftwareInfo, load_run_result_summary,
     new_run_manifest, render_run_html, render_run_markdown, write_matrix_result, write_od_result,
-    write_route_result,
+    write_route_result, write_service_area_result,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -110,6 +110,7 @@ fn main() -> Result<()> {
             AnalyzeCommand::Route(args) => analyze_route(&paths, args),
             AnalyzeCommand::Od(args) => analyze_od(&paths, args),
             AnalyzeCommand::Matrix(args) => analyze_matrix(&paths, args),
+            AnalyzeCommand::ServiceArea(args) => analyze_service_area(&paths, args),
         },
         Command::Experiment {
             command: experiment,
@@ -202,6 +203,7 @@ enum AnalyzeCommand {
     Route(RouteArgs),
     Od(OdArgs),
     Matrix(MatrixArgs),
+    ServiceArea(ServiceAreaArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -274,6 +276,18 @@ struct MatrixArgs {
     origins: PathBuf,
     #[arg(long)]
     destinations: PathBuf,
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct ServiceAreaArgs {
+    #[arg(long)]
+    dataset: String,
+    #[arg(long)]
+    profile: PathBuf,
+    #[arg(long)]
+    request: PathBuf,
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -488,14 +502,20 @@ fn analyze_route(paths: &WorkspacePaths, args: RouteArgs) -> Result<()> {
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
     let request = load_route_request(&args.request)?;
-    let stored = run_route_analysis(
+    let stored = match run_route_analysis(
         paths,
         &args.dataset,
         &profile,
         &args.request,
         request,
         args.out,
-    )?;
+    ) {
+        Ok(stored) => stored,
+        Err(error) => {
+            emit_structured_failure_diagnostics(&error);
+            return Err(error);
+        }
+    };
     println!("route result written to {}", stored.result_path.display());
     println!("run manifest written to {}", stored.manifest_path.display());
     Ok(())
@@ -510,14 +530,20 @@ fn analyze_od(paths: &WorkspacePaths, args: OdArgs) -> Result<()> {
     {
         request.returns.geometry = ReturnGeometry::Full;
     }
-    let stored = run_od_analysis(
+    let stored = match run_od_analysis(
         paths,
         &args.dataset,
         &profile,
         &args.pairs,
         request,
         args.out,
-    )?;
+    ) {
+        Ok(stored) => stored,
+        Err(error) => {
+            emit_structured_failure_diagnostics(&error);
+            return Err(error);
+        }
+    };
     println!("OD result written to {}", stored.result_path.display());
     println!("run manifest written to {}", stored.manifest_path.display());
     Ok(())
@@ -536,7 +562,7 @@ fn analyze_matrix(paths: &WorkspacePaths, args: MatrixArgs) -> Result<()> {
             destinations.returns.geometry = ReturnGeometry::Full;
         }
     }
-    let stored = run_matrix_analysis(
+    let stored = match run_matrix_analysis(
         paths,
         &args.dataset,
         &profile,
@@ -545,8 +571,37 @@ fn analyze_matrix(paths: &WorkspacePaths, args: MatrixArgs) -> Result<()> {
         origins,
         destinations,
         args.out,
-    )?;
+    ) {
+        Ok(stored) => stored,
+        Err(error) => {
+            emit_structured_failure_diagnostics(&error);
+            return Err(error);
+        }
+    };
     println!("matrix result written to {}", stored.result_path.display());
+    println!("run manifest written to {}", stored.manifest_path.display());
+    Ok(())
+}
+
+fn analyze_service_area(paths: &WorkspacePaths, args: ServiceAreaArgs) -> Result<()> {
+    let profile = load_profile(&args.profile)?;
+    profile.validate()?;
+    let mut request = load_service_area_request(&args.request)?;
+    if args.out.as_deref().is_some_and(output_needs_geometry) {
+        request.returns.geometry = true;
+    }
+    let stored = run_service_area_analysis(
+        paths,
+        &args.dataset,
+        &profile,
+        &args.request,
+        &request,
+        args.out,
+    )?;
+    println!(
+        "service-area result written to {}",
+        stored.result_path.display()
+    );
     println!("run manifest written to {}", stored.manifest_path.display());
     Ok(())
 }
@@ -666,6 +721,32 @@ fn run_matrix_analysis(
     )
 }
 
+fn run_service_area_analysis(
+    paths: &WorkspacePaths,
+    dataset_id: &str,
+    profile: &ProfileDocument,
+    request_path: &Path,
+    request: &netan_query::ServiceAreaRequest,
+    out: Option<PathBuf>,
+) -> Result<StoredRun> {
+    let (topology, compiled_manifest, compiled_bundle) =
+        load_route_execution_inputs(paths, dataset_id, profile)?;
+    let engine = engine_description(&topology);
+    let result = execute_service_area(&topology, &compiled_bundle, request)
+        .with_context(|| format!("executing service-area '{}'", request.analysis_id))?;
+    store_service_area_run(
+        paths,
+        dataset_id,
+        profile,
+        request_path,
+        request,
+        &result,
+        &compiled_manifest,
+        engine,
+        out,
+    )
+}
+
 fn store_route_run(
     paths: &WorkspacePaths,
     dataset_id: &str,
@@ -684,11 +765,13 @@ fn store_route_run(
         request_path.display().to_string(),
         RunStatus::Succeeded,
         format!(
-            "Route '{}' solved from node {} to node {} across {} edges.",
+            "Route '{}' solved from node {} to node {} across {} edges with outcome '{}' and {} violation(s).",
             result.route_id,
             result.origin.snapped_node_id,
             result.destination.snapped_node_id,
-            result.summary.segment_count
+            result.summary.segment_count,
+            serde_json::to_string(&result.outcome)?.trim_matches('"'),
+            result.summary.violation_count,
         ),
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
@@ -696,6 +779,8 @@ fn store_route_run(
     manifest.algorithm.engine = engine.route_engine.to_string();
     manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.route_summary.to_string();
+    manifest.connectivity_policy = Some(request.connectivity.clone());
+    manifest.fallback_policy = Some(request.fallback.clone());
     let result_path = out.unwrap_or_else(|| {
         paths
             .runs_dir
@@ -712,6 +797,10 @@ fn store_route_run(
             "total_distance_m": result.summary.total_distance_m,
             "total_travel_time_s": result.summary.total_travel_time_s,
             "total_generalized_cost": result.summary.total_generalized_cost,
+            "illegal_movement_penalty_s": result.summary.illegal_movement_penalty_s,
+            "illegal_movement_penalty_cost": result.summary.illegal_movement_penalty_cost,
+            "violation_count": result.summary.violation_count,
+            "violation_types": result.summary.violation_types,
             "segment_count": result.summary.segment_count,
         })),
     })
@@ -735,8 +824,8 @@ fn store_od_run(
         pairs_path.display().to_string(),
         RunStatus::Succeeded,
         format!(
-            "OD batch completed with {} succeeded pairs and {} failed pairs.",
-            result.succeeded_count, result.failed_count
+            "OD batch completed with {} succeeded pairs, {} ignored pairs, and {} failed pairs.",
+            result.succeeded_count, result.ignored_count, result.failed_count
         ),
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
@@ -744,6 +833,8 @@ fn store_od_run(
     manifest.algorithm.engine = engine.batch_engine.to_string();
     manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.batch_summary.to_string();
+    manifest.connectivity_policy = Some(request.connectivity.clone());
+    manifest.fallback_policy = Some(request.fallback.clone());
     let result_path = out.unwrap_or_else(|| {
         paths
             .runs_dir
@@ -758,6 +849,7 @@ fn store_od_run(
         summary: Some(serde_json::json!({
             "pair_count": result.pair_count,
             "succeeded_count": result.succeeded_count,
+            "ignored_count": result.ignored_count,
             "failed_count": result.failed_count,
         })),
     })
@@ -787,8 +879,8 @@ fn store_matrix_run(
         ),
         RunStatus::Succeeded,
         format!(
-            "Matrix batch completed with {} succeeded cells and {} failed cells.",
-            result.succeeded_count, result.failed_count
+            "Matrix batch completed with {} succeeded cells, {} ignored cells, and {} failed cells.",
+            result.succeeded_count, result.ignored_count, result.failed_count
         ),
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
@@ -796,6 +888,20 @@ fn store_matrix_run(
     manifest.algorithm.engine = engine.batch_engine.to_string();
     manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.batch_summary.to_string();
+    manifest.connectivity_policy = Some(
+        if origins.connectivity == netan_query::ConnectivityPolicy::default() {
+            destinations.connectivity.clone()
+        } else {
+            origins.connectivity.clone()
+        },
+    );
+    manifest.fallback_policy = Some(
+        if origins.fallback == netan_query::FallbackPolicy::default() {
+            destinations.fallback.clone()
+        } else {
+            origins.fallback.clone()
+        },
+    );
     let result_path = out.unwrap_or_else(|| {
         paths
             .runs_dir
@@ -812,7 +918,72 @@ fn store_matrix_run(
             "destination_count": result.destination_count,
             "cell_count": result.cell_count,
             "succeeded_count": result.succeeded_count,
+            "ignored_count": result.ignored_count,
             "failed_count": result.failed_count,
+        })),
+    })
+}
+
+fn store_service_area_run(
+    paths: &WorkspacePaths,
+    dataset_id: &str,
+    profile: &ProfileDocument,
+    request_path: &Path,
+    request: &netan_query::ServiceAreaRequest,
+    result: &ServiceAreaResult,
+    compiled_manifest: &CompiledProfileManifest,
+    engine: EngineDescription,
+    out: Option<PathBuf>,
+) -> Result<StoredRun> {
+    let mut manifest = new_run_manifest(
+        RunKind::ServiceArea,
+        dataset_id.to_string(),
+        profile,
+        request_path.display().to_string(),
+        RunStatus::Succeeded,
+        format!(
+            "Service-area '{}' completed with {} feature(s) across {} threshold(s) using output_mode={:?} and multi_origin_mode={:?}; {} origin(s) processed, {} skipped, {} with fallback.",
+            result.analysis_id,
+            result.features.len(),
+            result.threshold_count,
+            result.output_mode,
+            result.multi_origin_mode,
+            result.processed_origin_count,
+            result.skipped_origin_count,
+            result.fallback_origin_count
+        ),
+        software_info(),
+        Some(compiled_manifest.bundle.bundle_id.0.clone()),
+    )?;
+    manifest.algorithm.engine = engine.batch_engine.to_string();
+    manifest.algorithm.acceleration = engine.acceleration.to_string();
+    manifest.methods_summary.plain_language = format!(
+        "{} Service-area execution reuses one exact legal-network expansion per unique snapped origin and threshold metric, then emits cumulative or ring bands as network and/or polygon outputs.",
+        engine.batch_summary
+    );
+    manifest.connectivity_policy = Some(request.connectivity.clone());
+    manifest.fallback_policy = Some(request.fallback.clone());
+    let result_path = out.unwrap_or_else(|| {
+        paths
+            .runs_dir
+            .join(format!("{}-result.json", manifest.run_id))
+    });
+    write_service_area_result(&result_path, request, result)?;
+    manifest.result_path = Some(result_path.display().to_string());
+    let manifest_path = write_run_manifest(paths, &manifest)?;
+
+    Ok(StoredRun {
+        result_path,
+        manifest_path,
+        summary: Some(serde_json::json!({
+            "analysis_id": result.analysis_id,
+            "outcome": result.outcome,
+            "origin_count": result.origin_count,
+            "processed_origin_count": result.processed_origin_count,
+            "skipped_origin_count": result.skipped_origin_count,
+            "fallback_origin_count": result.fallback_origin_count,
+            "threshold_count": result.threshold_count,
+            "feature_count": result.features.len(),
         })),
     })
 }
@@ -987,6 +1158,37 @@ fn api_serve(paths: WorkspacePaths, args: ApiServeArgs) -> Result<()> {
     ))
 }
 
+fn emit_structured_failure_diagnostics(error: &anyhow::Error) {
+    let Some(failure) = analysis_failure(error) else {
+        return;
+    };
+
+    eprintln!("analysis failed: {}", failure.message);
+    for diagnostic in &failure.diagnostics {
+        eprintln!(
+            "  - [{:?}] {:?}: {}",
+            diagnostic.severity, diagnostic.code, diagnostic.message
+        );
+        if !diagnostic.point_ids.is_empty() {
+            eprintln!("    points: {}", diagnostic.point_ids.join(", "));
+        }
+        if !diagnostic.component_ids.is_empty() {
+            eprintln!(
+                "    components: {}",
+                diagnostic
+                    .component_ids
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        for suggestion in &diagnostic.suggested_actions {
+            eprintln!("    suggestion: {suggestion}");
+        }
+    }
+}
+
 fn load_route_execution_inputs(
     paths: &WorkspacePaths,
     dataset_id: &str,
@@ -1123,6 +1325,12 @@ fn run_experiment_scenario(
                 out,
             )
         }
+        AnalysisKind::ServiceArea => {
+            let request_path =
+                request_path.context("service-area scenario is missing a request path")?;
+            let request = load_service_area_request(request_path)?;
+            run_service_area_analysis(paths, dataset_id, &profile, request_path, &request, out)
+        }
     }
 }
 
@@ -1138,6 +1346,7 @@ fn analysis_name(analysis: AnalysisKind) -> &'static str {
         AnalysisKind::Route => "route",
         AnalysisKind::Od => "od",
         AnalysisKind::Matrix => "matrix",
+        AnalysisKind::ServiceArea => "service_area",
     }
 }
 

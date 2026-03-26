@@ -1034,6 +1034,8 @@ mod tests {
             names: vec![],
             edge_based_topology: EdgeBasedTopology::default(),
             spatial_index: None,
+            node_component_ids: vec![0, 0],
+            edge_component_ids: vec![0],
         };
 
         let compiled =
@@ -1078,6 +1080,8 @@ mod tests {
             names: vec![],
             edge_based_topology: EdgeBasedTopology::default(),
             spatial_index: None,
+            node_component_ids: vec![0, 0],
+            edge_component_ids: vec![0],
         };
 
         let error =
@@ -1152,6 +1156,8 @@ mod tests {
             names: vec![],
             edge_based_topology: EdgeBasedTopology::default(),
             spatial_index: None,
+            node_component_ids: vec![0, 0, 0],
+            edge_component_ids: vec![0, 0],
         };
 
         let compiled =
@@ -1288,6 +1294,8 @@ mod tests {
                 edge_transition_edges: vec![1],
             },
             spatial_index: None,
+            node_component_ids: vec![0, 0, 0],
+            edge_component_ids: vec![0, 0],
         };
         let acceleration = DatasetAccelerationBundle {
             schema_version: 1,
@@ -1389,6 +1397,8 @@ mod tests {
             names: vec![],
             edge_based_topology: EdgeBasedTopology::default(),
             spatial_index: None,
+            node_component_ids: vec![0, 0],
+            edge_component_ids: vec![0],
         }
     }
 }

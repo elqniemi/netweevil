@@ -287,6 +287,8 @@ mod tests {
             names: vec!["path name".to_string()],
             edge_based_topology: Default::default(),
             spatial_index: None,
+            node_component_ids: vec![0, 0],
+            edge_component_ids: vec![0, 0],
         };
 
         let unique = SystemTime::now()

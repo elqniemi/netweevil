@@ -6,12 +6,17 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use netan_core::{BuildStage, CacheBundleId, DatasetId, TopologyBundleMeta, TravelMode};
 use netan_profile::ProfileDocument;
-use netan_query::{MatrixResult, OdResult, RouteResult};
+use netan_query::{
+    AnalysisOutcome, ConnectivityPolicy, FallbackPolicy, MatrixResult, OdResult, RouteResult,
+    ServiceAreaBandMode, ServiceAreaMultiOriginMode, ServiceAreaOutputMode, ServiceAreaResult,
+};
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
-pub use output::{write_matrix_result, write_od_result, write_route_result};
+pub use output::{
+    write_matrix_result, write_od_result, write_route_result, write_service_area_result,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetManifest {
@@ -72,6 +77,10 @@ pub struct RunManifest {
     pub software: SoftwareInfo,
     pub algorithm: AlgorithmInfo,
     pub methods_summary: MethodsSummary,
+    #[serde(default)]
+    pub connectivity_policy: Option<ConnectivityPolicy>,
+    #[serde(default)]
+    pub fallback_policy: Option<FallbackPolicy>,
     pub message: String,
 }
 
@@ -81,6 +90,7 @@ pub enum RunKind {
     Route,
     Od,
     Matrix,
+    ServiceArea,
     Experiment,
 }
 
@@ -154,6 +164,8 @@ pub fn new_run_manifest(
             locked_profile_hash: Some(profile.fingerprint()?),
             defaults_pack: Some(profile.profile.defaults_pack.clone()),
         },
+        connectivity_policy: None,
+        fallback_policy: None,
         message: message.into(),
     })
 }
@@ -162,15 +174,21 @@ pub fn new_run_manifest(
 pub enum RunResultSummary {
     Route(RouteSummary),
     Batch(BatchSummary),
+    ServiceArea(ServiceAreaSummary),
 }
 
 #[derive(Debug, Clone)]
 pub struct RouteSummary {
     pub route_id: String,
+    pub outcome: AnalysisOutcome,
     pub total_distance_m: u64,
     pub total_travel_time_s: f64,
     pub total_generalized_cost: f64,
+    pub illegal_movement_penalty_s: f64,
+    pub illegal_movement_penalty_cost: f64,
+    pub violation_count: usize,
     pub segment_count: usize,
+    pub diagnostics_count: usize,
     pub warnings: Vec<String>,
 }
 
@@ -180,6 +198,29 @@ pub struct BatchSummary {
     pub item_count: usize,
     pub succeeded_count: usize,
     pub failed_count: usize,
+    pub ignored_count: usize,
+    pub legal_count: usize,
+    pub degraded_count: usize,
+    pub partial_count: usize,
+    pub unreachable_count: usize,
+    pub diagnostics_count: usize,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceAreaSummary {
+    pub analysis_id: String,
+    pub outcome: AnalysisOutcome,
+    pub output_mode: ServiceAreaOutputMode,
+    pub band_mode: ServiceAreaBandMode,
+    pub multi_origin_mode: ServiceAreaMultiOriginMode,
+    pub origin_count: usize,
+    pub processed_origin_count: usize,
+    pub skipped_origin_count: usize,
+    pub fallback_origin_count: usize,
+    pub threshold_count: usize,
+    pub feature_count: usize,
+    pub diagnostics_count: usize,
     pub warnings: Vec<String>,
 }
 
@@ -202,32 +243,79 @@ pub fn load_run_result_summary(manifest: &RunManifest) -> Result<Option<RunResul
                 serde_json::from_str(&raw).context("parsing route result JSON")?;
             RunResultSummary::Route(RouteSummary {
                 route_id: route.route_id,
+                outcome: route.outcome,
                 total_distance_m: route.summary.total_distance_m,
                 total_travel_time_s: route.summary.total_travel_time_s,
                 total_generalized_cost: route.summary.total_generalized_cost,
+                illegal_movement_penalty_s: route.summary.illegal_movement_penalty_s,
+                illegal_movement_penalty_cost: route.summary.illegal_movement_penalty_cost,
+                violation_count: route.summary.violation_count,
                 segment_count: route.summary.segment_count,
+                diagnostics_count: route.diagnostics.len(),
                 warnings: route.warnings,
             })
         }
         RunKind::Od => {
             let od: OdResult = serde_json::from_str(&raw).context("parsing OD result JSON")?;
+            let tally = tally_outcomes(
+                od.pairs
+                    .iter()
+                    .map(|pair| (pair.outcome, pair.diagnostics.len())),
+            );
             RunResultSummary::Batch(BatchSummary {
                 label: "OD pairs",
                 item_count: od.pair_count,
                 succeeded_count: od.succeeded_count,
                 failed_count: od.failed_count,
+                ignored_count: od.ignored_count,
+                legal_count: tally.legal_count,
+                degraded_count: tally.degraded_count,
+                partial_count: tally.partial_count,
+                unreachable_count: tally.unreachable_count,
+                diagnostics_count: tally.diagnostics_count,
                 warnings: od.warnings,
             })
         }
         RunKind::Matrix => {
             let matrix: MatrixResult =
                 serde_json::from_str(&raw).context("parsing matrix result JSON")?;
+            let tally = tally_outcomes(
+                matrix
+                    .cells
+                    .iter()
+                    .map(|cell| (cell.outcome, cell.diagnostics.len())),
+            );
             RunResultSummary::Batch(BatchSummary {
                 label: "matrix cells",
                 item_count: matrix.cell_count,
                 succeeded_count: matrix.succeeded_count,
                 failed_count: matrix.failed_count,
+                ignored_count: matrix.ignored_count,
+                legal_count: tally.legal_count,
+                degraded_count: tally.degraded_count,
+                partial_count: tally.partial_count,
+                unreachable_count: tally.unreachable_count,
+                diagnostics_count: tally.diagnostics_count,
                 warnings: matrix.warnings,
+            })
+        }
+        RunKind::ServiceArea => {
+            let service_area: ServiceAreaResult =
+                serde_json::from_str(&raw).context("parsing service-area result JSON")?;
+            RunResultSummary::ServiceArea(ServiceAreaSummary {
+                analysis_id: service_area.analysis_id,
+                outcome: service_area.outcome,
+                output_mode: service_area.output_mode,
+                band_mode: service_area.band_mode,
+                multi_origin_mode: service_area.multi_origin_mode,
+                origin_count: service_area.origin_count,
+                processed_origin_count: service_area.processed_origin_count,
+                skipped_origin_count: service_area.skipped_origin_count,
+                fallback_origin_count: service_area.fallback_origin_count,
+                threshold_count: service_area.threshold_count,
+                feature_count: service_area.features.len(),
+                diagnostics_count: service_area.diagnostics.len(),
+                warnings: service_area.warnings,
             })
         }
         RunKind::Experiment => return Ok(None),
@@ -255,7 +343,9 @@ pub fn render_run_markdown(
          - Git commit: `{}`\n\
          - Algorithm engine: `{}`\n\
          - Graph model: `{}`\n\
-         - Acceleration: `{}`\n\n",
+         - Acceleration: `{}`\n\
+         - Connectivity policy: `{}`\n\
+         - Fallback policy: `{}`\n\n",
         manifest.run_id,
         manifest.status,
         manifest.run_kind,
@@ -274,6 +364,8 @@ pub fn render_run_markdown(
         manifest.algorithm.engine,
         manifest.algorithm.graph_model,
         manifest.algorithm.acceleration,
+        compact_json_or_not_recorded(manifest.connectivity_policy.as_ref()),
+        compact_json_or_not_recorded(manifest.fallback_policy.as_ref()),
     ));
 
     if let Some(summary) = result_summary {
@@ -390,6 +482,20 @@ pub fn render_run_html(
         "Acceleration",
         &code_html(&manifest.algorithm.acceleration),
     );
+    push_definition(
+        &mut html,
+        "Connectivity policy",
+        &code_html(&compact_json_or_not_recorded(
+            manifest.connectivity_policy.as_ref(),
+        )),
+    );
+    push_definition(
+        &mut html,
+        "Fallback policy",
+        &code_html(&compact_json_or_not_recorded(
+            manifest.fallback_policy.as_ref(),
+        )),
+    );
     html.push_str("</dl></section>");
 
     if let Some(summary) = result_summary {
@@ -431,15 +537,25 @@ fn push_summary_markdown(markdown: &mut String, summary: &RunResultSummary) {
         RunResultSummary::Route(route) => {
             markdown.push_str(&format!(
                 "- Route ID: `{}`\n\
+                 - Outcome: `{}`\n\
                  - Total distance (m): `{}`\n\
                  - Total travel time (s): `{:.3}`\n\
                  - Total generalized cost: `{:.3}`\n\
-                 - Segment count: `{}`\n",
+                 - Illegal movement penalty (s): `{:.3}`\n\
+                 - Illegal movement penalty (cost): `{:.3}`\n\
+                 - Violations: `{}`\n\
+                 - Segment count: `{}`\n\
+                 - Diagnostics: `{}`\n",
                 route.route_id,
+                analysis_outcome_name(route.outcome),
                 route.total_distance_m,
                 route.total_travel_time_s,
                 route.total_generalized_cost,
+                route.illegal_movement_penalty_s,
+                route.illegal_movement_penalty_cost,
+                route.violation_count,
                 route.segment_count,
+                route.diagnostics_count,
             ));
             push_warning_markdown(markdown, &route.warnings);
         }
@@ -448,10 +564,54 @@ fn push_summary_markdown(markdown: &mut String, summary: &RunResultSummary) {
                 "- Item type: `{}`\n\
                  - Item count: `{}`\n\
                  - Succeeded: `{}`\n\
-                 - Failed: `{}`\n",
-                batch.label, batch.item_count, batch.succeeded_count, batch.failed_count,
+                 - Ignored: `{}`\n\
+                 - Failed: `{}`\n\
+                 - Legal: `{}`\n\
+                 - Degraded: `{}`\n\
+                 - Partial: `{}`\n\
+                 - Unreachable: `{}`\n\
+                 - Diagnostics: `{}`\n",
+                batch.label,
+                batch.item_count,
+                batch.succeeded_count,
+                batch.ignored_count,
+                batch.failed_count,
+                batch.legal_count,
+                batch.degraded_count,
+                batch.partial_count,
+                batch.unreachable_count,
+                batch.diagnostics_count,
             ));
             push_warning_markdown(markdown, &batch.warnings);
+        }
+        RunResultSummary::ServiceArea(service_area) => {
+            markdown.push_str(&format!(
+                "- Analysis ID: `{}`\n\
+                 - Outcome: `{}`\n\
+                 - Output mode: `{}`\n\
+                 - Band mode: `{}`\n\
+                 - Multi-origin mode: `{}`\n\
+                 - Origins requested: `{}`\n\
+                 - Origins processed: `{}`\n\
+                 - Origins skipped: `{}`\n\
+                 - Origins with fallback: `{}`\n\
+                 - Thresholds: `{}`\n\
+                 - Features: `{}`\n\
+                 - Diagnostics: `{}`\n",
+                service_area.analysis_id,
+                analysis_outcome_name(service_area.outcome),
+                service_area_output_mode_name(service_area.output_mode),
+                service_area_band_mode_name(service_area.band_mode),
+                service_area_multi_origin_mode_name(service_area.multi_origin_mode),
+                service_area.origin_count,
+                service_area.processed_origin_count,
+                service_area.skipped_origin_count,
+                service_area.fallback_origin_count,
+                service_area.threshold_count,
+                service_area.feature_count,
+                service_area.diagnostics_count,
+            ));
+            push_warning_markdown(markdown, &service_area.warnings);
         }
     }
 }
@@ -474,6 +634,11 @@ fn push_summary_html(html: &mut String, summary: &RunResultSummary) {
             push_definition(html, "Route ID", &code_html(&route.route_id));
             push_definition(
                 html,
+                "Outcome",
+                &code_html(analysis_outcome_name(route.outcome)),
+            );
+            push_definition(
+                html,
                 "Total distance (m)",
                 &code_html(&route.total_distance_m.to_string()),
             );
@@ -489,8 +654,28 @@ fn push_summary_html(html: &mut String, summary: &RunResultSummary) {
             );
             push_definition(
                 html,
+                "Illegal movement penalty (s)",
+                &code_html(&format!("{:.3}", route.illegal_movement_penalty_s)),
+            );
+            push_definition(
+                html,
+                "Illegal movement penalty (cost)",
+                &code_html(&format!("{:.3}", route.illegal_movement_penalty_cost)),
+            );
+            push_definition(
+                html,
+                "Violations",
+                &code_html(&route.violation_count.to_string()),
+            );
+            push_definition(
+                html,
                 "Segment count",
                 &code_html(&route.segment_count.to_string()),
+            );
+            push_definition(
+                html,
+                "Diagnostics",
+                &code_html(&route.diagnostics_count.to_string()),
             );
             html.push_str("</dl>");
             push_warning_html(html, &route.warnings);
@@ -508,11 +693,164 @@ fn push_summary_html(html: &mut String, summary: &RunResultSummary) {
                 "Succeeded",
                 &code_html(&batch.succeeded_count.to_string()),
             );
+            push_definition(
+                html,
+                "Ignored",
+                &code_html(&batch.ignored_count.to_string()),
+            );
             push_definition(html, "Failed", &code_html(&batch.failed_count.to_string()));
+            push_definition(html, "Legal", &code_html(&batch.legal_count.to_string()));
+            push_definition(
+                html,
+                "Degraded",
+                &code_html(&batch.degraded_count.to_string()),
+            );
+            push_definition(
+                html,
+                "Partial",
+                &code_html(&batch.partial_count.to_string()),
+            );
+            push_definition(
+                html,
+                "Unreachable",
+                &code_html(&batch.unreachable_count.to_string()),
+            );
+            push_definition(
+                html,
+                "Diagnostics",
+                &code_html(&batch.diagnostics_count.to_string()),
+            );
             html.push_str("</dl>");
             push_warning_html(html, &batch.warnings);
         }
+        RunResultSummary::ServiceArea(service_area) => {
+            html.push_str("<dl>");
+            push_definition(html, "Analysis ID", &code_html(&service_area.analysis_id));
+            push_definition(
+                html,
+                "Outcome",
+                &code_html(analysis_outcome_name(service_area.outcome)),
+            );
+            push_definition(
+                html,
+                "Output mode",
+                &code_html(service_area_output_mode_name(service_area.output_mode)),
+            );
+            push_definition(
+                html,
+                "Band mode",
+                &code_html(service_area_band_mode_name(service_area.band_mode)),
+            );
+            push_definition(
+                html,
+                "Multi-origin mode",
+                &code_html(service_area_multi_origin_mode_name(
+                    service_area.multi_origin_mode,
+                )),
+            );
+            push_definition(
+                html,
+                "Origins requested",
+                &code_html(&service_area.origin_count.to_string()),
+            );
+            push_definition(
+                html,
+                "Origins processed",
+                &code_html(&service_area.processed_origin_count.to_string()),
+            );
+            push_definition(
+                html,
+                "Origins skipped",
+                &code_html(&service_area.skipped_origin_count.to_string()),
+            );
+            push_definition(
+                html,
+                "Origins with fallback",
+                &code_html(&service_area.fallback_origin_count.to_string()),
+            );
+            push_definition(
+                html,
+                "Thresholds",
+                &code_html(&service_area.threshold_count.to_string()),
+            );
+            push_definition(
+                html,
+                "Features",
+                &code_html(&service_area.feature_count.to_string()),
+            );
+            push_definition(
+                html,
+                "Diagnostics",
+                &code_html(&service_area.diagnostics_count.to_string()),
+            );
+            html.push_str("</dl>");
+            push_warning_html(html, &service_area.warnings);
+        }
     }
+}
+
+#[derive(Default)]
+struct OutcomeTally {
+    legal_count: usize,
+    degraded_count: usize,
+    partial_count: usize,
+    unreachable_count: usize,
+    diagnostics_count: usize,
+}
+
+fn tally_outcomes(items: impl IntoIterator<Item = (AnalysisOutcome, usize)>) -> OutcomeTally {
+    let mut tally = OutcomeTally::default();
+    for (outcome, diagnostics_count) in items {
+        match outcome {
+            AnalysisOutcome::Legal => tally.legal_count += 1,
+            AnalysisOutcome::Degraded => tally.degraded_count += 1,
+            AnalysisOutcome::Partial => tally.partial_count += 1,
+            AnalysisOutcome::Unreachable | AnalysisOutcome::NotImplemented => {
+                tally.unreachable_count += 1
+            }
+        }
+        tally.diagnostics_count += diagnostics_count;
+    }
+    tally
+}
+
+fn analysis_outcome_name(outcome: AnalysisOutcome) -> &'static str {
+    match outcome {
+        AnalysisOutcome::Legal => "legal",
+        AnalysisOutcome::Degraded => "degraded",
+        AnalysisOutcome::Partial => "partial",
+        AnalysisOutcome::Unreachable => "unreachable",
+        AnalysisOutcome::NotImplemented => "not_implemented",
+    }
+}
+
+fn service_area_output_mode_name(mode: ServiceAreaOutputMode) -> &'static str {
+    match mode {
+        ServiceAreaOutputMode::Network => "network",
+        ServiceAreaOutputMode::Polygon => "polygon",
+        ServiceAreaOutputMode::Both => "both",
+    }
+}
+
+fn service_area_band_mode_name(mode: ServiceAreaBandMode) -> &'static str {
+    match mode {
+        ServiceAreaBandMode::Cumulative => "cumulative",
+        ServiceAreaBandMode::Ring => "ring",
+    }
+}
+
+fn service_area_multi_origin_mode_name(mode: ServiceAreaMultiOriginMode) -> &'static str {
+    match mode {
+        ServiceAreaMultiOriginMode::Merge => "merge",
+        ServiceAreaMultiOriginMode::Overlap => "overlap",
+        ServiceAreaMultiOriginMode::Cut => "cut",
+    }
+}
+
+fn compact_json_or_not_recorded<T: Serialize>(value: Option<&T>) -> String {
+    value
+        .map(|value| serde_json::to_string(value).unwrap_or_else(|_| "\"unavailable\"".to_string()))
+        .unwrap_or_else(|| "not_recorded".to_string())
 }
 
 fn push_warning_html(html: &mut String, warnings: &[String]) {
@@ -548,6 +886,9 @@ mod tests {
         AlgorithmInfo, MethodsSummary, RouteSummary, RunKind, RunManifest, RunResultSummary,
         RunStatus, SoftwareInfo, load_run_result_summary, render_run_html, render_run_markdown,
     };
+    use netan_query::{
+        AnalysisOutcome, ConnectivityPolicy, DisconnectedNetworkMode, FallbackPolicy,
+    };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -556,10 +897,15 @@ mod tests {
         let manifest = test_manifest();
         let summary = RunResultSummary::Route(RouteSummary {
             route_id: "baseline_route".to_string(),
+            outcome: AnalysisOutcome::Legal,
             total_distance_m: 1_665,
             total_travel_time_s: 152.496,
             total_generalized_cost: 152.496,
+            illegal_movement_penalty_s: 0.0,
+            illegal_movement_penalty_cost: 0.0,
+            violation_count: 0,
             segment_count: 12,
+            diagnostics_count: 1,
             warnings: vec!["Turn penalties are not modeled yet.".to_string()],
         });
 
@@ -569,6 +915,8 @@ mod tests {
         assert!(markdown.contains("baseline_route"));
         assert!(markdown.contains("152.496"));
         assert!(markdown.contains("Locked profile hash"));
+        assert!(markdown.contains("Outcome"));
+        assert!(markdown.contains("Connectivity policy"));
     }
 
     #[test]
@@ -634,6 +982,12 @@ mod tests {
                 locked_profile_hash: Some("deadbeef".to_string()),
                 defaults_pack: Some("research".to_string()),
             },
+            connectivity_policy: Some(ConnectivityPolicy {
+                disconnected: DisconnectedNetworkMode::Strict,
+                max_hop_distance_m: None,
+                report_hop_distance_separately: false,
+            }),
+            fallback_policy: Some(FallbackPolicy::default()),
             message: "Route solved.".to_string(),
         }
     }

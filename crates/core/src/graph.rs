@@ -119,6 +119,8 @@ pub struct TopologyBundleMeta {
     pub geometry_bytes: u64,
     pub turn_count: u64,
     #[serde(default)]
+    pub connected_components: Option<ConnectedComponentsMeta>,
+    #[serde(default)]
     pub source_node_count: u64,
     #[serde(default)]
     pub source_way_count: u64,
@@ -128,6 +130,25 @@ pub struct TopologyBundleMeta {
     pub routable_way_count: u64,
     #[serde(default)]
     pub skipped_way_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectedComponentKind {
+    #[default]
+    Weak,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ConnectedComponentsMeta {
+    #[serde(default)]
+    pub kind: ConnectedComponentKind,
+    #[serde(default)]
+    pub component_count: u32,
+    #[serde(default)]
+    pub largest_component_node_count: u64,
+    #[serde(default)]
+    pub largest_component_edge_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -196,4 +217,18 @@ pub struct TopologyBundle {
     pub edge_based_topology: EdgeBasedTopology,
     #[serde(default)]
     pub spatial_index: Option<NodeSpatialIndex>,
+    #[serde(default)]
+    pub node_component_ids: Vec<u32>,
+    #[serde(default)]
+    pub edge_component_ids: Vec<u32>,
+}
+
+impl TopologyBundle {
+    pub fn node_component_id(&self, node_id: u32) -> Option<u32> {
+        self.node_component_ids.get(node_id as usize).copied()
+    }
+
+    pub fn edge_component_id(&self, edge_id: u32) -> Option<u32> {
+        self.edge_component_ids.get(edge_id as usize).copied()
+    }
 }

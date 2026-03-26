@@ -1,14 +1,16 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::error::Error as StdError;
+use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use netan_core::{
-    CompiledProfileBundle, EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, RoadClass,
-    SurfaceClass, TopologyBundle, TopologyNode,
+    CompiledEdgeMetric, CompiledProfileBundle, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
+    EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, RoadClass, SurfaceClass, TopologyBundle, TopologyNode,
 };
 use netan_profile::ReturnConfig;
 use serde::{Deserialize, Serialize};
@@ -35,6 +37,10 @@ pub struct RouteRequest {
     pub destination: LabeledPoint,
     #[serde(default)]
     pub snap: SnapOptions,
+    #[serde(default)]
+    pub connectivity: ConnectivityPolicy,
+    #[serde(default)]
+    pub fallback: FallbackPolicy,
     #[serde(default)]
     pub returns: ReturnConfig,
 }
@@ -64,6 +70,170 @@ fn default_snap_distance() -> f64 {
     500.0
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DisconnectedNetworkMode {
+    #[default]
+    Strict,
+    IgnoreUnreachable,
+    HopOriginToNearestReachableComponent,
+    HopDestinationToNearestReachableComponent,
+    HopEitherEnd,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConnectivityPolicy {
+    #[serde(default)]
+    pub disconnected: DisconnectedNetworkMode,
+    #[serde(default)]
+    pub max_hop_distance_m: Option<f64>,
+    #[serde(default)]
+    pub report_hop_distance_separately: bool,
+}
+
+impl Default for ConnectivityPolicy {
+    fn default() -> Self {
+        Self {
+            disconnected: DisconnectedNetworkMode::Strict,
+            max_hop_distance_m: None,
+            report_hop_distance_separately: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct IllegalMovementPenaltyPolicy {
+    #[serde(default)]
+    pub reverse_oneway_penalty_s: Option<f64>,
+    #[serde(default)]
+    pub illegal_turn_penalty_s: Option<f64>,
+    #[serde(default)]
+    pub ignored_turn_restriction_penalty_s: Option<f64>,
+    #[serde(default)]
+    pub forbidden_uturn_penalty_s: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct FallbackPolicy {
+    #[serde(default)]
+    pub allow_reverse_oneway: bool,
+    #[serde(default)]
+    pub allow_illegal_turn: bool,
+    #[serde(default)]
+    pub ignore_turn_restrictions: bool,
+    #[serde(default)]
+    pub allow_uturn_where_normally_forbidden: bool,
+    #[serde(default)]
+    pub auto_relax_unreachable: bool,
+    #[serde(default)]
+    pub penalties: IllegalMovementPenaltyPolicy,
+    #[serde(default)]
+    pub max_illegal_distance_m: Option<f64>,
+    #[serde(default)]
+    pub max_illegal_turns: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisOutcome {
+    #[default]
+    Legal,
+    Degraded,
+    Partial,
+    Unreachable,
+    NotImplemented,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisDiagnosticSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisDiagnosticCode {
+    SnapNoCandidate,
+    DisconnectedComponents,
+    LegalRouteUnreachable,
+    FallbackUsed,
+    AnalysisNotImplemented,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnalysisDiagnostic {
+    pub code: AnalysisDiagnosticCode,
+    pub severity: AnalysisDiagnosticSeverity,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub point_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub component_ids: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_actions: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnalysisFailure {
+    pub message: String,
+    pub outcome: AnalysisOutcome,
+    pub diagnostics: Vec<AnalysisDiagnostic>,
+}
+
+impl AnalysisFailure {
+    pub fn new(
+        message: impl Into<String>,
+        outcome: AnalysisOutcome,
+        diagnostics: Vec<AnalysisDiagnostic>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            outcome,
+            diagnostics,
+        }
+    }
+}
+
+impl fmt::Display for AnalysisFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl StdError for AnalysisFailure {}
+
+pub fn analysis_failure(error: &anyhow::Error) -> Option<&AnalysisFailure> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<AnalysisFailure>())
+}
+
+fn route_snap_failure(point: &LabeledPoint, max_distance_m: f64) -> AnalysisFailure {
+    AnalysisFailure::new(
+        format!(
+            "point '{}' has no traversable candidate node or edge within {:.1} m",
+            point.id, max_distance_m
+        ),
+        AnalysisOutcome::Unreachable,
+        vec![AnalysisDiagnostic {
+            code: AnalysisDiagnosticCode::SnapNoCandidate,
+            severity: AnalysisDiagnosticSeverity::Error,
+            message: format!(
+                "No traversable node or edge was found within {:.1} m for point '{}'.",
+                max_distance_m, point.id
+            ),
+            point_ids: vec![point.id.clone()],
+            component_ids: Vec::new(),
+            suggested_actions: vec![
+                "Increase snap.max_distance_m.".to_string(),
+                "Move the point closer to the routable network.".to_string(),
+            ],
+        }],
+    )
+}
+
 pub fn load_route_request(path: impl AsRef<Path>) -> Result<RouteRequest> {
     let path = path.as_ref();
     let raw = fs::read_to_string(path)
@@ -80,6 +250,23 @@ pub fn load_route_request(path: impl AsRef<Path>) -> Result<RouteRequest> {
     }
 }
 
+pub fn load_service_area_request(path: impl AsRef<Path>) -> Result<ServiceAreaRequest> {
+    let path = path.as_ref();
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("reading service-area request {}", path.display()))?;
+    let request = match path.extension().and_then(|ext| ext.to_str()) {
+        Some("json") => serde_json::from_str(&raw).context("parsing JSON service-area request")?,
+        Some("yaml") | Some("yml") => {
+            serde_yaml::from_str(&raw).context("parsing YAML service-area request")?
+        }
+        other => bail!(
+            "unsupported service-area request extension {:?}; use .json, .yml, or .yaml",
+            other
+        ),
+    };
+    validate_service_area_request(request)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OdPair {
     pub pair_id: String,
@@ -94,6 +281,10 @@ pub struct OdPairsDocument {
     #[serde(default)]
     pub snap: SnapOptions,
     #[serde(default)]
+    pub connectivity: ConnectivityPolicy,
+    #[serde(default)]
+    pub fallback: FallbackPolicy,
+    #[serde(default)]
     pub returns: ReturnConfig,
 }
 
@@ -104,7 +295,220 @@ pub struct PointSetDocument {
     #[serde(default)]
     pub snap: SnapOptions,
     #[serde(default)]
+    pub connectivity: ConnectivityPolicy,
+    #[serde(default)]
+    pub fallback: FallbackPolicy,
+    #[serde(default)]
     pub returns: ReturnConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaThresholdMetric {
+    DistanceM,
+    TravelTimeS,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAreaThreshold {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub limit: f64,
+    pub metric: ServiceAreaThresholdMetric,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaOutputMode {
+    Network,
+    Polygon,
+    #[default]
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaBandMode {
+    #[default]
+    Cumulative,
+    Ring,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaBoundaryMode {
+    #[default]
+    Overlap,
+    CutAtBoundary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaMultiOriginMode {
+    #[default]
+    Merge,
+    Overlap,
+    Cut,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAreaPolygonOptions {
+    #[serde(default = "default_hull_aggressiveness")]
+    pub hull_aggressiveness: f64,
+    #[serde(default)]
+    pub simplification_tolerance_m: Option<f64>,
+}
+
+impl Default for ServiceAreaPolygonOptions {
+    fn default() -> Self {
+        Self {
+            hull_aggressiveness: default_hull_aggressiveness(),
+            simplification_tolerance_m: None,
+        }
+    }
+}
+
+fn default_hull_aggressiveness() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAreaReturnOptions {
+    #[serde(default = "default_true")]
+    pub geometry: bool,
+    #[serde(default = "default_true")]
+    pub attributes: bool,
+    #[serde(default = "default_true")]
+    pub per_threshold_summary: bool,
+    #[serde(default = "default_true")]
+    pub diagnostics: bool,
+}
+
+impl Default for ServiceAreaReturnOptions {
+    fn default() -> Self {
+        Self {
+            geometry: true,
+            attributes: true,
+            per_threshold_summary: true,
+            diagnostics: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAreaRequest {
+    pub analysis_id: String,
+    #[serde(default)]
+    pub origins: Vec<LabeledPoint>,
+    #[serde(default)]
+    pub thresholds: Vec<ServiceAreaThreshold>,
+    #[serde(default)]
+    pub snap: SnapOptions,
+    #[serde(default)]
+    pub connectivity: ConnectivityPolicy,
+    #[serde(default)]
+    pub fallback: FallbackPolicy,
+    #[serde(default)]
+    pub output_mode: ServiceAreaOutputMode,
+    #[serde(default)]
+    pub band_mode: ServiceAreaBandMode,
+    #[serde(default)]
+    pub boundary_mode: ServiceAreaBoundaryMode,
+    #[serde(default)]
+    pub multi_origin_mode: ServiceAreaMultiOriginMode,
+    #[serde(default)]
+    pub polygon: ServiceAreaPolygonOptions,
+    #[serde(default)]
+    pub returns: ServiceAreaReturnOptions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaGeometryType {
+    Network,
+    Polygon,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAreaFeature {
+    #[serde(default)]
+    pub origin_id: Option<String>,
+    #[serde(default)]
+    pub band_start_limit: Option<f64>,
+    #[serde(default)]
+    pub threshold_id: Option<String>,
+    pub threshold_limit: f64,
+    pub threshold_metric: ServiceAreaThresholdMetric,
+    pub geometry_type: ServiceAreaGeometryType,
+    #[serde(default)]
+    pub fallback_used: bool,
+    #[serde(default)]
+    pub origin_component_id: Option<u32>,
+    #[serde(default)]
+    pub origin_hop_distance_m: Option<f64>,
+    #[serde(default)]
+    pub reachable_network_length_m: Option<f64>,
+    #[serde(default)]
+    pub reachable_edge_count: Option<u64>,
+    #[serde(default)]
+    pub geometry: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAreaThresholdSummary {
+    #[serde(default)]
+    pub origin_id: Option<String>,
+    #[serde(default)]
+    pub band_start_limit: Option<f64>,
+    #[serde(default)]
+    pub threshold_id: Option<String>,
+    pub threshold_limit: f64,
+    pub threshold_metric: ServiceAreaThresholdMetric,
+    #[serde(default)]
+    pub fallback_used: bool,
+    #[serde(default)]
+    pub origin_component_id: Option<u32>,
+    #[serde(default)]
+    pub origin_hop_distance_m: Option<f64>,
+    #[serde(default)]
+    pub reachable_network_length_m: Option<f64>,
+    #[serde(default)]
+    pub reachable_edge_count: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAreaResult {
+    pub analysis_id: String,
+    #[serde(default)]
+    pub outcome: AnalysisOutcome,
+    #[serde(default)]
+    pub output_mode: ServiceAreaOutputMode,
+    #[serde(default)]
+    pub band_mode: ServiceAreaBandMode,
+    #[serde(default)]
+    pub boundary_mode: ServiceAreaBoundaryMode,
+    #[serde(default)]
+    pub multi_origin_mode: ServiceAreaMultiOriginMode,
+    pub origin_count: usize,
+    #[serde(default)]
+    pub processed_origin_count: usize,
+    #[serde(default)]
+    pub skipped_origin_count: usize,
+    #[serde(default)]
+    pub fallback_origin_count: usize,
+    pub threshold_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<ServiceAreaFeature>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub summaries: Vec<ServiceAreaThresholdSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AnalysisDiagnostic>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +620,8 @@ fn load_od_pairs_csv(raw: &str) -> Result<OdPairsDocument> {
     Ok(OdPairsDocument {
         pairs,
         snap: SnapOptions::default(),
+        connectivity: ConnectivityPolicy::default(),
+        fallback: FallbackPolicy::default(),
         returns: ReturnConfig::default(),
     })
 }
@@ -241,6 +647,8 @@ fn load_point_set_csv(raw: &str) -> Result<PointSetDocument> {
     Ok(PointSetDocument {
         points,
         snap: SnapOptions::default(),
+        connectivity: ConnectivityPolicy::default(),
+        fallback: FallbackPolicy::default(),
         returns: ReturnConfig::default(),
     })
 }
@@ -327,6 +735,8 @@ fn parse_structured_point_set(parsed: PointSetFile) -> PointSetDocument {
         PointSetFile::Bare(points) => PointSetDocument {
             points,
             snap: SnapOptions::default(),
+            connectivity: ConnectivityPolicy::default(),
+            fallback: FallbackPolicy::default(),
             returns: ReturnConfig::default(),
         },
     }
@@ -338,9 +748,36 @@ fn parse_structured_od_pairs(parsed: OdPairsFile) -> OdPairsDocument {
         OdPairsFile::Bare(pairs) => OdPairsDocument {
             pairs,
             snap: SnapOptions::default(),
+            connectivity: ConnectivityPolicy::default(),
+            fallback: FallbackPolicy::default(),
             returns: ReturnConfig::default(),
         },
     }
+}
+
+fn validate_service_area_request(request: ServiceAreaRequest) -> Result<ServiceAreaRequest> {
+    if request.analysis_id.trim().is_empty() {
+        bail!("service-area request must contain a non-empty analysis_id");
+    }
+    if request.origins.is_empty() {
+        bail!("service-area request must contain at least one origin");
+    }
+    if request.thresholds.is_empty() {
+        bail!("service-area request must contain at least one threshold");
+    }
+    if request
+        .thresholds
+        .iter()
+        .any(|threshold| threshold.limit <= 0.0)
+    {
+        bail!("service-area thresholds must be greater than zero");
+    }
+    if request.fallback != FallbackPolicy::default() {
+        bail!(
+            "service-area execution does not support fallback failure modes yet; leave fallback at the default strict value"
+        );
+    }
+    Ok(request)
 }
 
 fn merge_point_set_returns(left: &ReturnConfig, right: &ReturnConfig) -> ReturnConfig {
@@ -360,6 +797,28 @@ fn merge_point_set_returns(left: &ReturnConfig, right: &ReturnConfig) -> ReturnC
     merged
 }
 
+fn merge_point_set_connectivity_policy(
+    left: &ConnectivityPolicy,
+    right: &ConnectivityPolicy,
+) -> ConnectivityPolicy {
+    if *left == ConnectivityPolicy::default() {
+        right.clone()
+    } else {
+        left.clone()
+    }
+}
+
+fn merge_point_set_fallback_policy(
+    left: &FallbackPolicy,
+    right: &FallbackPolicy,
+) -> FallbackPolicy {
+    if *left == FallbackPolicy::default() {
+        right.clone()
+    } else {
+        left.clone()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnappedPoint {
     pub point_id: String,
@@ -377,14 +836,70 @@ pub struct SnappedPoint {
     pub snapped_from_node_id: Option<u32>,
     #[serde(default)]
     pub snapped_to_node_id: Option<u32>,
+    #[serde(default)]
+    pub component_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteSummary {
+    #[serde(default)]
+    pub network_distance_m: u64,
+    #[serde(default)]
+    pub network_travel_time_s: f64,
+    #[serde(default)]
+    pub network_generalized_cost: f64,
+    #[serde(default)]
+    pub illegal_movement_penalty_s: f64,
+    #[serde(default)]
+    pub illegal_movement_penalty_cost: f64,
+    #[serde(default)]
+    pub violation_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub violation_types: Vec<RouteViolationType>,
     pub total_distance_m: u64,
     pub total_travel_time_s: f64,
     pub total_generalized_cost: f64,
     pub segment_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteViolationType {
+    ReverseOneway,
+    IllegalTurn,
+    IgnoredTurnRestriction,
+    ForbiddenUturn,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteViolation {
+    pub violation_type: RouteViolationType,
+    #[serde(default)]
+    pub edge_id: Option<u32>,
+    #[serde(default)]
+    pub from_edge_id: Option<u32>,
+    #[serde(default)]
+    pub to_edge_id: Option<u32>,
+    #[serde(default)]
+    pub distance_m: Option<f64>,
+    #[serde(default)]
+    pub penalty_s: f64,
+    #[serde(default)]
+    pub penalty_generalized_cost: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HopEndpoint {
+    Origin,
+    Destination,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteHopSegment {
+    pub endpoint: HopEndpoint,
+    pub distance_m: f64,
+    pub geometry: Vec<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -400,6 +915,8 @@ pub struct RouteSegment {
     pub surface: SurfaceClass,
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub violation_type: Option<RouteViolationType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -423,6 +940,14 @@ pub struct RouteResult {
     pub route_id: String,
     pub origin: SnappedPoint,
     pub destination: SnappedPoint,
+    #[serde(default)]
+    pub outcome: AnalysisOutcome,
+    #[serde(default)]
+    pub fallback_used: bool,
+    #[serde(default)]
+    pub origin_hop_distance_m: Option<f64>,
+    #[serde(default)]
+    pub destination_hop_distance_m: Option<f64>,
     pub summary: RouteSummary,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub node_path: Vec<u32>,
@@ -430,10 +955,16 @@ pub struct RouteResult {
     pub edge_path: Vec<u32>,
     #[serde(default)]
     pub geometry: Option<Vec<[f64; 2]>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hop_segments: Vec<RouteHopSegment>,
     #[serde(default)]
     pub segments: Option<Vec<RouteSegment>>,
     #[serde(default)]
     pub breakdowns: Option<RouteBreakdowns>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub violations: Vec<RouteViolation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -442,6 +973,7 @@ pub struct RouteResult {
 #[serde(rename_all = "snake_case")]
 pub enum BatchItemStatus {
     Succeeded,
+    Ignored,
     Failed,
 }
 
@@ -452,6 +984,18 @@ pub struct OdPairResult {
     pub destination_id: String,
     pub status: BatchItemStatus,
     #[serde(default)]
+    pub outcome: AnalysisOutcome,
+    #[serde(default)]
+    pub fallback_used: bool,
+    #[serde(default)]
+    pub origin_component_id: Option<u32>,
+    #[serde(default)]
+    pub destination_component_id: Option<u32>,
+    #[serde(default)]
+    pub origin_hop_distance_m: Option<f64>,
+    #[serde(default)]
+    pub destination_hop_distance_m: Option<f64>,
+    #[serde(default)]
     pub origin_snap_distance_m: Option<f64>,
     #[serde(default)]
     pub destination_snap_distance_m: Option<f64>,
@@ -462,7 +1006,17 @@ pub struct OdPairResult {
     #[serde(default)]
     pub total_generalized_cost: Option<f64>,
     #[serde(default)]
+    pub illegal_movement_penalty_s: Option<f64>,
+    #[serde(default)]
+    pub illegal_movement_penalty_cost: Option<f64>,
+    #[serde(default)]
+    pub violation_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub violation_types: Vec<RouteViolationType>,
+    #[serde(default)]
     pub geometry: Option<Vec<[f64; 2]>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -472,7 +1026,11 @@ pub struct OdResult {
     pub pair_count: usize,
     pub succeeded_count: usize,
     pub failed_count: usize,
+    #[serde(default)]
+    pub ignored_count: usize,
     pub pairs: Vec<OdPairResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -483,6 +1041,18 @@ pub struct MatrixCellResult {
     pub destination_id: String,
     pub status: BatchItemStatus,
     #[serde(default)]
+    pub outcome: AnalysisOutcome,
+    #[serde(default)]
+    pub fallback_used: bool,
+    #[serde(default)]
+    pub origin_component_id: Option<u32>,
+    #[serde(default)]
+    pub destination_component_id: Option<u32>,
+    #[serde(default)]
+    pub origin_hop_distance_m: Option<f64>,
+    #[serde(default)]
+    pub destination_hop_distance_m: Option<f64>,
+    #[serde(default)]
     pub origin_snap_distance_m: Option<f64>,
     #[serde(default)]
     pub destination_snap_distance_m: Option<f64>,
@@ -493,7 +1063,17 @@ pub struct MatrixCellResult {
     #[serde(default)]
     pub total_generalized_cost: Option<f64>,
     #[serde(default)]
+    pub illegal_movement_penalty_s: Option<f64>,
+    #[serde(default)]
+    pub illegal_movement_penalty_cost: Option<f64>,
+    #[serde(default)]
+    pub violation_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub violation_types: Vec<RouteViolationType>,
+    #[serde(default)]
     pub geometry: Option<Vec<[f64; 2]>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
     pub error: Option<String>,
 }
@@ -505,7 +1085,11 @@ pub struct MatrixResult {
     pub cell_count: usize,
     pub succeeded_count: usize,
     pub failed_count: usize,
+    #[serde(default)]
+    pub ignored_count: usize,
     pub cells: Vec<MatrixCellResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
     pub warnings: Vec<String>,
 }
@@ -528,6 +1112,7 @@ impl PreparedRoutingEngine {
                     metrics.as_ref(),
                     RoutingGraphBuildOptions {
                         ignore_multi_edge_restriction_sequences: true,
+                        search_time_turn_restrictions: false,
                     },
                 )?)
             } else {
@@ -584,6 +1169,21 @@ impl PreparedRoutingEngine {
         edge_names: Option<&[String]>,
         mode: EngineMode,
     ) -> Result<RouteResult> {
+        if has_failure_modes(&request.fallback) {
+            let (degraded_topology, degraded_metrics, degraded_routing_graph) =
+                build_failure_mode_bundle(
+                    self.topology.as_ref(),
+                    self.metrics.as_ref(),
+                    &request.fallback,
+                )?;
+            return execute_route_with_graph(
+                &degraded_topology,
+                &degraded_metrics,
+                &degraded_routing_graph,
+                request,
+                edge_names,
+            );
+        }
         let (routing_graph, _) = self.routing_graph_for_mode(mode);
         execute_route_with_graph(
             self.topology.as_ref(),
@@ -603,6 +1203,20 @@ impl PreparedRoutingEngine {
         document: &OdPairsDocument,
         mode: EngineMode,
     ) -> Result<OdResult> {
+        if has_failure_modes(&document.fallback) {
+            let (degraded_topology, degraded_metrics, degraded_routing_graph) =
+                build_failure_mode_bundle(
+                    self.topology.as_ref(),
+                    self.metrics.as_ref(),
+                    &document.fallback,
+                )?;
+            return execute_od_with_graph(
+                &degraded_topology,
+                &degraded_metrics,
+                &degraded_routing_graph,
+                document,
+            );
+        }
         let (routing_graph, _) = self.routing_graph_for_mode(mode);
         execute_od_with_graph(
             self.topology.as_ref(),
@@ -626,6 +1240,22 @@ impl PreparedRoutingEngine {
         destinations: &PointSetDocument,
         mode: EngineMode,
     ) -> Result<MatrixResult> {
+        let fallback = merge_point_set_fallback_policy(&origins.fallback, &destinations.fallback);
+        if has_failure_modes(&fallback) {
+            let (degraded_topology, degraded_metrics, degraded_routing_graph) =
+                build_failure_mode_bundle(
+                    self.topology.as_ref(),
+                    self.metrics.as_ref(),
+                    &fallback,
+                )?;
+            return execute_matrix_with_graph(
+                &degraded_topology,
+                &degraded_metrics,
+                &degraded_routing_graph,
+                origins,
+                destinations,
+            );
+        }
         let (routing_graph, _) = self.routing_graph_for_mode(mode);
         execute_matrix_with_graph(
             self.topology.as_ref(),
@@ -633,6 +1263,24 @@ impl PreparedRoutingEngine {
             routing_graph,
             origins,
             destinations,
+        )
+    }
+
+    pub fn execute_service_area(&self, request: &ServiceAreaRequest) -> Result<ServiceAreaResult> {
+        self.execute_service_area_with_mode(request, EngineMode::Auto)
+    }
+
+    pub fn execute_service_area_with_mode(
+        &self,
+        request: &ServiceAreaRequest,
+        mode: EngineMode,
+    ) -> Result<ServiceAreaResult> {
+        let (routing_graph, _) = self.routing_graph_for_mode(mode);
+        execute_service_area_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            routing_graph,
+            request,
         )
     }
 
@@ -718,6 +1366,7 @@ fn execute_od_with_graph(
     let mut origin_tree_cache = HashMap::new();
     let mut pairs = Vec::with_capacity(document.pairs.len());
     let mut succeeded_count = 0_usize;
+    let mut ignored_count = 0_usize;
 
     for ((pair, origin_ref), destination_ref) in document
         .pairs
@@ -733,6 +1382,9 @@ fn execute_od_with_graph(
                 metrics,
                 routing_graph,
                 "",
+                document.snap.max_distance_m,
+                &document.connectivity,
+                &document.fallback,
                 &document.returns,
                 &unique_origin_candidates,
                 *origin_set_id,
@@ -744,33 +1396,68 @@ fn execute_od_with_graph(
         };
         match route {
             Ok(route) => {
-                succeeded_count += 1;
+                let status = batch_status_for_route(&route);
+                if matches!(status, BatchItemStatus::Succeeded) {
+                    succeeded_count += 1;
+                } else {
+                    ignored_count += 1;
+                }
+                let ignored = matches!(status, BatchItemStatus::Ignored);
+                let error = batch_ignored_message(&route);
+                let geometry = route.geometry;
+                let diagnostics = route.diagnostics;
                 pairs.push(OdPairResult {
                     pair_id: pair.pair_id.clone(),
                     origin_id: pair.origin.id.clone(),
                     destination_id: pair.destination.id.clone(),
-                    status: BatchItemStatus::Succeeded,
+                    status,
+                    outcome: route.outcome,
+                    fallback_used: route.fallback_used,
+                    origin_component_id: route.origin.component_id,
+                    destination_component_id: route.destination.component_id,
+                    origin_hop_distance_m: route.origin_hop_distance_m,
+                    destination_hop_distance_m: route.destination_hop_distance_m,
                     origin_snap_distance_m: Some(route.origin.snap_distance_m),
                     destination_snap_distance_m: Some(route.destination.snap_distance_m),
-                    total_distance_m: Some(route.summary.total_distance_m),
-                    total_travel_time_s: Some(route.summary.total_travel_time_s),
-                    total_generalized_cost: Some(route.summary.total_generalized_cost),
-                    geometry: route.geometry,
-                    error: None,
+                    total_distance_m: (!ignored).then_some(route.summary.total_distance_m),
+                    total_travel_time_s: (!ignored).then_some(route.summary.total_travel_time_s),
+                    total_generalized_cost: (!ignored)
+                        .then_some(route.summary.total_generalized_cost),
+                    illegal_movement_penalty_s: (!ignored)
+                        .then_some(route.summary.illegal_movement_penalty_s),
+                    illegal_movement_penalty_cost: (!ignored)
+                        .then_some(route.summary.illegal_movement_penalty_cost),
+                    violation_count: route.summary.violation_count,
+                    violation_types: route.summary.violation_types.clone(),
+                    geometry,
+                    diagnostics,
+                    error,
                 });
             }
             Err(error) => {
+                let (outcome, diagnostics) = failure_outcome_and_diagnostics(&error);
                 pairs.push(OdPairResult {
                     pair_id: pair.pair_id.clone(),
                     origin_id: pair.origin.id.clone(),
                     destination_id: pair.destination.id.clone(),
                     status: BatchItemStatus::Failed,
+                    outcome,
+                    fallback_used: false,
+                    origin_component_id: None,
+                    destination_component_id: None,
+                    origin_hop_distance_m: None,
+                    destination_hop_distance_m: None,
                     origin_snap_distance_m: None,
                     destination_snap_distance_m: None,
                     total_distance_m: None,
                     total_travel_time_s: None,
                     total_generalized_cost: None,
+                    illegal_movement_penalty_s: None,
+                    illegal_movement_penalty_cost: None,
+                    violation_count: 0,
+                    violation_types: Vec::new(),
                     geometry: None,
+                    diagnostics,
                     error: Some(error.to_string()),
                 });
             }
@@ -780,12 +1467,17 @@ fn execute_od_with_graph(
     Ok(OdResult {
         pair_count: pairs.len(),
         succeeded_count,
-        failed_count: pairs.len() - succeeded_count,
+        failed_count: pairs.len() - succeeded_count - ignored_count,
+        ignored_count,
         pairs,
+        diagnostics: Vec::new(),
         warnings: {
             let mut warnings = vec![
                 "Batch OD execution now reuses exact single-source search trees and duplicate snapped solves within the batch; multi-edge restriction cases still fall back to per-pair automaton search.".to_string(),
             ];
+            if ignored_count > 0 {
+                warnings.push(batch_ignored_unreachable_warning("OD", ignored_count));
+            }
             warnings.extend(execution_warnings(metrics));
             warnings
         },
@@ -804,11 +1496,15 @@ fn execute_matrix_with_graph(
         .max_distance_m
         .max(destinations.snap.max_distance_m);
     let returns = merge_point_set_returns(&origins.returns, &destinations.returns);
+    let connectivity =
+        merge_point_set_connectivity_policy(&origins.connectivity, &destinations.connectivity);
+    let fallback = merge_point_set_fallback_policy(&origins.fallback, &destinations.fallback);
     let origin_snaps = presnap_point_set(
         topology,
         routing_graph,
         &origins.points,
         snap_max_distance_m,
+        true,
     );
     let (origin_refs, unique_origin_candidates) = intern_candidate_sets(origin_snaps);
     let destination_snaps = presnap_point_set(
@@ -816,6 +1512,7 @@ fn execute_matrix_with_graph(
         routing_graph,
         &destinations.points,
         snap_max_distance_m,
+        false,
     );
     let (destination_refs, unique_destination_candidates) =
         intern_candidate_sets(destination_snaps);
@@ -823,6 +1520,7 @@ fn execute_matrix_with_graph(
     let mut origin_tree_cache = HashMap::new();
     let mut cells = Vec::with_capacity(origins.points.len() * destinations.points.len());
     let mut succeeded_count = 0_usize;
+    let mut ignored_count = 0_usize;
 
     for (origin, origin_ref) in origins.points.iter().zip(&origin_refs) {
         for (destination, destination_ref) in destinations.points.iter().zip(&destination_refs) {
@@ -834,6 +1532,9 @@ fn execute_matrix_with_graph(
                     metrics,
                     routing_graph,
                     "",
+                    snap_max_distance_m,
+                    &connectivity,
+                    &fallback,
                     &returns,
                     &unique_origin_candidates,
                     *origin_set_id,
@@ -845,31 +1546,67 @@ fn execute_matrix_with_graph(
             };
             match route {
                 Ok(route) => {
-                    succeeded_count += 1;
+                    let status = batch_status_for_route(&route);
+                    if matches!(status, BatchItemStatus::Succeeded) {
+                        succeeded_count += 1;
+                    } else {
+                        ignored_count += 1;
+                    }
+                    let ignored = matches!(status, BatchItemStatus::Ignored);
+                    let error = batch_ignored_message(&route);
+                    let geometry = route.geometry;
+                    let diagnostics = route.diagnostics;
                     cells.push(MatrixCellResult {
                         origin_id: origin.id.clone(),
                         destination_id: destination.id.clone(),
-                        status: BatchItemStatus::Succeeded,
+                        status,
+                        outcome: route.outcome,
+                        fallback_used: route.fallback_used,
+                        origin_component_id: route.origin.component_id,
+                        destination_component_id: route.destination.component_id,
+                        origin_hop_distance_m: route.origin_hop_distance_m,
+                        destination_hop_distance_m: route.destination_hop_distance_m,
                         origin_snap_distance_m: Some(route.origin.snap_distance_m),
                         destination_snap_distance_m: Some(route.destination.snap_distance_m),
-                        total_distance_m: Some(route.summary.total_distance_m),
-                        total_travel_time_s: Some(route.summary.total_travel_time_s),
-                        total_generalized_cost: Some(route.summary.total_generalized_cost),
-                        geometry: route.geometry,
-                        error: None,
+                        total_distance_m: (!ignored).then_some(route.summary.total_distance_m),
+                        total_travel_time_s: (!ignored)
+                            .then_some(route.summary.total_travel_time_s),
+                        total_generalized_cost: (!ignored)
+                            .then_some(route.summary.total_generalized_cost),
+                        illegal_movement_penalty_s: (!ignored)
+                            .then_some(route.summary.illegal_movement_penalty_s),
+                        illegal_movement_penalty_cost: (!ignored)
+                            .then_some(route.summary.illegal_movement_penalty_cost),
+                        violation_count: route.summary.violation_count,
+                        violation_types: route.summary.violation_types.clone(),
+                        geometry,
+                        diagnostics,
+                        error,
                     });
                 }
                 Err(error) => {
+                    let (outcome, diagnostics) = failure_outcome_and_diagnostics(&error);
                     cells.push(MatrixCellResult {
                         origin_id: origin.id.clone(),
                         destination_id: destination.id.clone(),
                         status: BatchItemStatus::Failed,
+                        outcome,
+                        fallback_used: false,
+                        origin_component_id: None,
+                        destination_component_id: None,
+                        origin_hop_distance_m: None,
+                        destination_hop_distance_m: None,
                         origin_snap_distance_m: None,
                         destination_snap_distance_m: None,
                         total_distance_m: None,
                         total_travel_time_s: None,
                         total_generalized_cost: None,
+                        illegal_movement_penalty_s: None,
+                        illegal_movement_penalty_cost: None,
+                        violation_count: 0,
+                        violation_types: Vec::new(),
                         geometry: None,
+                        diagnostics,
                         error: Some(error.to_string()),
                     });
                 }
@@ -882,16 +1619,1313 @@ fn execute_matrix_with_graph(
         destination_count: destinations.points.len(),
         cell_count: cells.len(),
         succeeded_count,
-        failed_count: cells.len() - succeeded_count,
+        failed_count: cells.len() - succeeded_count - ignored_count,
+        ignored_count,
         cells,
+        diagnostics: Vec::new(),
         warnings: {
             let mut warnings = vec![
                 "Matrix execution now reuses exact single-source search trees and duplicate snapped solves within the batch; multi-edge restriction cases still fall back to per-cell automaton search.".to_string(),
             ];
+            if ignored_count > 0 {
+                warnings.push(batch_ignored_unreachable_warning("matrix", ignored_count));
+            }
             warnings.extend(execution_warnings(metrics));
             warnings
         },
     })
+}
+
+pub fn execute_service_area(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    request: &ServiceAreaRequest,
+) -> Result<ServiceAreaResult> {
+    validate_execution_inputs(topology, metrics)?;
+    let routing_graph = build_routing_graph(topology, metrics)?;
+    execute_service_area_with_graph(topology, metrics, &routing_graph, request)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ServiceAreaMetricKind {
+    DistanceM,
+    TravelTimeS,
+}
+
+impl From<ServiceAreaThresholdMetric> for ServiceAreaMetricKind {
+    fn from(value: ServiceAreaThresholdMetric) -> Self {
+        match value {
+            ServiceAreaThresholdMetric::DistanceM => Self::DistanceM,
+            ServiceAreaThresholdMetric::TravelTimeS => Self::TravelTimeS,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ReachableEdgeInterval {
+    edge_index: usize,
+    start_fraction: f64,
+    end_fraction: f64,
+    midpoint_cost: f64,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceAreaOriginExpansion {
+    origin_id: String,
+    representative_origin: SnappedPoint,
+    fallback_used: bool,
+    origin_hop_distance_m: Option<f64>,
+    edge_before_costs: Vec<f64>,
+    edge_end_costs: Vec<f64>,
+    edge_start_fractions: Vec<f64>,
+    diagnostics: Vec<AnalysisDiagnostic>,
+    warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceAreaOriginBand {
+    origin_id: String,
+    origin_component_id: Option<u32>,
+    fallback_used: bool,
+    origin_hop_distance_m: Option<f64>,
+    threshold_id: Option<String>,
+    band_start_limit: Option<f64>,
+    threshold_limit: f64,
+    threshold_metric: ServiceAreaThresholdMetric,
+    segments: Vec<ReachableEdgeInterval>,
+}
+
+#[derive(Debug, Clone)]
+struct ServiceAreaOriginResolution {
+    seed_candidates: Vec<SnappedPoint>,
+    representative_origin: SnappedPoint,
+    fallback_used: bool,
+    origin_hop_distance_m: Option<f64>,
+    diagnostics: Vec<AnalysisDiagnostic>,
+    warnings: Vec<String>,
+}
+
+fn execute_service_area_with_graph(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    request: &ServiceAreaRequest,
+) -> Result<ServiceAreaResult> {
+    let search_distance_m = request
+        .connectivity
+        .max_hop_distance_m
+        .unwrap_or(request.snap.max_distance_m)
+        .max(request.snap.max_distance_m);
+    let thresholds_by_metric = thresholds_for_service_area(request);
+    let mut snap_cache = HashMap::new();
+    let origin_candidate_sets = request
+        .origins
+        .iter()
+        .map(|origin| {
+            cached_snap_candidates(
+                &mut snap_cache,
+                topology,
+                routing_graph,
+                origin,
+                search_distance_m,
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    let (origin_refs, unique_origin_candidates) = intern_candidate_sets(origin_candidate_sets);
+
+    let mut expansion_cache = HashMap::<
+        (usize, ServiceAreaMetricKind),
+        std::result::Result<ServiceAreaOriginExpansion, AnalysisFailure>,
+    >::new();
+    let mut diagnostics = Vec::new();
+    let mut warnings = execution_warnings(metrics);
+    let mut threshold_summaries = Vec::new();
+    let mut origin_bands = Vec::new();
+    let mut processed_origin_count = 0_usize;
+    let mut skipped_origin_count = 0_usize;
+    let mut fallback_origin_count = 0_usize;
+
+    for (origin, origin_ref) in request.origins.iter().zip(&origin_refs) {
+        let origin_set_id = match origin_ref {
+            Ok(origin_set_id) => *origin_set_id,
+            Err(error) => {
+                if matches!(
+                    request.connectivity.disconnected,
+                    DisconnectedNetworkMode::IgnoreUnreachable
+                ) {
+                    skipped_origin_count += 1;
+                    diagnostics.extend(error.diagnostics.clone());
+                    warnings.push(format!(
+                        "Service-area origin '{}' was ignored because it had no legal snap candidate within policy.",
+                        origin.id
+                    ));
+                    continue;
+                }
+                return Err(anyhow::Error::new(error.clone()))
+                    .with_context(|| format!("executing service-area origin '{}'", origin.id));
+            }
+        };
+
+        let mut origin_processed = false;
+        let mut origin_skipped = false;
+
+        for (metric_kind, thresholds) in &thresholds_by_metric {
+            let expansion = expansion_cache
+                .entry((origin_set_id, *metric_kind))
+                .or_insert_with(|| {
+                    build_service_area_expansion(
+                        topology,
+                        metrics,
+                        routing_graph,
+                        origin,
+                        &unique_origin_candidates[origin_set_id],
+                        request.snap.max_distance_m,
+                        &request.connectivity,
+                        *metric_kind,
+                    )
+                    .map_err(|error| {
+                        analysis_failure(&error).cloned().unwrap_or_else(|| {
+                            AnalysisFailure::new(
+                                error.to_string(),
+                                AnalysisOutcome::Unreachable,
+                                Vec::new(),
+                            )
+                        })
+                    })
+                })
+                .clone();
+
+            let expansion = match expansion {
+                Ok(expansion) => expansion,
+                Err(error)
+                    if matches!(
+                        request.connectivity.disconnected,
+                        DisconnectedNetworkMode::IgnoreUnreachable
+                    ) =>
+                {
+                    origin_skipped = true;
+                    diagnostics.extend(error.diagnostics);
+                    warnings.push(format!(
+                        "Service-area origin '{}' was ignored because it could not be reached under the current connectivity policy.",
+                        origin.id
+                    ));
+                    continue;
+                }
+                Err(error) => {
+                    return Err(anyhow::Error::new(error))
+                        .with_context(|| format!("executing service-area origin '{}'", origin.id));
+                }
+            };
+
+            origin_processed = true;
+            if expansion.fallback_used {
+                fallback_origin_count += 1;
+            }
+            diagnostics.extend(expansion.diagnostics.clone());
+            warnings.extend(expansion.warnings.clone());
+
+            let mut previous_limit = None;
+            for threshold in thresholds {
+                let cumulative = service_area_intervals_for_threshold(
+                    topology,
+                    metrics,
+                    &expansion,
+                    *metric_kind,
+                    threshold.limit,
+                    request.boundary_mode,
+                );
+                let segments = if matches!(request.band_mode, ServiceAreaBandMode::Ring) {
+                    let previous = previous_limit.map(|limit| {
+                        service_area_intervals_for_threshold(
+                            topology,
+                            metrics,
+                            &expansion,
+                            *metric_kind,
+                            limit,
+                            request.boundary_mode,
+                        )
+                    });
+                    difference_service_area_intervals(cumulative, previous.unwrap_or_default())
+                } else {
+                    cumulative
+                };
+
+                if request.returns.per_threshold_summary {
+                    let (reachable_network_length_m, reachable_edge_count) =
+                        summarize_service_area_segments(
+                            topology,
+                            &segments,
+                            request.returns.attributes,
+                        );
+                    threshold_summaries.push(ServiceAreaThresholdSummary {
+                        origin_id: Some(expansion.origin_id.clone()),
+                        band_start_limit: previous_limit,
+                        threshold_id: threshold.id.clone(),
+                        threshold_limit: threshold.limit,
+                        threshold_metric: threshold.metric,
+                        fallback_used: expansion.fallback_used,
+                        origin_component_id: expansion.representative_origin.component_id,
+                        origin_hop_distance_m: expansion.origin_hop_distance_m,
+                        reachable_network_length_m,
+                        reachable_edge_count,
+                    });
+                }
+
+                origin_bands.push(ServiceAreaOriginBand {
+                    origin_id: expansion.origin_id.clone(),
+                    origin_component_id: expansion.representative_origin.component_id,
+                    fallback_used: expansion.fallback_used,
+                    origin_hop_distance_m: expansion.origin_hop_distance_m,
+                    threshold_id: threshold.id.clone(),
+                    band_start_limit: previous_limit,
+                    threshold_limit: threshold.limit,
+                    threshold_metric: threshold.metric,
+                    segments,
+                });
+                previous_limit = Some(threshold.limit);
+            }
+        }
+
+        if origin_processed {
+            processed_origin_count += 1;
+        } else if origin_skipped {
+            skipped_origin_count += 1;
+        }
+    }
+
+    let origin_bands = match request.multi_origin_mode {
+        ServiceAreaMultiOriginMode::Overlap => origin_bands,
+        ServiceAreaMultiOriginMode::Merge => merge_service_area_bands(origin_bands),
+        ServiceAreaMultiOriginMode::Cut => cut_service_area_bands(origin_bands),
+    };
+
+    let features = if request.returns.geometry || request.returns.attributes {
+        build_service_area_features(topology, request, origin_bands)
+    } else {
+        Vec::new()
+    };
+
+    let diagnostics = if request.returns.diagnostics {
+        diagnostics
+    } else {
+        Vec::new()
+    };
+
+    Ok(ServiceAreaResult {
+        analysis_id: request.analysis_id.clone(),
+        outcome: service_area_result_outcome(
+            processed_origin_count,
+            skipped_origin_count,
+            fallback_origin_count,
+        ),
+        output_mode: request.output_mode,
+        band_mode: request.band_mode,
+        boundary_mode: request.boundary_mode,
+        multi_origin_mode: request.multi_origin_mode,
+        origin_count: request.origins.len(),
+        processed_origin_count,
+        skipped_origin_count,
+        fallback_origin_count,
+        threshold_count: request.thresholds.len(),
+        features,
+        summaries: threshold_summaries,
+        diagnostics,
+        warnings,
+    })
+}
+
+fn thresholds_for_service_area(
+    request: &ServiceAreaRequest,
+) -> Vec<(ServiceAreaMetricKind, Vec<&ServiceAreaThreshold>)> {
+    let mut distance = request
+        .thresholds
+        .iter()
+        .filter(|threshold| matches!(threshold.metric, ServiceAreaThresholdMetric::DistanceM))
+        .collect::<Vec<_>>();
+    let mut time = request
+        .thresholds
+        .iter()
+        .filter(|threshold| matches!(threshold.metric, ServiceAreaThresholdMetric::TravelTimeS))
+        .collect::<Vec<_>>();
+    distance.sort_by(|left, right| left.limit.total_cmp(&right.limit));
+    time.sort_by(|left, right| left.limit.total_cmp(&right.limit));
+
+    let mut groups = Vec::new();
+    if !distance.is_empty() {
+        groups.push((ServiceAreaMetricKind::DistanceM, distance));
+    }
+    if !time.is_empty() {
+        groups.push((ServiceAreaMetricKind::TravelTimeS, time));
+    }
+    groups
+}
+
+fn build_service_area_expansion(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    point: &LabeledPoint,
+    candidates: &[SnappedPoint],
+    snap_max_distance_m: f64,
+    connectivity: &ConnectivityPolicy,
+    metric_kind: ServiceAreaMetricKind,
+) -> Result<ServiceAreaOriginExpansion> {
+    let resolution =
+        resolve_service_area_origin(point, candidates, snap_max_distance_m, connectivity)?;
+    let edge_count = topology.edges.len();
+    let mut edge_before_costs = vec![f64::INFINITY; edge_count];
+    let mut edge_end_costs = vec![f64::INFINITY; edge_count];
+    let mut edge_start_fractions = vec![0.0_f64; edge_count];
+
+    if routing_graph.has_restriction_sequences() {
+        let mut dist = HashMap::<SearchStateKey, f64>::new();
+        let mut heap = BinaryHeap::new();
+        for candidate in &resolution.seed_candidates {
+            for seed in
+                service_area_seed_specs(routing_graph, topology, metrics, candidate, metric_kind)
+            {
+                let automaton_state = routing_graph.automaton.transition(0, seed.edge_index);
+                let key = SearchStateKey {
+                    edge_index: seed.edge_index,
+                    automaton_state,
+                };
+                let previous = dist.get(&key).copied().unwrap_or(f64::INFINITY);
+                if seed.end_cost + f64::EPSILON >= previous {
+                    continue;
+                }
+                dist.insert(key, seed.end_cost);
+                update_service_area_edge_best(
+                    &mut edge_before_costs,
+                    &mut edge_end_costs,
+                    &mut edge_start_fractions,
+                    seed.edge_index,
+                    seed.before_cost,
+                    seed.end_cost,
+                    seed.start_fraction,
+                );
+                heap.push(State {
+                    edge_index: seed.edge_index,
+                    automaton_state,
+                    cost: seed.end_cost,
+                    score: seed.end_cost,
+                });
+            }
+        }
+
+        while let Some(State {
+            edge_index,
+            automaton_state,
+            cost,
+            score: _,
+        }) = heap.pop()
+        {
+            let key = SearchStateKey {
+                edge_index,
+                automaton_state,
+            };
+            if cost > dist.get(&key).copied().unwrap_or(f64::INFINITY) {
+                continue;
+            }
+
+            for transition_index in routing_graph.transition_range(edge_index) {
+                let next_edge = routing_graph.transition_edges[transition_index] as usize;
+                if !routing_graph
+                    .automaton
+                    .is_transition_allowed(automaton_state, next_edge)
+                {
+                    continue;
+                }
+                let Some(edge_cost) =
+                    service_area_edge_cost(topology, metrics, next_edge, metric_kind)
+                else {
+                    continue;
+                };
+                let next_before = cost
+                    + service_area_turn_cost(topology, metrics, edge_index, next_edge, metric_kind);
+                let next_end = next_before + edge_cost;
+                let next_state = routing_graph
+                    .automaton
+                    .transition(automaton_state, next_edge);
+                let next_key = SearchStateKey {
+                    edge_index: next_edge,
+                    automaton_state: next_state,
+                };
+                let previous = dist.get(&next_key).copied().unwrap_or(f64::INFINITY);
+                if next_end + f64::EPSILON >= previous {
+                    continue;
+                }
+                dist.insert(next_key, next_end);
+                update_service_area_edge_best(
+                    &mut edge_before_costs,
+                    &mut edge_end_costs,
+                    &mut edge_start_fractions,
+                    next_edge,
+                    next_before,
+                    next_end,
+                    0.0,
+                );
+                heap.push(State {
+                    edge_index: next_edge,
+                    automaton_state: next_state,
+                    cost: next_end,
+                    score: next_end,
+                });
+            }
+        }
+    } else {
+        SINGLE_SOURCE_SEARCH_SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            scratch.prepare(edge_count);
+            for candidate in &resolution.seed_candidates {
+                for seed in service_area_seed_specs(
+                    routing_graph,
+                    topology,
+                    metrics,
+                    candidate,
+                    metric_kind,
+                ) {
+                    if !scratch.update(seed.edge_index, seed.end_cost, NO_PREVIOUS_EDGE) {
+                        continue;
+                    }
+                    update_service_area_edge_best(
+                        &mut edge_before_costs,
+                        &mut edge_end_costs,
+                        &mut edge_start_fractions,
+                        seed.edge_index,
+                        seed.before_cost,
+                        seed.end_cost,
+                        seed.start_fraction,
+                    );
+                    scratch.heap.push(State {
+                        edge_index: seed.edge_index,
+                        automaton_state: 0,
+                        cost: seed.end_cost,
+                        score: seed.end_cost,
+                    });
+                }
+            }
+
+            while let Some(State {
+                edge_index,
+                automaton_state: _,
+                cost,
+                score: _,
+            }) = scratch.heap.pop()
+            {
+                if cost > scratch.dist[edge_index] {
+                    continue;
+                }
+
+                for transition_index in routing_graph.transition_range(edge_index) {
+                    let next_edge = routing_graph.transition_edges[transition_index] as usize;
+                    let Some(edge_cost) =
+                        service_area_edge_cost(topology, metrics, next_edge, metric_kind)
+                    else {
+                        continue;
+                    };
+                    let next_before = cost
+                        + service_area_turn_cost(
+                            topology,
+                            metrics,
+                            edge_index,
+                            next_edge,
+                            metric_kind,
+                        );
+                    let next_end = next_before + edge_cost;
+                    if !scratch.update(next_edge, next_end, edge_index as u32) {
+                        continue;
+                    }
+                    update_service_area_edge_best(
+                        &mut edge_before_costs,
+                        &mut edge_end_costs,
+                        &mut edge_start_fractions,
+                        next_edge,
+                        next_before,
+                        next_end,
+                        0.0,
+                    );
+                    scratch.heap.push(State {
+                        edge_index: next_edge,
+                        automaton_state: 0,
+                        cost: next_end,
+                        score: next_end,
+                    });
+                }
+            }
+        });
+    }
+
+    Ok(ServiceAreaOriginExpansion {
+        origin_id: point.id.clone(),
+        representative_origin: resolution.representative_origin,
+        fallback_used: resolution.fallback_used,
+        origin_hop_distance_m: resolution.origin_hop_distance_m,
+        edge_before_costs,
+        edge_end_costs,
+        edge_start_fractions,
+        diagnostics: resolution.diagnostics,
+        warnings: resolution.warnings,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ServiceAreaSeedSpec {
+    edge_index: usize,
+    before_cost: f64,
+    end_cost: f64,
+    start_fraction: f64,
+}
+
+fn service_area_seed_specs(
+    routing_graph: &RoutingGraph,
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    candidate: &SnappedPoint,
+    metric_kind: ServiceAreaMetricKind,
+) -> Vec<ServiceAreaSeedSpec> {
+    if let (Some(edge_id), Some(fraction)) =
+        (candidate.snapped_edge_id, candidate.snapped_edge_fraction)
+    {
+        let edge_index = edge_id as usize;
+        let Some(full_cost) = service_area_edge_cost(topology, metrics, edge_index, metric_kind)
+        else {
+            return Vec::new();
+        };
+        let remaining = full_cost * (1.0 - fraction);
+        if remaining <= f64::EPSILON {
+            return Vec::new();
+        }
+        return vec![ServiceAreaSeedSpec {
+            edge_index,
+            before_cost: 0.0,
+            end_cost: remaining,
+            start_fraction: fraction,
+        }];
+    }
+
+    routing_graph
+        .outgoing_edges(candidate.snapped_node_id as usize)
+        .iter()
+        .filter_map(|&edge_index| {
+            let edge_index = edge_index as usize;
+            service_area_edge_cost(topology, metrics, edge_index, metric_kind).and_then(|cost| {
+                (cost > f64::EPSILON).then_some(ServiceAreaSeedSpec {
+                    edge_index,
+                    before_cost: 0.0,
+                    end_cost: cost,
+                    start_fraction: 0.0,
+                })
+            })
+        })
+        .collect()
+}
+
+fn update_service_area_edge_best(
+    edge_before_costs: &mut [f64],
+    edge_end_costs: &mut [f64],
+    edge_start_fractions: &mut [f64],
+    edge_index: usize,
+    before_cost: f64,
+    end_cost: f64,
+    start_fraction: f64,
+) {
+    if end_cost + f64::EPSILON < edge_end_costs[edge_index] {
+        edge_before_costs[edge_index] = before_cost;
+        edge_end_costs[edge_index] = end_cost;
+        edge_start_fractions[edge_index] = start_fraction;
+    }
+}
+
+fn resolve_service_area_origin(
+    point: &LabeledPoint,
+    candidates: &[SnappedPoint],
+    snap_max_distance_m: f64,
+    connectivity: &ConnectivityPolicy,
+) -> Result<ServiceAreaOriginResolution> {
+    let mut warnings = Vec::new();
+    let max_hop_distance_m = connectivity
+        .max_hop_distance_m
+        .unwrap_or(snap_max_distance_m);
+
+    let nearest_candidates = |limit_m: f64| -> Vec<SnappedPoint> {
+        let min_distance = candidates
+            .iter()
+            .filter(|candidate| candidate.snap_distance_m <= limit_m)
+            .map(|candidate| candidate.snap_distance_m)
+            .min_by(|left, right| left.total_cmp(right));
+        candidates
+            .iter()
+            .filter(|candidate| {
+                min_distance.is_some_and(|distance| {
+                    candidate.snap_distance_m <= limit_m
+                        && (candidate.snap_distance_m - distance).abs() <= 1e-6
+                })
+            })
+            .cloned()
+            .collect()
+    };
+
+    let strict_candidates = nearest_candidates(snap_max_distance_m);
+    let hop_candidates = nearest_candidates(max_hop_distance_m);
+
+    let seed_candidates = match connectivity.disconnected {
+        DisconnectedNetworkMode::Strict
+        | DisconnectedNetworkMode::IgnoreUnreachable
+        | DisconnectedNetworkMode::HopDestinationToNearestReachableComponent => {
+            if matches!(
+                connectivity.disconnected,
+                DisconnectedNetworkMode::HopDestinationToNearestReachableComponent
+            ) {
+                warnings.push(
+                    "connectivity.disconnected=hop_destination_to_nearest_reachable_component has no effect for service-area origins; strict origin snapping was used.".to_string(),
+                );
+            }
+            strict_candidates
+        }
+        DisconnectedNetworkMode::HopOriginToNearestReachableComponent
+        | DisconnectedNetworkMode::HopEitherEnd => {
+            if !strict_candidates.is_empty() {
+                strict_candidates
+            } else {
+                hop_candidates
+            }
+        }
+    };
+
+    let Some(representative_origin) = seed_candidates
+        .iter()
+        .min_by(|left, right| left.snap_distance_m.total_cmp(&right.snap_distance_m))
+        .cloned()
+    else {
+        return Err(route_snap_failure(point, snap_max_distance_m).into());
+    };
+
+    let fallback_used = representative_origin.snap_distance_m > snap_max_distance_m;
+    let origin_hop_distance_m = fallback_used.then_some(representative_origin.snap_distance_m);
+    let mut diagnostics = Vec::new();
+    if fallback_used {
+        diagnostics.push(AnalysisDiagnostic {
+            code: AnalysisDiagnosticCode::FallbackUsed,
+            severity: AnalysisDiagnosticSeverity::Warning,
+            message: format!(
+                "Connectivity fallback hopped service-area origin '{}' {:.1} m to reach component {}.",
+                point.id,
+                representative_origin.snap_distance_m,
+                representative_origin.component_id.unwrap_or_default()
+            ),
+            point_ids: vec![point.id.clone()],
+            component_ids: representative_origin.component_id.into_iter().collect(),
+            suggested_actions: vec![],
+        });
+        warnings.push(format!(
+            "Service-area connectivity fallback used a non-network origin hop of {:.1} m for '{}'.",
+            representative_origin.snap_distance_m, point.id
+        ));
+    }
+
+    Ok(ServiceAreaOriginResolution {
+        seed_candidates,
+        representative_origin,
+        fallback_used,
+        origin_hop_distance_m,
+        diagnostics,
+        warnings,
+    })
+}
+
+fn service_area_edge_cost(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    edge_index: usize,
+    metric_kind: ServiceAreaMetricKind,
+) -> Option<f64> {
+    match metric_kind {
+        ServiceAreaMetricKind::DistanceM => Some(topology.edges[edge_index].length_m as f64),
+        ServiceAreaMetricKind::TravelTimeS => metrics.edge_metrics[edge_index].travel_time_s,
+    }
+}
+
+fn service_area_turn_cost(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    previous_edge_index: usize,
+    next_edge_index: usize,
+    metric_kind: ServiceAreaMetricKind,
+) -> f64 {
+    match metric_kind {
+        ServiceAreaMetricKind::DistanceM => 0.0,
+        ServiceAreaMetricKind::TravelTimeS => {
+            turn_penalty_seconds(topology, metrics, previous_edge_index, next_edge_index)
+        }
+    }
+}
+
+fn service_area_intervals_for_threshold(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    expansion: &ServiceAreaOriginExpansion,
+    metric_kind: ServiceAreaMetricKind,
+    threshold_limit: f64,
+    boundary_mode: ServiceAreaBoundaryMode,
+) -> Vec<ReachableEdgeInterval> {
+    let mut segments = Vec::new();
+    for edge_index in 0..topology.edges.len() {
+        let before_cost = expansion.edge_before_costs[edge_index];
+        let end_cost = expansion.edge_end_costs[edge_index];
+        if !before_cost.is_finite() || !end_cost.is_finite() || threshold_limit <= before_cost {
+            continue;
+        }
+        let start_fraction = expansion.edge_start_fractions[edge_index];
+        let mut end_fraction = 1.0_f64;
+        if matches!(boundary_mode, ServiceAreaBoundaryMode::CutAtBoundary)
+            && threshold_limit + f64::EPSILON < end_cost
+        {
+            let remaining_cost = end_cost - before_cost;
+            if remaining_cost <= f64::EPSILON {
+                continue;
+            }
+            let progress = ((threshold_limit - before_cost) / remaining_cost).clamp(0.0, 1.0);
+            end_fraction = start_fraction + (1.0 - start_fraction) * progress;
+        }
+        if end_fraction <= start_fraction + f64::EPSILON {
+            continue;
+        }
+        let midpoint_fraction = (start_fraction + end_fraction) / 2.0;
+        let midpoint_progress = if start_fraction >= 1.0 - f64::EPSILON {
+            1.0
+        } else {
+            ((midpoint_fraction - start_fraction) / (1.0 - start_fraction)).clamp(0.0, 1.0)
+        };
+        let full_edge_cost =
+            service_area_edge_cost(topology, metrics, edge_index, metric_kind).unwrap_or_default();
+        let midpoint_cost =
+            before_cost + full_edge_cost * (1.0 - start_fraction) * midpoint_progress;
+        segments.push(ReachableEdgeInterval {
+            edge_index,
+            start_fraction,
+            end_fraction,
+            midpoint_cost,
+        });
+    }
+    normalize_service_area_segments(segments)
+}
+
+fn difference_service_area_intervals(
+    current: Vec<ReachableEdgeInterval>,
+    previous: Vec<ReachableEdgeInterval>,
+) -> Vec<ReachableEdgeInterval> {
+    let mut previous_by_edge = BTreeMap::<usize, Vec<ReachableEdgeInterval>>::new();
+    for interval in previous {
+        previous_by_edge
+            .entry(interval.edge_index)
+            .or_default()
+            .push(interval);
+    }
+
+    let mut ring = Vec::new();
+    for interval in current {
+        let mut start = interval.start_fraction;
+        if let Some(previous_intervals) = previous_by_edge.get(&interval.edge_index) {
+            for previous in previous_intervals {
+                if previous.end_fraction <= start + f64::EPSILON {
+                    continue;
+                }
+                start = start.max(previous.end_fraction);
+            }
+        }
+        if interval.end_fraction > start + f64::EPSILON {
+            ring.push(ReachableEdgeInterval {
+                start_fraction: start,
+                ..interval
+            });
+        }
+    }
+
+    normalize_service_area_segments(ring)
+}
+
+fn normalize_service_area_segments(
+    mut segments: Vec<ReachableEdgeInterval>,
+) -> Vec<ReachableEdgeInterval> {
+    segments.sort_by(|left, right| {
+        left.edge_index
+            .cmp(&right.edge_index)
+            .then_with(|| left.start_fraction.total_cmp(&right.start_fraction))
+            .then_with(|| left.end_fraction.total_cmp(&right.end_fraction))
+    });
+
+    let mut merged: Vec<ReachableEdgeInterval> = Vec::new();
+    for segment in segments {
+        if let Some(previous) = merged.last_mut() {
+            if previous.edge_index == segment.edge_index
+                && segment.start_fraction <= previous.end_fraction + 1e-9
+            {
+                previous.end_fraction = previous.end_fraction.max(segment.end_fraction);
+                previous.midpoint_cost = previous.midpoint_cost.min(segment.midpoint_cost);
+                continue;
+            }
+        }
+        merged.push(segment);
+    }
+    merged
+}
+
+fn summarize_service_area_segments(
+    topology: &TopologyBundle,
+    segments: &[ReachableEdgeInterval],
+    include_attributes: bool,
+) -> (Option<f64>, Option<u64>) {
+    if !include_attributes {
+        return (None, None);
+    }
+    let length = segments
+        .iter()
+        .map(|segment| {
+            topology.edges[segment.edge_index].length_m as f64
+                * (segment.end_fraction - segment.start_fraction)
+        })
+        .sum::<f64>();
+    let edge_count = segments
+        .iter()
+        .map(|segment| segment.edge_index)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64;
+    (Some(length), Some(edge_count))
+}
+
+fn merge_service_area_bands(bands: Vec<ServiceAreaOriginBand>) -> Vec<ServiceAreaOriginBand> {
+    let mut merged = BTreeMap::<
+        (
+            Option<String>,
+            Option<String>,
+            u64,
+            ServiceAreaThresholdMetric,
+        ),
+        Vec<ServiceAreaOriginBand>,
+    >::new();
+    for band in bands {
+        let key = (
+            band.threshold_id.clone(),
+            band.band_start_limit
+                .map(f64::to_bits)
+                .map(|bits| bits.to_string()),
+            band.threshold_limit.to_bits(),
+            band.threshold_metric,
+        );
+        merged.entry(key).or_default().push(band);
+    }
+
+    merged
+        .into_values()
+        .map(|group| {
+            let mut segments = Vec::new();
+            let mut fallback_used = false;
+            let mut origin_hop_distance_m = None;
+            let threshold_id = group[0].threshold_id.clone();
+            let band_start_limit = group[0].band_start_limit;
+            let threshold_limit = group[0].threshold_limit;
+            let threshold_metric = group[0].threshold_metric;
+            for band in group {
+                fallback_used |= band.fallback_used;
+                origin_hop_distance_m = origin_hop_distance_m.or(band.origin_hop_distance_m);
+                segments.extend(band.segments);
+            }
+            ServiceAreaOriginBand {
+                origin_id: String::new(),
+                origin_component_id: None,
+                fallback_used,
+                origin_hop_distance_m,
+                threshold_id,
+                band_start_limit,
+                threshold_limit,
+                threshold_metric,
+                segments: normalize_service_area_segments(segments),
+            }
+        })
+        .collect()
+}
+
+fn cut_service_area_bands(bands: Vec<ServiceAreaOriginBand>) -> Vec<ServiceAreaOriginBand> {
+    let mut groups = BTreeMap::<
+        (
+            Option<String>,
+            Option<String>,
+            u64,
+            ServiceAreaThresholdMetric,
+        ),
+        Vec<ServiceAreaOriginBand>,
+    >::new();
+    for band in bands {
+        let key = (
+            band.threshold_id.clone(),
+            band.band_start_limit
+                .map(f64::to_bits)
+                .map(|bits| bits.to_string()),
+            band.threshold_limit.to_bits(),
+            band.threshold_metric,
+        );
+        groups.entry(key).or_default().push(band);
+    }
+
+    let mut cut = Vec::new();
+    for group in groups.into_values() {
+        let mut per_origin = BTreeMap::<String, ServiceAreaOriginBand>::new();
+        let mut winners = BTreeMap::<usize, (String, ReachableEdgeInterval)>::new();
+
+        for band in group {
+            let entry =
+                per_origin
+                    .entry(band.origin_id.clone())
+                    .or_insert_with(|| ServiceAreaOriginBand {
+                        origin_id: band.origin_id.clone(),
+                        origin_component_id: band.origin_component_id,
+                        fallback_used: band.fallback_used,
+                        origin_hop_distance_m: band.origin_hop_distance_m,
+                        threshold_id: band.threshold_id.clone(),
+                        band_start_limit: band.band_start_limit,
+                        threshold_limit: band.threshold_limit,
+                        threshold_metric: band.threshold_metric,
+                        segments: Vec::new(),
+                    });
+            entry.fallback_used |= band.fallback_used;
+            entry.origin_hop_distance_m =
+                entry.origin_hop_distance_m.or(band.origin_hop_distance_m);
+
+            for segment in band.segments {
+                let winner = winners
+                    .entry(segment.edge_index)
+                    .or_insert_with(|| (band.origin_id.clone(), segment.clone()));
+                if segment.midpoint_cost + f64::EPSILON < winner.1.midpoint_cost
+                    || ((segment.midpoint_cost - winner.1.midpoint_cost).abs() <= 1e-9
+                        && band.origin_id < winner.0)
+                {
+                    *winner = (band.origin_id.clone(), segment.clone());
+                }
+            }
+        }
+
+        for (edge_index, (origin_id, winner_segment)) in winners {
+            if let Some(band) = per_origin.get_mut(&origin_id) {
+                band.segments.push(ReachableEdgeInterval {
+                    edge_index,
+                    ..winner_segment
+                });
+            }
+        }
+
+        cut.extend(per_origin.into_values().map(|mut band| {
+            band.segments = normalize_service_area_segments(band.segments);
+            band
+        }));
+    }
+
+    cut
+}
+
+fn build_service_area_features(
+    topology: &TopologyBundle,
+    request: &ServiceAreaRequest,
+    bands: Vec<ServiceAreaOriginBand>,
+) -> Vec<ServiceAreaFeature> {
+    let mut features = Vec::new();
+    for band in bands {
+        let (reachable_network_length_m, reachable_edge_count) =
+            summarize_service_area_segments(topology, &band.segments, request.returns.attributes);
+        let origin_id = (!band.origin_id.is_empty()).then_some(band.origin_id.clone());
+
+        if matches!(
+            request.output_mode,
+            ServiceAreaOutputMode::Network | ServiceAreaOutputMode::Both
+        ) {
+            features.push(ServiceAreaFeature {
+                origin_id: origin_id.clone(),
+                band_start_limit: band.band_start_limit,
+                threshold_id: band.threshold_id.clone(),
+                threshold_limit: band.threshold_limit,
+                threshold_metric: band.threshold_metric,
+                geometry_type: ServiceAreaGeometryType::Network,
+                fallback_used: band.fallback_used,
+                origin_component_id: band.origin_component_id,
+                origin_hop_distance_m: band.origin_hop_distance_m,
+                reachable_network_length_m,
+                reachable_edge_count,
+                geometry: request
+                    .returns
+                    .geometry
+                    .then(|| service_area_network_geometry(topology, &band.segments)),
+            });
+        }
+
+        if matches!(
+            request.output_mode,
+            ServiceAreaOutputMode::Polygon | ServiceAreaOutputMode::Both
+        ) {
+            features.push(ServiceAreaFeature {
+                origin_id,
+                band_start_limit: band.band_start_limit,
+                threshold_id: band.threshold_id,
+                threshold_limit: band.threshold_limit,
+                threshold_metric: band.threshold_metric,
+                geometry_type: ServiceAreaGeometryType::Polygon,
+                fallback_used: band.fallback_used,
+                origin_component_id: band.origin_component_id,
+                origin_hop_distance_m: band.origin_hop_distance_m,
+                reachable_network_length_m,
+                reachable_edge_count,
+                geometry: request.returns.geometry.then(|| {
+                    service_area_polygon_geometry(topology, &band.segments, &request.polygon)
+                }),
+            });
+        }
+    }
+
+    features
+}
+
+fn service_area_result_outcome(
+    processed_origin_count: usize,
+    skipped_origin_count: usize,
+    fallback_origin_count: usize,
+) -> AnalysisOutcome {
+    if processed_origin_count == 0 {
+        AnalysisOutcome::Unreachable
+    } else if skipped_origin_count > 0 {
+        AnalysisOutcome::Partial
+    } else if fallback_origin_count > 0 {
+        AnalysisOutcome::Degraded
+    } else {
+        AnalysisOutcome::Legal
+    }
+}
+
+fn service_area_network_geometry(
+    topology: &TopologyBundle,
+    segments: &[ReachableEdgeInterval],
+) -> serde_json::Value {
+    let coordinates = segments
+        .iter()
+        .map(|segment| service_area_segment_coords(topology, segment))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "type": "MultiLineString",
+        "coordinates": coordinates,
+    })
+}
+
+fn service_area_polygon_geometry(
+    topology: &TopologyBundle,
+    segments: &[ReachableEdgeInterval],
+    options: &ServiceAreaPolygonOptions,
+) -> serde_json::Value {
+    let buffer_width_m = (25.0 * options.hull_aggressiveness.max(0.25)).max(5.0);
+    let mut per_component = BTreeMap::<u32, Vec<[f64; 2]>>::new();
+
+    for segment in segments {
+        let component_id = topology
+            .edge_component_id(segment.edge_index as u32)
+            .unwrap_or_default();
+        let coords = service_area_segment_coords(topology, segment);
+        let midpoint_lat = (coords[0][1] + coords[1][1]) / 2.0;
+        per_component
+            .entry(component_id)
+            .or_default()
+            .extend(buffered_segment_corners(
+                coords[0],
+                coords[1],
+                buffer_width_m,
+                midpoint_lat,
+            ));
+    }
+
+    if per_component.is_empty() {
+        return serde_json::json!({
+            "type": "MultiPolygon",
+            "coordinates": Vec::<Vec<Vec<[f64; 2]>>>::new(),
+        });
+    }
+
+    let tolerance = options.simplification_tolerance_m.unwrap_or(0.0);
+    let polygons = per_component
+        .into_values()
+        .filter_map(|points| {
+            let hull = convex_hull(points);
+            simplify_polygon_ring(hull, tolerance)
+        })
+        .collect::<Vec<_>>();
+
+    if polygons.len() == 1 {
+        serde_json::json!({
+            "type": "Polygon",
+            "coordinates": [polygons[0].clone()],
+        })
+    } else {
+        serde_json::json!({
+            "type": "MultiPolygon",
+            "coordinates": polygons.into_iter().map(|ring| vec![ring]).collect::<Vec<_>>(),
+        })
+    }
+}
+
+fn service_area_segment_coords(
+    topology: &TopologyBundle,
+    segment: &ReachableEdgeInterval,
+) -> Vec<[f64; 2]> {
+    let edge = &topology.edges[segment.edge_index];
+    let from_node = &topology.nodes[edge.from.0 as usize];
+    let to_node = &topology.nodes[edge.to.0 as usize];
+    vec![
+        interpolate_edge_point(
+            from_node.lon,
+            from_node.lat,
+            to_node.lon,
+            to_node.lat,
+            segment.start_fraction,
+        ),
+        interpolate_edge_point(
+            from_node.lon,
+            from_node.lat,
+            to_node.lon,
+            to_node.lat,
+            segment.end_fraction,
+        ),
+    ]
+}
+
+fn interpolate_edge_point(
+    from_lon: f64,
+    from_lat: f64,
+    to_lon: f64,
+    to_lat: f64,
+    fraction: f64,
+) -> [f64; 2] {
+    [
+        from_lon + (to_lon - from_lon) * fraction,
+        from_lat + (to_lat - from_lat) * fraction,
+    ]
+}
+
+fn buffered_segment_corners(
+    start: [f64; 2],
+    end: [f64; 2],
+    buffer_width_m: f64,
+    at_lat: f64,
+) -> Vec<[f64; 2]> {
+    let dx_m = longitude_delta_to_meters(end[0] - start[0], at_lat);
+    let dy_m = latitude_delta_to_meters(end[1] - start[1]);
+    let length_m = (dx_m * dx_m + dy_m * dy_m).sqrt();
+    let (unit_px, unit_py) = if length_m <= 1e-6 {
+        (0.0, 1.0)
+    } else {
+        (-dy_m / length_m, dx_m / length_m)
+    };
+    let offset_lon = meters_to_longitude_delta(unit_px * buffer_width_m, at_lat);
+    let offset_lat = meters_to_latitude_delta(unit_py * buffer_width_m);
+    vec![
+        [start[0] + offset_lon, start[1] + offset_lat],
+        [start[0] - offset_lon, start[1] - offset_lat],
+        [end[0] - offset_lon, end[1] - offset_lat],
+        [end[0] + offset_lon, end[1] + offset_lat],
+    ]
+}
+
+fn convex_hull(mut points: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
+    points.sort_by(|left, right| {
+        left[0]
+            .total_cmp(&right[0])
+            .then_with(|| left[1].total_cmp(&right[1]))
+    });
+    points.dedup_by(|left, right| {
+        (left[0] - right[0]).abs() <= 1e-12 && (left[1] - right[1]).abs() <= 1e-12
+    });
+
+    if points.len() <= 1 {
+        return points;
+    }
+
+    let mut lower = Vec::<[f64; 2]>::new();
+    for point in &points {
+        while lower.len() >= 2
+            && cross(lower[lower.len() - 2], lower[lower.len() - 1], *point) <= 0.0
+        {
+            lower.pop();
+        }
+        lower.push(*point);
+    }
+
+    let mut upper = Vec::<[f64; 2]>::new();
+    for point in points.iter().rev() {
+        while upper.len() >= 2
+            && cross(upper[upper.len() - 2], upper[upper.len() - 1], *point) <= 0.0
+        {
+            upper.pop();
+        }
+        upper.push(*point);
+    }
+
+    lower.pop();
+    upper.pop();
+    lower.extend(upper);
+    lower
+}
+
+fn cross(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+fn simplify_polygon_ring(mut ring: Vec<[f64; 2]>, tolerance_m: f64) -> Option<Vec<[f64; 2]>> {
+    if ring.is_empty() {
+        return None;
+    }
+    if tolerance_m > 0.0 {
+        let mut simplified = Vec::new();
+        for point in ring {
+            if simplified.last().is_none_or(|previous: &[f64; 2]| {
+                haversine_meters(previous[0], previous[1], point[0], point[1]) >= tolerance_m
+            }) {
+                simplified.push(point);
+            }
+        }
+        ring = simplified;
+    }
+    if ring.len() == 1 {
+        let point = ring[0];
+        let offset_lon = meters_to_longitude_delta(5.0, point[1]);
+        let offset_lat = meters_to_latitude_delta(5.0);
+        ring = vec![
+            [point[0] - offset_lon, point[1] - offset_lat],
+            [point[0] + offset_lon, point[1] - offset_lat],
+            [point[0] + offset_lon, point[1] + offset_lat],
+            [point[0] - offset_lon, point[1] + offset_lat],
+        ];
+    } else if ring.len() == 2 {
+        let corners =
+            buffered_segment_corners(ring[0], ring[1], 5.0, (ring[0][1] + ring[1][1]) / 2.0);
+        ring = convex_hull(corners);
+    }
+    if ring.len() < 3 {
+        return None;
+    }
+    if ring.first() != ring.last() {
+        ring.push(ring[0]);
+    }
+    Some(ring)
+}
+
+fn longitude_delta_to_meters(delta_lon: f64, at_lat: f64) -> f64 {
+    delta_lon * 111_320.0 * at_lat.to_radians().cos().abs().max(0.01)
+}
+
+fn latitude_delta_to_meters(delta_lat: f64) -> f64 {
+    delta_lat * 110_540.0
+}
+
+fn meters_to_longitude_delta(meters: f64, at_lat: f64) -> f64 {
+    meters / (111_320.0 * at_lat.to_radians().cos().abs().max(0.01))
+}
+
+fn meters_to_latitude_delta(meters: f64) -> f64 {
+    meters / 110_540.0
 }
 
 pub fn execute_route(
@@ -917,6 +2951,18 @@ fn execute_route_with_optional_edge_names(
     request: &RouteRequest,
     edge_names: Option<&[String]>,
 ) -> Result<RouteResult> {
+    if has_failure_modes(&request.fallback) {
+        validate_execution_inputs(topology, metrics)?;
+        let (degraded_topology, degraded_metrics, degraded_routing_graph) =
+            build_failure_mode_bundle(topology, metrics, &request.fallback)?;
+        return execute_route_with_graph(
+            &degraded_topology,
+            &degraded_metrics,
+            &degraded_routing_graph,
+            request,
+            edge_names,
+        );
+    }
     validate_execution_inputs(topology, metrics)?;
     let routing_graph = build_routing_graph(topology, metrics)?;
     execute_route_with_graph(topology, metrics, &routing_graph, request, edge_names)
@@ -927,6 +2973,17 @@ pub fn execute_od(
     metrics: &CompiledProfileBundle,
     document: &OdPairsDocument,
 ) -> Result<OdResult> {
+    if has_failure_modes(&document.fallback) {
+        validate_execution_inputs(topology, metrics)?;
+        let (degraded_topology, degraded_metrics, degraded_routing_graph) =
+            build_failure_mode_bundle(topology, metrics, &document.fallback)?;
+        return execute_od_with_graph(
+            &degraded_topology,
+            &degraded_metrics,
+            &degraded_routing_graph,
+            document,
+        );
+    }
     validate_execution_inputs(topology, metrics)?;
     let routing_graph = build_routing_graph(topology, metrics)?;
     execute_od_with_graph(topology, metrics, &routing_graph, document)
@@ -938,6 +2995,19 @@ pub fn execute_matrix(
     origins: &PointSetDocument,
     destinations: &PointSetDocument,
 ) -> Result<MatrixResult> {
+    let fallback = merge_point_set_fallback_policy(&origins.fallback, &destinations.fallback);
+    if has_failure_modes(&fallback) {
+        validate_execution_inputs(topology, metrics)?;
+        let (degraded_topology, degraded_metrics, degraded_routing_graph) =
+            build_failure_mode_bundle(topology, metrics, &fallback)?;
+        return execute_matrix_with_graph(
+            &degraded_topology,
+            &degraded_metrics,
+            &degraded_routing_graph,
+            origins,
+            destinations,
+        );
+    }
     validate_execution_inputs(topology, metrics)?;
     let routing_graph = build_routing_graph(topology, metrics)?;
     execute_matrix_with_graph(topology, metrics, &routing_graph, origins, destinations)
@@ -957,6 +3027,177 @@ fn validate_execution_inputs(
     Ok(())
 }
 
+fn has_failure_modes(fallback: &FallbackPolicy) -> bool {
+    fallback.allow_reverse_oneway
+        || fallback.allow_illegal_turn
+        || fallback.ignore_turn_restrictions
+        || fallback.allow_uturn_where_normally_forbidden
+}
+
+fn auto_relaxation_requested(fallback: &FallbackPolicy) -> bool {
+    fallback.auto_relax_unreachable
+}
+
+fn fallback_without_auto_relaxation(fallback: &FallbackPolicy) -> FallbackPolicy {
+    let mut sanitized = fallback.clone();
+    sanitized.auto_relax_unreachable = false;
+    sanitized
+}
+
+fn auto_relaxed_seed_fallback(fallback: &FallbackPolicy) -> FallbackPolicy {
+    let mut seed = fallback_without_auto_relaxation(fallback);
+    seed.allow_reverse_oneway = true;
+    seed.allow_illegal_turn = true;
+    seed.ignore_turn_restrictions = true;
+    seed.allow_uturn_where_normally_forbidden = true;
+    seed.penalties.reverse_oneway_penalty_s =
+        seed.penalties.reverse_oneway_penalty_s.or(Some(120.0));
+    seed.penalties.illegal_turn_penalty_s = seed.penalties.illegal_turn_penalty_s.or(Some(90.0));
+    seed.penalties.ignored_turn_restriction_penalty_s = seed
+        .penalties
+        .ignored_turn_restriction_penalty_s
+        .or(Some(180.0));
+    seed.penalties.forbidden_uturn_penalty_s =
+        seed.penalties.forbidden_uturn_penalty_s.or(Some(60.0));
+    seed
+}
+
+fn auto_selected_fallback(
+    requested: &FallbackPolicy,
+    seed: &FallbackPolicy,
+    route: &RouteResult,
+) -> FallbackPolicy {
+    let mut selected = fallback_without_auto_relaxation(requested);
+    for violation in &route.violations {
+        match violation.violation_type {
+            RouteViolationType::ReverseOneway => {
+                selected.allow_reverse_oneway = true;
+            }
+            RouteViolationType::IllegalTurn => {
+                selected.allow_illegal_turn = true;
+            }
+            RouteViolationType::IgnoredTurnRestriction => {
+                selected.ignore_turn_restrictions = true;
+            }
+            RouteViolationType::ForbiddenUturn => {
+                selected.allow_uturn_where_normally_forbidden = true;
+            }
+        }
+    }
+
+    if selected.allow_reverse_oneway {
+        selected.penalties.reverse_oneway_penalty_s = seed.penalties.reverse_oneway_penalty_s;
+    }
+    if selected.allow_illegal_turn {
+        selected.penalties.illegal_turn_penalty_s = seed.penalties.illegal_turn_penalty_s;
+    }
+    if selected.ignore_turn_restrictions {
+        selected.penalties.ignored_turn_restriction_penalty_s =
+            seed.penalties.ignored_turn_restriction_penalty_s;
+    }
+    if selected.allow_uturn_where_normally_forbidden {
+        selected.penalties.forbidden_uturn_penalty_s = seed.penalties.forbidden_uturn_penalty_s;
+    }
+
+    selected
+}
+
+fn fallback_mode_labels(fallback: &FallbackPolicy) -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    if fallback.allow_uturn_where_normally_forbidden {
+        labels.push("allow_uturn_where_normally_forbidden");
+    }
+    if fallback.allow_illegal_turn {
+        labels.push("allow_illegal_turn");
+    }
+    if fallback.allow_reverse_oneway {
+        labels.push("allow_reverse_oneway");
+    }
+    if fallback.ignore_turn_restrictions {
+        labels.push("ignore_turn_restrictions");
+    }
+    labels
+}
+
+fn build_failure_mode_bundle(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    fallback: &FallbackPolicy,
+) -> Result<(TopologyBundle, CompiledProfileBundle, RoutingGraph)> {
+    let mut degraded_topology = topology.clone();
+    let mut degraded_metrics = metrics.clone();
+    degraded_metrics.acceleration = None;
+    let mut virtual_reverse_of = vec![None; degraded_topology.edges.len()];
+
+    if fallback.allow_reverse_oneway {
+        let existing_edges = degraded_topology
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(edge_index, _)| {
+                degraded_metrics
+                    .edge_metrics
+                    .get(*edge_index)
+                    .and_then(|metric| metric.generalized_cost)
+                    .is_some()
+            })
+            .map(|(_, edge)| (edge.from.0, edge.to.0, edge.source_way_id))
+            .collect::<std::collections::BTreeSet<_>>();
+        let original_edge_count = degraded_topology.edges.len();
+        for edge_index in 0..original_edge_count {
+            let edge = &degraded_topology.edges[edge_index];
+            let metric = &degraded_metrics.edge_metrics[edge_index];
+            if metric.generalized_cost.is_none() || metric.travel_time_s.is_none() {
+                continue;
+            }
+            if existing_edges.contains(&(edge.to.0, edge.from.0, edge.source_way_id)) {
+                continue;
+            }
+            degraded_topology.edges.push(DirectedEdge {
+                edge_id: edge.edge_id,
+                from: edge.to,
+                to: edge.from,
+                source_way_id: edge.source_way_id,
+                length_m: edge.length_m,
+                duration_s: edge.duration_s,
+                road_class: edge.road_class,
+                surface: edge.surface,
+                smoothness: edge.smoothness,
+                access_mask: edge.access_mask,
+                is_toll: edge.is_toll,
+                name_index: edge.name_index,
+                geometry_offset: edge.geometry_offset,
+                geometry_len: edge.geometry_len,
+                flags: 0,
+            });
+            degraded_metrics.edge_metrics.push(CompiledEdgeMetric {
+                edge_id: metric.edge_id,
+                travel_time_s: metric.travel_time_s,
+                generalized_cost: metric.generalized_cost,
+            });
+            degraded_topology.edge_component_ids.push(
+                topology
+                    .edge_component_id(edge_index as u32)
+                    .unwrap_or_default(),
+            );
+            virtual_reverse_of.push(Some(edge_index));
+        }
+    }
+
+    degraded_topology.edge_based_topology = build_edge_based_topology_fallback(&degraded_topology);
+    let mut routing_graph = build_routing_graph_with_options(
+        &degraded_topology,
+        &degraded_metrics,
+        RoutingGraphBuildOptions {
+            search_time_turn_restrictions: true,
+            ..RoutingGraphBuildOptions::default()
+        },
+    )?;
+    routing_graph.acceleration = None;
+    routing_graph.virtual_reverse_of = virtual_reverse_of;
+    Ok((degraded_topology, degraded_metrics, routing_graph))
+}
+
 fn execute_route_with_graph(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
@@ -964,23 +3205,33 @@ fn execute_route_with_graph(
     request: &RouteRequest,
     edge_names: Option<&[String]>,
 ) -> Result<RouteResult> {
+    let search_distance_m = request
+        .connectivity
+        .max_hop_distance_m
+        .unwrap_or(request.snap.max_distance_m)
+        .max(request.snap.max_distance_m);
     let origin_candidates = snap_candidates(
         topology,
         routing_graph,
         &request.origin,
-        request.snap.max_distance_m,
+        search_distance_m,
+        true,
     )?;
     let destination_candidates = snap_candidates(
         topology,
         routing_graph,
         &request.destination,
-        request.snap.max_distance_m,
+        search_distance_m,
+        false,
     )?;
     execute_route_with_candidates(
         topology,
         metrics,
         routing_graph,
         &request.route_id,
+        request.snap.max_distance_m,
+        &request.connectivity,
+        &request.fallback,
         &request.returns,
         &origin_candidates,
         &destination_candidates,
@@ -993,18 +3244,92 @@ fn execute_route_with_candidates(
     metrics: &CompiledProfileBundle,
     routing_graph: &RoutingGraph,
     route_id: &str,
+    snap_max_distance_m: f64,
+    connectivity: &ConnectivityPolicy,
+    fallback: &FallbackPolicy,
     returns: &ReturnConfig,
     origin_candidates: &[SnappedPoint],
     destination_candidates: &[SnappedPoint],
     edge_names: Option<&[String]>,
 ) -> Result<RouteResult> {
-    let (origin, destination, path) = route_between_candidates(
+    if auto_relaxation_requested(fallback) && !has_failure_modes(fallback) {
+        let strict_fallback = fallback_without_auto_relaxation(fallback);
+        if let Err(error) = route_between_candidates(
+            topology,
+            metrics,
+            routing_graph,
+            snap_max_distance_m,
+            connectivity,
+            &strict_fallback,
+            origin_candidates,
+            destination_candidates,
+        ) {
+            if let Some(result) = try_auto_relaxed_route_with_candidates(
+                topology,
+                metrics,
+                route_id,
+                snap_max_distance_m,
+                connectivity,
+                fallback,
+                returns,
+                origin_candidates,
+                destination_candidates,
+                edge_names,
+            )? {
+                return Ok(result);
+            }
+            if matches!(
+                connectivity.disconnected,
+                DisconnectedNetworkMode::IgnoreUnreachable
+            ) {
+                if let Some(failure) = analysis_failure(&error) {
+                    if matches!(failure.outcome, AnalysisOutcome::Unreachable) {
+                        return Ok(ignored_unreachable_route_result(
+                            route_id,
+                            origin_candidates,
+                            destination_candidates,
+                            failure.clone(),
+                            execution_warnings(metrics),
+                        ));
+                    }
+                }
+            }
+            return Err(error);
+        }
+    }
+
+    let (origin, destination, path, hop_info) = match route_between_candidates(
         topology,
         metrics,
         routing_graph,
+        snap_max_distance_m,
+        connectivity,
+        fallback,
         origin_candidates,
         destination_candidates,
-    )?;
+    ) {
+        Ok(result) => result,
+        Err(error)
+            if matches!(
+                connectivity.disconnected,
+                DisconnectedNetworkMode::IgnoreUnreachable
+            ) =>
+        {
+            if let Some(failure) = analysis_failure(&error) {
+                if matches!(failure.outcome, AnalysisOutcome::Unreachable) {
+                    return Ok(ignored_unreachable_route_result(
+                        route_id,
+                        origin_candidates,
+                        destination_candidates,
+                        failure.clone(),
+                        execution_warnings(metrics),
+                    ));
+                }
+            }
+            return Err(error);
+        }
+        Err(error) => return Err(error),
+    };
 
     let include_detailed_paths = request_returns_detailed_path(returns);
     let needs_node_path =
@@ -1063,14 +3388,34 @@ fn execute_route_with_candidates(
                             .name_index
                             .and_then(|index| edge_names.get(index as usize))
                             .cloned(),
+                        violation_type: None,
                     }
                 })
-                .collect(),
+                .collect::<Vec<_>>(),
         )
     } else {
         None
     };
 
+    let analysis = analyze_route_path(
+        topology,
+        metrics,
+        routing_graph,
+        fallback,
+        &path,
+        &origin,
+        &destination,
+    )?;
+    let mut segments = segments;
+    if let Some(segment_rows) = segments.as_mut() {
+        for (segment, edge_index) in segment_rows.iter_mut().zip(&path.edge_indexes) {
+            segment.violation_type = analysis
+                .segment_violation_types
+                .get(edge_index)
+                .copied()
+                .flatten();
+        }
+    }
     let breakdowns = build_breakdowns(topology, metrics, &path.edge_indexes, returns);
     let warnings = execution_warnings(metrics);
 
@@ -1078,12 +3423,15 @@ fn execute_route_with_candidates(
         route_id: route_id.to_string(),
         origin,
         destination,
-        summary: RouteSummary {
-            total_distance_m: path.total_distance_m,
-            total_travel_time_s: path.total_travel_time_s,
-            total_generalized_cost: path.total_generalized_cost,
-            segment_count: path.edge_indexes.len(),
+        outcome: if !analysis.violations.is_empty() || hop_info.fallback_used {
+            AnalysisOutcome::Degraded
+        } else {
+            AnalysisOutcome::Legal
         },
+        fallback_used: hop_info.fallback_used || !analysis.violations.is_empty(),
+        origin_hop_distance_m: hop_info.origin_hop_distance_m,
+        destination_hop_distance_m: hop_info.destination_hop_distance_m,
+        summary: analysis.summary,
         node_path,
         edge_path: if include_detailed_paths {
             path.edge_indexes
@@ -1094,10 +3442,100 @@ fn execute_route_with_candidates(
             Vec::new()
         },
         geometry,
+        hop_segments: hop_info.hop_segments,
         segments,
         breakdowns,
-        warnings,
+        violations: analysis.violations,
+        diagnostics: hop_info.diagnostics,
+        warnings: merge_warnings(
+            merge_warnings(warnings, analysis.warnings),
+            hop_info.warnings,
+        ),
     })
+}
+
+fn try_auto_relaxed_route_with_candidates(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    route_id: &str,
+    snap_max_distance_m: f64,
+    connectivity: &ConnectivityPolicy,
+    fallback: &FallbackPolicy,
+    returns: &ReturnConfig,
+    origin_candidates: &[SnappedPoint],
+    destination_candidates: &[SnappedPoint],
+    edge_names: Option<&[String]>,
+) -> Result<Option<RouteResult>> {
+    let seed_fallback = auto_relaxed_seed_fallback(fallback);
+    let (degraded_topology, degraded_metrics, degraded_routing_graph) =
+        build_failure_mode_bundle(topology, metrics, &seed_fallback)?;
+    let seed_result = match execute_route_with_candidates(
+        &degraded_topology,
+        &degraded_metrics,
+        &degraded_routing_graph,
+        route_id,
+        snap_max_distance_m,
+        connectivity,
+        &seed_fallback,
+        returns,
+        origin_candidates,
+        destination_candidates,
+        edge_names,
+    ) {
+        Ok(result) => result,
+        Err(error) => {
+            if analysis_failure(&error)
+                .is_some_and(|failure| matches!(failure.outcome, AnalysisOutcome::Unreachable))
+            {
+                return Ok(None);
+            }
+            return Err(error);
+        }
+    };
+
+    let selected_fallback = auto_selected_fallback(fallback, &seed_fallback, &seed_result);
+    let mut result = if selected_fallback == seed_fallback {
+        seed_result
+    } else {
+        let (selected_topology, selected_metrics, selected_routing_graph) =
+            build_failure_mode_bundle(topology, metrics, &selected_fallback)?;
+        execute_route_with_candidates(
+            &selected_topology,
+            &selected_metrics,
+            &selected_routing_graph,
+            route_id,
+            snap_max_distance_m,
+            connectivity,
+            &selected_fallback,
+            returns,
+            origin_candidates,
+            destination_candidates,
+            edge_names,
+        )?
+    };
+
+    let selected_labels = fallback_mode_labels(&selected_fallback);
+    if !selected_labels.is_empty() {
+        result.diagnostics.push(AnalysisDiagnostic {
+            code: AnalysisDiagnosticCode::FallbackUsed,
+            severity: AnalysisDiagnosticSeverity::Warning,
+            message: format!(
+                "Auto fallback resolved an unreachable strict route by enabling {}.",
+                selected_labels.join(", ")
+            ),
+            point_ids: vec![result.origin.point_id.clone(), result.destination.point_id.clone()],
+            component_ids: Vec::new(),
+            suggested_actions: vec![
+                "Review the returned violations and fallback_used fields before using this route for strict legal-network analysis.".to_string(),
+            ],
+        });
+        result.warnings.push(format!(
+            "Auto fallback enabled {} after the strict route was unreachable.",
+            selected_labels.join(", ")
+        ));
+    }
+
+    Ok(Some(result))
 }
 
 fn request_returns_detailed_path(returns: &ReturnConfig) -> bool {
@@ -1109,12 +3547,513 @@ fn request_returns_detailed_path(returns: &ReturnConfig) -> bool {
         || returns.explain_cost_derivation
 }
 
+#[derive(Debug, Clone)]
+struct HopSelectionInfo {
+    fallback_used: bool,
+    origin_hop_distance_m: Option<f64>,
+    destination_hop_distance_m: Option<f64>,
+    hop_segments: Vec<RouteHopSegment>,
+    diagnostics: Vec<AnalysisDiagnostic>,
+    warnings: Vec<String>,
+}
+
+struct RoutePathAnalysis {
+    summary: RouteSummary,
+    violations: Vec<RouteViolation>,
+    segment_violation_types: HashMap<usize, Option<RouteViolationType>>,
+    warnings: Vec<String>,
+}
+
+fn merge_warnings(mut warnings: Vec<String>, extra: Vec<String>) -> Vec<String> {
+    warnings.extend(extra);
+    warnings
+}
+
+fn analyze_route_path(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    fallback: &FallbackPolicy,
+    path: &RoutePath,
+    origin: &SnappedPoint,
+    destination: &SnappedPoint,
+) -> Result<RoutePathAnalysis> {
+    let mut network_distance_m = 0_u64;
+    let mut network_travel_time_s = 0.0;
+    let mut network_generalized_cost = 0.0;
+    let mut penalty_s = 0.0;
+    let mut penalty_cost = 0.0;
+    let mut previous_edge_index = None;
+    let mut automaton_state = 0_usize;
+    let mut violations = Vec::new();
+    let mut violation_types = std::collections::BTreeSet::<RouteViolationType>::new();
+    let mut segment_violation_types = HashMap::<usize, Option<RouteViolationType>>::new();
+    let first_edge = path.edge_indexes.first().copied();
+    let last_edge = path.edge_indexes.last().copied();
+
+    for &edge_index in &path.edge_indexes {
+        let edge = &topology.edges[edge_index];
+        let metric = &metrics.edge_metrics[edge_index];
+        let factor = edge_traversal_factor(edge_index, first_edge, last_edge, origin, destination);
+        network_distance_m += (edge.length_m as f64 * factor).round() as u64;
+        network_travel_time_s += metric.travel_time_s.unwrap_or_default() * factor;
+        network_generalized_cost += metric.generalized_cost.unwrap_or_default() * factor;
+
+        if let Some(original_edge_index) = routing_graph
+            .virtual_reverse_of
+            .get(edge_index)
+            .and_then(|value| *value)
+        {
+            let route_violation_type = RouteViolationType::ReverseOneway;
+            let edge_penalty_s = fallback
+                .penalties
+                .reverse_oneway_penalty_s
+                .unwrap_or_default();
+            let edge_penalty_cost = edge_penalty_s * metrics.turn_costs.cost_time_weight;
+            penalty_s += edge_penalty_s;
+            penalty_cost += edge_penalty_cost;
+            violations.push(RouteViolation {
+                violation_type: route_violation_type,
+                edge_id: Some(topology.edges[original_edge_index].edge_id.0),
+                from_edge_id: None,
+                to_edge_id: None,
+                distance_m: Some(edge.length_m as f64 * factor),
+                penalty_s: edge_penalty_s,
+                penalty_generalized_cost: edge_penalty_cost,
+            });
+            violation_types.insert(route_violation_type);
+            segment_violation_types.insert(edge_index, Some(route_violation_type));
+        } else {
+            segment_violation_types.entry(edge_index).or_insert(None);
+        }
+
+        if let Some(previous_edge_index) = previous_edge_index {
+            let turn_penalty_s =
+                turn_penalty_seconds(topology, metrics, previous_edge_index, edge_index);
+            network_travel_time_s += turn_penalty_s;
+            network_generalized_cost += turn_penalty_s * metrics.turn_costs.cost_time_weight;
+            if let Some(sequence_len) = routing_graph
+                .automaton
+                .prohibited_sequence_len(automaton_state, edge_index)
+            {
+                let (violation_type, local_penalty_s) = if fallback.ignore_turn_restrictions {
+                    (
+                        RouteViolationType::IgnoredTurnRestriction,
+                        fallback
+                            .penalties
+                            .ignored_turn_restriction_penalty_s
+                            .unwrap_or_default(),
+                    )
+                } else if sequence_len == 2
+                    && classify_turn(topology, previous_edge_index, edge_index)
+                        == TurnDirection::Uturn
+                    && fallback.allow_uturn_where_normally_forbidden
+                {
+                    (
+                        RouteViolationType::ForbiddenUturn,
+                        fallback
+                            .penalties
+                            .forbidden_uturn_penalty_s
+                            .or(fallback.penalties.illegal_turn_penalty_s)
+                            .unwrap_or_default(),
+                    )
+                } else if sequence_len == 2 && fallback.allow_illegal_turn {
+                    (
+                        RouteViolationType::IllegalTurn,
+                        fallback
+                            .penalties
+                            .illegal_turn_penalty_s
+                            .unwrap_or_default(),
+                    )
+                } else {
+                    (RouteViolationType::IgnoredTurnRestriction, 0.0)
+                };
+                let local_penalty_cost = local_penalty_s * metrics.turn_costs.cost_time_weight;
+                penalty_s += local_penalty_s;
+                penalty_cost += local_penalty_cost;
+                violations.push(RouteViolation {
+                    violation_type,
+                    edge_id: None,
+                    from_edge_id: Some(topology.edges[previous_edge_index].edge_id.0),
+                    to_edge_id: Some(topology.edges[edge_index].edge_id.0),
+                    distance_m: None,
+                    penalty_s: local_penalty_s,
+                    penalty_generalized_cost: local_penalty_cost,
+                });
+                violation_types.insert(violation_type);
+            }
+        }
+        automaton_state = routing_graph
+            .automaton
+            .transition(automaton_state, edge_index);
+        previous_edge_index = Some(edge_index);
+    }
+
+    let reverse_distance_m = violations
+        .iter()
+        .filter(|violation| violation.violation_type == RouteViolationType::ReverseOneway)
+        .filter_map(|violation| violation.distance_m)
+        .sum::<f64>();
+    if let Some(max_illegal_distance_m) = fallback.max_illegal_distance_m {
+        if reverse_distance_m > max_illegal_distance_m + f64::EPSILON {
+            return Err(AnalysisFailure::new(
+                format!(
+                    "degraded route exceeds fallback.max_illegal_distance_m ({:.1} m > {:.1} m)",
+                    reverse_distance_m, max_illegal_distance_m
+                ),
+                AnalysisOutcome::Unreachable,
+                vec![AnalysisDiagnostic {
+                    code: AnalysisDiagnosticCode::FallbackUsed,
+                    severity: AnalysisDiagnosticSeverity::Error,
+                    message: format!(
+                        "The selected degraded route required {:.1} m of reverse-oneway travel, exceeding fallback.max_illegal_distance_m={:.1}.",
+                        reverse_distance_m, max_illegal_distance_m
+                    ),
+                    point_ids: vec![origin.point_id.clone(), destination.point_id.clone()],
+                    component_ids: Vec::new(),
+                    suggested_actions: vec![
+                        "Increase fallback.max_illegal_distance_m only if this degraded behavior is still acceptable.".to_string(),
+                        "Disable allow_reverse_oneway to keep the route strictly legal.".to_string(),
+                    ],
+                }],
+            )
+            .into());
+        }
+    }
+    if let Some(max_illegal_turns) = fallback.max_illegal_turns {
+        let illegal_turn_count = violations
+            .iter()
+            .filter(|violation| violation.violation_type != RouteViolationType::ReverseOneway)
+            .count() as u32;
+        if illegal_turn_count > max_illegal_turns {
+            return Err(AnalysisFailure::new(
+                format!(
+                    "degraded route exceeds fallback.max_illegal_turns ({} > {})",
+                    illegal_turn_count, max_illegal_turns
+                ),
+                AnalysisOutcome::Unreachable,
+                vec![AnalysisDiagnostic {
+                    code: AnalysisDiagnosticCode::FallbackUsed,
+                    severity: AnalysisDiagnosticSeverity::Error,
+                    message: format!(
+                        "The selected degraded route required {} illegal turn or restriction override(s), exceeding fallback.max_illegal_turns={}.",
+                        illegal_turn_count, max_illegal_turns
+                    ),
+                    point_ids: vec![origin.point_id.clone(), destination.point_id.clone()],
+                    component_ids: Vec::new(),
+                    suggested_actions: vec![
+                        "Increase fallback.max_illegal_turns only if this degraded behavior is still acceptable.".to_string(),
+                        "Disable turn-related fallback flags to keep the route strictly legal.".to_string(),
+                    ],
+                }],
+            )
+            .into());
+        }
+    }
+
+    let mut warnings = Vec::new();
+    if has_failure_modes(fallback) {
+        if violations.is_empty() {
+            warnings.push(
+                "Unsafe failure-mode flags were enabled for this request, but the returned route did not require illegal movements."
+                    .to_string(),
+            );
+        } else {
+            warnings.push(
+                "Unsafe failure-mode fallback was used; this route is degraded and noncompliant for strict legal routing analysis."
+                    .to_string(),
+            );
+        }
+    }
+
+    Ok(RoutePathAnalysis {
+        summary: RouteSummary {
+            network_distance_m,
+            network_travel_time_s,
+            network_generalized_cost,
+            illegal_movement_penalty_s: penalty_s,
+            illegal_movement_penalty_cost: penalty_cost,
+            violation_count: violations.len(),
+            violation_types: violation_types.into_iter().collect(),
+            total_distance_m: network_distance_m,
+            total_travel_time_s: network_travel_time_s + penalty_s,
+            total_generalized_cost: network_generalized_cost + penalty_cost,
+            segment_count: path.edge_indexes.len(),
+        },
+        violations,
+        segment_violation_types,
+        warnings,
+    })
+}
+
+fn ignored_unreachable_warning() -> String {
+    "Connectivity policy ignored an unreachable pair; no legal path geometry or network cost was returned.".to_string()
+}
+
+fn batch_ignored_unreachable_warning(label: &str, ignored_count: usize) -> String {
+    format!(
+        "Connectivity policy ignored {} unreachable {} item(s); see per-item status='ignored' and outcome='partial'.",
+        ignored_count, label
+    )
+}
+
+fn ignored_unreachable_route_result(
+    route_id: &str,
+    origin_candidates: &[SnappedPoint],
+    destination_candidates: &[SnappedPoint],
+    failure: AnalysisFailure,
+    warnings: Vec<String>,
+) -> RouteResult {
+    let origin = origin_candidates
+        .first()
+        .cloned()
+        .expect("successful snapping must produce at least one origin candidate");
+    let destination = destination_candidates
+        .first()
+        .cloned()
+        .expect("successful snapping must produce at least one destination candidate");
+    RouteResult {
+        route_id: route_id.to_string(),
+        origin,
+        destination,
+        outcome: AnalysisOutcome::Partial,
+        fallback_used: false,
+        origin_hop_distance_m: None,
+        destination_hop_distance_m: None,
+        summary: RouteSummary {
+            network_distance_m: 0,
+            network_travel_time_s: 0.0,
+            network_generalized_cost: 0.0,
+            illegal_movement_penalty_s: 0.0,
+            illegal_movement_penalty_cost: 0.0,
+            violation_count: 0,
+            violation_types: Vec::new(),
+            total_distance_m: 0,
+            total_travel_time_s: 0.0,
+            total_generalized_cost: 0.0,
+            segment_count: 0,
+        },
+        node_path: Vec::new(),
+        edge_path: Vec::new(),
+        geometry: None,
+        hop_segments: Vec::new(),
+        segments: None,
+        breakdowns: None,
+        violations: Vec::new(),
+        diagnostics: failure.diagnostics,
+        warnings: merge_warnings(warnings, vec![ignored_unreachable_warning()]),
+    }
+}
+
+fn batch_status_for_route(route: &RouteResult) -> BatchItemStatus {
+    if matches!(route.outcome, AnalysisOutcome::Partial) {
+        BatchItemStatus::Ignored
+    } else {
+        BatchItemStatus::Succeeded
+    }
+}
+
+fn batch_ignored_message(route: &RouteResult) -> Option<String> {
+    matches!(route.outcome, AnalysisOutcome::Partial).then(|| {
+        route
+            .diagnostics
+            .first()
+            .map(|diagnostic| diagnostic.message.clone())
+            .unwrap_or_else(|| "Connectivity policy ignored an unreachable pair.".to_string())
+    })
+}
+
+fn hop_info_for_pair(
+    origin: &SnappedPoint,
+    destination: &SnappedPoint,
+    snap_max_distance_m: f64,
+    connectivity: &ConnectivityPolicy,
+) -> Option<HopSelectionInfo> {
+    let origin_requires_hop = origin.snap_distance_m > snap_max_distance_m;
+    let destination_requires_hop = destination.snap_distance_m > snap_max_distance_m;
+    let max_hop_distance_m = connectivity
+        .max_hop_distance_m
+        .unwrap_or(snap_max_distance_m);
+
+    if (origin_requires_hop && origin.snap_distance_m > max_hop_distance_m)
+        || (destination_requires_hop && destination.snap_distance_m > max_hop_distance_m)
+    {
+        return None;
+    }
+
+    let allowed = match connectivity.disconnected {
+        DisconnectedNetworkMode::Strict | DisconnectedNetworkMode::IgnoreUnreachable => {
+            !origin_requires_hop && !destination_requires_hop
+        }
+        DisconnectedNetworkMode::HopOriginToNearestReachableComponent => !destination_requires_hop,
+        DisconnectedNetworkMode::HopDestinationToNearestReachableComponent => !origin_requires_hop,
+        DisconnectedNetworkMode::HopEitherEnd => !(origin_requires_hop && destination_requires_hop),
+    };
+    if !allowed {
+        return None;
+    }
+
+    let mut hop_segments = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut warnings = Vec::new();
+    if origin_requires_hop {
+        hop_segments.push(RouteHopSegment {
+            endpoint: HopEndpoint::Origin,
+            distance_m: origin.snap_distance_m,
+            geometry: vec![
+                [origin.requested_lon, origin.requested_lat],
+                [origin.snapped_lon, origin.snapped_lat],
+            ],
+        });
+        diagnostics.push(AnalysisDiagnostic {
+            code: AnalysisDiagnosticCode::FallbackUsed,
+            severity: AnalysisDiagnosticSeverity::Warning,
+            message: format!(
+                "Connectivity fallback hopped the origin {:.1} m to reach component {}.",
+                origin.snap_distance_m,
+                origin.component_id.unwrap_or_default()
+            ),
+            point_ids: vec![origin.point_id.clone()],
+            component_ids: origin.component_id.into_iter().collect(),
+            suggested_actions: vec![],
+        });
+        warnings.push(format!(
+            "Connectivity fallback used a non-network origin hop of {:.1} m.",
+            origin.snap_distance_m
+        ));
+    }
+    if destination_requires_hop {
+        hop_segments.push(RouteHopSegment {
+            endpoint: HopEndpoint::Destination,
+            distance_m: destination.snap_distance_m,
+            geometry: vec![
+                [destination.snapped_lon, destination.snapped_lat],
+                [destination.requested_lon, destination.requested_lat],
+            ],
+        });
+        diagnostics.push(AnalysisDiagnostic {
+            code: AnalysisDiagnosticCode::FallbackUsed,
+            severity: AnalysisDiagnosticSeverity::Warning,
+            message: format!(
+                "Connectivity fallback hopped the destination {:.1} m to reach component {}.",
+                destination.snap_distance_m,
+                destination.component_id.unwrap_or_default()
+            ),
+            point_ids: vec![destination.point_id.clone()],
+            component_ids: destination.component_id.into_iter().collect(),
+            suggested_actions: vec![],
+        });
+        warnings.push(format!(
+            "Connectivity fallback used a non-network destination hop of {:.1} m.",
+            destination.snap_distance_m
+        ));
+    }
+
+    Some(HopSelectionInfo {
+        fallback_used: origin_requires_hop || destination_requires_hop,
+        origin_hop_distance_m: origin_requires_hop.then_some(origin.snap_distance_m),
+        destination_hop_distance_m: destination_requires_hop.then_some(destination.snap_distance_m),
+        hop_segments,
+        diagnostics,
+        warnings,
+    })
+}
+
+fn no_route_failure(
+    topology: &TopologyBundle,
+    origin_candidates: &[SnappedPoint],
+    destination_candidates: &[SnappedPoint],
+) -> AnalysisFailure {
+    let origin_components = candidate_component_ids(origin_candidates);
+    let destination_components = candidate_component_ids(destination_candidates);
+    if !origin_components.is_empty()
+        && !destination_components.is_empty()
+        && origin_components.is_disjoint(&destination_components)
+    {
+        let component_ids = origin_components
+            .union(&destination_components)
+            .copied()
+            .collect::<Vec<_>>();
+        let point_ids = vec![
+            origin_candidates
+                .first()
+                .map(|candidate| candidate.point_id.clone())
+                .unwrap_or_else(|| "origin".to_string()),
+            destination_candidates
+                .first()
+                .map(|candidate| candidate.point_id.clone())
+                .unwrap_or_else(|| "destination".to_string()),
+        ];
+        return AnalysisFailure::new(
+            "origin and destination snapped to different weakly connected components",
+            AnalysisOutcome::Unreachable,
+            vec![AnalysisDiagnostic {
+                code: AnalysisDiagnosticCode::DisconnectedComponents,
+                severity: AnalysisDiagnosticSeverity::Error,
+                message: format!(
+                    "Origin and destination snapped to different weak components in the legal graph for dataset '{}'.",
+                    topology.source_path
+                ),
+                point_ids,
+                component_ids,
+                suggested_actions: vec![
+                    "Choose points in the same connected subnetwork.".to_string(),
+                    "Set connectivity.disconnected to ignore_unreachable or a hop_* mode for exploratory analysis.".to_string(),
+                ],
+            }],
+        );
+    }
+
+    AnalysisFailure::new(
+        "no route found between the snapped origin and destination",
+        AnalysisOutcome::Unreachable,
+        vec![AnalysisDiagnostic {
+            code: AnalysisDiagnosticCode::LegalRouteUnreachable,
+            severity: AnalysisDiagnosticSeverity::Error,
+            message: "Snapping succeeded, but no legal route was found between the snapped origin and destination candidates.".to_string(),
+            point_ids: vec![
+                origin_candidates
+                    .first()
+                    .map(|candidate| candidate.point_id.clone())
+                    .unwrap_or_else(|| "origin".to_string()),
+                destination_candidates
+                    .first()
+                    .map(|candidate| candidate.point_id.clone())
+                    .unwrap_or_else(|| "destination".to_string()),
+            ],
+            component_ids: Vec::new(),
+            suggested_actions: vec![
+                "Inspect one-way and turn-restriction constraints near the endpoints.".to_string(),
+                "If exploratory degraded analysis is acceptable, enable explicit fallback flags in fallback.".to_string(),
+            ],
+        }],
+    )
+}
+
+fn candidate_component_ids(candidates: &[SnappedPoint]) -> std::collections::BTreeSet<u32> {
+    candidates
+        .iter()
+        .filter_map(|candidate| candidate.component_id)
+        .collect()
+}
+
+fn failure_outcome_and_diagnostics(
+    error: &anyhow::Error,
+) -> (AnalysisOutcome, Vec<AnalysisDiagnostic>) {
+    if let Some(failure) = analysis_failure(error) {
+        (failure.outcome, failure.diagnostics.clone())
+    } else {
+        (AnalysisOutcome::Unreachable, Vec::new())
+    }
+}
+
 fn presnap_point_set(
     topology: &TopologyBundle,
     routing_graph: &RoutingGraph,
     points: &[LabeledPoint],
     max_distance_m: f64,
-) -> Vec<Result<Vec<SnappedPoint>, String>> {
+    is_origin: bool,
+) -> Vec<std::result::Result<Vec<SnappedPoint>, AnalysisFailure>> {
     let mut snap_cache = HashMap::new();
     points
         .iter()
@@ -1125,24 +4064,32 @@ fn presnap_point_set(
                 routing_graph,
                 point,
                 max_distance_m,
-                true,
+                is_origin,
             )
         })
         .collect()
 }
 
 fn cached_snap_candidates(
-    cache: &mut HashMap<(bool, u64, u64, u64), Result<Vec<SnappedPoint>, String>>,
+    cache: &mut HashMap<
+        (bool, u64, u64, u64),
+        std::result::Result<Vec<SnappedPoint>, AnalysisFailure>,
+    >,
     topology: &TopologyBundle,
     routing_graph: &RoutingGraph,
     point: &LabeledPoint,
     max_distance_m: f64,
     is_origin: bool,
-) -> Result<Vec<SnappedPoint>, String> {
+) -> std::result::Result<Vec<SnappedPoint>, AnalysisFailure> {
     let key = snap_point_cache_key(point, max_distance_m, is_origin);
     let value = cache.entry(key).or_insert_with(|| {
-        snap_candidates(topology, routing_graph, point, max_distance_m)
-            .map_err(|error| error.to_string())
+        snap_candidates(topology, routing_graph, point, max_distance_m, is_origin).map_err(
+            |error| {
+                analysis_failure(&error)
+                    .cloned()
+                    .unwrap_or_else(|| route_snap_failure(point, max_distance_m))
+            },
+        )
     });
     value.clone()
 }
@@ -1185,8 +4132,11 @@ fn batch_candidate_set_key(candidates: &[SnappedPoint]) -> Vec<BatchSnapCandidat
 }
 
 fn intern_candidate_sets(
-    candidate_sets: Vec<Result<Vec<SnappedPoint>, String>>,
-) -> (Vec<Result<usize, String>>, Vec<Vec<SnappedPoint>>) {
+    candidate_sets: Vec<std::result::Result<Vec<SnappedPoint>, AnalysisFailure>>,
+) -> (
+    Vec<std::result::Result<usize, AnalysisFailure>>,
+    Vec<Vec<SnappedPoint>>,
+) {
     let mut unique = Vec::new();
     let mut interned = HashMap::new();
     let mut refs = Vec::with_capacity(candidate_sets.len());
@@ -1212,12 +4162,15 @@ fn intern_candidate_sets(
 }
 
 fn cached_batch_route_result(
-    cache: &mut HashMap<(usize, usize), Result<RouteResult, String>>,
+    cache: &mut HashMap<(usize, usize), std::result::Result<RouteResult, AnalysisFailure>>,
     origin_tree_cache: &mut HashMap<(u32, u64, u64), Result<SingleSourceEdgeTree, String>>,
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     routing_graph: &RoutingGraph,
     route_id: &str,
+    snap_max_distance_m: f64,
+    connectivity: &ConnectivityPolicy,
+    fallback: &FallbackPolicy,
     returns: &ReturnConfig,
     origin_candidates: &[Vec<SnappedPoint>],
     origin_set_id: usize,
@@ -1232,13 +4185,20 @@ fn cached_batch_route_result(
             metrics,
             routing_graph,
             route_id,
+            snap_max_distance_m,
+            connectivity,
+            fallback,
             returns,
             &origin_candidates[origin_set_id],
             &destination_candidates[destination_set_id],
         )
-        .map_err(|error| error.to_string())
+        .map_err(|error| {
+            analysis_failure(&error).cloned().unwrap_or_else(|| {
+                AnalysisFailure::new(error.to_string(), AnalysisOutcome::Unreachable, Vec::new())
+            })
+        })
     });
-    value.clone().map_err(anyhow::Error::msg)
+    value.clone().map_err(anyhow::Error::new)
 }
 
 fn execute_batched_route_with_candidates(
@@ -1247,16 +4207,25 @@ fn execute_batched_route_with_candidates(
     metrics: &CompiledProfileBundle,
     routing_graph: &RoutingGraph,
     route_id: &str,
+    snap_max_distance_m: f64,
+    connectivity: &ConnectivityPolicy,
+    fallback: &FallbackPolicy,
     returns: &ReturnConfig,
     origin_candidates: &[SnappedPoint],
     destination_candidates: &[SnappedPoint],
 ) -> Result<RouteResult> {
-    if routing_graph.has_restriction_sequences() {
+    if routing_graph.has_restriction_sequences()
+        || has_failure_modes(fallback)
+        || auto_relaxation_requested(fallback)
+    {
         return execute_route_with_candidates(
             topology,
             metrics,
             routing_graph,
             route_id,
+            snap_max_distance_m,
+            connectivity,
+            fallback,
             returns,
             origin_candidates,
             destination_candidates,
@@ -1271,20 +4240,37 @@ fn execute_batched_route_with_candidates(
             if same_edge_reverse_pair(origin, destination) {
                 continue;
             }
+            let Some(hop_info) =
+                hop_info_for_pair(origin, destination, snap_max_distance_m, connectivity)
+            else {
+                continue;
+            };
             let path = best_path_from_origin_tree(routing_graph, &tree, origin, destination);
             if let Some(path) = path {
                 let path =
                     finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
+                let analysis = analyze_route_path(
+                    topology,
+                    metrics,
+                    routing_graph,
+                    fallback,
+                    &path,
+                    origin,
+                    destination,
+                )?;
                 return Ok(RouteResult {
                     route_id: route_id.to_string(),
                     origin: origin.clone(),
                     destination: destination.clone(),
-                    summary: RouteSummary {
-                        total_distance_m: path.total_distance_m,
-                        total_travel_time_s: path.total_travel_time_s,
-                        total_generalized_cost: path.total_generalized_cost,
-                        segment_count: path.edge_indexes.len(),
+                    outcome: if !analysis.violations.is_empty() || hop_info.fallback_used {
+                        AnalysisOutcome::Degraded
+                    } else {
+                        AnalysisOutcome::Legal
                     },
+                    fallback_used: hop_info.fallback_used || !analysis.violations.is_empty(),
+                    origin_hop_distance_m: hop_info.origin_hop_distance_m,
+                    destination_hop_distance_m: hop_info.destination_hop_distance_m,
+                    summary: analysis.summary,
                     node_path: Vec::new(),
                     edge_path: Vec::new(),
                     geometry: match returns.geometry {
@@ -1296,6 +4282,7 @@ fn execute_batched_route_with_candidates(
                             destination,
                         )),
                     },
+                    hop_segments: hop_info.hop_segments,
                     segments: if returns.segment_rows {
                         Some(
                             path.edge_indexes
@@ -1328,6 +4315,11 @@ fn execute_batched_route_with_candidates(
                                             .name_index
                                             .and_then(|index| topology.names.get(index as usize))
                                             .cloned(),
+                                        violation_type: analysis
+                                            .segment_violation_types
+                                            .get(&edge_index)
+                                            .copied()
+                                            .flatten(),
                                     }
                                 })
                                 .collect(),
@@ -1336,13 +4328,33 @@ fn execute_batched_route_with_candidates(
                         None
                     },
                     breakdowns: build_breakdowns(topology, metrics, &path.edge_indexes, returns),
-                    warnings: execution_warnings(metrics),
+                    violations: analysis.violations,
+                    diagnostics: hop_info.diagnostics,
+                    warnings: merge_warnings(
+                        merge_warnings(execution_warnings(metrics), analysis.warnings),
+                        hop_info.warnings,
+                    ),
                 });
             }
         }
     }
 
-    bail!("no route found between the snapped origin and destination")
+    let failure = no_route_failure(topology, origin_candidates, destination_candidates);
+    if matches!(
+        connectivity.disconnected,
+        DisconnectedNetworkMode::IgnoreUnreachable
+    ) && matches!(failure.outcome, AnalysisOutcome::Unreachable)
+    {
+        return Ok(ignored_unreachable_route_result(
+            route_id,
+            origin_candidates,
+            destination_candidates,
+            failure,
+            execution_warnings(metrics),
+        ));
+    }
+
+    Err(failure.into())
 }
 
 fn cached_single_source_edge_tree(
@@ -1467,8 +4479,6 @@ fn reconstruct_single_source_route_path(
 
     RoutePath {
         edge_indexes,
-        total_distance_m: 0,
-        total_travel_time_s: 0.0,
         total_generalized_cost,
     }
 }
@@ -1504,6 +4514,7 @@ pub enum AnalysisKind {
     Route,
     Od,
     Matrix,
+    ServiceArea,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1539,8 +4550,6 @@ pub fn load_experiment(path: impl AsRef<Path>) -> Result<ExperimentDocument> {
 #[derive(Clone)]
 struct RoutePath {
     edge_indexes: Vec<usize>,
-    total_distance_m: u64,
-    total_travel_time_s: f64,
     total_generalized_cost: f64,
 }
 
@@ -1549,7 +4558,6 @@ struct RoutingGraph {
     edge_order: Vec<u32>,
     incoming_first_out: Vec<u32>,
     incoming_edge_order: Vec<u32>,
-    head: Vec<u32>,
     edge_costs: Vec<f64>,
     transition_first_out: Vec<u32>,
     transition_edges: Vec<u32>,
@@ -1559,7 +4567,7 @@ struct RoutingGraph {
     reverse_transition_costs: Vec<f64>,
     acceleration: Option<AccelerationGraph>,
     automaton: RestrictionAutomaton,
-    min_cost_per_meter: f64,
+    virtual_reverse_of: Vec<Option<usize>>,
 }
 
 impl RoutingGraph {
@@ -1622,6 +4630,7 @@ struct AutomatonState {
     transitions: HashMap<usize, usize>,
     failure: usize,
     prohibited_next: Vec<usize>,
+    prohibited_meta: HashMap<usize, usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1862,7 +4871,6 @@ fn edge_based_topology_view(topology: &TopologyBundle) -> Option<EdgeBasedTopolo
     })
 }
 
-#[cfg(test)]
 fn build_edge_based_topology_fallback(topology: &TopologyBundle) -> netan_core::EdgeBasedTopology {
     let mut out_degree = vec![0_u32; topology.nodes.len()];
     let mut head = vec![0_u32; topology.edges.len()];
@@ -1941,6 +4949,13 @@ impl RestrictionAutomaton {
             automaton.states[state_index]
                 .prohibited_next
                 .push(*sequence.last().unwrap());
+            let next_edge = *sequence.last().unwrap();
+            let sequence_len = sequence.len();
+            automaton.states[state_index]
+                .prohibited_meta
+                .entry(next_edge)
+                .and_modify(|existing| *existing = (*existing).max(sequence_len))
+                .or_insert(sequence_len);
         }
 
         let mut queue = std::collections::VecDeque::new();
@@ -1979,6 +4994,15 @@ impl RestrictionAutomaton {
                 automaton.states[next_state]
                     .prohibited_next
                     .extend(inherited);
+                for (&next_edge, &sequence_len) in
+                    &automaton.states[failure_state].prohibited_meta.clone()
+                {
+                    automaton.states[next_state]
+                        .prohibited_meta
+                        .entry(next_edge)
+                        .and_modify(|existing| *existing = (*existing).max(sequence_len))
+                        .or_insert(sequence_len);
+                }
                 automaton.states[next_state].prohibited_next.sort_unstable();
                 automaton.states[next_state].prohibited_next.dedup();
                 queue.push_back(next_state);
@@ -2011,11 +5035,19 @@ impl RestrictionAutomaton {
             .binary_search(&edge_index)
             .is_err()
     }
+
+    fn prohibited_sequence_len(&self, state_index: usize, edge_index: usize) -> Option<usize> {
+        self.states[state_index]
+            .prohibited_meta
+            .get(&edge_index)
+            .copied()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 struct RoutingGraphBuildOptions {
     ignore_multi_edge_restriction_sequences: bool,
+    search_time_turn_restrictions: bool,
 }
 
 fn build_routing_graph(
@@ -2032,19 +5064,13 @@ fn build_routing_graph_with_options(
 ) -> Result<RoutingGraph> {
     let mut out_degree = vec![0_u32; topology.nodes.len()];
     let mut in_degree = vec![0_u32; topology.nodes.len()];
-    let mut head = vec![0_u32; topology.edges.len()];
     let mut edge_costs = vec![f64::INFINITY; topology.edges.len()];
-    let mut min_cost_per_meter = f64::INFINITY;
 
     for (edge_index, edge) in topology.edges.iter().enumerate() {
-        head[edge_index] = edge.to.0;
         let metric = &metrics.edge_metrics[edge_index];
         if let (Some(cost), Some(_)) = (metric.generalized_cost, metric.travel_time_s) {
             edge_costs[edge_index] = cost;
             in_degree[edge.to.0 as usize] += 1;
-            if edge.length_m > 0 {
-                min_cost_per_meter = min_cost_per_meter.min(cost / edge.length_m as f64);
-            }
         }
     }
 
@@ -2086,7 +5112,7 @@ fn build_routing_graph_with_options(
             let write_index = &mut write_positions[node_index];
             edge_order[*write_index as usize] = edge_index;
             *write_index += 1;
-            let head_node = head[edge_index as usize] as usize;
+            let head_node = topology.edges[edge_index as usize].to.0 as usize;
             let incoming_write_index = &mut incoming_write_positions[head_node];
             incoming_edge_order[*incoming_write_index as usize] = edge_index;
             *incoming_write_index += 1;
@@ -2102,6 +5128,19 @@ fn build_routing_graph_with_options(
         .filter(|restriction| restriction.mode_mask.contains(mode_bit))
     {
         if restriction.edge_path.len() < 2 {
+            continue;
+        }
+        if options.search_time_turn_restrictions {
+            if restriction.edge_path.len() > 2 && options.ignore_multi_edge_restriction_sequences {
+                continue;
+            }
+            restricted_sequences.push(
+                restriction
+                    .edge_path
+                    .iter()
+                    .map(|edge| edge.0 as usize)
+                    .collect::<Vec<_>>(),
+            );
             continue;
         }
         if restriction.edge_path.len() == 2 {
@@ -2150,10 +5189,11 @@ fn build_routing_graph_with_options(
             if !edge_costs[next_edge as usize].is_finite() {
                 continue;
             }
-            if !forbidden_turns[forbidden_turn_first_out[edge_index] as usize
-                ..forbidden_turn_first_out[edge_index + 1] as usize]
-                .binary_search(&next_edge)
-                .is_ok()
+            if options.search_time_turn_restrictions
+                || !forbidden_turns[forbidden_turn_first_out[edge_index] as usize
+                    ..forbidden_turn_first_out[edge_index + 1] as usize]
+                    .binary_search(&next_edge)
+                    .is_ok()
             {
                 transition_degree[edge_index] += 1;
             }
@@ -2182,10 +5222,11 @@ fn build_routing_graph_with_options(
                 continue;
             }
             let write_index = &mut transition_write_positions[edge_index];
-            if forbidden_turns[forbidden_turn_first_out[edge_index] as usize
-                ..forbidden_turn_first_out[edge_index + 1] as usize]
-                .binary_search(&(next_edge as u32))
-                .is_ok()
+            if !options.search_time_turn_restrictions
+                && forbidden_turns[forbidden_turn_first_out[edge_index] as usize
+                    ..forbidden_turn_first_out[edge_index + 1] as usize]
+                    .binary_search(&(next_edge as u32))
+                    .is_ok()
             {
                 continue;
             }
@@ -2224,7 +5265,6 @@ fn build_routing_graph_with_options(
         edge_order,
         incoming_first_out,
         incoming_edge_order,
-        head,
         edge_costs,
         transition_first_out,
         transition_edges,
@@ -2234,11 +5274,7 @@ fn build_routing_graph_with_options(
         reverse_transition_costs,
         acceleration: build_acceleration_graph(metrics, topology.edges.len())?,
         automaton: RestrictionAutomaton::build(&restricted_sequences),
-        min_cost_per_meter: if min_cost_per_meter.is_finite() {
-            min_cost_per_meter
-        } else {
-            0.0
-        },
+        virtual_reverse_of: vec![None; topology.edges.len()],
     })
 }
 
@@ -2359,9 +5395,22 @@ fn route_between_candidates(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     routing_graph: &RoutingGraph,
+    snap_max_distance_m: f64,
+    connectivity: &ConnectivityPolicy,
+    fallback: &FallbackPolicy,
     origin_candidates: &[SnappedPoint],
     destination_candidates: &[SnappedPoint],
-) -> Result<(SnappedPoint, SnappedPoint, RoutePath)> {
+) -> Result<(SnappedPoint, SnappedPoint, RoutePath, HopSelectionInfo)> {
+    let origin_components = candidate_component_ids(origin_candidates);
+    let destination_components = candidate_component_ids(destination_candidates);
+    if !origin_components.is_empty()
+        && !destination_components.is_empty()
+        && origin_components.is_disjoint(&destination_components)
+        && matches!(connectivity.disconnected, DisconnectedNetworkMode::Strict)
+    {
+        return Err(no_route_failure(topology, origin_candidates, destination_candidates).into());
+    }
+
     let mut path_cache = HashMap::<((u32, u64, u64), (u32, u64, u64)), Option<RoutePath>>::new();
 
     for origin in origin_candidates {
@@ -2369,18 +5418,58 @@ fn route_between_candidates(
             if same_edge_reverse_pair(origin, destination) {
                 continue;
             }
+            let Some(hop_info) =
+                hop_info_for_pair(origin, destination, snap_max_distance_m, connectivity)
+            else {
+                continue;
+            };
             let key = (snap_cache_key(origin), snap_cache_key(destination));
             let path = if let Some(cached) = path_cache.get(&key) {
                 cached.clone()
             } else {
                 let direct_path = direct_same_edge_path(routing_graph, origin, destination);
                 let path = if routing_graph.has_restriction_sequences() {
-                    astar_with_restriction_sequences(
-                        topology,
-                        routing_graph,
-                        origin.snapped_node_id as usize,
-                        destination.snapped_node_id as usize,
-                    )?
+                    let origin_seeds = origin_edge_seeds(routing_graph, origin);
+                    let destination_seeds = destination_edge_seeds(routing_graph, destination);
+                    if has_failure_modes(fallback) {
+                        astar_between_edge_seeds_with_failure_modes(
+                            topology,
+                            metrics,
+                            routing_graph,
+                            &origin_seeds,
+                            &destination_seeds,
+                            direct_path.clone(),
+                            fallback,
+                        )?
+                    } else {
+                        let pairwise_candidate = seeded_bidirectional_dijkstra_on_edge_transitions(
+                            topology,
+                            routing_graph,
+                            &origin_seeds,
+                            &destination_seeds,
+                            direct_path.clone(),
+                        )?;
+                        match pairwise_candidate {
+                            Some(path)
+                                if path_respects_restriction_sequences(
+                                    routing_graph,
+                                    &path.edge_indexes,
+                                ) =>
+                            {
+                                Some(path)
+                            }
+                            Some(_) => astar_between_edge_seeds_with_failure_modes(
+                                topology,
+                                metrics,
+                                routing_graph,
+                                &origin_seeds,
+                                &destination_seeds,
+                                direct_path.clone(),
+                                fallback,
+                            )?,
+                            None => None,
+                        }
+                    }
                 } else if routing_graph.acceleration.is_some() {
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);
                     let destination_seeds = destination_edge_seeds(routing_graph, destination);
@@ -2401,13 +5490,25 @@ fn route_between_candidates(
                 } else {
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);
                     let destination_seeds = destination_edge_seeds(routing_graph, destination);
-                    seeded_bidirectional_dijkstra_on_edge_transitions(
-                        topology,
-                        routing_graph,
-                        &origin_seeds,
-                        &destination_seeds,
-                        direct_path.clone(),
-                    )?
+                    if has_failure_modes(fallback) {
+                        astar_between_edge_seeds_with_failure_modes(
+                            topology,
+                            metrics,
+                            routing_graph,
+                            &origin_seeds,
+                            &destination_seeds,
+                            direct_path.clone(),
+                            fallback,
+                        )?
+                    } else {
+                        seeded_bidirectional_dijkstra_on_edge_transitions(
+                            topology,
+                            routing_graph,
+                            &origin_seeds,
+                            &destination_seeds,
+                            direct_path.clone(),
+                        )?
+                    }
                 };
                 path_cache.insert(key, path.clone());
                 path
@@ -2415,12 +5516,12 @@ fn route_between_candidates(
             if let Some(path) = path {
                 let path =
                     finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
-                return Ok((origin.clone(), destination.clone(), path));
+                return Ok((origin.clone(), destination.clone(), path, hop_info));
             }
         }
     }
 
-    bail!("no route found between the snapped origin and destination")
+    Err(no_route_failure(topology, origin_candidates, destination_candidates).into())
 }
 
 fn snap_cache_key(point: &SnappedPoint) -> (u32, u64, u64) {
@@ -2460,8 +5561,6 @@ fn direct_same_edge_path(
         {
             return Some(RoutePath {
                 edge_indexes: Vec::new(),
-                total_distance_m: 0,
-                total_travel_time_s: 0.0,
                 total_generalized_cost: 0.0,
             });
         }
@@ -2476,10 +5575,33 @@ fn direct_same_edge_path(
     }
     Some(RoutePath {
         edge_indexes: vec![edge_id as usize],
-        total_distance_m: 0,
-        total_travel_time_s: 0.0,
         total_generalized_cost: edge_cost * (destination_fraction - origin_fraction),
     })
+}
+
+fn path_respects_restriction_sequences(
+    routing_graph: &RoutingGraph,
+    edge_indexes: &[usize],
+) -> bool {
+    if !routing_graph.has_restriction_sequences() {
+        return true;
+    }
+
+    let mut automaton_state = 0_usize;
+    for &edge_index in edge_indexes {
+        if routing_graph
+            .automaton
+            .prohibited_sequence_len(automaton_state, edge_index)
+            .is_some()
+        {
+            return false;
+        }
+        automaton_state = routing_graph
+            .automaton
+            .transition(automaton_state, edge_index);
+    }
+
+    true
 }
 
 fn origin_edge_seeds(routing_graph: &RoutingGraph, origin: &SnappedPoint) -> Vec<(usize, f64)> {
@@ -2553,8 +5675,6 @@ fn reconstruct_bidirectional_route_path(
 
     RoutePath {
         edge_indexes,
-        total_distance_m: 0,
-        total_travel_time_s: 0.0,
         total_generalized_cost,
     }
 }
@@ -2607,8 +5727,6 @@ fn reconstruct_accelerated_route_path(
 
     RoutePath {
         edge_indexes,
-        total_distance_m: 0,
-        total_travel_time_s: 0.0,
         total_generalized_cost,
     }
 }
@@ -2640,8 +5758,6 @@ fn accelerated_route_query(
         .collect::<Vec<_>>();
     let initial_path = (source == target).then_some(RoutePath {
         edge_indexes: Vec::new(),
-        total_distance_m: 0,
-        total_travel_time_s: 0.0,
         total_generalized_cost: 0.0,
     });
     accelerated_route_query_seeded(
@@ -2959,35 +6075,106 @@ fn seeded_bidirectional_dijkstra_on_edge_transitions(
     })
 }
 
-fn astar_with_restriction_sequences(
-    topology: &TopologyBundle,
+fn edge_failure_mode_penalty(
+    metrics: &CompiledProfileBundle,
     routing_graph: &RoutingGraph,
-    source: usize,
-    target: usize,
-) -> Result<Option<RoutePath>> {
-    if source >= topology.nodes.len() || target >= topology.nodes.len() {
-        bail!("source or target node is out of bounds for the topology bundle");
+    fallback: &FallbackPolicy,
+    edge_index: usize,
+) -> (f64, f64) {
+    if routing_graph
+        .virtual_reverse_of
+        .get(edge_index)
+        .and_then(|value| *value)
+        .is_some()
+    {
+        let penalty_s = fallback
+            .penalties
+            .reverse_oneway_penalty_s
+            .unwrap_or_default();
+        return (penalty_s, penalty_s * metrics.turn_costs.cost_time_weight);
     }
-    if source == target {
-        return Ok(Some(RoutePath {
-            edge_indexes: Vec::new(),
-            total_distance_m: 0,
-            total_travel_time_s: 0.0,
-            total_generalized_cost: 0.0,
-        }));
-    }
+    (0.0, 0.0)
+}
 
+fn transition_failure_mode_penalty(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    automaton_state: usize,
+    previous_edge_index: usize,
+    next_edge_index: usize,
+    fallback: &FallbackPolicy,
+) -> Option<(f64, f64)> {
+    let mut penalty_s = 0.0;
+    if let Some(sequence_len) = routing_graph
+        .automaton
+        .prohibited_sequence_len(automaton_state, next_edge_index)
+    {
+        if fallback.ignore_turn_restrictions {
+            penalty_s += fallback
+                .penalties
+                .ignored_turn_restriction_penalty_s
+                .unwrap_or_default();
+        } else if sequence_len == 2
+            && classify_turn(topology, previous_edge_index, next_edge_index) == TurnDirection::Uturn
+            && fallback.allow_uturn_where_normally_forbidden
+        {
+            penalty_s += fallback
+                .penalties
+                .forbidden_uturn_penalty_s
+                .or(fallback.penalties.illegal_turn_penalty_s)
+                .unwrap_or_default();
+        } else if sequence_len == 2 && fallback.allow_illegal_turn {
+            penalty_s += fallback
+                .penalties
+                .illegal_turn_penalty_s
+                .unwrap_or_default();
+        } else {
+            return None;
+        }
+    }
+    let (_, edge_penalty_cost) =
+        edge_failure_mode_penalty(metrics, routing_graph, fallback, next_edge_index);
+    Some((
+        penalty_s,
+        penalty_s * metrics.turn_costs.cost_time_weight + edge_penalty_cost,
+    ))
+}
+
+fn astar_between_edge_seeds_with_failure_modes(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    origin_seeds: &[(usize, f64)],
+    destination_seeds: &[(usize, f64)],
+    initial_upper_bound: Option<RoutePath>,
+    fallback: &FallbackPolicy,
+) -> Result<Option<RoutePath>> {
     RESTRICTED_SEARCH_SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
         scratch.prepare();
 
-        let mut best_cost = f64::INFINITY;
+        let mut best_path = initial_upper_bound;
+        let mut best_cost = best_path
+            .as_ref()
+            .map(|path| path.total_generalized_cost)
+            .unwrap_or(f64::INFINITY);
         let mut best_state = None;
+        let destination_adjustments = destination_seeds.iter().fold(
+            HashMap::<usize, f64>::new(),
+            |mut acc, (edge_index, adjustment)| {
+                acc.entry(*edge_index)
+                    .and_modify(|existing| *existing = existing.min(*adjustment))
+                    .or_insert(*adjustment);
+                acc
+            },
+        );
 
-        for &edge_index in routing_graph.outgoing_edges(source) {
-            let edge_index = edge_index as usize;
-            let cost = routing_graph.edge_costs[edge_index];
-            if !cost.is_finite() {
+        for &(edge_index, cost) in origin_seeds {
+            let (edge_penalty_s, edge_penalty_cost) =
+                edge_failure_mode_penalty(metrics, routing_graph, fallback, edge_index);
+            let seeded_cost = cost + edge_penalty_cost;
+            if !seeded_cost.is_finite() {
                 continue;
             }
             let automaton_state = routing_graph.automaton.transition(0, edge_index);
@@ -2995,19 +6182,13 @@ fn astar_with_restriction_sequences(
                 edge_index,
                 automaton_state,
             };
-            scratch.dist.insert(key, cost);
+            scratch.dist.insert(key, seeded_cost);
             scratch.previous.insert(key, None);
             scratch.heap.push(State {
                 edge_index,
                 automaton_state,
-                cost,
-                score: cost
-                    + heuristic_cost(
-                        topology,
-                        routing_graph,
-                        routing_graph.head[edge_index] as usize,
-                        target,
-                    ),
+                cost: seeded_cost,
+                score: seeded_cost + edge_penalty_s * 0.0,
             });
         }
 
@@ -3029,11 +6210,12 @@ fn astar_with_restriction_sequences(
                 continue;
             }
 
-            let node_index = routing_graph.head[edge_index] as usize;
-            if node_index == target {
-                best_cost = cost;
-                best_state = Some(key);
-                break;
+            if let Some(&adjustment) = destination_adjustments.get(&edge_index) {
+                let candidate_cost = cost + adjustment;
+                if candidate_cost < best_cost {
+                    best_cost = candidate_cost;
+                    best_state = Some(key);
+                }
             }
             if cost >= best_cost {
                 continue;
@@ -3041,13 +6223,19 @@ fn astar_with_restriction_sequences(
 
             for transition_index in routing_graph.transition_range(edge_index) {
                 let next_edge = routing_graph.transition_edges[transition_index] as usize;
-                if !routing_graph
-                    .automaton
-                    .is_transition_allowed(automaton_state, next_edge)
-                {
+                let Some((penalty_s, penalty_cost)) = transition_failure_mode_penalty(
+                    topology,
+                    metrics,
+                    routing_graph,
+                    automaton_state,
+                    edge_index,
+                    next_edge,
+                    fallback,
+                ) else {
                     continue;
-                }
-                let next_cost = cost + routing_graph.transition_costs[transition_index];
+                };
+                let next_cost =
+                    cost + routing_graph.transition_costs[transition_index] + penalty_cost;
                 let next_automaton_state = routing_graph
                     .automaton
                     .transition(automaton_state, next_edge);
@@ -3063,20 +6251,14 @@ fn astar_with_restriction_sequences(
                         edge_index: next_edge,
                         automaton_state: next_automaton_state,
                         cost: next_cost,
-                        score: next_cost
-                            + heuristic_cost(
-                                topology,
-                                routing_graph,
-                                routing_graph.head[next_edge] as usize,
-                                target,
-                            ),
+                        score: next_cost + penalty_s * 0.0,
                     });
                 }
             }
         }
 
         let Some(mut cursor) = best_state else {
-            return Ok(None);
+            return Ok(best_path);
         };
 
         let mut edge_indexes = Vec::new();
@@ -3093,12 +6275,12 @@ fn astar_with_restriction_sequences(
         }
         edge_indexes.reverse();
 
-        Ok(Some(RoutePath {
+        best_path = Some(RoutePath {
             edge_indexes,
-            total_distance_m: 0,
-            total_travel_time_s: 0.0,
             total_generalized_cost: best_cost,
-        }))
+        });
+
+        Ok(best_path)
     })
 }
 
@@ -3109,32 +6291,24 @@ fn finalize_route_path(
     origin: &SnappedPoint,
     destination: &SnappedPoint,
 ) -> RoutePath {
-    let mut total_distance_m = 0_u64;
-    let mut total_travel_time_s = 0.0;
     let mut total_generalized_cost = 0.0;
     let mut previous_edge_index = None;
     let first_edge = edge_indexes.first().copied();
     let last_edge = edge_indexes.last().copied();
     for &edge_index in &edge_indexes {
-        let edge = &topology.edges[edge_index];
         let metric = &metrics.edge_metrics[edge_index];
         let factor = edge_traversal_factor(edge_index, first_edge, last_edge, origin, destination);
-        total_distance_m += (edge.length_m as f64 * factor).round() as u64;
-        total_travel_time_s += metric.travel_time_s.unwrap_or_default() * factor;
         total_generalized_cost += metric.generalized_cost.unwrap_or_default() * factor;
         if let Some(previous_edge_index) = previous_edge_index {
-            let turn_penalty_s =
-                turn_penalty_seconds(topology, metrics, previous_edge_index, edge_index);
-            total_travel_time_s += turn_penalty_s;
-            total_generalized_cost += turn_penalty_s * metrics.turn_costs.cost_time_weight;
+            total_generalized_cost +=
+                turn_penalty_seconds(topology, metrics, previous_edge_index, edge_index)
+                    * metrics.turn_costs.cost_time_weight;
         }
         previous_edge_index = Some(edge_index);
     }
 
     RoutePath {
         edge_indexes,
-        total_distance_m,
-        total_travel_time_s,
         total_generalized_cost,
     }
 }
@@ -3190,20 +6364,6 @@ fn build_route_geometry(
         geometry.push([destination.snapped_lon, destination.snapped_lat]);
     }
     geometry
-}
-
-fn heuristic_cost(
-    topology: &TopologyBundle,
-    routing_graph: &RoutingGraph,
-    from_node: usize,
-    to_node: usize,
-) -> f64 {
-    haversine_meters(
-        topology.nodes[from_node].lon,
-        topology.nodes[from_node].lat,
-        topology.nodes[to_node].lon,
-        topology.nodes[to_node].lat,
-    ) * routing_graph.min_cost_per_meter
 }
 
 fn execution_warnings(metrics: &CompiledProfileBundle) -> Vec<String> {
@@ -3324,6 +6484,7 @@ fn snap_candidates(
     routing_graph: &RoutingGraph,
     point: &LabeledPoint,
     max_distance_m: f64,
+    is_origin: bool,
 ) -> Result<Vec<SnappedPoint>> {
     const MAX_SNAP_CANDIDATES: usize = 8;
 
@@ -3345,6 +6506,9 @@ fn snap_candidates(
 
     let mut candidates = Vec::with_capacity(MAX_SNAP_CANDIDATES * 2);
     for &(node_id, distance_m) in &nearby_nodes {
+        if !node_is_traversable_for_snap(routing_graph, node_id as usize, is_origin) {
+            continue;
+        }
         push_best_snap_candidate(
             &mut candidates,
             SnappedPoint {
@@ -3359,6 +6523,12 @@ fn snap_candidates(
                 snapped_edge_fraction: None,
                 snapped_from_node_id: None,
                 snapped_to_node_id: None,
+                component_id: traversable_node_component_id(
+                    topology,
+                    routing_graph,
+                    node_id as usize,
+                    is_origin,
+                ),
             },
             MAX_SNAP_CANDIDATES,
         );
@@ -3410,23 +6580,48 @@ fn snap_candidates(
                 snapped_edge_fraction: Some(projection.fraction),
                 snapped_from_node_id: Some(edge.from.0),
                 snapped_to_node_id: Some(edge.to.0),
+                component_id: topology.edge_component_id(edge_index),
             },
             MAX_SNAP_CANDIDATES,
         );
     }
 
     if candidates.is_empty() {
-        bail!(
-            "point '{}' has no traversable candidate node or edge within {:.1} m",
-            point.id,
-            max_distance_m
-        );
+        return Err(route_snap_failure(point, max_distance_m).into());
     }
 
     candidates.sort_by(|left, right| left.snap_distance_m.total_cmp(&right.snap_distance_m));
     candidates.dedup_by(|left, right| snap_candidate_key(left) == snap_candidate_key(right));
     candidates.truncate(MAX_SNAP_CANDIDATES);
     Ok(candidates)
+}
+
+fn node_is_traversable_for_snap(
+    routing_graph: &RoutingGraph,
+    node_index: usize,
+    is_origin: bool,
+) -> bool {
+    if is_origin {
+        !routing_graph.outgoing_edges(node_index).is_empty()
+    } else {
+        !routing_graph.incoming_edges(node_index).is_empty()
+    }
+}
+
+fn traversable_node_component_id(
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    node_index: usize,
+    is_origin: bool,
+) -> Option<u32> {
+    let edge_index = if is_origin {
+        routing_graph.outgoing_edges(node_index).first().copied()
+    } else {
+        routing_graph.incoming_edges(node_index).first().copied()
+    };
+    edge_index
+        .and_then(|edge_index| topology.edge_component_id(edge_index))
+        .or_else(|| topology.node_component_id(node_index as u32))
 }
 
 struct SegmentProjection {
@@ -3689,9 +6884,14 @@ fn haversine_meters(from_lon: f64, from_lat: f64, to_lon: f64, to_lat: f64) -> f
 #[cfg(test)]
 mod tests {
     use super::{
-        AnalysisKind, EngineMode, OdPair, OdPairsDocument, PointSetDocument, PreparedRoutingEngine,
-        RouteRequest, SnapOptions, build_routing_graph, execute_matrix, execute_od, execute_route,
-        execute_route_with_edge_names, load_experiment, load_od_pairs, load_point_set,
+        AnalysisDiagnosticCode, AnalysisKind, ConnectivityPolicy, DisconnectedNetworkMode,
+        EngineMode, FallbackPolicy, IllegalMovementPenaltyPolicy, OdPair, OdPairsDocument,
+        PointSetDocument, PreparedRoutingEngine, RouteRequest, ServiceAreaBandMode,
+        ServiceAreaBoundaryMode, ServiceAreaMultiOriginMode, ServiceAreaOutputMode,
+        ServiceAreaThreshold, ServiceAreaThresholdMetric, SnapOptions, analysis_failure,
+        build_routing_graph, execute_matrix, execute_od, execute_route,
+        execute_route_with_edge_names, execute_service_area, load_experiment, load_od_pairs,
+        load_point_set, load_service_area_request,
     };
     use netan_core::{
         AccessMask, CacheBundleId, CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle,
@@ -3750,6 +6950,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 segment_rows: true,
@@ -3798,6 +7000,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::None,
                 segment_rows: true,
@@ -3838,6 +7042,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -3880,6 +7086,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig::default(),
         };
 
@@ -3908,6 +7116,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 segment_rows: true,
@@ -3950,6 +7160,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 10.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig::default(),
         };
 
@@ -3965,20 +7177,7 @@ mod tests {
     #[test]
     fn snap_candidates_keep_only_the_nearest_eight() {
         let topology = snap_test_topology();
-        let metrics = CompiledProfileBundle {
-            schema_version: 2,
-            profile_id: "snap".to_string(),
-            profile_hash: "abc".to_string(),
-            mode: TravelMode::Car,
-            turn_costs: CompiledTurnCostConfig::default(),
-            source_topology_bundle_id: CacheBundleId::new("topology-test"),
-            acceleration: None,
-            edge_metrics: vec![CompiledEdgeMetric {
-                edge_id: EdgeId(0),
-                travel_time_s: Some(1.0),
-                generalized_cost: Some(1.0),
-            }],
-        };
+        let metrics = uniform_metrics(topology.edges.len(), 1.0);
         let graph = build_routing_graph(&topology, &metrics).expect("graph builds");
         let point = super::LabeledPoint {
             id: "snap".to_string(),
@@ -3987,7 +7186,7 @@ mod tests {
         };
 
         let candidates =
-            super::snap_candidates(&topology, &graph, &point, 500.0).expect("snap works");
+            super::snap_candidates(&topology, &graph, &point, 500.0, true).expect("snap works");
 
         assert_eq!(candidates.len(), 8);
         assert!(
@@ -4033,6 +7232,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4070,6 +7271,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4084,6 +7287,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4122,6 +7327,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4143,6 +7350,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4187,6 +7396,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4208,6 +7419,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4236,6 +7449,8 @@ mod tests {
                     origin: origin.clone(),
                     destination: destination.clone(),
                     snap: origins.snap.clone(),
+                    connectivity: origins.connectivity.clone(),
+                    fallback: origins.fallback.clone(),
                     returns: origins.returns.clone(),
                 },
             )
@@ -4279,6 +7494,8 @@ mod tests {
                 snap: SnapOptions {
                     max_distance_m: 500.0,
                 },
+                connectivity: Default::default(),
+                fallback: Default::default(),
                 returns: ReturnConfig {
                     geometry: ReturnGeometry::Full,
                     ..ReturnConfig::default()
@@ -4299,6 +7516,8 @@ mod tests {
                 snap: SnapOptions {
                     max_distance_m: 500.0,
                 },
+                connectivity: Default::default(),
+                fallback: Default::default(),
                 returns: ReturnConfig::default(),
             },
         ];
@@ -4346,6 +7565,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4399,6 +7620,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4438,6 +7661,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4476,6 +7701,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4522,6 +7749,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4531,6 +7760,18 @@ mod tests {
         let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
         assert_eq!(result.edge_path, vec![3, 2]);
         assert_eq!(result.summary.total_distance_m, 300);
+    }
+
+    #[test]
+    fn detects_when_a_path_violates_multi_edge_restriction_sequences() {
+        let graph = build_routing_graph(&multi_edge_restricted_topology(), &restricted_metrics())
+            .expect("graph builds");
+
+        assert!(!super::path_respects_restriction_sequences(
+            &graph,
+            &[0, 1, 2]
+        ));
+        assert!(super::path_respects_restriction_sequences(&graph, &[3, 2]));
     }
 
     #[test]
@@ -4556,6 +7797,8 @@ mod tests {
             snap: SnapOptions {
                 max_distance_m: 500.0,
             },
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
@@ -4731,6 +7974,8 @@ scenarios:
             names: vec![],
             edge_based_topology: Default::default(),
             spatial_index: Some(spatial_index_for_all_nodes(3, 6.0, 53.0, 6.002, 53.0)),
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
         })
     }
 
@@ -4758,6 +8003,100 @@ scenarios:
                     edge_id: EdgeId(2),
                     travel_time_s: Some(100.0),
                     generalized_cost: Some(100.0),
+                },
+            ],
+        }
+    }
+
+    fn service_area_linear_topology() -> TopologyBundle {
+        with_edge_based_topology(TopologyBundle {
+            schema_version: 2,
+            source_path: "service-area-linear".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![
+                TopologyNode {
+                    node_id: NodeId(0),
+                    osm_node_id: 1,
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(1),
+                    osm_node_id: 2,
+                    lon: 6.001,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(2),
+                    osm_node_id: 3,
+                    lon: 6.002,
+                    lat: 53.0,
+                },
+            ],
+            edges: vec![
+                DirectedEdge {
+                    edge_id: EdgeId(0),
+                    from: NodeId(0),
+                    to: NodeId(1),
+                    source_way_id: 30,
+                    length_m: 100,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+                DirectedEdge {
+                    edge_id: EdgeId(1),
+                    from: NodeId(1),
+                    to: NodeId(2),
+                    source_way_id: 31,
+                    length_m: 200,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+            ],
+            turn_restrictions: vec![],
+            names: vec![],
+            edge_based_topology: Default::default(),
+            spatial_index: Some(spatial_index_for_all_nodes(3, 6.0, 53.0, 6.002, 53.0)),
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
+        })
+    }
+
+    fn service_area_linear_metrics() -> CompiledProfileBundle {
+        CompiledProfileBundle {
+            schema_version: 2,
+            profile_id: "service-area-test".to_string(),
+            profile_hash: "abc".to_string(),
+            mode: TravelMode::Car,
+            turn_costs: CompiledTurnCostConfig::default(),
+            source_topology_bundle_id: CacheBundleId::new("service-area-test"),
+            acceleration: None,
+            edge_metrics: vec![
+                CompiledEdgeMetric {
+                    edge_id: EdgeId(0),
+                    travel_time_s: Some(10.0),
+                    generalized_cost: Some(10.0),
+                },
+                CompiledEdgeMetric {
+                    edge_id: EdgeId(1),
+                    travel_time_s: Some(20.0),
+                    generalized_cost: Some(20.0),
                 },
             ],
         }
@@ -4912,6 +8251,8 @@ scenarios:
             names: vec![],
             edge_based_topology: Default::default(),
             spatial_index: Some(spatial_index_for_all_nodes(4, 6.0, 53.0, 6.003, 53.0)),
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
         })
     }
 
@@ -5108,6 +8449,8 @@ scenarios:
             names: vec![],
             edge_based_topology: Default::default(),
             spatial_index: Some(spatial_index_for_all_nodes(5, 6.0, 53.0, 6.002, 53.001)),
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
         })
     }
 
@@ -5233,6 +8576,8 @@ scenarios:
             names: vec![],
             edge_based_topology: Default::default(),
             spatial_index: Some(spatial_index_for_all_nodes(4, 6.0, 53.0, 6.002, 53.001)),
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
         })
     }
 
@@ -5282,16 +8627,12 @@ scenarios:
                 lat: 53.0,
             })
             .collect::<Vec<_>>();
-        with_edge_based_topology(TopologyBundle {
-            schema_version: 3,
-            source_path: "test".to_string(),
-            source_sha256: "abc".to_string(),
-            nodes,
-            edges: vec![DirectedEdge {
-                edge_id: EdgeId(0),
-                from: NodeId(0),
-                to: NodeId(1),
-                source_way_id: 1,
+        let edges = (0..9)
+            .map(|index| DirectedEdge {
+                edge_id: EdgeId(index),
+                from: NodeId(index),
+                to: NodeId(index + 1),
+                source_way_id: i64::from(index) + 1,
                 length_m: 10,
                 duration_s: None,
                 road_class: RoadClass::Residential,
@@ -5303,17 +8644,79 @@ scenarios:
                 geometry_offset: 0,
                 geometry_len: 0,
                 flags: 0,
-            }],
+            })
+            .collect::<Vec<_>>();
+        with_edge_based_topology(TopologyBundle {
+            schema_version: 3,
+            source_path: "test".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes,
+            edges,
             turn_restrictions: vec![],
             names: vec![],
             edge_based_topology: Default::default(),
             spatial_index: None,
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
         })
     }
 
     fn with_edge_based_topology(mut topology: TopologyBundle) -> TopologyBundle {
         topology.edge_based_topology = super::build_edge_based_topology_fallback(&topology);
+        if topology.node_component_ids.len() != topology.nodes.len()
+            || topology.edge_component_ids.len() != topology.edges.len()
+        {
+            let (node_component_ids, edge_component_ids) = weak_components_for_test(&topology);
+            topology.node_component_ids = node_component_ids;
+            topology.edge_component_ids = edge_component_ids;
+        }
         topology
+    }
+
+    fn weak_components_for_test(topology: &TopologyBundle) -> (Vec<u32>, Vec<u32>) {
+        let node_count = topology.nodes.len();
+        let mut parent = (0..node_count as u32).collect::<Vec<_>>();
+
+        for edge in &topology.edges {
+            union_test_components(&mut parent, edge.from.0 as usize, edge.to.0 as usize);
+        }
+
+        let mut remap = std::collections::BTreeMap::<u32, u32>::new();
+        let mut node_component_ids = vec![0_u32; node_count];
+        for node_index in 0..node_count {
+            let root = find_test_component_root(&mut parent, node_index);
+            let next_component_id = remap.len() as u32;
+            let component_id = *remap.entry(root).or_insert(next_component_id);
+            node_component_ids[node_index] = component_id;
+        }
+
+        let edge_component_ids = topology
+            .edges
+            .iter()
+            .map(|edge| node_component_ids[edge.from.0 as usize])
+            .collect();
+        (node_component_ids, edge_component_ids)
+    }
+
+    fn find_test_component_root(parent: &mut [u32], index: usize) -> u32 {
+        let parent_index = parent[index] as usize;
+        if parent_index != index {
+            parent[index] = find_test_component_root(parent, parent_index);
+        }
+        parent[index]
+    }
+
+    fn union_test_components(parent: &mut [u32], left: usize, right: usize) {
+        let left_root = find_test_component_root(parent, left);
+        let right_root = find_test_component_root(parent, right);
+        if left_root == right_root {
+            return;
+        }
+        if left_root <= right_root {
+            parent[right_root as usize] = left_root;
+        } else {
+            parent[left_root as usize] = right_root;
+        }
     }
 
     fn turn_penalty_metrics() -> CompiledProfileBundle {
@@ -5353,6 +8756,1576 @@ scenarios:
                     edge_id: EdgeId(4),
                     travel_time_s: Some(10.0),
                     generalized_cost: Some(10.0),
+                },
+            ],
+        }
+    }
+
+    fn one_way_dead_end_topology() -> TopologyBundle {
+        with_edge_based_topology(TopologyBundle {
+            schema_version: 3,
+            source_path: "oneway-dead-end".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![
+                TopologyNode {
+                    node_id: NodeId(0),
+                    osm_node_id: 1,
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(1),
+                    osm_node_id: 2,
+                    lon: 6.001,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(2),
+                    osm_node_id: 3,
+                    lon: 6.002,
+                    lat: 53.0,
+                },
+            ],
+            edges: vec![
+                DirectedEdge {
+                    edge_id: EdgeId(0),
+                    from: NodeId(0),
+                    to: NodeId(1),
+                    source_way_id: 100,
+                    length_m: 100,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+                DirectedEdge {
+                    edge_id: EdgeId(1),
+                    from: NodeId(1),
+                    to: NodeId(2),
+                    source_way_id: 101,
+                    length_m: 100,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+            ],
+            turn_restrictions: vec![],
+            names: vec![],
+            edge_based_topology: Default::default(),
+            spatial_index: Some(spatial_index_for_all_nodes(3, 6.0, 53.0, 6.002, 53.0)),
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
+        })
+    }
+
+    fn illegal_turn_only_topology() -> TopologyBundle {
+        let mut topology = one_way_dead_end_topology();
+        topology.turn_restrictions = vec![TurnRestriction {
+            relation_id: 200,
+            kind: TurnRestrictionKind::NoTurn,
+            edge_path: vec![EdgeId(0), EdgeId(1)],
+            mode_mask: AccessMask::new(AccessMask::CAR),
+        }];
+        topology
+    }
+
+    fn dead_node_snap_topology() -> TopologyBundle {
+        with_edge_based_topology(TopologyBundle {
+            schema_version: 3,
+            source_path: "dead-node-snap".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![
+                TopologyNode {
+                    node_id: NodeId(0),
+                    osm_node_id: 10,
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(1),
+                    osm_node_id: 11,
+                    lon: 6.0001,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(2),
+                    osm_node_id: 12,
+                    lon: 6.0002,
+                    lat: 53.0,
+                },
+            ],
+            edges: vec![DirectedEdge {
+                edge_id: EdgeId(0),
+                from: NodeId(1),
+                to: NodeId(2),
+                source_way_id: 310,
+                length_m: 10,
+                duration_s: None,
+                road_class: RoadClass::Residential,
+                surface: SurfaceClass::Asphalt,
+                smoothness: SmoothnessClass::Good,
+                access_mask: AccessMask::new(AccessMask::CAR),
+                is_toll: false,
+                name_index: None,
+                geometry_offset: 0,
+                geometry_len: 0,
+                flags: 0,
+            }],
+            turn_restrictions: vec![],
+            names: vec![],
+            edge_based_topology: Default::default(),
+            spatial_index: Some(spatial_index_for_all_nodes(3, 6.0, 53.0, 6.0002, 53.0)),
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
+        })
+    }
+
+    fn ignored_restriction_only_topology() -> TopologyBundle {
+        with_edge_based_topology(TopologyBundle {
+            schema_version: 3,
+            source_path: "ignored-restriction".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![
+                TopologyNode {
+                    node_id: NodeId(0),
+                    osm_node_id: 1,
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(1),
+                    osm_node_id: 2,
+                    lon: 6.001,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(2),
+                    osm_node_id: 3,
+                    lon: 6.002,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(3),
+                    osm_node_id: 4,
+                    lon: 6.003,
+                    lat: 53.0,
+                },
+            ],
+            edges: vec![
+                DirectedEdge {
+                    edge_id: EdgeId(0),
+                    from: NodeId(0),
+                    to: NodeId(1),
+                    source_way_id: 210,
+                    length_m: 100,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+                DirectedEdge {
+                    edge_id: EdgeId(1),
+                    from: NodeId(1),
+                    to: NodeId(2),
+                    source_way_id: 211,
+                    length_m: 100,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+                DirectedEdge {
+                    edge_id: EdgeId(2),
+                    from: NodeId(2),
+                    to: NodeId(3),
+                    source_way_id: 212,
+                    length_m: 100,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+            ],
+            turn_restrictions: vec![TurnRestriction {
+                relation_id: 201,
+                kind: TurnRestrictionKind::NoTurn,
+                edge_path: vec![EdgeId(0), EdgeId(1), EdgeId(2)],
+                mode_mask: AccessMask::new(AccessMask::CAR),
+            }],
+            names: vec![],
+            edge_based_topology: Default::default(),
+            spatial_index: Some(spatial_index_for_all_nodes(4, 6.0, 53.0, 6.003, 53.0)),
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
+        })
+    }
+
+    fn forbidden_uturn_topology() -> TopologyBundle {
+        with_edge_based_topology(TopologyBundle {
+            schema_version: 3,
+            source_path: "forbidden-uturn".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![
+                TopologyNode {
+                    node_id: NodeId(0),
+                    osm_node_id: 1,
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(1),
+                    osm_node_id: 2,
+                    lon: 6.001,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(2),
+                    osm_node_id: 3,
+                    lon: 6.0,
+                    lat: 53.001,
+                },
+            ],
+            edges: vec![
+                DirectedEdge {
+                    edge_id: EdgeId(0),
+                    from: NodeId(0),
+                    to: NodeId(1),
+                    source_way_id: 300,
+                    length_m: 100,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+                DirectedEdge {
+                    edge_id: EdgeId(1),
+                    from: NodeId(1),
+                    to: NodeId(0),
+                    source_way_id: 301,
+                    length_m: 100,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+                DirectedEdge {
+                    edge_id: EdgeId(2),
+                    from: NodeId(0),
+                    to: NodeId(2),
+                    source_way_id: 302,
+                    length_m: 120,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+            ],
+            turn_restrictions: vec![TurnRestriction {
+                relation_id: 202,
+                kind: TurnRestrictionKind::NoTurn,
+                edge_path: vec![EdgeId(0), EdgeId(1)],
+                mode_mask: AccessMask::new(AccessMask::CAR),
+            }],
+            names: vec![],
+            edge_based_topology: Default::default(),
+            spatial_index: Some(spatial_index_for_all_nodes(3, 6.0, 53.0, 6.001, 53.001)),
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
+        })
+    }
+
+    fn ferry_only_subnetwork_topology() -> TopologyBundle {
+        with_edge_based_topology(TopologyBundle {
+            schema_version: 3,
+            source_path: "ferry-only".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![
+                TopologyNode {
+                    node_id: NodeId(0),
+                    osm_node_id: 1,
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(1),
+                    osm_node_id: 2,
+                    lon: 6.001,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(2),
+                    osm_node_id: 3,
+                    lon: 6.01,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(3),
+                    osm_node_id: 4,
+                    lon: 6.011,
+                    lat: 53.0,
+                },
+            ],
+            edges: vec![
+                DirectedEdge {
+                    edge_id: EdgeId(0),
+                    from: NodeId(0),
+                    to: NodeId(1),
+                    source_way_id: 400,
+                    length_m: 100,
+                    duration_s: Some(60.0),
+                    road_class: RoadClass::Ferry,
+                    surface: SurfaceClass::Unknown,
+                    smoothness: SmoothnessClass::Unknown,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+                DirectedEdge {
+                    edge_id: EdgeId(1),
+                    from: NodeId(2),
+                    to: NodeId(3),
+                    source_way_id: 401,
+                    length_m: 100,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+            ],
+            turn_restrictions: vec![],
+            names: vec![],
+            edge_based_topology: Default::default(),
+            spatial_index: Some(spatial_index_for_all_nodes(4, 6.0, 53.0, 6.011, 53.0)),
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
+        })
+    }
+
+    fn uniform_metrics(edge_count: usize, travel_time_s: f64) -> CompiledProfileBundle {
+        CompiledProfileBundle {
+            schema_version: 3,
+            profile_id: "test".to_string(),
+            profile_hash: "abc".to_string(),
+            mode: TravelMode::Car,
+            turn_costs: CompiledTurnCostConfig {
+                cost_time_weight: 1.0,
+                ..CompiledTurnCostConfig::default()
+            },
+            source_topology_bundle_id: CacheBundleId::new("topology-test"),
+            acceleration: None,
+            edge_metrics: (0..edge_count)
+                .map(|edge_index| CompiledEdgeMetric {
+                    edge_id: EdgeId(edge_index as u32),
+                    travel_time_s: Some(travel_time_s),
+                    generalized_cost: Some(travel_time_s),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn reports_structured_diagnostics_for_component_mismatch() {
+        let topology = disconnected_topology();
+        let metrics = disconnected_metrics();
+        let request = RouteRequest {
+            route_id: "disconnected".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.01,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 100.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+        };
+
+        let error = execute_route(&topology, &metrics, &request).expect_err("route should fail");
+        let failure = analysis_failure(&error).expect("failure should be structured");
+
+        assert_eq!(failure.outcome, super::AnalysisOutcome::Unreachable);
+        assert_eq!(failure.diagnostics.len(), 1);
+        assert_eq!(
+            failure.diagnostics[0].code,
+            AnalysisDiagnosticCode::DisconnectedComponents
+        );
+        assert_eq!(failure.diagnostics[0].component_ids, vec![0, 1]);
+    }
+
+    #[test]
+    fn returns_partial_route_when_ignore_unreachable_is_enabled() {
+        let topology = disconnected_topology();
+        let metrics = disconnected_metrics();
+        let request = RouteRequest {
+            route_id: "disconnected-ignore".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.01,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 100.0,
+            },
+            connectivity: ConnectivityPolicy {
+                disconnected: DisconnectedNetworkMode::IgnoreUnreachable,
+                ..ConnectivityPolicy::default()
+            },
+            fallback: Default::default(),
+            returns: ReturnConfig {
+                geometry: ReturnGeometry::Full,
+                ..ReturnConfig::default()
+            },
+        };
+
+        let result = execute_route(&topology, &metrics, &request).expect("route returns partial");
+
+        assert_eq!(result.outcome, super::AnalysisOutcome::Partial);
+        assert!(!result.fallback_used);
+        assert_eq!(result.summary.total_distance_m, 0);
+        assert_eq!(result.summary.total_travel_time_s, 0.0);
+        assert!(result.geometry.is_none());
+        assert_eq!(result.diagnostics.len(), 1);
+        assert_eq!(
+            result.diagnostics[0].code,
+            AnalysisDiagnosticCode::DisconnectedComponents
+        );
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("ignored an unreachable pair"))
+        );
+    }
+
+    #[test]
+    fn marks_ignored_unreachable_pairs_explicitly_in_od_batches() {
+        let topology = disconnected_topology();
+        let metrics = disconnected_metrics();
+        let document = OdPairsDocument {
+            pairs: vec![
+                OdPair {
+                    pair_id: "connected".to_string(),
+                    origin: super::LabeledPoint {
+                        id: "origin_a".to_string(),
+                        lon: 6.0,
+                        lat: 53.0,
+                    },
+                    destination: super::LabeledPoint {
+                        id: "destination_a".to_string(),
+                        lon: 6.001,
+                        lat: 53.0,
+                    },
+                },
+                OdPair {
+                    pair_id: "ignored".to_string(),
+                    origin: super::LabeledPoint {
+                        id: "origin_b".to_string(),
+                        lon: 6.0,
+                        lat: 53.0,
+                    },
+                    destination: super::LabeledPoint {
+                        id: "destination_b".to_string(),
+                        lon: 6.01,
+                        lat: 53.0,
+                    },
+                },
+            ],
+            snap: SnapOptions {
+                max_distance_m: 100.0,
+            },
+            connectivity: ConnectivityPolicy {
+                disconnected: DisconnectedNetworkMode::IgnoreUnreachable,
+                ..ConnectivityPolicy::default()
+            },
+            fallback: Default::default(),
+            returns: ReturnConfig {
+                geometry: ReturnGeometry::Full,
+                ..ReturnConfig::default()
+            },
+        };
+
+        let result = execute_od(&topology, &metrics, &document).expect("OD succeeds");
+
+        assert_eq!(result.succeeded_count, 1);
+        assert_eq!(result.ignored_count, 1);
+        assert_eq!(result.failed_count, 0);
+        assert_eq!(result.pairs[0].status, super::BatchItemStatus::Succeeded);
+        assert_eq!(result.pairs[1].status, super::BatchItemStatus::Ignored);
+        assert_eq!(result.pairs[1].outcome, super::AnalysisOutcome::Partial);
+        assert_eq!(result.pairs[1].total_distance_m, None);
+        assert!(result.pairs[1].geometry.is_none());
+        assert!(
+            result
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("status='ignored'"))
+        );
+    }
+
+    #[test]
+    fn service_area_ignores_unreachable_origins_under_ignore_policy() {
+        let topology = service_area_linear_topology();
+        let metrics = service_area_linear_metrics();
+        let request = super::ServiceAreaRequest {
+            analysis_id: "service-area-ignore".to_string(),
+            origins: vec![
+                super::LabeledPoint {
+                    id: "reachable".to_string(),
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                super::LabeledPoint {
+                    id: "too_far".to_string(),
+                    lon: 6.5,
+                    lat: 53.5,
+                },
+            ],
+            thresholds: vec![ServiceAreaThreshold {
+                id: Some("band".to_string()),
+                limit: 15.0,
+                metric: ServiceAreaThresholdMetric::TravelTimeS,
+            }],
+            snap: SnapOptions {
+                max_distance_m: 50.0,
+            },
+            connectivity: ConnectivityPolicy {
+                disconnected: DisconnectedNetworkMode::IgnoreUnreachable,
+                ..ConnectivityPolicy::default()
+            },
+            fallback: Default::default(),
+            output_mode: ServiceAreaOutputMode::Network,
+            band_mode: ServiceAreaBandMode::Cumulative,
+            boundary_mode: ServiceAreaBoundaryMode::CutAtBoundary,
+            multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+            polygon: Default::default(),
+            returns: Default::default(),
+        };
+
+        let result =
+            execute_service_area(&topology, &metrics, &request).expect("service area succeeds");
+
+        assert_eq!(result.outcome, super::AnalysisOutcome::Partial);
+        assert_eq!(result.processed_origin_count, 1);
+        assert_eq!(result.skipped_origin_count, 1);
+        assert!(
+            result
+                .features
+                .iter()
+                .all(|feature| feature.origin_component_id.is_some())
+        );
+    }
+
+    #[test]
+    fn rejects_service_area_failure_modes_until_supported() {
+        let request = super::ServiceAreaRequest {
+            analysis_id: "service-area-fallback".to_string(),
+            origins: vec![super::LabeledPoint {
+                id: "a".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            }],
+            thresholds: vec![ServiceAreaThreshold {
+                id: Some("band".to_string()),
+                limit: 10.0,
+                metric: ServiceAreaThresholdMetric::DistanceM,
+            }],
+            snap: Default::default(),
+            connectivity: Default::default(),
+            fallback: FallbackPolicy {
+                allow_reverse_oneway: true,
+                ..FallbackPolicy::default()
+            },
+            output_mode: ServiceAreaOutputMode::Network,
+            band_mode: ServiceAreaBandMode::Cumulative,
+            boundary_mode: ServiceAreaBoundaryMode::Overlap,
+            multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+            polygon: Default::default(),
+            returns: Default::default(),
+        };
+
+        let path = write_temp_file(
+            "service_area_failure_mode.json",
+            &serde_json::to_string_pretty(&request).expect("request serializes"),
+        );
+        let error = load_service_area_request(&path).expect_err("request should fail validation");
+        assert!(
+            error
+                .to_string()
+                .contains("does not support fallback failure modes")
+        );
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn allows_reverse_oneway_when_requested() {
+        let topology = one_way_dead_end_topology();
+        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let request = RouteRequest {
+            route_id: "reverse-oneway".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.002,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 2.0,
+            },
+            connectivity: Default::default(),
+            fallback: FallbackPolicy {
+                allow_reverse_oneway: true,
+                penalties: IllegalMovementPenaltyPolicy {
+                    reverse_oneway_penalty_s: Some(30.0),
+                    ..IllegalMovementPenaltyPolicy::default()
+                },
+                ..FallbackPolicy::default()
+            },
+            returns: ReturnConfig::default(),
+        };
+
+        let result = execute_route(&topology, &metrics, &request).expect("degraded route succeeds");
+        assert_eq!(result.outcome, super::AnalysisOutcome::Degraded);
+        assert_eq!(result.summary.violation_count, 2);
+        assert!(
+            result
+                .summary
+                .violation_types
+                .contains(&super::RouteViolationType::ReverseOneway)
+        );
+    }
+
+    #[test]
+    fn strict_route_still_fails_on_oneway_dead_end() {
+        let topology = one_way_dead_end_topology();
+        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let request = RouteRequest {
+            route_id: "reverse-oneway-strict".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.002,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.001,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 2.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+        };
+
+        assert!(execute_route(&topology, &metrics, &request).is_err());
+    }
+
+    #[test]
+    fn auto_relaxes_unreachable_route_with_minimal_reverse_oneway_policy() {
+        let topology = one_way_dead_end_topology();
+        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let request = RouteRequest {
+            route_id: "reverse-oneway-auto".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0019,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.001,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 40.0,
+            },
+            connectivity: Default::default(),
+            fallback: FallbackPolicy {
+                auto_relax_unreachable: true,
+                ..FallbackPolicy::default()
+            },
+            returns: ReturnConfig::default(),
+        };
+
+        let result = execute_route(&topology, &metrics, &request).expect("auto route succeeds");
+        assert_eq!(result.outcome, super::AnalysisOutcome::Degraded);
+        assert_eq!(
+            result.summary.violation_types,
+            vec![super::RouteViolationType::ReverseOneway]
+        );
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("allow_reverse_oneway"))
+        );
+    }
+
+    #[test]
+    fn allows_illegal_turn_when_requested() {
+        let topology = illegal_turn_only_topology();
+        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let request = RouteRequest {
+            route_id: "illegal-turn".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.002,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 40.0,
+            },
+            connectivity: Default::default(),
+            fallback: FallbackPolicy {
+                allow_illegal_turn: true,
+                penalties: IllegalMovementPenaltyPolicy {
+                    illegal_turn_penalty_s: Some(45.0),
+                    ..IllegalMovementPenaltyPolicy::default()
+                },
+                ..FallbackPolicy::default()
+            },
+            returns: ReturnConfig::default(),
+        };
+
+        let result =
+            execute_route(&topology, &metrics, &request).expect("illegal turn route succeeds");
+        assert_eq!(result.outcome, super::AnalysisOutcome::Degraded);
+        assert!(
+            result
+                .summary
+                .violation_types
+                .contains(&super::RouteViolationType::IllegalTurn)
+        );
+    }
+
+    #[test]
+    fn ignores_multi_edge_restriction_only_when_explicitly_requested() {
+        let topology = ignored_restriction_only_topology();
+        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let strict_request = RouteRequest {
+            route_id: "ignored-restriction-strict".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.003,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 40.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+        };
+        assert!(execute_route(&topology, &metrics, &strict_request).is_err());
+
+        let degraded_request = RouteRequest {
+            fallback: FallbackPolicy {
+                ignore_turn_restrictions: true,
+                penalties: IllegalMovementPenaltyPolicy {
+                    ignored_turn_restriction_penalty_s: Some(60.0),
+                    ..IllegalMovementPenaltyPolicy::default()
+                },
+                ..FallbackPolicy::default()
+            },
+            ..strict_request
+        };
+        let result = execute_route(&topology, &metrics, &degraded_request)
+            .expect("ignored restriction route succeeds");
+        assert_eq!(result.outcome, super::AnalysisOutcome::Degraded);
+        assert!(
+            result
+                .summary
+                .violation_types
+                .contains(&super::RouteViolationType::IgnoredTurnRestriction)
+        );
+    }
+
+    #[test]
+    fn allows_forbidden_uturn_when_requested() {
+        let topology = forbidden_uturn_topology();
+        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let strict_request = RouteRequest {
+            route_id: "forbidden-uturn-strict".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0009,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.0,
+                lat: 53.001,
+            },
+            snap: SnapOptions {
+                max_distance_m: 40.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+        };
+
+        let degraded_request = RouteRequest {
+            fallback: FallbackPolicy {
+                allow_uturn_where_normally_forbidden: true,
+                penalties: IllegalMovementPenaltyPolicy {
+                    forbidden_uturn_penalty_s: Some(15.0),
+                    ..IllegalMovementPenaltyPolicy::default()
+                },
+                ..FallbackPolicy::default()
+            },
+            ..strict_request
+        };
+        let result =
+            execute_route(&topology, &metrics, &degraded_request).expect("uturn route succeeds");
+        assert_eq!(result.outcome, super::AnalysisOutcome::Degraded);
+        assert!(
+            result
+                .summary
+                .violation_types
+                .contains(&super::RouteViolationType::ForbiddenUturn)
+        );
+    }
+
+    #[test]
+    fn detects_ferry_only_component_fixture() {
+        let topology = ferry_only_subnetwork_topology();
+        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let request = RouteRequest {
+            route_id: "ferry-component".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.011,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 40.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+        };
+
+        let error = execute_route(&topology, &metrics, &request).expect_err("route should fail");
+        let failure = analysis_failure(&error).expect("failure should be structured");
+        assert_eq!(
+            failure.diagnostics[0].code,
+            AnalysisDiagnosticCode::DisconnectedComponents
+        );
+    }
+
+    #[test]
+    fn loads_service_area_request_schema() {
+        let path = write_temp_file(
+            "service-area.json",
+            r#"{
+  "analysis_id": "sa_demo",
+  "origins": [{"id":"o1","lon":6.56,"lat":53.22}],
+  "thresholds": [{"id":"five_min","limit":300.0,"metric":"travel_time_s"}],
+  "output_mode": "both",
+  "band_mode": "cumulative",
+  "boundary_mode": "overlap",
+  "multi_origin_mode": "merge"
+}"#,
+        );
+
+        let request = load_service_area_request(&path).expect("service-area request parses");
+        fs::remove_file(path).expect("fixture removed");
+
+        assert_eq!(request.analysis_id, "sa_demo");
+        assert_eq!(request.origins.len(), 1);
+        assert_eq!(request.thresholds.len(), 1);
+        assert!(matches!(
+            request.thresholds[0].metric,
+            super::ServiceAreaThresholdMetric::TravelTimeS
+        ));
+    }
+
+    #[test]
+    fn executes_service_area_with_partial_edge_frontier() {
+        let request = super::ServiceAreaRequest {
+            analysis_id: "service-area-cut".to_string(),
+            origins: vec![super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            }],
+            thresholds: vec![ServiceAreaThreshold {
+                id: Some("fifteen_s".to_string()),
+                limit: 15.0,
+                metric: ServiceAreaThresholdMetric::TravelTimeS,
+            }],
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            output_mode: ServiceAreaOutputMode::Network,
+            band_mode: ServiceAreaBandMode::Cumulative,
+            boundary_mode: ServiceAreaBoundaryMode::CutAtBoundary,
+            multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+            polygon: Default::default(),
+            returns: Default::default(),
+        };
+
+        let result = execute_service_area(
+            &service_area_linear_topology(),
+            &service_area_linear_metrics(),
+            &request,
+        )
+        .expect("service area succeeds");
+
+        assert_eq!(result.outcome, super::AnalysisOutcome::Legal);
+        assert_eq!(result.features.len(), 1);
+        assert_eq!(result.summaries.len(), 1);
+        assert_eq!(result.summaries[0].reachable_edge_count, Some(2));
+        assert_eq!(result.summaries[0].reachable_network_length_m, Some(150.0));
+        assert_eq!(
+            result.features[0].geometry_type,
+            super::ServiceAreaGeometryType::Network
+        );
+        assert_eq!(
+            result.features[0]
+                .geometry
+                .as_ref()
+                .and_then(|value| value.get("type"))
+                .and_then(|value| value.as_str()),
+            Some("MultiLineString")
+        );
+    }
+
+    #[test]
+    fn executes_service_area_ring_bands() {
+        let request = super::ServiceAreaRequest {
+            analysis_id: "service-area-ring".to_string(),
+            origins: vec![super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            }],
+            thresholds: vec![
+                ServiceAreaThreshold {
+                    id: Some("ten_s".to_string()),
+                    limit: 10.0,
+                    metric: ServiceAreaThresholdMetric::TravelTimeS,
+                },
+                ServiceAreaThreshold {
+                    id: Some("thirty_s".to_string()),
+                    limit: 30.0,
+                    metric: ServiceAreaThresholdMetric::TravelTimeS,
+                },
+            ],
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            output_mode: ServiceAreaOutputMode::Network,
+            band_mode: ServiceAreaBandMode::Ring,
+            boundary_mode: ServiceAreaBoundaryMode::CutAtBoundary,
+            multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+            polygon: Default::default(),
+            returns: Default::default(),
+        };
+
+        let result = execute_service_area(
+            &service_area_linear_topology(),
+            &service_area_linear_metrics(),
+            &request,
+        )
+        .expect("service area succeeds");
+
+        assert_eq!(result.features.len(), 2);
+        assert_eq!(result.features[0].reachable_network_length_m, Some(100.0));
+        assert_eq!(result.features[1].band_start_limit, Some(10.0));
+        assert_eq!(result.features[1].reachable_network_length_m, Some(200.0));
+    }
+
+    #[test]
+    fn merges_multi_origin_service_areas() {
+        let request = super::ServiceAreaRequest {
+            analysis_id: "service-area-merge".to_string(),
+            origins: vec![
+                super::LabeledPoint {
+                    id: "origin_a".to_string(),
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                super::LabeledPoint {
+                    id: "origin_b".to_string(),
+                    lon: 6.001,
+                    lat: 53.0,
+                },
+            ],
+            thresholds: vec![ServiceAreaThreshold {
+                id: Some("thirty_s".to_string()),
+                limit: 30.0,
+                metric: ServiceAreaThresholdMetric::TravelTimeS,
+            }],
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            output_mode: ServiceAreaOutputMode::Network,
+            band_mode: ServiceAreaBandMode::Cumulative,
+            boundary_mode: ServiceAreaBoundaryMode::CutAtBoundary,
+            multi_origin_mode: ServiceAreaMultiOriginMode::Merge,
+            polygon: Default::default(),
+            returns: Default::default(),
+        };
+
+        let result = execute_service_area(
+            &service_area_linear_topology(),
+            &service_area_linear_metrics(),
+            &request,
+        )
+        .expect("service area succeeds");
+
+        assert_eq!(result.features.len(), 1);
+        assert_eq!(result.features[0].origin_id, None);
+        assert_eq!(result.summaries.len(), 2);
+        assert_eq!(result.processed_origin_count, 2);
+    }
+
+    #[test]
+    fn emits_service_area_polygon_output() {
+        let request = super::ServiceAreaRequest {
+            analysis_id: "service-area-polygon".to_string(),
+            origins: vec![super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            }],
+            thresholds: vec![ServiceAreaThreshold {
+                id: Some("three_hundred_m".to_string()),
+                limit: 300.0,
+                metric: ServiceAreaThresholdMetric::DistanceM,
+            }],
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            output_mode: ServiceAreaOutputMode::Both,
+            band_mode: ServiceAreaBandMode::Cumulative,
+            boundary_mode: ServiceAreaBoundaryMode::CutAtBoundary,
+            multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+            polygon: Default::default(),
+            returns: Default::default(),
+        };
+
+        let result = execute_service_area(
+            &service_area_linear_topology(),
+            &service_area_linear_metrics(),
+            &request,
+        )
+        .expect("service area succeeds");
+
+        assert_eq!(result.features.len(), 2);
+        assert!(result.features.iter().any(|feature| {
+            feature.geometry_type == super::ServiceAreaGeometryType::Polygon
+                && feature
+                    .geometry
+                    .as_ref()
+                    .and_then(|value| value.get("type"))
+                    .and_then(|value| value.as_str())
+                    .is_some()
+        }));
+    }
+
+    #[test]
+    fn allows_origin_hop_fallback_between_components() {
+        let topology = hop_disconnected_topology();
+        let metrics = hop_disconnected_metrics();
+        let request = RouteRequest {
+            route_id: "origin-hop".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0002,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.0015,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 40.0,
+            },
+            connectivity: ConnectivityPolicy {
+                disconnected: DisconnectedNetworkMode::HopOriginToNearestReachableComponent,
+                max_hop_distance_m: Some(120.0),
+                report_hop_distance_separately: true,
+            },
+            fallback: Default::default(),
+            returns: ReturnConfig {
+                geometry: ReturnGeometry::Full,
+                ..ReturnConfig::default()
+            },
+        };
+
+        let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
+        assert_eq!(result.outcome, super::AnalysisOutcome::Degraded);
+        assert!(result.fallback_used);
+        assert!(result.origin_hop_distance_m.is_some());
+        assert_eq!(result.destination_hop_distance_m, None);
+        assert_eq!(result.hop_segments.len(), 1);
+        assert_eq!(result.hop_segments[0].endpoint, super::HopEndpoint::Origin);
+    }
+
+    #[test]
+    fn allows_destination_hop_fallback_between_components() {
+        let topology = hop_disconnected_topology();
+        let metrics = hop_disconnected_metrics();
+        let request = RouteRequest {
+            route_id: "destination-hop".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0010,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.0003,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 40.0,
+            },
+            connectivity: ConnectivityPolicy {
+                disconnected: DisconnectedNetworkMode::HopDestinationToNearestReachableComponent,
+                max_hop_distance_m: Some(120.0),
+                report_hop_distance_separately: true,
+            },
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+        };
+
+        let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
+        assert_eq!(result.outcome, super::AnalysisOutcome::Degraded);
+        assert!(result.fallback_used);
+        assert_eq!(result.origin_hop_distance_m, None);
+        assert!(result.destination_hop_distance_m.is_some());
+        assert_eq!(result.hop_segments.len(), 1);
+        assert_eq!(
+            result.hop_segments[0].endpoint,
+            super::HopEndpoint::Destination
+        );
+    }
+
+    #[test]
+    fn allows_either_end_hop_fallback_between_components() {
+        let topology = hop_disconnected_topology();
+        let metrics = hop_disconnected_metrics();
+        let request = RouteRequest {
+            route_id: "either-hop".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0002,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.0015,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 40.0,
+            },
+            connectivity: ConnectivityPolicy {
+                disconnected: DisconnectedNetworkMode::HopEitherEnd,
+                max_hop_distance_m: Some(120.0),
+                report_hop_distance_separately: true,
+            },
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+        };
+
+        let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
+        assert!(result.fallback_used);
+        assert_eq!(result.outcome, super::AnalysisOutcome::Degraded);
+    }
+
+    #[test]
+    fn hop_fallback_keeps_legal_network_cost_unchanged() {
+        let topology = hop_disconnected_topology();
+        let metrics = hop_disconnected_metrics();
+        let legal_request = RouteRequest {
+            route_id: "legal".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0010,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.0015,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 40.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+        };
+        let hopped_request = RouteRequest {
+            route_id: "hopped".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0002,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.0015,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 40.0,
+            },
+            connectivity: ConnectivityPolicy {
+                disconnected: DisconnectedNetworkMode::HopOriginToNearestReachableComponent,
+                max_hop_distance_m: Some(120.0),
+                report_hop_distance_separately: true,
+            },
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+        };
+
+        let legal = execute_route(&topology, &metrics, &legal_request).expect("legal route");
+        let hopped = execute_route(&topology, &metrics, &hopped_request).expect("hopped route");
+
+        assert_eq!(
+            hopped.summary.total_distance_m,
+            legal.summary.total_distance_m
+        );
+        assert_eq!(
+            hopped.summary.total_travel_time_s,
+            legal.summary.total_travel_time_s
+        );
+        assert_eq!(
+            hopped.summary.total_generalized_cost,
+            legal.summary.total_generalized_cost
+        );
+        assert!(hopped.origin_hop_distance_m.is_some());
+    }
+
+    #[test]
+    fn skips_non_traversable_nodes_when_snapping_route_endpoints() {
+        let topology = dead_node_snap_topology();
+        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let request = RouteRequest {
+            route_id: "dead-node-snap".to_string(),
+            origin: super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "destination".to_string(),
+                lon: 6.0002,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 30.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+        };
+
+        let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
+        assert_ne!(result.origin.snapped_node_id, 0);
+        assert_eq!(result.origin.snapped_node_id, 1);
+        assert_eq!(result.destination.snapped_node_id, 2);
+    }
+
+    fn disconnected_topology() -> TopologyBundle {
+        with_edge_based_topology(TopologyBundle {
+            schema_version: 7,
+            source_path: "disconnected".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![
+                TopologyNode {
+                    node_id: NodeId(0),
+                    osm_node_id: 100,
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(1),
+                    osm_node_id: 101,
+                    lon: 6.001,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(2),
+                    osm_node_id: 102,
+                    lon: 6.01,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(3),
+                    osm_node_id: 103,
+                    lon: 6.011,
+                    lat: 53.0,
+                },
+            ],
+            edges: vec![
+                DirectedEdge {
+                    edge_id: EdgeId(0),
+                    from: NodeId(0),
+                    to: NodeId(1),
+                    source_way_id: 10,
+                    length_m: 100,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+                DirectedEdge {
+                    edge_id: EdgeId(1),
+                    from: NodeId(2),
+                    to: NodeId(3),
+                    source_way_id: 11,
+                    length_m: 100,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+            ],
+            turn_restrictions: vec![],
+            names: vec![],
+            edge_based_topology: Default::default(),
+            spatial_index: Some(spatial_index_for_all_nodes(4, 6.0, 53.0, 6.011, 53.0)),
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
+        })
+    }
+
+    fn hop_disconnected_topology() -> TopologyBundle {
+        with_edge_based_topology(TopologyBundle {
+            schema_version: 7,
+            source_path: "hop-disconnected".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![
+                TopologyNode {
+                    node_id: NodeId(0),
+                    osm_node_id: 200,
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(1),
+                    osm_node_id: 201,
+                    lon: 6.0005,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(2),
+                    osm_node_id: 202,
+                    lon: 6.0010,
+                    lat: 53.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(3),
+                    osm_node_id: 203,
+                    lon: 6.0015,
+                    lat: 53.0,
+                },
+            ],
+            edges: vec![
+                DirectedEdge {
+                    edge_id: EdgeId(0),
+                    from: NodeId(0),
+                    to: NodeId(1),
+                    source_way_id: 20,
+                    length_m: 50,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+                DirectedEdge {
+                    edge_id: EdgeId(1),
+                    from: NodeId(2),
+                    to: NodeId(3),
+                    source_way_id: 21,
+                    length_m: 50,
+                    duration_s: None,
+                    road_class: RoadClass::Residential,
+                    surface: SurfaceClass::Asphalt,
+                    smoothness: SmoothnessClass::Good,
+                    access_mask: AccessMask::new(AccessMask::CAR),
+                    is_toll: false,
+                    name_index: None,
+                    geometry_offset: 0,
+                    geometry_len: 0,
+                    flags: 0,
+                },
+            ],
+            turn_restrictions: vec![],
+            names: vec![],
+            edge_based_topology: Default::default(),
+            spatial_index: Some(spatial_index_for_all_nodes(4, 6.0, 53.0, 6.0015, 53.0)),
+            node_component_ids: vec![],
+            edge_component_ids: vec![],
+        })
+    }
+
+    fn hop_disconnected_metrics() -> CompiledProfileBundle {
+        CompiledProfileBundle {
+            schema_version: 3,
+            profile_id: "test".to_string(),
+            profile_hash: "abc".to_string(),
+            mode: TravelMode::Car,
+            turn_costs: CompiledTurnCostConfig::default(),
+            source_topology_bundle_id: CacheBundleId::new("topology-test"),
+            acceleration: None,
+            edge_metrics: vec![
+                CompiledEdgeMetric {
+                    edge_id: EdgeId(0),
+                    travel_time_s: Some(5.0),
+                    generalized_cost: Some(5.0),
+                },
+                CompiledEdgeMetric {
+                    edge_id: EdgeId(1),
+                    travel_time_s: Some(5.0),
+                    generalized_cost: Some(5.0),
+                },
+            ],
+        }
+    }
+
+    fn disconnected_metrics() -> CompiledProfileBundle {
+        CompiledProfileBundle {
+            schema_version: 3,
+            profile_id: "test".to_string(),
+            profile_hash: "abc".to_string(),
+            mode: TravelMode::Car,
+            turn_costs: CompiledTurnCostConfig::default(),
+            source_topology_bundle_id: CacheBundleId::new("topology-test"),
+            acceleration: None,
+            edge_metrics: vec![
+                CompiledEdgeMetric {
+                    edge_id: EdgeId(0),
+                    travel_time_s: Some(5.0),
+                    generalized_cost: Some(5.0),
+                },
+                CompiledEdgeMetric {
+                    edge_id: EdgeId(1),
+                    travel_time_s: Some(5.0),
+                    generalized_cost: Some(5.0),
                 },
             ],
         }

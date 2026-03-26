@@ -11,8 +11,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use netan_core::{
-    CacheBundleId, CompiledProfileBundle, DatasetAccelerationBundle, DatasetId, TopologyBounds,
-    TopologyBundle,
+    CacheBundleId, CompiledProfileBundle, ConnectedComponentsMeta, DatasetAccelerationBundle,
+    DatasetId, TopologyBounds, TopologyBundle,
 };
 use netan_persist::{
     WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
@@ -23,8 +23,9 @@ use netan_profile::{
     ProfileDocument, ReturnGeometry, compile_profile_bundle_with_acceleration, load_profile,
 };
 use netan_query::{
-    EffectiveEngineDescription, EngineMode, MatrixResult, OdPairsDocument, OdResult,
-    PointSetDocument, PreparedRoutingEngine, RouteRequest, RouteResult,
+    AnalysisDiagnostic, EffectiveEngineDescription, EngineMode, MatrixResult, OdPairsDocument,
+    OdResult, PointSetDocument, PreparedRoutingEngine, RouteRequest, RouteResult,
+    ServiceAreaRequest, ServiceAreaResult, analysis_failure,
 };
 use netan_report::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
 use serde::{Deserialize, Serialize};
@@ -79,6 +80,8 @@ struct ServiceCapabilities {
     analyses: Vec<&'static str>,
     geometry: Vec<&'static str>,
     breakdown_metrics: Vec<&'static str>,
+    connectivity_policies: Vec<&'static str>,
+    failure_modes: Vec<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,6 +114,8 @@ pub struct DatasetInfo {
     edge_count: Option<u64>,
     #[serde(default)]
     turn_count: Option<u64>,
+    #[serde(default)]
+    connected_components: Option<ConnectedComponentsMeta>,
 }
 
 #[derive(Debug, Serialize)]
@@ -154,6 +159,13 @@ pub struct MatrixExecutionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ServiceAreaExecutionRequest {
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub request: ServiceAreaRequest,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct MatrixRequest {
     pub origins: PointSetDocument,
     pub destinations: PointSetDocument,
@@ -177,6 +189,12 @@ pub struct MatrixExecutionResponse {
     result: MatrixResult,
 }
 
+#[derive(Debug, Serialize)]
+pub struct ServiceAreaExecutionResponse {
+    service: ExecutionContext,
+    result: ServiceAreaResult,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct ResponseFormatQuery {
     format: Option<String>,
@@ -195,11 +213,14 @@ pub struct ExecutionContext {
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    diagnostics: Vec<AnalysisDiagnostic>,
 }
 
 struct ApiError {
     status: StatusCode,
     message: String,
+    diagnostics: Vec<AnalysisDiagnostic>,
 }
 
 impl ApiError {
@@ -207,6 +228,7 @@ impl ApiError {
         Self {
             status: StatusCode::BAD_REQUEST,
             message: message.into(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -214,6 +236,7 @@ impl ApiError {
         Self {
             status: StatusCode::NOT_FOUND,
             message: message.into(),
+            diagnostics: Vec::new(),
         }
     }
 
@@ -221,6 +244,19 @@ impl ApiError {
         Self {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: message.into(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn from_execution_error(error: anyhow::Error) -> Self {
+        if let Some(failure) = analysis_failure(&error) {
+            Self {
+                status: StatusCode::BAD_REQUEST,
+                message: failure.message.clone(),
+                diagnostics: failure.diagnostics.clone(),
+            }
+        } else {
+            Self::bad_request(error.to_string())
         }
     }
 }
@@ -231,6 +267,7 @@ impl IntoResponse for ApiError {
             self.status,
             Json(ErrorResponse {
                 error: self.message,
+                diagnostics: self.diagnostics,
             }),
         )
             .into_response()
@@ -269,6 +306,7 @@ fn router(state: ApiState) -> Router {
         .route("/v1/route", post(route_handler))
         .route("/v1/od", post(od_handler))
         .route("/v1/matrix", post(matrix_handler))
+        .route("/v1/service-area", post(service_area_handler))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -372,9 +410,23 @@ fn load_service_runtime(
         default_profile_id,
         profiles: loaded_profiles,
         capabilities: ServiceCapabilities {
-            analyses: vec!["route", "od", "matrix"],
+            analyses: vec!["route", "od", "matrix", "service_area"],
             geometry: vec!["none", "full", "segments"],
             breakdown_metrics: vec!["time_s", "distance_m"],
+            connectivity_policies: vec![
+                "strict",
+                "ignore_unreachable",
+                "hop_origin_to_nearest_reachable_component",
+                "hop_destination_to_nearest_reachable_component",
+                "hop_either_end",
+            ],
+            failure_modes: vec![
+                "auto_relax_unreachable",
+                "allow_reverse_oneway",
+                "allow_illegal_turn",
+                "ignore_turn_restrictions",
+                "allow_uturn_where_normally_forbidden",
+            ],
         },
         engine,
     })
@@ -533,7 +585,7 @@ async fn route_handler(
     .await
     .map_err(|error| {
         warn!(endpoint = "route", route_id = %route_id, %error, "request failed");
-        ApiError::bad_request(error.to_string())
+        ApiError::from_execution_error(error)
     })?;
     info!(
         endpoint = "route",
@@ -583,12 +635,13 @@ async fn od_handler(
     .await
     .map_err(|error| {
         warn!(endpoint = "od", %error, "request failed");
-        ApiError::bad_request(error.to_string())
+        ApiError::from_execution_error(error)
     })?;
     info!(
         endpoint = "od",
         pair_count = result.pair_count,
         succeeded = result.succeeded_count,
+        ignored = result.ignored_count,
         failed = result.failed_count,
         "response"
     );
@@ -632,12 +685,13 @@ async fn matrix_handler(
     .await
     .map_err(|error| {
         warn!(endpoint = "matrix", %error, "request failed");
-        ApiError::bad_request(error.to_string())
+        ApiError::from_execution_error(error)
     })?;
     info!(
         endpoint = "matrix",
         cells = result.cell_count,
         succeeded = result.succeeded_count,
+        ignored = result.ignored_count,
         failed = result.failed_count,
         "response"
     );
@@ -645,6 +699,53 @@ async fn matrix_handler(
         return geojson_response(matrix_result_geojson(&service, &result));
     }
     Ok(Json(MatrixExecutionResponse { service, result }).into_response())
+}
+
+async fn service_area_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<ResponseFormatQuery>,
+    Json(payload): Json<ServiceAreaExecutionRequest>,
+) -> Result<Response, ApiError> {
+    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let profile_id = &profile.document.profile.id;
+    info!(
+        endpoint = "service_area",
+        profile_id = %profile_id,
+        analysis_id = %payload.request.analysis_id,
+        origins = payload.request.origins.len(),
+        thresholds = payload.request.thresholds.len(),
+        format = query.format.as_deref().unwrap_or("json"),
+        "request"
+    );
+    let mut request = payload.request;
+    if wants_geojson(&query) {
+        request.returns.geometry = true;
+    }
+    let effective_engine = profile
+        .engine
+        .effective_engine_description(EngineMode::Auto);
+    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let engine = Arc::clone(&profile.engine);
+    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+        engine.execute_service_area(&request)
+    })
+    .await
+    .map_err(|error| {
+        warn!(endpoint = "service_area", %error, "request failed");
+        ApiError::from_execution_error(error)
+    })?;
+    info!(
+        endpoint = "service_area",
+        analysis_id = %result.analysis_id,
+        features = result.features.len(),
+        processed_origins = result.processed_origin_count,
+        skipped_origins = result.skipped_origin_count,
+        "response"
+    );
+    if wants_geojson(&query) {
+        return geojson_response(service_area_result_geojson(&service, &result));
+    }
+    Ok(Json(ServiceAreaExecutionResponse { service, result }).into_response())
 }
 
 fn resolve_profile<'a>(
@@ -725,6 +826,7 @@ fn build_service_info(service: &ServiceRuntime) -> ServiceInfoResponse {
             node_count: topology_meta.map(|meta| meta.node_count),
             edge_count: topology_meta.map(|meta| meta.edge_count),
             turn_count: topology_meta.map(|meta| meta.turn_count),
+            connected_components: topology_meta.and_then(|meta| meta.connected_components.clone()),
         },
         default_profile_id: service.default_profile_id.clone(),
         loaded_profiles: build_profile_infos(service),
@@ -838,13 +940,24 @@ fn route_result_geojson(
                     "profile_id": execution.profile_id,
                     "profile_hash": execution.profile_hash,
                     "route_id": result.route_id,
+                    "outcome": result.outcome,
+                    "fallback_used": result.fallback_used,
                     "origin_id": result.origin.point_id,
                     "destination_id": result.destination.point_id,
+                    "origin_component_id": result.origin.component_id,
+                    "destination_component_id": result.destination.component_id,
                     "origin_snap_distance_m": result.origin.snap_distance_m,
                     "destination_snap_distance_m": result.destination.snap_distance_m,
+                    "origin_hop_distance_m": result.origin_hop_distance_m,
+                    "destination_hop_distance_m": result.destination_hop_distance_m,
                     "total_distance_m": result.summary.total_distance_m,
                     "total_travel_time_s": result.summary.total_travel_time_s,
                     "total_generalized_cost": result.summary.total_generalized_cost,
+                    "illegal_movement_penalty_s": result.summary.illegal_movement_penalty_s,
+                    "illegal_movement_penalty_cost": result.summary.illegal_movement_penalty_cost,
+                    "violation_count": result.summary.violation_count,
+                    "violation_types": result.summary.violation_types,
+                    "violations": result.violations,
                     "segment_count": result.summary.segment_count,
                     "warnings": result.warnings,
                 }
@@ -872,11 +985,21 @@ fn od_result_geojson(execution: &ExecutionContext, result: &OdResult) -> Value {
                     "origin_id": pair.origin_id,
                     "destination_id": pair.destination_id,
                     "status": pair.status,
+                    "outcome": pair.outcome,
+                    "fallback_used": pair.fallback_used,
+                    "origin_component_id": pair.origin_component_id,
+                    "destination_component_id": pair.destination_component_id,
+                    "origin_hop_distance_m": pair.origin_hop_distance_m,
+                    "destination_hop_distance_m": pair.destination_hop_distance_m,
                     "origin_snap_distance_m": pair.origin_snap_distance_m,
                     "destination_snap_distance_m": pair.destination_snap_distance_m,
                     "total_distance_m": pair.total_distance_m,
                     "total_travel_time_s": pair.total_travel_time_s,
                     "total_generalized_cost": pair.total_generalized_cost,
+                    "illegal_movement_penalty_s": pair.illegal_movement_penalty_s,
+                    "illegal_movement_penalty_cost": pair.illegal_movement_penalty_cost,
+                    "violation_count": pair.violation_count,
+                    "violation_types": pair.violation_types,
                     "error": pair.error,
                 }
             })
@@ -915,11 +1038,21 @@ fn matrix_result_geojson(execution: &ExecutionContext, result: &MatrixResult) ->
                     "origin_id": cell.origin_id,
                     "destination_id": cell.destination_id,
                     "status": cell.status,
+                    "outcome": cell.outcome,
+                    "fallback_used": cell.fallback_used,
+                    "origin_component_id": cell.origin_component_id,
+                    "destination_component_id": cell.destination_component_id,
+                    "origin_hop_distance_m": cell.origin_hop_distance_m,
+                    "destination_hop_distance_m": cell.destination_hop_distance_m,
                     "origin_snap_distance_m": cell.origin_snap_distance_m,
                     "destination_snap_distance_m": cell.destination_snap_distance_m,
                     "total_distance_m": cell.total_distance_m,
                     "total_travel_time_s": cell.total_travel_time_s,
                     "total_generalized_cost": cell.total_generalized_cost,
+                    "illegal_movement_penalty_s": cell.illegal_movement_penalty_s,
+                    "illegal_movement_penalty_cost": cell.illegal_movement_penalty_cost,
+                    "violation_count": cell.violation_count,
+                    "violation_types": cell.violation_types,
                     "error": cell.error,
                 }
             })
@@ -942,6 +1075,53 @@ fn matrix_result_geojson(execution: &ExecutionContext, result: &MatrixResult) ->
     })
 }
 
+fn service_area_result_geojson(execution: &ExecutionContext, result: &ServiceAreaResult) -> Value {
+    let features = result
+        .features
+        .iter()
+        .map(|feature| {
+            json!({
+                "type": "Feature",
+                "geometry": feature.geometry.clone().unwrap_or(Value::Null),
+                "properties": {
+                    "dataset_id": execution.dataset_id,
+                    "profile_id": execution.profile_id,
+                    "profile_hash": execution.profile_hash,
+                    "analysis_id": result.analysis_id,
+                    "origin_id": feature.origin_id,
+                    "threshold_id": feature.threshold_id,
+                    "band_start_limit": feature.band_start_limit,
+                    "threshold_limit": feature.threshold_limit,
+                    "threshold_metric": feature.threshold_metric,
+                    "geometry_type": feature.geometry_type,
+                    "fallback_used": feature.fallback_used,
+                    "origin_component_id": feature.origin_component_id,
+                    "origin_hop_distance_m": feature.origin_hop_distance_m,
+                    "reachable_network_length_m": feature.reachable_network_length_m,
+                    "reachable_edge_count": feature.reachable_edge_count,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "type": "FeatureCollection",
+        "features": features,
+        "metadata": {
+            "dataset_id": execution.dataset_id,
+            "profile_id": execution.profile_id,
+            "profile_hash": execution.profile_hash,
+            "analysis_id": result.analysis_id,
+            "outcome": result.outcome,
+            "origin_count": result.origin_count,
+            "processed_origin_count": result.processed_origin_count,
+            "skipped_origin_count": result.skipped_origin_count,
+            "fallback_origin_count": result.fallback_origin_count,
+            "threshold_count": result.threshold_count,
+            "warnings": result.warnings,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -949,7 +1129,9 @@ mod tests {
         od_result_geojson,
     };
     use netan_core::{EdgeBasedTopology, TopologyBundle};
-    use netan_query::{BatchItemStatus, MatrixCellResult, MatrixResult, OdPairResult, OdResult};
+    use netan_query::{
+        AnalysisOutcome, BatchItemStatus, MatrixCellResult, MatrixResult, OdPairResult, OdResult,
+    };
 
     #[test]
     fn reports_pairwise_engine_when_only_simple_turns_exist() {
@@ -963,6 +1145,8 @@ mod tests {
             names: vec![],
             edge_based_topology: EdgeBasedTopology::default(),
             spatial_index: None,
+            node_component_ids: vec![0, 0],
+            edge_component_ids: vec![0],
         };
 
         let engine = engine_description(&topology);
@@ -991,19 +1175,32 @@ mod tests {
             pair_count: 1,
             succeeded_count: 1,
             failed_count: 0,
+            ignored_count: 0,
             pairs: vec![OdPairResult {
                 pair_id: "pair_1".to_string(),
                 origin_id: "a".to_string(),
                 destination_id: "b".to_string(),
                 status: BatchItemStatus::Succeeded,
+                outcome: AnalysisOutcome::Legal,
+                fallback_used: false,
+                origin_component_id: None,
+                destination_component_id: None,
+                origin_hop_distance_m: None,
+                destination_hop_distance_m: None,
                 origin_snap_distance_m: Some(1.0),
                 destination_snap_distance_m: Some(2.0),
                 total_distance_m: Some(100),
                 total_travel_time_s: Some(12.5),
                 total_generalized_cost: Some(13.5),
+                illegal_movement_penalty_s: Some(0.0),
+                illegal_movement_penalty_cost: Some(0.0),
+                violation_count: 0,
+                violation_types: vec![],
                 geometry: Some(vec![[2.0, 48.0], [2.1, 48.1]]),
+                diagnostics: vec![],
                 error: None,
             }],
+            diagnostics: vec![],
             warnings: vec!["ok".to_string()],
         };
 
@@ -1029,18 +1226,31 @@ mod tests {
             cell_count: 1,
             succeeded_count: 0,
             failed_count: 1,
+            ignored_count: 0,
             cells: vec![MatrixCellResult {
                 origin_id: "a".to_string(),
                 destination_id: "b".to_string(),
                 status: BatchItemStatus::Failed,
+                outcome: AnalysisOutcome::Unreachable,
+                fallback_used: false,
+                origin_component_id: None,
+                destination_component_id: None,
+                origin_hop_distance_m: None,
+                destination_hop_distance_m: None,
                 origin_snap_distance_m: None,
                 destination_snap_distance_m: None,
                 total_distance_m: None,
                 total_travel_time_s: None,
                 total_generalized_cost: None,
+                illegal_movement_penalty_s: None,
+                illegal_movement_penalty_cost: None,
+                violation_count: 0,
+                violation_types: vec![],
                 geometry: None,
+                diagnostics: vec![],
                 error: Some("no route".to_string()),
             }],
+            diagnostics: vec![],
             warnings: vec![],
         };
 

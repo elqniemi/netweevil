@@ -1,0 +1,58 @@
+{
+  "analysis_id": "groningen_service_area_multi_origin_demo",
+  "origins": [
+    {
+      "id": "origin_a",
+      "lon": 6.5665,
+      "lat": 53.2194
+    },
+    {
+      "id": "origin_b",
+      "lon": 6.5636,
+      "lat": 53.2181
+    }
+  ],
+  "thresholds": [
+    {
+      "id": "three_hundred_m",
+      "limit": 300.0,
+      "metric": "distance_m"
+    },
+    {
+      "id": "five_minutes",
+      "limit": 300.0,
+      "metric": "travel_time_s"
+    },
+    {
+      "id": "ten_minutes",
+      "limit": 600.0,
+      "metric": "travel_time_s"
+    }
+  ],
+  "snap": {
+    "max_distance_m": 500.0
+  },
+  "connectivity": {
+    "disconnected": "ignore_unreachable"
+  },
+  "fallback": {
+    "allow_reverse_oneway": false,
+    "allow_illegal_turn": false,
+    "ignore_turn_restrictions": false,
+    "allow_uturn_where_normally_forbidden": false
+  },
+  "output_mode": "both",
+  "band_mode": "ring",
+  "boundary_mode": "cut_at_boundary",
+  "multi_origin_mode": "merge",
+  "polygon": {
+    "hull_aggressiveness": 1.0,
+    "simplification_tolerance_m": 20.0
+  },
+  "returns": {
+    "geometry": true,
+    "attributes": true,
+    "per_threshold_summary": true,
+    "diagnostics": true
+  }
+}

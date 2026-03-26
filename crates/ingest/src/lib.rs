@@ -8,11 +8,11 @@ use std::sync::{
 
 use anyhow::{Context, Result, bail};
 use netan_core::{
-    AccessMask, BuildStage, CacheBundleId, DatasetAccelerationBundle, DatasetId, DirectedEdge,
-    EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId,
-    EdgeNameBundle, NodeId, RoadClass, SmoothnessClass, SpatialIndexCell, SurfaceClass,
-    TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyNode, TurnRestriction,
-    TurnRestrictionKind,
+    AccessMask, BuildStage, CacheBundleId, ConnectedComponentKind, ConnectedComponentsMeta,
+    DatasetAccelerationBundle, DatasetId, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
+    EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId, EdgeNameBundle, NodeId, RoadClass,
+    SmoothnessClass, SpatialIndexCell, SurfaceClass, TopologyBounds, TopologyBundle,
+    TopologyBundleMeta, TopologyNode, TurnRestriction, TurnRestrictionKind,
 };
 use netan_persist::{
     WorkspacePaths, write_acceleration_bundle, write_dataset_manifest, write_edge_name_bundle,
@@ -454,9 +454,10 @@ fn build_topology_bundle(
         ),
     );
     let edge_based_topology = build_edge_based_topology(nodes.len(), &edges);
+    let components = label_weak_components(nodes.len(), &edges);
 
     let bundle = TopologyBundle {
-        schema_version: 6,
+        schema_version: 7,
         source_path: source_path.display().to_string(),
         source_sha256: source_sha256.to_string(),
         nodes,
@@ -465,12 +466,20 @@ fn build_topology_bundle(
         names: Vec::new(),
         edge_based_topology,
         spatial_index,
+        node_component_ids: components.node_component_ids.clone(),
+        edge_component_ids: components.edge_component_ids.clone(),
     };
     let meta = TopologyBundleMeta {
         node_count: bundle.nodes.len() as u64,
         edge_count: bundle.edges.len() as u64,
         geometry_bytes: 0,
         turn_count: bundle.turn_restrictions.len() as u64,
+        connected_components: Some(ConnectedComponentsMeta {
+            kind: ConnectedComponentKind::Weak,
+            component_count: components.component_count,
+            largest_component_node_count: components.largest_component_node_count,
+            largest_component_edge_count: components.largest_component_edge_count,
+        }),
         source_node_count: counts.nodes,
         source_way_count: counts.ways,
         source_relation_count: counts.relations,
@@ -526,6 +535,95 @@ fn build_edge_based_topology(node_count: usize, edges: &[DirectedEdge]) -> EdgeB
         node_edge_order,
         edge_transition_first_out,
         edge_transition_edges,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct WeakComponentLabels {
+    node_component_ids: Vec<u32>,
+    edge_component_ids: Vec<u32>,
+    component_count: u32,
+    largest_component_node_count: u64,
+    largest_component_edge_count: u64,
+}
+
+fn label_weak_components(node_count: usize, edges: &[DirectedEdge]) -> WeakComponentLabels {
+    let mut parent = (0..node_count as u32).collect::<Vec<_>>();
+    let mut rank = vec![0_u8; node_count];
+
+    for edge in edges {
+        union_components(
+            &mut parent,
+            &mut rank,
+            edge.from.0 as usize,
+            edge.to.0 as usize,
+        );
+    }
+
+    let mut root_to_component = BTreeMap::<u32, u32>::new();
+    let mut node_counts = Vec::<u64>::new();
+    let mut node_component_ids = vec![0_u32; node_count];
+
+    for node_index in 0..node_count {
+        let root = find_component_root(&mut parent, node_index);
+        let component_id = if let Some(&component_id) = root_to_component.get(&root) {
+            component_id
+        } else {
+            let component_id = root_to_component.len() as u32;
+            root_to_component.insert(root, component_id);
+            node_counts.push(0);
+            component_id
+        };
+        node_component_ids[node_index] = component_id;
+        node_counts[component_id as usize] += 1;
+    }
+
+    let mut edge_counts = vec![0_u64; node_counts.len()];
+    let edge_component_ids = edges
+        .iter()
+        .map(|edge| {
+            let component_id = node_component_ids[edge.from.0 as usize];
+            edge_counts[component_id as usize] += 1;
+            component_id
+        })
+        .collect::<Vec<_>>();
+
+    WeakComponentLabels {
+        node_component_ids,
+        edge_component_ids,
+        component_count: node_counts.len() as u32,
+        largest_component_node_count: node_counts.into_iter().max().unwrap_or_default(),
+        largest_component_edge_count: edge_counts.into_iter().max().unwrap_or_default(),
+    }
+}
+
+fn find_component_root(parent: &mut [u32], index: usize) -> u32 {
+    let parent_index = parent[index] as usize;
+    if parent_index != index {
+        parent[index] = find_component_root(parent, parent_index);
+    }
+    parent[index]
+}
+
+fn union_components(parent: &mut [u32], rank: &mut [u8], left: usize, right: usize) {
+    let left_root = find_component_root(parent, left);
+    let right_root = find_component_root(parent, right);
+    if left_root == right_root {
+        return;
+    }
+
+    let left_rank = rank[left_root as usize];
+    let right_rank = rank[right_root as usize];
+    if left_rank < right_rank {
+        parent[left_root as usize] = right_root;
+    } else if left_rank > right_rank {
+        parent[right_root as usize] = left_root;
+    } else if left_root <= right_root {
+        parent[right_root as usize] = left_root;
+        rank[left_root as usize] += 1;
+    } else {
+        parent[left_root as usize] = right_root;
+        rank[right_root as usize] += 1;
     }
 }
 
@@ -2383,6 +2481,8 @@ mod tests {
             names: vec![],
             edge_based_topology: build_edge_based_topology(4, &edges),
             spatial_index: None,
+            node_component_ids: vec![0, 0, 0, 0],
+            edge_component_ids: vec![0, 0, 0, 0],
         };
 
         let bundle =
@@ -2399,6 +2499,20 @@ mod tests {
         assert_eq!(bundle.downward_head, vec![2]);
         assert_eq!(bundle.downward_path_first_out, vec![0, 1]);
         assert_eq!(bundle.downward_path_edges, vec![2]);
+    }
+
+    #[test]
+    fn labels_weak_components_for_disconnected_subnetworks() {
+        let labels = super::label_weak_components(
+            4,
+            &[edge(0, 0, 1, 10), edge(1, 1, 0, 10), edge(2, 2, 3, 20)],
+        );
+
+        assert_eq!(labels.component_count, 2);
+        assert_eq!(labels.node_component_ids, vec![0, 0, 1, 1]);
+        assert_eq!(labels.edge_component_ids, vec![0, 0, 1]);
+        assert_eq!(labels.largest_component_node_count, 2);
+        assert_eq!(labels.largest_component_edge_count, 2);
     }
 
     fn pending_way(osm_way_id: i64, node_ids: &[i64]) -> PendingWay {

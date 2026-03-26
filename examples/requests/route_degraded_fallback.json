@@ -1,0 +1,36 @@
+{
+  "route_id": "route_degraded_fallback_demo",
+  "origin": {
+    "id": "origin_a",
+    "lon": 6.5665,
+    "lat": 53.2194
+  },
+  "destination": {
+    "id": "destination_b",
+    "lon": 6.5716,
+    "lat": 53.2148
+  },
+  "snap": {
+    "max_distance_m": 500.0
+  },
+  "connectivity": {
+    "disconnected": "strict"
+  },
+  "fallback": {
+    "allow_reverse_oneway": true,
+    "allow_illegal_turn": true,
+    "ignore_turn_restrictions": true,
+    "allow_uturn_where_normally_forbidden": false,
+    "penalties": {
+      "reverse_oneway_penalty_s": 120.0,
+      "illegal_turn_penalty_s": 90.0,
+      "ignored_turn_restriction_penalty_s": 180.0
+    },
+    "max_illegal_distance_m": 250.0,
+    "max_illegal_turns": 2
+  },
+  "returns": {
+    "geometry": "full",
+    "segment_rows": true
+  }
+}

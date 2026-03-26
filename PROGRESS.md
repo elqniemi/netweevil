@@ -50,7 +50,12 @@ The system targets local OSM routing and network analysis with explicit, version
 
 ### In Progress
 
-- None currently.
+- [ ] Advanced analysis expansion:
+  - Phase 1 service areas are complete for the shared backend surfaces: request/result schema, execution engine, network and polygon outputs, CLI/API execution, writers, reports, and example requests.
+  - Phase 2 disconnected-network handling is complete for the shared backend surfaces, including service-area skip semantics, explicit connectivity metadata in outputs, and QGIS/plugin diagnostic surfacing.
+  - Phase 3 degraded routing / failure modes is complete for route, OD, and matrix execution, including reverse-oneway, illegal-turn, ignored-restriction, and forbidden-UTurn fallbacks with explicit violation provenance.
+  - Phase 4 QGIS support for service areas and the new diagnostics is still pending.
+  - detailed task breakdown in `IMPLEMENT_ADVANCED_ANALYSIS.md`
 
 ### Not Started
 
@@ -79,6 +84,8 @@ The system targets local OSM routing and network analysis with explicit, version
 - The current code intentionally treats CLI, API, and QGIS state as serialized configuration first.
 - Hidden UI-only state is out of scope.
 - Deterministic outputs and explicit provenance are product requirements, not polish items.
+- Verified locally on 2026-03-26: `cargo fmt --all` and `cargo test` pass after landing shared Phase 1 service-area execution across query, CLI, API, report, and output-writer surfaces.
+- Verified locally on 2026-03-26: `cargo test` passes after completing the remaining Phase 2 disconnected-network handling tasks and Phase 3 degraded-routing failure modes, including route/OD/matrix violation reporting and QGIS diagnostic logging.
 - Verified locally on 2026-03-18: the workspace builds, the example profile validates, `dataset import` scans `datasets/groningen-260317.osm.pbf` into a topology bundle with 493,348 nodes and 1,033,012 directed edges, `profile compile` writes a separate metric bundle with 1,033,012 edge metrics, `analyze route` solves `examples/requests/route.json` with 27.0 m / 36.5 m snaps, 1,665 m total distance, and 152.496 s total travel time, `analyze od` completes 2 example pairs, and `analyze matrix` completes a 2x2 example matrix.
 - Verified locally on 2026-03-18: `cargo test` passes after adding ferry-duration ingest and profile compilation handling.
 - Verified locally on 2026-03-18: the rebuilt CLI accepts `examples/requests/od_pairs.csv`, `examples/requests/matrix_origins.csv`, and `examples/requests/matrix_destinations.csv`, writes route outputs to CSV and GeoJSON, and writes matrix outputs to GeoPackage.
@@ -111,6 +118,9 @@ The system targets local OSM routing and network analysis with explicit, version
 - [x] CSV, GeoJSON, and GeoPackage result writers for route, OD, and matrix outputs
 - [x] First-pass node-based turn restriction relation handling during topology ingest
 - [x] Exact route, OD, and matrix execution honoring persisted prohibited turn transitions
+- [x] Service-area execution with network and polygon outputs across CLI, API, reports, and file writers
+- [x] Shared disconnected-network handling with explicit connectivity diagnostics across route, OD, matrix, service-area outputs, and QGIS plugin logging
+- [x] Explicit degraded-routing failure modes with penalties, violation provenance, reports, and exported outputs for route, OD, and matrix execution
 - [x] Scenario sweep execution with per-scenario outputs and experiment summary artifacts
 - [x] HTML/Markdown research bundle export with methods summary and report bundle output
 - [x] Via-way turn restriction relation handling and broader mode-specific restriction coverage

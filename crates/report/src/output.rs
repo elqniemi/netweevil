@@ -8,8 +8,8 @@ use anyhow::{Context, Result, bail};
 use arrow_array::{ArrayRef, BinaryArray, Float64Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
 use netan_query::{
-    BatchItemStatus, MatrixResult, OdPairsDocument, OdResult, PointSetDocument, RouteRequest,
-    RouteResult,
+    AnalysisOutcome, BatchItemStatus, MatrixResult, OdPairsDocument, OdResult, PointSetDocument,
+    RouteRequest, RouteResult, ServiceAreaGeometryType, ServiceAreaRequest, ServiceAreaResult,
 };
 use parquet::arrow::ArrowWriter;
 use rusqlite::{Connection, params};
@@ -67,6 +67,22 @@ pub fn write_matrix_result(
     }
 }
 
+pub fn write_service_area_result(
+    path: impl AsRef<Path>,
+    request: &ServiceAreaRequest,
+    result: &ServiceAreaResult,
+) -> Result<()> {
+    let path = path.as_ref();
+    match output_format(path)? {
+        OutputFormat::Json => write_json(path, result),
+        OutputFormat::Csv => write_service_area_csv(path, request, result),
+        OutputFormat::GeoJson => write_service_area_geojson(path, request, result),
+        OutputFormat::GeoPackage => write_service_area_gpkg(path, request, result),
+        OutputFormat::Parquet => write_service_area_parquet(path, request, result),
+        OutputFormat::GeoParquet => write_service_area_geoparquet(path, request, result),
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum OutputFormat {
     Json,
@@ -114,6 +130,7 @@ fn write_route_csv(path: &Path, request: &RouteRequest, result: &RouteResult) ->
         .map(linestring_wkt)
         .unwrap_or_default();
     let warnings = result.warnings.join(" | ");
+    let diagnostics = diagnostics_json(&result.diagnostics);
 
     write_csv(
         path,
@@ -121,12 +138,24 @@ fn write_route_csv(path: &Path, request: &RouteRequest, result: &RouteResult) ->
             "route_id",
             "origin_id",
             "destination_id",
+            "outcome",
+            "fallback_used",
+            "origin_component_id",
+            "destination_component_id",
+            "origin_hop_distance_m",
+            "destination_hop_distance_m",
             "origin_snap_distance_m",
             "destination_snap_distance_m",
             "total_distance_m",
             "total_travel_time_s",
             "total_generalized_cost",
+            "illegal_movement_penalty_s",
+            "illegal_movement_penalty_cost",
+            "violation_count",
+            "violation_types_json",
+            "violations_json",
             "segment_count",
+            "diagnostics_json",
             "geometry_wkt",
             "warnings",
         ],
@@ -134,12 +163,24 @@ fn write_route_csv(path: &Path, request: &RouteRequest, result: &RouteResult) ->
             result.route_id.clone(),
             request.origin.id.clone(),
             request.destination.id.clone(),
+            outcome_name(result.outcome).to_string(),
+            result.fallback_used.to_string(),
+            optional_string(result.origin.component_id),
+            optional_string(result.destination.component_id),
+            optional_string(result.origin_hop_distance_m),
+            optional_string(result.destination_hop_distance_m),
             result.origin.snap_distance_m.to_string(),
             result.destination.snap_distance_m.to_string(),
             result.summary.total_distance_m.to_string(),
             result.summary.total_travel_time_s.to_string(),
             result.summary.total_generalized_cost.to_string(),
+            result.summary.illegal_movement_penalty_s.to_string(),
+            result.summary.illegal_movement_penalty_cost.to_string(),
+            result.summary.violation_count.to_string(),
+            diagnostics_json(&result.summary.violation_types),
+            diagnostics_json(&result.violations),
             result.summary.segment_count.to_string(),
+            diagnostics,
             geometry_wkt,
             warnings,
         ]],
@@ -158,12 +199,24 @@ fn write_route_geojson(path: &Path, request: &RouteRequest, result: &RouteResult
                     "route_id": result.route_id,
                     "origin_id": request.origin.id,
                     "destination_id": request.destination.id,
+                    "outcome": outcome_name(result.outcome),
+                    "fallback_used": result.fallback_used,
+                    "origin_component_id": result.origin.component_id,
+                    "destination_component_id": result.destination.component_id,
+                    "origin_hop_distance_m": result.origin_hop_distance_m,
+                    "destination_hop_distance_m": result.destination_hop_distance_m,
                     "origin_snap_distance_m": result.origin.snap_distance_m,
                     "destination_snap_distance_m": result.destination.snap_distance_m,
                     "total_distance_m": result.summary.total_distance_m,
                     "total_travel_time_s": result.summary.total_travel_time_s,
                     "total_generalized_cost": result.summary.total_generalized_cost,
+                    "illegal_movement_penalty_s": result.summary.illegal_movement_penalty_s,
+                    "illegal_movement_penalty_cost": result.summary.illegal_movement_penalty_cost,
+                    "violation_count": result.summary.violation_count,
+                    "violation_types": result.summary.violation_types,
+                    "violations": result.violations,
                     "segment_count": result.summary.segment_count,
+                    "diagnostics": result.diagnostics,
                     "warnings": result.warnings,
                 }
             }
@@ -181,12 +234,24 @@ fn write_route_gpkg(path: &Path, request: &RouteRequest, result: &RouteResult) -
             ("route_id", "TEXT NOT NULL"),
             ("origin_id", "TEXT NOT NULL"),
             ("destination_id", "TEXT NOT NULL"),
+            ("outcome", "TEXT NOT NULL"),
+            ("fallback_used", "INTEGER NOT NULL"),
+            ("origin_component_id", "INTEGER"),
+            ("destination_component_id", "INTEGER"),
+            ("origin_hop_distance_m", "REAL"),
+            ("destination_hop_distance_m", "REAL"),
             ("origin_snap_distance_m", "REAL NOT NULL"),
             ("destination_snap_distance_m", "REAL NOT NULL"),
             ("total_distance_m", "INTEGER NOT NULL"),
             ("total_travel_time_s", "REAL NOT NULL"),
             ("total_generalized_cost", "REAL NOT NULL"),
+            ("illegal_movement_penalty_s", "REAL NOT NULL"),
+            ("illegal_movement_penalty_cost", "REAL NOT NULL"),
+            ("violation_count", "INTEGER NOT NULL"),
+            ("violation_types_json", "TEXT NOT NULL"),
+            ("violations_json", "TEXT NOT NULL"),
             ("segment_count", "INTEGER NOT NULL"),
+            ("diagnostics_json", "TEXT NOT NULL"),
             ("warnings", "TEXT NOT NULL"),
         ],
         "LINESTRING",
@@ -200,6 +265,30 @@ fn write_route_gpkg(path: &Path, request: &RouteRequest, result: &RouteResult) -
             (
                 "destination_id",
                 SqlValue::Text(request.destination.id.clone()),
+            ),
+            (
+                "outcome",
+                SqlValue::Text(outcome_name(result.outcome).to_string()),
+            ),
+            (
+                "fallback_used",
+                SqlValue::Integer(if result.fallback_used { 1 } else { 0 }),
+            ),
+            (
+                "origin_component_id",
+                SqlValue::NullableInteger(optional_u32_as_i64(result.origin.component_id)),
+            ),
+            (
+                "destination_component_id",
+                SqlValue::NullableInteger(optional_u32_as_i64(result.destination.component_id)),
+            ),
+            (
+                "origin_hop_distance_m",
+                SqlValue::NullableReal(result.origin_hop_distance_m),
+            ),
+            (
+                "destination_hop_distance_m",
+                SqlValue::NullableReal(result.destination_hop_distance_m),
             ),
             (
                 "origin_snap_distance_m",
@@ -222,8 +311,32 @@ fn write_route_gpkg(path: &Path, request: &RouteRequest, result: &RouteResult) -
                 SqlValue::Real(result.summary.total_generalized_cost),
             ),
             (
+                "illegal_movement_penalty_s",
+                SqlValue::Real(result.summary.illegal_movement_penalty_s),
+            ),
+            (
+                "illegal_movement_penalty_cost",
+                SqlValue::Real(result.summary.illegal_movement_penalty_cost),
+            ),
+            (
+                "violation_count",
+                SqlValue::Integer(result.summary.violation_count as i64),
+            ),
+            (
+                "violation_types_json",
+                SqlValue::Text(diagnostics_json(&result.summary.violation_types)),
+            ),
+            (
+                "violations_json",
+                SqlValue::Text(diagnostics_json(&result.violations)),
+            ),
+            (
                 "segment_count",
                 SqlValue::Integer(result.summary.segment_count as i64),
+            ),
+            (
+                "diagnostics_json",
+                SqlValue::Text(diagnostics_json(&result.diagnostics)),
             ),
             ("warnings", SqlValue::Text(result.warnings.join(" | "))),
         ],
@@ -239,16 +352,29 @@ fn write_route_parquet(path: &Path, request: &RouteRequest, result: &RouteResult
         .map(linestring_wkt)
         .unwrap_or_default();
     let warnings = result.warnings.join(" | ");
+    let diagnostics = diagnostics_json(&result.diagnostics);
     let schema = Schema::new(vec![
         Field::new("route_id", DataType::Utf8, false),
         Field::new("origin_id", DataType::Utf8, false),
         Field::new("destination_id", DataType::Utf8, false),
+        Field::new("outcome", DataType::Utf8, false),
+        Field::new("fallback_used", DataType::Utf8, false),
+        Field::new("origin_component_id", DataType::UInt64, true),
+        Field::new("destination_component_id", DataType::UInt64, true),
+        Field::new("origin_hop_distance_m", DataType::Float64, true),
+        Field::new("destination_hop_distance_m", DataType::Float64, true),
         Field::new("origin_snap_distance_m", DataType::Float64, false),
         Field::new("destination_snap_distance_m", DataType::Float64, false),
         Field::new("total_distance_m", DataType::UInt64, false),
         Field::new("total_travel_time_s", DataType::Float64, false),
         Field::new("total_generalized_cost", DataType::Float64, false),
+        Field::new("illegal_movement_penalty_s", DataType::Float64, false),
+        Field::new("illegal_movement_penalty_cost", DataType::Float64, false),
+        Field::new("violation_count", DataType::UInt64, false),
+        Field::new("violation_types_json", DataType::Utf8, false),
+        Field::new("violations_json", DataType::Utf8, false),
         Field::new("segment_count", DataType::UInt64, false),
+        Field::new("diagnostics_json", DataType::Utf8, false),
         Field::new("geometry_wkt", DataType::Utf8, false),
         Field::new("warnings", DataType::Utf8, false),
     ]);
@@ -259,6 +385,20 @@ fn write_route_parquet(path: &Path, request: &RouteRequest, result: &RouteResult
             Arc::new(StringArray::from(vec![result.route_id.as_str()])) as ArrayRef,
             Arc::new(StringArray::from(vec![request.origin.id.as_str()])),
             Arc::new(StringArray::from(vec![request.destination.id.as_str()])),
+            Arc::new(StringArray::from(vec![outcome_name(result.outcome)])),
+            Arc::new(StringArray::from(vec![if result.fallback_used {
+                "true"
+            } else {
+                "false"
+            }])),
+            Arc::new(UInt64Array::from(vec![
+                result.origin.component_id.map(u64::from),
+            ])),
+            Arc::new(UInt64Array::from(vec![
+                result.destination.component_id.map(u64::from),
+            ])),
+            Arc::new(Float64Array::from(vec![result.origin_hop_distance_m])),
+            Arc::new(Float64Array::from(vec![result.destination_hop_distance_m])),
             Arc::new(Float64Array::from(vec![result.origin.snap_distance_m])),
             Arc::new(Float64Array::from(vec![result.destination.snap_distance_m])),
             Arc::new(UInt64Array::from(vec![result.summary.total_distance_m])),
@@ -266,7 +406,23 @@ fn write_route_parquet(path: &Path, request: &RouteRequest, result: &RouteResult
             Arc::new(Float64Array::from(vec![
                 result.summary.total_generalized_cost,
             ])),
+            Arc::new(Float64Array::from(vec![
+                result.summary.illegal_movement_penalty_s,
+            ])),
+            Arc::new(Float64Array::from(vec![
+                result.summary.illegal_movement_penalty_cost,
+            ])),
+            Arc::new(UInt64Array::from(vec![
+                result.summary.violation_count as u64,
+            ])),
+            Arc::new(StringArray::from(vec![diagnostics_json(
+                &result.summary.violation_types,
+            )])),
+            Arc::new(StringArray::from(vec![diagnostics_json(
+                &result.violations,
+            )])),
             Arc::new(UInt64Array::from(vec![result.summary.segment_count as u64])),
+            Arc::new(StringArray::from(vec![diagnostics.as_str()])),
             Arc::new(StringArray::from(vec![geometry_wkt.as_str()])),
             Arc::new(StringArray::from(vec![warnings.as_str()])),
         ],
@@ -277,18 +433,31 @@ fn write_route_geoparquet(path: &Path, request: &RouteRequest, result: &RouteRes
     let coords = route_coords(result)?;
     let geometry = wkb_linestring(&coords);
     let warnings = result.warnings.join(" | ");
+    let diagnostics = diagnostics_json(&result.diagnostics);
     let extent = extent_for_features([coords.as_slice()]);
     let schema = geoparquet_schema(
         vec![
             Field::new("route_id", DataType::Utf8, false),
             Field::new("origin_id", DataType::Utf8, false),
             Field::new("destination_id", DataType::Utf8, false),
+            Field::new("outcome", DataType::Utf8, false),
+            Field::new("fallback_used", DataType::Utf8, false),
+            Field::new("origin_component_id", DataType::UInt64, true),
+            Field::new("destination_component_id", DataType::UInt64, true),
+            Field::new("origin_hop_distance_m", DataType::Float64, true),
+            Field::new("destination_hop_distance_m", DataType::Float64, true),
             Field::new("origin_snap_distance_m", DataType::Float64, false),
             Field::new("destination_snap_distance_m", DataType::Float64, false),
             Field::new("total_distance_m", DataType::UInt64, false),
             Field::new("total_travel_time_s", DataType::Float64, false),
             Field::new("total_generalized_cost", DataType::Float64, false),
+            Field::new("illegal_movement_penalty_s", DataType::Float64, false),
+            Field::new("illegal_movement_penalty_cost", DataType::Float64, false),
+            Field::new("violation_count", DataType::UInt64, false),
+            Field::new("violation_types_json", DataType::Utf8, false),
+            Field::new("violations_json", DataType::Utf8, false),
             Field::new("segment_count", DataType::UInt64, false),
+            Field::new("diagnostics_json", DataType::Utf8, false),
             Field::new("warnings", DataType::Utf8, false),
             Field::new("geometry", DataType::Binary, false),
         ],
@@ -301,6 +470,20 @@ fn write_route_geoparquet(path: &Path, request: &RouteRequest, result: &RouteRes
             Arc::new(StringArray::from(vec![result.route_id.as_str()])) as ArrayRef,
             Arc::new(StringArray::from(vec![request.origin.id.as_str()])),
             Arc::new(StringArray::from(vec![request.destination.id.as_str()])),
+            Arc::new(StringArray::from(vec![outcome_name(result.outcome)])),
+            Arc::new(StringArray::from(vec![if result.fallback_used {
+                "true"
+            } else {
+                "false"
+            }])),
+            Arc::new(UInt64Array::from(vec![
+                result.origin.component_id.map(u64::from),
+            ])),
+            Arc::new(UInt64Array::from(vec![
+                result.destination.component_id.map(u64::from),
+            ])),
+            Arc::new(Float64Array::from(vec![result.origin_hop_distance_m])),
+            Arc::new(Float64Array::from(vec![result.destination_hop_distance_m])),
             Arc::new(Float64Array::from(vec![result.origin.snap_distance_m])),
             Arc::new(Float64Array::from(vec![result.destination.snap_distance_m])),
             Arc::new(UInt64Array::from(vec![result.summary.total_distance_m])),
@@ -308,7 +491,23 @@ fn write_route_geoparquet(path: &Path, request: &RouteRequest, result: &RouteRes
             Arc::new(Float64Array::from(vec![
                 result.summary.total_generalized_cost,
             ])),
+            Arc::new(Float64Array::from(vec![
+                result.summary.illegal_movement_penalty_s,
+            ])),
+            Arc::new(Float64Array::from(vec![
+                result.summary.illegal_movement_penalty_cost,
+            ])),
+            Arc::new(UInt64Array::from(vec![
+                result.summary.violation_count as u64,
+            ])),
+            Arc::new(StringArray::from(vec![diagnostics_json(
+                &result.summary.violation_types,
+            )])),
+            Arc::new(StringArray::from(vec![diagnostics_json(
+                &result.violations,
+            )])),
             Arc::new(UInt64Array::from(vec![result.summary.segment_count as u64])),
+            Arc::new(StringArray::from(vec![diagnostics.as_str()])),
             Arc::new(StringArray::from(vec![warnings.as_str()])),
             Arc::new(BinaryArray::from(vec![geometry.as_slice()])),
         ],
@@ -338,12 +537,23 @@ fn write_od_csv(path: &Path, request: &OdPairsDocument, result: &OdResult) -> Re
                 request_pair.destination.lon.to_string(),
                 request_pair.destination.lat.to_string(),
                 batch_status_name(pair.status).to_string(),
+                outcome_name(pair.outcome).to_string(),
+                pair.fallback_used.to_string(),
+                optional_string(pair.origin_component_id),
+                optional_string(pair.destination_component_id),
+                optional_string(pair.origin_hop_distance_m),
+                optional_string(pair.destination_hop_distance_m),
                 optional_string(pair.origin_snap_distance_m),
                 optional_string(pair.destination_snap_distance_m),
                 optional_string(pair.total_distance_m),
                 optional_string(pair.total_travel_time_s),
                 optional_string(pair.total_generalized_cost),
+                optional_string(pair.illegal_movement_penalty_s),
+                optional_string(pair.illegal_movement_penalty_cost),
+                pair.violation_count.to_string(),
+                diagnostics_json(&pair.violation_types),
                 pair.error.clone().unwrap_or_default(),
+                diagnostics_json(&pair.diagnostics),
                 linestring_wkt(&geometry),
             ])
         })
@@ -360,12 +570,23 @@ fn write_od_csv(path: &Path, request: &OdPairsDocument, result: &OdResult) -> Re
             "target_x",
             "target_y",
             "status",
+            "outcome",
+            "fallback_used",
+            "origin_component_id",
+            "destination_component_id",
+            "origin_hop_distance_m",
+            "destination_hop_distance_m",
             "origin_snap_distance_m",
             "destination_snap_distance_m",
             "total_distance_m",
             "total_travel_time_s",
             "total_generalized_cost",
+            "illegal_movement_penalty_s",
+            "illegal_movement_penalty_cost",
+            "violation_count",
+            "violation_types_json",
             "error",
+            "diagnostics_json",
             "geometry_wkt",
         ],
         rows,
@@ -397,12 +618,23 @@ fn write_od_geojson(path: &Path, request: &OdPairsDocument, result: &OdResult) -
                     "origin_id": pair.origin_id,
                     "destination_id": pair.destination_id,
                     "status": batch_status_name(pair.status),
+                    "outcome": outcome_name(pair.outcome),
+                    "fallback_used": pair.fallback_used,
+                    "origin_component_id": pair.origin_component_id,
+                    "destination_component_id": pair.destination_component_id,
+                    "origin_hop_distance_m": pair.origin_hop_distance_m,
+                    "destination_hop_distance_m": pair.destination_hop_distance_m,
                     "origin_snap_distance_m": pair.origin_snap_distance_m,
                     "destination_snap_distance_m": pair.destination_snap_distance_m,
                     "total_distance_m": pair.total_distance_m,
                     "total_travel_time_s": pair.total_travel_time_s,
                     "total_generalized_cost": pair.total_generalized_cost,
+                    "illegal_movement_penalty_s": pair.illegal_movement_penalty_s,
+                    "illegal_movement_penalty_cost": pair.illegal_movement_penalty_cost,
+                    "violation_count": pair.violation_count,
+                    "violation_types": pair.violation_types,
                     "error": pair.error,
+                    "diagnostics": pair.diagnostics,
                 }
             }))
         })
@@ -446,12 +678,23 @@ fn write_od_gpkg(path: &Path, request: &OdPairsDocument, result: &OdResult) -> R
             ("target_x", "REAL NOT NULL"),
             ("target_y", "REAL NOT NULL"),
             ("status", "TEXT NOT NULL"),
+            ("outcome", "TEXT NOT NULL"),
+            ("fallback_used", "INTEGER NOT NULL"),
+            ("origin_component_id", "INTEGER"),
+            ("destination_component_id", "INTEGER"),
+            ("origin_hop_distance_m", "REAL"),
+            ("destination_hop_distance_m", "REAL"),
             ("origin_snap_distance_m", "REAL"),
             ("destination_snap_distance_m", "REAL"),
             ("total_distance_m", "INTEGER"),
             ("total_travel_time_s", "REAL"),
             ("total_generalized_cost", "REAL"),
+            ("illegal_movement_penalty_s", "REAL"),
+            ("illegal_movement_penalty_cost", "REAL"),
+            ("violation_count", "INTEGER NOT NULL"),
+            ("violation_types_json", "TEXT NOT NULL"),
             ("error", "TEXT"),
+            ("diagnostics_json", "TEXT NOT NULL"),
         ],
         "LINESTRING",
         Some(extent_for_features(extents.iter().map(Vec::as_slice))),
@@ -480,6 +723,30 @@ fn write_od_gpkg(path: &Path, request: &OdPairsDocument, result: &OdResult) -> R
                     SqlValue::Text(batch_status_name(pair.status).to_string()),
                 ),
                 (
+                    "outcome",
+                    SqlValue::Text(outcome_name(pair.outcome).to_string()),
+                ),
+                (
+                    "fallback_used",
+                    SqlValue::Integer(if pair.fallback_used { 1 } else { 0 }),
+                ),
+                (
+                    "origin_component_id",
+                    SqlValue::NullableInteger(optional_u32_as_i64(pair.origin_component_id)),
+                ),
+                (
+                    "destination_component_id",
+                    SqlValue::NullableInteger(optional_u32_as_i64(pair.destination_component_id)),
+                ),
+                (
+                    "origin_hop_distance_m",
+                    SqlValue::NullableReal(pair.origin_hop_distance_m),
+                ),
+                (
+                    "destination_hop_distance_m",
+                    SqlValue::NullableReal(pair.destination_hop_distance_m),
+                ),
+                (
                     "origin_snap_distance_m",
                     SqlValue::NullableReal(pair.origin_snap_distance_m),
                 ),
@@ -499,7 +766,27 @@ fn write_od_gpkg(path: &Path, request: &OdPairsDocument, result: &OdResult) -> R
                     "total_generalized_cost",
                     SqlValue::NullableReal(pair.total_generalized_cost),
                 ),
+                (
+                    "illegal_movement_penalty_s",
+                    SqlValue::NullableReal(pair.illegal_movement_penalty_s),
+                ),
+                (
+                    "illegal_movement_penalty_cost",
+                    SqlValue::NullableReal(pair.illegal_movement_penalty_cost),
+                ),
+                (
+                    "violation_count",
+                    SqlValue::Integer(pair.violation_count as i64),
+                ),
+                (
+                    "violation_types_json",
+                    SqlValue::Text(diagnostics_json(&pair.violation_types)),
+                ),
                 ("error", SqlValue::NullableText(pair.error.clone())),
+                (
+                    "diagnostics_json",
+                    SqlValue::Text(diagnostics_json(&pair.diagnostics)),
+                ),
             ],
             &geometry,
         )?;
@@ -538,12 +825,23 @@ fn write_od_parquet(path: &Path, request: &OdPairsDocument, result: &OdResult) -
         Field::new("target_x", DataType::Float64, false),
         Field::new("target_y", DataType::Float64, false),
         Field::new("status", DataType::Utf8, false),
+        Field::new("outcome", DataType::Utf8, false),
+        Field::new("fallback_used", DataType::Utf8, false),
+        Field::new("origin_component_id", DataType::UInt64, true),
+        Field::new("destination_component_id", DataType::UInt64, true),
+        Field::new("origin_hop_distance_m", DataType::Float64, true),
+        Field::new("destination_hop_distance_m", DataType::Float64, true),
         Field::new("origin_snap_distance_m", DataType::Float64, true),
         Field::new("destination_snap_distance_m", DataType::Float64, true),
         Field::new("total_distance_m", DataType::UInt64, true),
         Field::new("total_travel_time_s", DataType::Float64, true),
         Field::new("total_generalized_cost", DataType::Float64, true),
+        Field::new("illegal_movement_penalty_s", DataType::Float64, true),
+        Field::new("illegal_movement_penalty_cost", DataType::Float64, true),
+        Field::new("violation_count", DataType::UInt64, false),
+        Field::new("violation_types_json", DataType::Utf8, false),
         Field::new("error", DataType::Utf8, true),
+        Field::new("diagnostics_json", DataType::Utf8, false),
         Field::new("geometry_wkt", DataType::Utf8, false),
     ]);
 
@@ -579,6 +877,30 @@ fn write_od_parquet(path: &Path, request: &OdPairsDocument, result: &OdResult) -
         .iter()
         .map(|(pair, _, _)| batch_status_name(pair.status))
         .collect::<Vec<_>>();
+    let outcome = rows
+        .iter()
+        .map(|(pair, _, _)| outcome_name(pair.outcome))
+        .collect::<Vec<_>>();
+    let fallback_used = rows
+        .iter()
+        .map(|(pair, _, _)| if pair.fallback_used { "true" } else { "false" })
+        .collect::<Vec<_>>();
+    let origin_component_id = rows
+        .iter()
+        .map(|(pair, _, _)| pair.origin_component_id.map(u64::from))
+        .collect::<Vec<_>>();
+    let destination_component_id = rows
+        .iter()
+        .map(|(pair, _, _)| pair.destination_component_id.map(u64::from))
+        .collect::<Vec<_>>();
+    let origin_hop_distance = rows
+        .iter()
+        .map(|(pair, _, _)| pair.origin_hop_distance_m)
+        .collect::<Vec<_>>();
+    let destination_hop_distance = rows
+        .iter()
+        .map(|(pair, _, _)| pair.destination_hop_distance_m)
+        .collect::<Vec<_>>();
     let origin_snap = rows
         .iter()
         .map(|(pair, _, _)| pair.origin_snap_distance_m)
@@ -599,9 +921,29 @@ fn write_od_parquet(path: &Path, request: &OdPairsDocument, result: &OdResult) -
         .iter()
         .map(|(pair, _, _)| pair.total_generalized_cost)
         .collect::<Vec<_>>();
+    let illegal_penalty_s = rows
+        .iter()
+        .map(|(pair, _, _)| pair.illegal_movement_penalty_s)
+        .collect::<Vec<_>>();
+    let illegal_penalty_cost = rows
+        .iter()
+        .map(|(pair, _, _)| pair.illegal_movement_penalty_cost)
+        .collect::<Vec<_>>();
+    let violation_count = rows
+        .iter()
+        .map(|(pair, _, _)| pair.violation_count as u64)
+        .collect::<Vec<_>>();
+    let violation_types = rows
+        .iter()
+        .map(|(pair, _, _)| diagnostics_json(&pair.violation_types))
+        .collect::<Vec<_>>();
     let error = rows
         .iter()
         .map(|(pair, _, _)| pair.error.as_deref())
+        .collect::<Vec<_>>();
+    let diagnostics = rows
+        .iter()
+        .map(|(pair, _, _)| diagnostics_json(&pair.diagnostics))
         .collect::<Vec<_>>();
     let geometry_wkt = rows
         .iter()
@@ -620,12 +962,30 @@ fn write_od_parquet(path: &Path, request: &OdPairsDocument, result: &OdResult) -
             Arc::new(Float64Array::from(target_x)),
             Arc::new(Float64Array::from(target_y)),
             Arc::new(StringArray::from(status)),
+            Arc::new(StringArray::from(outcome)),
+            Arc::new(StringArray::from(fallback_used)),
+            Arc::new(UInt64Array::from(origin_component_id)),
+            Arc::new(UInt64Array::from(destination_component_id)),
+            Arc::new(Float64Array::from(origin_hop_distance)),
+            Arc::new(Float64Array::from(destination_hop_distance)),
             Arc::new(Float64Array::from(origin_snap)),
             Arc::new(Float64Array::from(destination_snap)),
             Arc::new(UInt64Array::from(total_distance)),
             Arc::new(Float64Array::from(total_travel_time)),
             Arc::new(Float64Array::from(total_cost)),
+            Arc::new(Float64Array::from(illegal_penalty_s)),
+            Arc::new(Float64Array::from(illegal_penalty_cost)),
+            Arc::new(UInt64Array::from(violation_count)),
+            Arc::new(StringArray::from(
+                violation_types
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )),
             Arc::new(StringArray::from(error)),
+            Arc::new(StringArray::from(
+                diagnostics.iter().map(String::as_str).collect::<Vec<_>>(),
+            )),
             Arc::new(StringArray::from(geometry_wkt)),
         ],
     )
@@ -660,12 +1020,23 @@ fn write_od_geoparquet(path: &Path, request: &OdPairsDocument, result: &OdResult
             Field::new("target_x", DataType::Float64, false),
             Field::new("target_y", DataType::Float64, false),
             Field::new("status", DataType::Utf8, false),
+            Field::new("outcome", DataType::Utf8, false),
+            Field::new("fallback_used", DataType::Utf8, false),
+            Field::new("origin_component_id", DataType::UInt64, true),
+            Field::new("destination_component_id", DataType::UInt64, true),
+            Field::new("origin_hop_distance_m", DataType::Float64, true),
+            Field::new("destination_hop_distance_m", DataType::Float64, true),
             Field::new("origin_snap_distance_m", DataType::Float64, true),
             Field::new("destination_snap_distance_m", DataType::Float64, true),
             Field::new("total_distance_m", DataType::UInt64, true),
             Field::new("total_travel_time_s", DataType::Float64, true),
             Field::new("total_generalized_cost", DataType::Float64, true),
+            Field::new("illegal_movement_penalty_s", DataType::Float64, true),
+            Field::new("illegal_movement_penalty_cost", DataType::Float64, true),
+            Field::new("violation_count", DataType::UInt64, false),
+            Field::new("violation_types_json", DataType::Utf8, false),
             Field::new("error", DataType::Utf8, true),
+            Field::new("diagnostics_json", DataType::Utf8, false),
             Field::new("geometry", DataType::Binary, false),
         ],
         extent,
@@ -715,6 +1086,36 @@ fn write_od_geoparquet(path: &Path, request: &OdPairsDocument, result: &OdResult
                     .map(|(pair, _, _, _)| batch_status_name(pair.status))
                     .collect::<Vec<_>>(),
             )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(pair, _, _, _)| outcome_name(pair.outcome))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(pair, _, _, _)| if pair.fallback_used { "true" } else { "false" })
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter()
+                    .map(|(pair, _, _, _)| pair.origin_component_id.map(u64::from))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter()
+                    .map(|(pair, _, _, _)| pair.destination_component_id.map(u64::from))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(pair, _, _, _)| pair.origin_hop_distance_m)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(pair, _, _, _)| pair.destination_hop_distance_m)
+                    .collect::<Vec<_>>(),
+            )),
             Arc::new(Float64Array::from(
                 rows.iter()
                     .map(|(pair, _, _, _)| pair.origin_snap_distance_m)
@@ -740,9 +1141,34 @@ fn write_od_geoparquet(path: &Path, request: &OdPairsDocument, result: &OdResult
                     .map(|(pair, _, _, _)| pair.total_generalized_cost)
                     .collect::<Vec<_>>(),
             )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(pair, _, _, _)| pair.illegal_movement_penalty_s)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(pair, _, _, _)| pair.illegal_movement_penalty_cost)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter()
+                    .map(|(pair, _, _, _)| pair.violation_count as u64)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(pair, _, _, _)| diagnostics_json(&pair.violation_types))
+                    .collect::<Vec<_>>(),
+            )),
             Arc::new(StringArray::from(
                 rows.iter()
                     .map(|(pair, _, _, _)| pair.error.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(pair, _, _, _)| diagnostics_json(&pair.diagnostics))
                     .collect::<Vec<_>>(),
             )),
             Arc::new(BinaryArray::from(
@@ -791,12 +1217,23 @@ fn write_matrix_csv(
                 destination.lon.to_string(),
                 destination.lat.to_string(),
                 batch_status_name(cell.status).to_string(),
+                outcome_name(cell.outcome).to_string(),
+                cell.fallback_used.to_string(),
+                optional_string(cell.origin_component_id),
+                optional_string(cell.destination_component_id),
+                optional_string(cell.origin_hop_distance_m),
+                optional_string(cell.destination_hop_distance_m),
                 optional_string(cell.origin_snap_distance_m),
                 optional_string(cell.destination_snap_distance_m),
                 optional_string(cell.total_distance_m),
                 optional_string(cell.total_travel_time_s),
                 optional_string(cell.total_generalized_cost),
+                optional_string(cell.illegal_movement_penalty_s),
+                optional_string(cell.illegal_movement_penalty_cost),
+                cell.violation_count.to_string(),
+                diagnostics_json(&cell.violation_types),
                 cell.error.clone().unwrap_or_default(),
+                diagnostics_json(&cell.diagnostics),
                 linestring_wkt(&geometry),
             ])
         })
@@ -812,12 +1249,23 @@ fn write_matrix_csv(
             "target_x",
             "target_y",
             "status",
+            "outcome",
+            "fallback_used",
+            "origin_component_id",
+            "destination_component_id",
+            "origin_hop_distance_m",
+            "destination_hop_distance_m",
             "origin_snap_distance_m",
             "destination_snap_distance_m",
             "total_distance_m",
             "total_travel_time_s",
             "total_generalized_cost",
+            "illegal_movement_penalty_s",
+            "illegal_movement_penalty_cost",
+            "violation_count",
+            "violation_types_json",
             "error",
+            "diagnostics_json",
             "geometry_wkt",
         ],
         rows,
@@ -863,12 +1311,23 @@ fn write_matrix_geojson(
                     "origin_id": cell.origin_id,
                     "destination_id": cell.destination_id,
                     "status": batch_status_name(cell.status),
+                    "outcome": outcome_name(cell.outcome),
+                    "fallback_used": cell.fallback_used,
+                    "origin_component_id": cell.origin_component_id,
+                    "destination_component_id": cell.destination_component_id,
+                    "origin_hop_distance_m": cell.origin_hop_distance_m,
+                    "destination_hop_distance_m": cell.destination_hop_distance_m,
                     "origin_snap_distance_m": cell.origin_snap_distance_m,
                     "destination_snap_distance_m": cell.destination_snap_distance_m,
                     "total_distance_m": cell.total_distance_m,
                     "total_travel_time_s": cell.total_travel_time_s,
                     "total_generalized_cost": cell.total_generalized_cost,
+                    "illegal_movement_penalty_s": cell.illegal_movement_penalty_s,
+                    "illegal_movement_penalty_cost": cell.illegal_movement_penalty_cost,
+                    "violation_count": cell.violation_count,
+                    "violation_types": cell.violation_types,
                     "error": cell.error,
+                    "diagnostics": cell.diagnostics,
                 }
             }))
         })
@@ -926,12 +1385,23 @@ fn write_matrix_gpkg(
             ("target_x", "REAL NOT NULL"),
             ("target_y", "REAL NOT NULL"),
             ("status", "TEXT NOT NULL"),
+            ("outcome", "TEXT NOT NULL"),
+            ("fallback_used", "INTEGER NOT NULL"),
+            ("origin_component_id", "INTEGER"),
+            ("destination_component_id", "INTEGER"),
+            ("origin_hop_distance_m", "REAL"),
+            ("destination_hop_distance_m", "REAL"),
             ("origin_snap_distance_m", "REAL"),
             ("destination_snap_distance_m", "REAL"),
             ("total_distance_m", "INTEGER"),
             ("total_travel_time_s", "REAL"),
             ("total_generalized_cost", "REAL"),
+            ("illegal_movement_penalty_s", "REAL"),
+            ("illegal_movement_penalty_cost", "REAL"),
+            ("violation_count", "INTEGER NOT NULL"),
+            ("violation_types_json", "TEXT NOT NULL"),
             ("error", "TEXT"),
+            ("diagnostics_json", "TEXT NOT NULL"),
         ],
         "LINESTRING",
         Some(extent_for_features(extents.iter().map(Vec::as_slice))),
@@ -972,6 +1442,30 @@ fn write_matrix_gpkg(
                     SqlValue::Text(batch_status_name(cell.status).to_string()),
                 ),
                 (
+                    "outcome",
+                    SqlValue::Text(outcome_name(cell.outcome).to_string()),
+                ),
+                (
+                    "fallback_used",
+                    SqlValue::Integer(if cell.fallback_used { 1 } else { 0 }),
+                ),
+                (
+                    "origin_component_id",
+                    SqlValue::NullableInteger(optional_u32_as_i64(cell.origin_component_id)),
+                ),
+                (
+                    "destination_component_id",
+                    SqlValue::NullableInteger(optional_u32_as_i64(cell.destination_component_id)),
+                ),
+                (
+                    "origin_hop_distance_m",
+                    SqlValue::NullableReal(cell.origin_hop_distance_m),
+                ),
+                (
+                    "destination_hop_distance_m",
+                    SqlValue::NullableReal(cell.destination_hop_distance_m),
+                ),
+                (
                     "origin_snap_distance_m",
                     SqlValue::NullableReal(cell.origin_snap_distance_m),
                 ),
@@ -991,7 +1485,27 @@ fn write_matrix_gpkg(
                     "total_generalized_cost",
                     SqlValue::NullableReal(cell.total_generalized_cost),
                 ),
+                (
+                    "illegal_movement_penalty_s",
+                    SqlValue::NullableReal(cell.illegal_movement_penalty_s),
+                ),
+                (
+                    "illegal_movement_penalty_cost",
+                    SqlValue::NullableReal(cell.illegal_movement_penalty_cost),
+                ),
+                (
+                    "violation_count",
+                    SqlValue::Integer(cell.violation_count as i64),
+                ),
+                (
+                    "violation_types_json",
+                    SqlValue::Text(diagnostics_json(&cell.violation_types)),
+                ),
                 ("error", SqlValue::NullableText(cell.error.clone())),
+                (
+                    "diagnostics_json",
+                    SqlValue::Text(diagnostics_json(&cell.diagnostics)),
+                ),
             ],
             &geometry,
         )?;
@@ -1045,12 +1559,23 @@ fn write_matrix_parquet(
         Field::new("target_x", DataType::Float64, false),
         Field::new("target_y", DataType::Float64, false),
         Field::new("status", DataType::Utf8, false),
+        Field::new("outcome", DataType::Utf8, false),
+        Field::new("fallback_used", DataType::Utf8, false),
+        Field::new("origin_component_id", DataType::UInt64, true),
+        Field::new("destination_component_id", DataType::UInt64, true),
+        Field::new("origin_hop_distance_m", DataType::Float64, true),
+        Field::new("destination_hop_distance_m", DataType::Float64, true),
         Field::new("origin_snap_distance_m", DataType::Float64, true),
         Field::new("destination_snap_distance_m", DataType::Float64, true),
         Field::new("total_distance_m", DataType::UInt64, true),
         Field::new("total_travel_time_s", DataType::Float64, true),
         Field::new("total_generalized_cost", DataType::Float64, true),
+        Field::new("illegal_movement_penalty_s", DataType::Float64, true),
+        Field::new("illegal_movement_penalty_cost", DataType::Float64, true),
+        Field::new("violation_count", DataType::UInt64, false),
+        Field::new("violation_types_json", DataType::Utf8, false),
         Field::new("error", DataType::Utf8, true),
+        Field::new("diagnostics_json", DataType::Utf8, false),
         Field::new("geometry_wkt", DataType::Utf8, false),
     ]);
 
@@ -1093,6 +1618,36 @@ fn write_matrix_parquet(
                     .map(|(cell, _, _, _)| batch_status_name(cell.status))
                     .collect::<Vec<_>>(),
             )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(cell, _, _, _)| outcome_name(cell.outcome))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(cell, _, _, _)| if cell.fallback_used { "true" } else { "false" })
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _)| cell.origin_component_id.map(u64::from))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _)| cell.destination_component_id.map(u64::from))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _)| cell.origin_hop_distance_m)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _)| cell.destination_hop_distance_m)
+                    .collect::<Vec<_>>(),
+            )),
             Arc::new(Float64Array::from(
                 rows.iter()
                     .map(|(cell, _, _, _)| cell.origin_snap_distance_m)
@@ -1118,9 +1673,34 @@ fn write_matrix_parquet(
                     .map(|(cell, _, _, _)| cell.total_generalized_cost)
                     .collect::<Vec<_>>(),
             )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _)| cell.illegal_movement_penalty_s)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _)| cell.illegal_movement_penalty_cost)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _)| cell.violation_count as u64)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(cell, _, _, _)| diagnostics_json(&cell.violation_types))
+                    .collect::<Vec<_>>(),
+            )),
             Arc::new(StringArray::from(
                 rows.iter()
                     .map(|(cell, _, _, _)| cell.error.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(cell, _, _, _)| diagnostics_json(&cell.diagnostics))
                     .collect::<Vec<_>>(),
             )),
             Arc::new(StringArray::from(
@@ -1183,12 +1763,23 @@ fn write_matrix_geoparquet(
             Field::new("target_x", DataType::Float64, false),
             Field::new("target_y", DataType::Float64, false),
             Field::new("status", DataType::Utf8, false),
+            Field::new("outcome", DataType::Utf8, false),
+            Field::new("fallback_used", DataType::Utf8, false),
+            Field::new("origin_component_id", DataType::UInt64, true),
+            Field::new("destination_component_id", DataType::UInt64, true),
+            Field::new("origin_hop_distance_m", DataType::Float64, true),
+            Field::new("destination_hop_distance_m", DataType::Float64, true),
             Field::new("origin_snap_distance_m", DataType::Float64, true),
             Field::new("destination_snap_distance_m", DataType::Float64, true),
             Field::new("total_distance_m", DataType::UInt64, true),
             Field::new("total_travel_time_s", DataType::Float64, true),
             Field::new("total_generalized_cost", DataType::Float64, true),
+            Field::new("illegal_movement_penalty_s", DataType::Float64, true),
+            Field::new("illegal_movement_penalty_cost", DataType::Float64, true),
+            Field::new("violation_count", DataType::UInt64, false),
+            Field::new("violation_types_json", DataType::Utf8, false),
             Field::new("error", DataType::Utf8, true),
+            Field::new("diagnostics_json", DataType::Utf8, false),
             Field::new("geometry", DataType::Binary, false),
         ],
         extent,
@@ -1233,6 +1824,36 @@ fn write_matrix_geoparquet(
                     .map(|(cell, _, _, _, _)| batch_status_name(cell.status))
                     .collect::<Vec<_>>(),
             )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(cell, _, _, _, _)| outcome_name(cell.outcome))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(cell, _, _, _, _)| if cell.fallback_used { "true" } else { "false" })
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _, _)| cell.origin_component_id.map(u64::from))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _, _)| cell.destination_component_id.map(u64::from))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _, _)| cell.origin_hop_distance_m)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _, _)| cell.destination_hop_distance_m)
+                    .collect::<Vec<_>>(),
+            )),
             Arc::new(Float64Array::from(
                 rows.iter()
                     .map(|(cell, _, _, _, _)| cell.origin_snap_distance_m)
@@ -1258,14 +1879,517 @@ fn write_matrix_geoparquet(
                     .map(|(cell, _, _, _, _)| cell.total_generalized_cost)
                     .collect::<Vec<_>>(),
             )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _, _)| cell.illegal_movement_penalty_s)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _, _)| cell.illegal_movement_penalty_cost)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter()
+                    .map(|(cell, _, _, _, _)| cell.violation_count as u64)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(cell, _, _, _, _)| diagnostics_json(&cell.violation_types))
+                    .collect::<Vec<_>>(),
+            )),
             Arc::new(StringArray::from(
                 rows.iter()
                     .map(|(cell, _, _, _, _)| cell.error.as_deref())
                     .collect::<Vec<_>>(),
             )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(cell, _, _, _, _)| diagnostics_json(&cell.diagnostics))
+                    .collect::<Vec<_>>(),
+            )),
             Arc::new(BinaryArray::from(
                 rows.iter()
                     .map(|(_, _, _, _, wkb)| wkb.as_slice())
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )
+}
+
+fn write_service_area_csv(
+    path: &Path,
+    _request: &ServiceAreaRequest,
+    result: &ServiceAreaResult,
+) -> Result<()> {
+    let rows = result
+        .features
+        .iter()
+        .map(|feature| {
+            vec![
+                result.analysis_id.clone(),
+                optional_string(feature.origin_id.clone()),
+                optional_string(feature.threshold_id.clone()),
+                optional_string(feature.band_start_limit),
+                feature.threshold_limit.to_string(),
+                service_area_threshold_metric_name(feature.threshold_metric).to_string(),
+                service_area_geometry_type_name(feature.geometry_type).to_string(),
+                feature.fallback_used.to_string(),
+                optional_string(feature.origin_component_id),
+                optional_string(feature.origin_hop_distance_m),
+                optional_string(feature.reachable_network_length_m),
+                optional_string(feature.reachable_edge_count),
+                feature
+                    .geometry
+                    .clone()
+                    .unwrap_or(serde_json::Value::Null)
+                    .to_string(),
+            ]
+        })
+        .collect::<Vec<_>>();
+
+    write_csv(
+        path,
+        &[
+            "analysis_id",
+            "origin_id",
+            "threshold_id",
+            "band_start_limit",
+            "threshold_limit",
+            "threshold_metric",
+            "geometry_type",
+            "fallback_used",
+            "origin_component_id",
+            "origin_hop_distance_m",
+            "reachable_network_length_m",
+            "reachable_edge_count",
+            "geometry_json",
+        ],
+        rows,
+    )
+}
+
+fn write_service_area_geojson(
+    path: &Path,
+    _request: &ServiceAreaRequest,
+    result: &ServiceAreaResult,
+) -> Result<()> {
+    let features = result
+        .features
+        .iter()
+        .map(|feature| {
+            json!({
+                "type": "Feature",
+                "geometry": feature.geometry.clone().unwrap_or(serde_json::Value::Null),
+                "properties": {
+                    "analysis_id": result.analysis_id,
+                    "origin_id": feature.origin_id,
+                    "threshold_id": feature.threshold_id,
+                    "band_start_limit": feature.band_start_limit,
+                    "threshold_limit": feature.threshold_limit,
+                    "threshold_metric": service_area_threshold_metric_name(feature.threshold_metric),
+                    "geometry_type": service_area_geometry_type_name(feature.geometry_type),
+                    "fallback_used": feature.fallback_used,
+                    "origin_component_id": feature.origin_component_id,
+                    "origin_hop_distance_m": feature.origin_hop_distance_m,
+                    "reachable_network_length_m": feature.reachable_network_length_m,
+                    "reachable_edge_count": feature.reachable_edge_count,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    write_json(
+        path,
+        &json!({
+            "type": "FeatureCollection",
+            "features": features,
+        }),
+    )
+}
+
+fn write_service_area_gpkg(
+    path: &Path,
+    _request: &ServiceAreaRequest,
+    result: &ServiceAreaResult,
+) -> Result<()> {
+    let mut gpkg = GeoPackageWriter::create(path)?;
+    write_service_area_gpkg_table(
+        &mut gpkg,
+        result,
+        ServiceAreaGeometryType::Network,
+        "service_area_network",
+        "MULTILINESTRING",
+    )?;
+    write_service_area_gpkg_table(
+        &mut gpkg,
+        result,
+        ServiceAreaGeometryType::Polygon,
+        "service_area_polygon",
+        "MULTIPOLYGON",
+    )?;
+    Ok(())
+}
+
+fn write_service_area_gpkg_table(
+    gpkg: &mut GeoPackageWriter,
+    result: &ServiceAreaResult,
+    geometry_type: ServiceAreaGeometryType,
+    table_name: &str,
+    gpkg_geometry_type: &str,
+) -> Result<()> {
+    let rows = result
+        .features
+        .iter()
+        .filter(|feature| feature.geometry_type == geometry_type)
+        .filter_map(|feature| {
+            let geometry = feature.geometry.as_ref()?;
+            let wkb = service_area_geometry_wkb(geometry, geometry_type)?;
+            let extent = extent_for_geometry_json(geometry)?;
+            Some((feature, wkb, extent))
+        })
+        .collect::<Vec<_>>();
+
+    if rows.is_empty() {
+        return Ok(());
+    }
+
+    let extent = rows
+        .iter()
+        .map(|(_, _, extent)| *extent)
+        .reduce(combine_extents)
+        .unwrap_or_default();
+
+    gpkg.create_feature_table(
+        table_name,
+        &[
+            ("analysis_id", "TEXT NOT NULL"),
+            ("origin_id", "TEXT"),
+            ("threshold_id", "TEXT"),
+            ("band_start_limit", "REAL"),
+            ("threshold_limit", "REAL NOT NULL"),
+            ("threshold_metric", "TEXT NOT NULL"),
+            ("geometry_type", "TEXT NOT NULL"),
+            ("fallback_used", "INTEGER NOT NULL"),
+            ("origin_component_id", "INTEGER"),
+            ("origin_hop_distance_m", "REAL"),
+            ("reachable_network_length_m", "REAL"),
+            ("reachable_edge_count", "INTEGER"),
+        ],
+        gpkg_geometry_type,
+        Some(extent),
+    )?;
+
+    for (feature, wkb, _) in rows {
+        gpkg.insert_feature_wkb(
+            table_name,
+            &[
+                ("analysis_id", SqlValue::Text(result.analysis_id.clone())),
+                (
+                    "origin_id",
+                    SqlValue::NullableText(feature.origin_id.clone()),
+                ),
+                (
+                    "threshold_id",
+                    SqlValue::NullableText(feature.threshold_id.clone()),
+                ),
+                (
+                    "band_start_limit",
+                    SqlValue::NullableReal(feature.band_start_limit),
+                ),
+                ("threshold_limit", SqlValue::Real(feature.threshold_limit)),
+                (
+                    "threshold_metric",
+                    SqlValue::Text(
+                        service_area_threshold_metric_name(feature.threshold_metric).to_string(),
+                    ),
+                ),
+                (
+                    "geometry_type",
+                    SqlValue::Text(
+                        service_area_geometry_type_name(feature.geometry_type).to_string(),
+                    ),
+                ),
+                (
+                    "fallback_used",
+                    SqlValue::Integer(if feature.fallback_used { 1 } else { 0 }),
+                ),
+                (
+                    "origin_component_id",
+                    SqlValue::NullableInteger(optional_u32_as_i64(feature.origin_component_id)),
+                ),
+                (
+                    "origin_hop_distance_m",
+                    SqlValue::NullableReal(feature.origin_hop_distance_m),
+                ),
+                (
+                    "reachable_network_length_m",
+                    SqlValue::NullableReal(feature.reachable_network_length_m),
+                ),
+                (
+                    "reachable_edge_count",
+                    SqlValue::NullableInteger(
+                        feature.reachable_edge_count.map(|value| value as i64),
+                    ),
+                ),
+            ],
+            &wkb,
+        )?;
+    }
+
+    Ok(())
+}
+
+fn write_service_area_parquet(
+    path: &Path,
+    _request: &ServiceAreaRequest,
+    result: &ServiceAreaResult,
+) -> Result<()> {
+    let schema = Schema::new(vec![
+        Field::new("analysis_id", DataType::Utf8, false),
+        Field::new("origin_id", DataType::Utf8, true),
+        Field::new("threshold_id", DataType::Utf8, true),
+        Field::new("band_start_limit", DataType::Float64, true),
+        Field::new("threshold_limit", DataType::Float64, false),
+        Field::new("threshold_metric", DataType::Utf8, false),
+        Field::new("geometry_type", DataType::Utf8, false),
+        Field::new("fallback_used", DataType::Utf8, false),
+        Field::new("origin_component_id", DataType::UInt64, true),
+        Field::new("origin_hop_distance_m", DataType::Float64, true),
+        Field::new("reachable_network_length_m", DataType::Float64, true),
+        Field::new("reachable_edge_count", DataType::UInt64, true),
+        Field::new("geometry_json", DataType::Utf8, false),
+    ]);
+
+    write_parquet_record_batch(
+        path,
+        schema,
+        vec![
+            Arc::new(StringArray::from(
+                result
+                    .features
+                    .iter()
+                    .map(|_| result.analysis_id.as_str())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                result
+                    .features
+                    .iter()
+                    .map(|feature| feature.origin_id.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                result
+                    .features
+                    .iter()
+                    .map(|feature| feature.threshold_id.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                result
+                    .features
+                    .iter()
+                    .map(|feature| feature.band_start_limit)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                result
+                    .features
+                    .iter()
+                    .map(|feature| feature.threshold_limit)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                result
+                    .features
+                    .iter()
+                    .map(|feature| service_area_threshold_metric_name(feature.threshold_metric))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                result
+                    .features
+                    .iter()
+                    .map(|feature| service_area_geometry_type_name(feature.geometry_type))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                result
+                    .features
+                    .iter()
+                    .map(|feature| {
+                        if feature.fallback_used {
+                            "true"
+                        } else {
+                            "false"
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                result
+                    .features
+                    .iter()
+                    .map(|feature| feature.origin_component_id.map(u64::from))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                result
+                    .features
+                    .iter()
+                    .map(|feature| feature.origin_hop_distance_m)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                result
+                    .features
+                    .iter()
+                    .map(|feature| feature.reachable_network_length_m)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                result
+                    .features
+                    .iter()
+                    .map(|feature| feature.reachable_edge_count)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                result
+                    .features
+                    .iter()
+                    .map(|feature| {
+                        feature
+                            .geometry
+                            .clone()
+                            .unwrap_or(serde_json::Value::Null)
+                            .to_string()
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+        ],
+    )
+}
+
+fn write_service_area_geoparquet(
+    path: &Path,
+    _request: &ServiceAreaRequest,
+    result: &ServiceAreaResult,
+) -> Result<()> {
+    let rows = result
+        .features
+        .iter()
+        .filter_map(|feature| {
+            let geometry = feature.geometry.as_ref()?;
+            let wkb = service_area_geometry_wkb(geometry, feature.geometry_type)?;
+            let extent = extent_for_geometry_json(geometry)?;
+            Some((feature, wkb, extent))
+        })
+        .collect::<Vec<_>>();
+
+    let extent = rows
+        .iter()
+        .map(|(_, _, extent)| *extent)
+        .reduce(combine_extents)
+        .unwrap_or_default();
+
+    let schema = geoparquet_schema_with_types(
+        vec![
+            Field::new("analysis_id", DataType::Utf8, false),
+            Field::new("origin_id", DataType::Utf8, true),
+            Field::new("threshold_id", DataType::Utf8, true),
+            Field::new("band_start_limit", DataType::Float64, true),
+            Field::new("threshold_limit", DataType::Float64, false),
+            Field::new("threshold_metric", DataType::Utf8, false),
+            Field::new("geometry_type", DataType::Utf8, false),
+            Field::new("fallback_used", DataType::Utf8, false),
+            Field::new("origin_component_id", DataType::UInt64, true),
+            Field::new("origin_hop_distance_m", DataType::Float64, true),
+            Field::new("reachable_network_length_m", DataType::Float64, true),
+            Field::new("reachable_edge_count", DataType::UInt64, true),
+            Field::new("geometry", DataType::Binary, false),
+        ],
+        extent,
+        &["MultiLineString", "MultiPolygon"],
+    );
+
+    write_parquet_record_batch(
+        path,
+        schema,
+        vec![
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|_| result.analysis_id.as_str())
+                    .collect::<Vec<_>>(),
+            )) as ArrayRef,
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(feature, _, _)| feature.origin_id.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(feature, _, _)| feature.threshold_id.as_deref())
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(feature, _, _)| feature.band_start_limit)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(feature, _, _)| feature.threshold_limit)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(feature, _, _)| {
+                        service_area_threshold_metric_name(feature.threshold_metric)
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(feature, _, _)| service_area_geometry_type_name(feature.geometry_type))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter()
+                    .map(|(feature, _, _)| {
+                        if feature.fallback_used {
+                            "true"
+                        } else {
+                            "false"
+                        }
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter()
+                    .map(|(feature, _, _)| feature.origin_component_id.map(u64::from))
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(feature, _, _)| feature.origin_hop_distance_m)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter()
+                    .map(|(feature, _, _)| feature.reachable_network_length_m)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(UInt64Array::from(
+                rows.iter()
+                    .map(|(feature, _, _)| feature.reachable_edge_count)
+                    .collect::<Vec<_>>(),
+            )),
+            Arc::new(BinaryArray::from(
+                rows.iter()
+                    .map(|(_, wkb, _)| wkb.as_slice())
                     .collect::<Vec<_>>(),
             )),
         ],
@@ -1309,6 +2433,99 @@ fn route_geometry_geojson(result: &RouteResult) -> Result<serde_json::Value> {
         "type": "LineString",
         "coordinates": route_coords(result)?,
     }))
+}
+
+fn service_area_threshold_metric_name(
+    metric: netan_query::ServiceAreaThresholdMetric,
+) -> &'static str {
+    match metric {
+        netan_query::ServiceAreaThresholdMetric::DistanceM => "distance_m",
+        netan_query::ServiceAreaThresholdMetric::TravelTimeS => "travel_time_s",
+    }
+}
+
+fn service_area_geometry_type_name(geometry_type: ServiceAreaGeometryType) -> &'static str {
+    match geometry_type {
+        ServiceAreaGeometryType::Network => "network",
+        ServiceAreaGeometryType::Polygon => "polygon",
+    }
+}
+
+fn extent_for_geometry_json(geometry: &serde_json::Value) -> Option<Extent> {
+    match geometry.get("type")?.as_str()? {
+        "LineString" => {
+            let coords = geojson_coords_vec(geometry.get("coordinates")?)?;
+            Some(extent_for_features([coords.as_slice()]))
+        }
+        "MultiLineString" => {
+            let lines = geometry.get("coordinates")?.as_array()?;
+            let coords = lines
+                .iter()
+                .map(geojson_coords_vec)
+                .collect::<Option<Vec<_>>>()?;
+            Some(extent_for_features(coords.iter().map(Vec::as_slice)))
+        }
+        "Polygon" => {
+            let rings = geometry.get("coordinates")?.as_array()?;
+            let coords = rings
+                .iter()
+                .map(geojson_coords_vec)
+                .collect::<Option<Vec<_>>>()?;
+            Some(extent_for_features(coords.iter().map(Vec::as_slice)))
+        }
+        "MultiPolygon" => {
+            let polygons = geometry.get("coordinates")?.as_array()?;
+            let coords = polygons
+                .iter()
+                .flat_map(|polygon| polygon.as_array().into_iter().flatten())
+                .map(geojson_coords_vec)
+                .collect::<Option<Vec<_>>>()?;
+            Some(extent_for_features(coords.iter().map(Vec::as_slice)))
+        }
+        _ => None,
+    }
+}
+
+fn geojson_coords_vec(value: &serde_json::Value) -> Option<Vec<[f64; 2]>> {
+    serde_json::from_value::<Vec<[f64; 2]>>(value.clone()).ok()
+}
+
+fn service_area_geometry_wkb(
+    geometry: &serde_json::Value,
+    geometry_type: ServiceAreaGeometryType,
+) -> Option<Vec<u8>> {
+    match geometry_type {
+        ServiceAreaGeometryType::Network => {
+            let lines = match geometry.get("type")?.as_str()? {
+                "LineString" => vec![
+                    serde_json::from_value::<Vec<[f64; 2]>>(geometry.get("coordinates")?.clone())
+                        .ok()?,
+                ],
+                "MultiLineString" => serde_json::from_value::<Vec<Vec<[f64; 2]>>>(
+                    geometry.get("coordinates")?.clone(),
+                )
+                .ok()?,
+                _ => return None,
+            };
+            Some(wkb_multilinestring(&lines))
+        }
+        ServiceAreaGeometryType::Polygon => {
+            let polygons = match geometry.get("type")?.as_str()? {
+                "Polygon" => vec![
+                    serde_json::from_value::<Vec<Vec<[f64; 2]>>>(
+                        geometry.get("coordinates")?.clone(),
+                    )
+                    .ok()?,
+                ],
+                "MultiPolygon" => serde_json::from_value::<Vec<Vec<Vec<[f64; 2]>>>>(
+                    geometry.get("coordinates")?.clone(),
+                )
+                .ok()?,
+                _ => return None,
+            };
+            Some(wkb_multipolygon(&polygons))
+        }
+    }
 }
 
 fn point_lookup(document: &PointSetDocument) -> BTreeMap<&str, &netan_query::LabeledPoint> {
@@ -1356,9 +2573,28 @@ fn optional_string<T: ToString>(value: Option<T>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
 }
 
+fn optional_u32_as_i64(value: Option<u32>) -> Option<i64> {
+    value.map(i64::from)
+}
+
+fn outcome_name(outcome: AnalysisOutcome) -> &'static str {
+    match outcome {
+        AnalysisOutcome::Legal => "legal",
+        AnalysisOutcome::Degraded => "degraded",
+        AnalysisOutcome::Partial => "partial",
+        AnalysisOutcome::Unreachable => "unreachable",
+        AnalysisOutcome::NotImplemented => "not_implemented",
+    }
+}
+
+fn diagnostics_json<T: Serialize>(value: &T) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "[]".to_string())
+}
+
 fn batch_status_name(status: BatchItemStatus) -> &'static str {
     match status {
         BatchItemStatus::Succeeded => "succeeded",
+        BatchItemStatus::Ignored => "ignored",
         BatchItemStatus::Failed => "failed",
     }
 }
@@ -1392,7 +2628,7 @@ fn ensure_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct Extent {
     min_x: f64,
     min_y: f64,
@@ -1416,6 +2652,15 @@ fn extent_for_features<'a>(features: impl IntoIterator<Item = &'a [[f64; 2]]>) -
         }
     }
     extent
+}
+
+fn combine_extents(left: Extent, right: Extent) -> Extent {
+    Extent {
+        min_x: left.min_x.min(right.min_x),
+        min_y: left.min_y.min(right.min_y),
+        max_x: left.max_x.max(right.max_x),
+        max_y: left.max_y.max(right.max_y),
+    }
 }
 
 struct GeoPackageWriter {
@@ -1571,6 +2816,30 @@ impl GeoPackageWriter {
         sql.clear();
         Ok(())
     }
+
+    fn insert_feature_wkb(
+        &mut self,
+        table_name: &str,
+        fields: &[(&str, SqlValue)],
+        wkb: &[u8],
+    ) -> Result<()> {
+        let mut field_names = fields.iter().map(|(name, _)| *name).collect::<Vec<_>>();
+        field_names.push("geom");
+        let sql = format!(
+            "INSERT INTO {table_name} ({}) VALUES ({})",
+            field_names.join(", "),
+            vec!["?"; field_names.len()].join(", ")
+        );
+        let geometry = gpkg_wkb(wkb);
+        let mut statement = self.connection.prepare(&sql)?;
+        let mut values = fields
+            .iter()
+            .map(|(_, value)| value.as_param())
+            .collect::<Vec<_>>();
+        values.push(rusqlite::types::Value::Blob(geometry));
+        statement.execute(rusqlite::params_from_iter(values))?;
+        Ok(())
+    }
 }
 
 enum SqlValue {
@@ -1601,19 +2870,16 @@ impl SqlValue {
 
 fn gpkg_linestring(coords: &[[f64; 2]]) -> Vec<u8> {
     let coords = coerce_linestring_coords(coords);
+    gpkg_wkb(&wkb_linestring(&coords))
+}
+
+fn gpkg_wkb(wkb: &[u8]) -> Vec<u8> {
     let mut binary = Vec::new();
     binary.extend_from_slice(b"GP");
     binary.push(0);
     binary.push(1);
     binary.extend_from_slice(&EPSG_4326.to_le_bytes());
-
-    binary.push(1);
-    binary.extend_from_slice(&2_u32.to_le_bytes());
-    binary.extend_from_slice(&(coords.len() as u32).to_le_bytes());
-    for [x, y] in coords {
-        binary.extend_from_slice(&x.to_le_bytes());
-        binary.extend_from_slice(&y.to_le_bytes());
-    }
+    binary.extend_from_slice(wkb);
     binary
 }
 
@@ -1630,14 +2896,59 @@ fn wkb_linestring(coords: &[[f64; 2]]) -> Vec<u8> {
     binary
 }
 
+fn wkb_multilinestring(lines: &[Vec<[f64; 2]>]) -> Vec<u8> {
+    let mut binary = Vec::new();
+    binary.push(1);
+    binary.extend_from_slice(&5_u32.to_le_bytes());
+    binary.extend_from_slice(&(lines.len() as u32).to_le_bytes());
+    for line in lines {
+        binary.extend_from_slice(&wkb_linestring(line));
+    }
+    binary
+}
+
+fn wkb_polygon(rings: &[Vec<[f64; 2]>]) -> Vec<u8> {
+    let mut binary = Vec::new();
+    binary.push(1);
+    binary.extend_from_slice(&3_u32.to_le_bytes());
+    binary.extend_from_slice(&(rings.len() as u32).to_le_bytes());
+    for ring in rings {
+        binary.extend_from_slice(&(ring.len() as u32).to_le_bytes());
+        for [x, y] in ring {
+            binary.extend_from_slice(&x.to_le_bytes());
+            binary.extend_from_slice(&y.to_le_bytes());
+        }
+    }
+    binary
+}
+
+fn wkb_multipolygon(polygons: &[Vec<Vec<[f64; 2]>>]) -> Vec<u8> {
+    let mut binary = Vec::new();
+    binary.push(1);
+    binary.extend_from_slice(&6_u32.to_le_bytes());
+    binary.extend_from_slice(&(polygons.len() as u32).to_le_bytes());
+    for polygon in polygons {
+        binary.extend_from_slice(&wkb_polygon(polygon));
+    }
+    binary
+}
+
 fn geoparquet_schema(fields: Vec<Field>, extent: Extent) -> Schema {
+    geoparquet_schema_with_types(fields, extent, &["LineString"])
+}
+
+fn geoparquet_schema_with_types(
+    fields: Vec<Field>,
+    extent: Extent,
+    geometry_types: &[&str],
+) -> Schema {
     let geo_metadata = json!({
         "version": "1.1.0",
         "primary_column": "geometry",
         "columns": {
             "geometry": {
                 "encoding": "WKB",
-                "geometry_types": ["LineString"],
+                "geometry_types": geometry_types,
                 "bbox": [extent.min_x, extent.min_y, extent.max_x, extent.max_y]
             }
         }
@@ -1669,11 +2980,15 @@ fn write_parquet_record_batch(path: &Path, schema: Schema, columns: Vec<ArrayRef
 mod tests {
     use super::{
         coerce_linestring_coords, csv_escape, linestring_wkt, write_od_result, write_route_result,
+        write_service_area_result,
     };
     use netan_profile::ReturnConfig;
     use netan_query::{
-        BatchItemStatus, LabeledPoint, OdPair, OdPairResult, OdPairsDocument, OdResult,
-        RouteRequest, RouteResult, RouteSummary, SnappedPoint,
+        AnalysisOutcome, BatchItemStatus, LabeledPoint, OdPair, OdPairResult, OdPairsDocument,
+        OdResult, RouteRequest, RouteResult, RouteSummary, ServiceAreaBandMode,
+        ServiceAreaBoundaryMode, ServiceAreaFeature, ServiceAreaGeometryType,
+        ServiceAreaMultiOriginMode, ServiceAreaOutputMode, ServiceAreaRequest, ServiceAreaResult,
+        ServiceAreaThresholdMetric, SnappedPoint,
     };
     use rusqlite::Connection;
     use std::fs;
@@ -1719,6 +3034,8 @@ mod tests {
                 lat: 53.2,
             },
             snap: Default::default(),
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig::default(),
         };
         let result = RouteResult {
@@ -1735,6 +3052,7 @@ mod tests {
                 snapped_edge_fraction: None,
                 snapped_from_node_id: None,
                 snapped_to_node_id: None,
+                component_id: Some(0),
             },
             destination: SnappedPoint {
                 point_id: "destination".to_string(),
@@ -1748,8 +3066,20 @@ mod tests {
                 snapped_edge_fraction: None,
                 snapped_from_node_id: None,
                 snapped_to_node_id: None,
+                component_id: Some(0),
             },
+            outcome: AnalysisOutcome::Legal,
+            fallback_used: false,
+            origin_hop_distance_m: None,
+            destination_hop_distance_m: None,
             summary: RouteSummary {
+                network_distance_m: 1_000,
+                network_travel_time_s: 120.0,
+                network_generalized_cost: 120.0,
+                illegal_movement_penalty_s: 0.0,
+                illegal_movement_penalty_cost: 0.0,
+                violation_count: 0,
+                violation_types: vec![],
                 total_distance_m: 1_000,
                 total_travel_time_s: 120.0,
                 total_generalized_cost: 120.0,
@@ -1758,8 +3088,11 @@ mod tests {
             node_path: vec![1, 2, 3],
             edge_path: vec![10, 11],
             geometry: Some(vec![[6.0, 53.0], [6.1, 53.1], [6.2, 53.2]]),
+            hop_segments: vec![],
             segments: None,
             breakdowns: None,
+            violations: vec![],
+            diagnostics: vec![],
             warnings: vec![],
         };
 
@@ -1792,32 +3125,115 @@ mod tests {
                 },
             }],
             snap: Default::default(),
+            connectivity: Default::default(),
+            fallback: Default::default(),
             returns: ReturnConfig::default(),
         };
         let result = OdResult {
             pair_count: 1,
             succeeded_count: 1,
             failed_count: 0,
+            ignored_count: 0,
             pairs: vec![OdPairResult {
                 pair_id: "pair_1".to_string(),
                 origin_id: "origin".to_string(),
                 destination_id: "destination".to_string(),
                 status: BatchItemStatus::Succeeded,
+                outcome: AnalysisOutcome::Legal,
+                fallback_used: false,
+                origin_component_id: Some(0),
+                destination_component_id: Some(0),
+                origin_hop_distance_m: None,
+                destination_hop_distance_m: None,
                 origin_snap_distance_m: Some(1.0),
                 destination_snap_distance_m: Some(2.0),
                 total_distance_m: Some(1_000),
                 total_travel_time_s: Some(120.0),
                 total_generalized_cost: Some(120.0),
+                illegal_movement_penalty_s: Some(0.0),
+                illegal_movement_penalty_cost: Some(0.0),
+                violation_count: 0,
+                violation_types: vec![],
                 geometry: Some(vec![[6.0, 53.0], [6.1, 53.1], [6.2, 53.2]]),
+                diagnostics: vec![],
                 error: None,
             }],
+            diagnostics: vec![],
             warnings: vec![],
         };
 
         write_od_result(&path, &request, &result).expect("csv written");
 
         let raw = fs::read_to_string(&path).expect("csv readable");
+        assert!(raw.contains("outcome"));
+        assert!(raw.contains("diagnostics_json"));
+        assert!(raw.contains("legal"));
         assert!(raw.contains("LINESTRING(6 53, 6.1 53.1, 6.2 53.2)"));
+
+        fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn writes_service_area_geojson() {
+        let path = temp_path("service_area.geojson");
+        let request = ServiceAreaRequest {
+            analysis_id: "sa_demo".to_string(),
+            origins: vec![LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            }],
+            thresholds: vec![],
+            snap: Default::default(),
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            output_mode: ServiceAreaOutputMode::Both,
+            band_mode: ServiceAreaBandMode::Cumulative,
+            boundary_mode: ServiceAreaBoundaryMode::CutAtBoundary,
+            multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+            polygon: Default::default(),
+            returns: Default::default(),
+        };
+        let result = ServiceAreaResult {
+            analysis_id: "sa_demo".to_string(),
+            outcome: AnalysisOutcome::Legal,
+            output_mode: ServiceAreaOutputMode::Both,
+            band_mode: ServiceAreaBandMode::Cumulative,
+            boundary_mode: ServiceAreaBoundaryMode::CutAtBoundary,
+            multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+            origin_count: 1,
+            processed_origin_count: 1,
+            skipped_origin_count: 0,
+            fallback_origin_count: 0,
+            threshold_count: 1,
+            features: vec![ServiceAreaFeature {
+                origin_id: Some("origin".to_string()),
+                band_start_limit: None,
+                threshold_id: Some("t1".to_string()),
+                threshold_limit: 300.0,
+                threshold_metric: ServiceAreaThresholdMetric::DistanceM,
+                geometry_type: ServiceAreaGeometryType::Network,
+                fallback_used: false,
+                origin_component_id: Some(0),
+                origin_hop_distance_m: None,
+                reachable_network_length_m: Some(300.0),
+                reachable_edge_count: Some(2),
+                geometry: Some(serde_json::json!({
+                    "type": "MultiLineString",
+                    "coordinates": [[[6.0, 53.0], [6.1, 53.1]]],
+                })),
+            }],
+            summaries: vec![],
+            diagnostics: vec![],
+            warnings: vec![],
+        };
+
+        write_service_area_result(&path, &request, &result).expect("geojson written");
+
+        let raw = fs::read_to_string(&path).expect("geojson readable");
+        assert!(raw.contains("FeatureCollection"));
+        assert!(raw.contains("sa_demo"));
+        assert!(raw.contains("MultiLineString"));
 
         fs::remove_file(path).ok();
     }

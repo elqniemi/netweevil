@@ -1,0 +1,39 @@
+{
+  "route_id": "qgis_route_008",
+  "origin": {
+    "id": "origin",
+    "lon": 6.535841,
+    "lat": 53.237978
+  },
+  "destination": {
+    "id": "destination",
+    "lon": 6.56717,
+    "lat": 53.215743
+  },
+  "snap": {
+    "max_distance_m": 500.0
+  },
+  "connectivity": {
+    "disconnected": "strict"
+  },
+  "fallback": {
+    "allow_reverse_oneway": false,
+    "allow_illegal_turn": false,
+    "ignore_turn_restrictions": false,
+    "allow_uturn_where_normally_forbidden": false
+  },
+  "returns": {
+    "geometry": "full",
+    "segment_rows": true,
+    "road_type_breakdown": [
+      "time_s",
+      "distance_m"
+    ],
+    "surface_breakdown": [
+      "time_s",
+      "distance_m"
+    ],
+    "penalty_breakdown": true,
+    "explain_cost_derivation": true
+  }
+}

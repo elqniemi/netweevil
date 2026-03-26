@@ -10,9 +10,11 @@ It does not shell out to the CLI. QGIS sends JSON requests to the API, receives 
 - reads the loaded dataset and available profiles from `/v1/service`
 - lets you pick route start and end points directly from the QGIS map canvas
 - can pull route points from a selected point feature in the active layer
-- submits route, OD, and matrix requests to the API
-- loads route, OD, and matrix geometries into QGIS from API responses
+- submits route, OD, matrix, and service-area requests to the API
+- loads route, OD, matrix, and service-area geometries into QGIS from API responses
 - can build matrix origins and destinations from loaded QGIS point layers
+- can build service-area origins from map picks, selected point features, or the current route endpoints
+- exposes disconnected-network policies and opt-in degraded-routing controls for route and batch requests
 - supports both normal JSON responses and direct GeoJSON responses
 - remembers connection and analysis settings between QGIS sessions
 
@@ -115,6 +117,28 @@ Use either loaded point layers or files:
 
 Then press `Run Matrix`.
 
+### Service Area
+
+Use the dedicated `Service Area` tab:
+
+1. Set an `Analysis id`.
+2. Enter one threshold list such as `300, 600`.
+3. Pick either `Distance (m)` or `Travel time (s)` for the whole threshold list.
+4. Append origins with `Pick On Map`, `Add Selected Features`, `Use Route Start`, or `Use Route Start + End`.
+5. Choose `Output mode`, `Band mode`, `Boundary mode`, and `Multi-origin mode`.
+6. Optionally expand `Connectivity Controls` to set disconnected-network behavior.
+7. Press `Run Service Area`.
+
+The plugin saves the raw API response and loads grouped sublayers back into QGIS by threshold and geometry type.
+
+### Advanced Route And Batch Controls
+
+- `Route` and `Batch` each have a collapsed `Advanced Controls` section.
+- Disconnected-network policies are available there for route, OD, and matrix requests.
+- Unsafe degraded-routing options remain under a separate collapsed `Unsafe Failure Modes` section and are off by default.
+- The plugin shows a preflight confirmation before sending a request with unsafe failure modes enabled.
+- Diagnostics now include suggested next actions in the dock log when the API returns them.
+
 ## Notes
 
 - The plugin does not embed the Rust engine; it calls the running HTTP API.
@@ -123,4 +147,5 @@ Then press `Run Matrix`.
 - Route points are transformed from the current map or layer CRS into WGS84 before being sent to the API.
 - YAML request files are not supported by the plugin in API mode.
 - When `Response format` is `JSON`, the plugin still builds a temporary GeoJSON layer locally when geometry is present in the API response.
+- Service-area outputs are loaded into grouped sublayers so thresholds and geometry modes stay inspectable in QGIS.
 - In WSL mode, output layers are loaded back into QGIS through `\\wsl$\<distro>\...`.
