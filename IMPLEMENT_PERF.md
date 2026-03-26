@@ -126,8 +126,10 @@ Completed in this phase:
 - [x] snap candidate search now keeps only the nearest bounded set instead of collecting full candidate vectors
 - [x] matrix execution now pre-snaps origin and destination point sets once per batch
 - [x] OD execution now reuses snapped endpoint candidates for repeated points within a batch
+- [x] batch snap lookup now keys repeated point coordinates directly instead of missing cache reuse on differing point ids
 - [x] multi-edge restriction fallback now reuses automaton-search hash maps and heap scratch across requests
 - [x] single-route candidate evaluation now reuses exact-solver results when multiple snap candidates collapse onto the same origin/destination node pair
+- [x] OD and matrix execution now reuse identical snapped candidate-set route solves within a batch instead of rerunning the same exact search
 
 Target structures:
 
@@ -215,13 +217,15 @@ Exit criteria:
 
 ### Phase 7: Accelerated Query Engine
 
-Status: In progress.
+Status: Implementation complete; corpus validation pending.
 
 Completed in this phase:
 
 - [x] route snapping now supports interior edge phantoms so first/last edge costs, summaries, segments, and geometry are partial-edge aware
 - [x] route geometry is still assembled on demand from the persisted topology node coordinates instead of being materialized eagerly in the hot path
-- [ ] query-time reuse of persisted acceleration data remains disabled until the bundle is upgraded from oriented transition scaffolding to a real shortcut-capable structure
+- [x] dataset imports now persist shortcut-capable acceleration arcs with unpack metadata instead of only oriented transition scaffolding
+- [x] profile compilation now customizes persisted shortcut-arc weights from the compiled edge and turn costs
+- [x] query-time route solving now reuses the persisted acceleration bundle as a safe upper-bound accelerator before the exact final search
 
 Exit criteria:
 
@@ -231,6 +235,14 @@ Exit criteria:
 ### Phase 8: Service Throughput
 
 Make the runtime scale under real load:
+
+Status: Implementation complete; throughput validation pending.
+
+Completed in this phase:
+
+- [x] API route, OD, and matrix execution now run on a bounded blocking worker path instead of consuming async reactor threads directly
+- [x] shared read-only prepared engines remain hot in memory across requests
+- [x] thread-local scratch reuse now covers the unrestricted single-source batch path in addition to the pairwise exact solvers
 
 - dedicated CPU worker pool for routing
 - per-thread scratch reuse
@@ -245,6 +257,13 @@ Exit criteria:
 
 Replace repeated single-pair solves for OD and matrix with many-to-many acceleration.
 
+Status: Implementation complete for the current exact engine; accelerator-backed corpus validation pending.
+
+Completed in this phase:
+
+- [x] OD and matrix execution now reuse exact single-source edge-transition search trees per snapped origin candidate instead of rerunning a full pairwise search for every cell
+- [x] batch execution still preserves current snap-candidate semantics and falls back to the restriction automaton path when multi-edge restrictions are active
+
 Exit criteria:
 
 - OD and matrix are materially faster than repeated route solves
@@ -252,6 +271,13 @@ Exit criteria:
 ### Phase 10: Differential Verification
 
 Protect correctness with:
+
+Status: Implementation complete for the current in-repo test scope; large-dataset sampling pending.
+
+Completed in this phase:
+
+- [x] differential tests now compare accelerated route execution against exact route execution on the small in-repo topology fixtures
+- [x] differential tests now compare matrix batch execution against repeated exact single-route execution on the same requests
 
 - golden fixtures
 - randomized differential tests on small and medium extracts
@@ -313,7 +339,14 @@ These are the first concrete tasks to execute now:
 - [x] Reduced snap candidate allocation by keeping only the nearest bounded candidate set during search.
 - [x] Removed repeated matrix-cell snapping by precomputing batch snap candidates.
 - [x] Added per-batch snap candidate reuse for repeated OD endpoints.
+- [x] Removed avoidable snap-cache misses for repeated coordinates that arrived under different point ids.
 - [x] Reused scratch allocations in the multi-edge automaton fallback path.
 - [x] Avoided duplicate exact solves for repeated snapped node pairs during single-route candidate evaluation.
+- [x] Reused identical snapped candidate-set route solves across OD pairs and matrix cells within a batch.
 - [x] Replaced the normal unrestricted exact hot path with bidirectional edge-based search
+- [x] Upgraded dataset acceleration bundles from oriented transition scaffolding to shortcut-capable arcs with unpack metadata.
+- [x] Re-enabled query-time acceleration reuse with customized shortcut weights and exact-search upper-bound pruning.
+- [x] Replaced per-cell repeated batch solving with reusable single-source exact search trees across OD and matrix batches.
 - [x] Summary-only route responses now omit `node_path` and `edge_path` payloads unless richer route detail is requested.
+- [x] Moved API route, OD, and matrix execution onto a bounded blocking worker path to protect async request handling under CPU load.
+- [x] Added differential tests that compare accelerated routes and batch matrix results against repeated exact execution on the in-repo fixtures.

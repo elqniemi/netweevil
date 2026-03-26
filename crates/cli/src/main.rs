@@ -17,7 +17,8 @@ use netan_persist::{
     write_compiled_profile_manifest, write_json, write_run_manifest,
 };
 use netan_profile::{
-    ProfileDocument, ReturnGeometry, compile_profile_bundle_with_acceleration, load_profile,
+    ProfileCompileProgress, ProfileCompileStage, ProfileDocument, ReturnGeometry,
+    compile_profile_bundle_with_acceleration_with_progress, load_profile,
 };
 use netan_query::{
     AnalysisKind, MatrixResult, OdResult, RouteResult, execute_matrix, execute_od, execute_route,
@@ -343,16 +344,35 @@ fn profile_validate(path: &Path) -> Result<()> {
 }
 
 fn profile_compile(paths: &WorkspacePaths, dataset: &str, profile_path: &Path) -> Result<()> {
+    let mut progress_line_len = 0_usize;
     let profile = load_profile(profile_path)?;
     profile.validate()?;
+    render_profile_compile_message(
+        "Load Dataset",
+        format!("Reading dataset manifest for '{dataset}'"),
+        false,
+        &mut progress_line_len,
+    );
     let dataset_manifest = read_dataset_manifest(paths, dataset)
         .with_context(|| format!("reading dataset manifest for '{dataset}'"))?;
     let topology_ref = dataset_manifest
         .topology_bundle
         .clone()
         .context("dataset is missing a topology bundle; run `netan dataset import` first")?;
+    render_profile_compile_message(
+        "Load Dataset",
+        format!("Reading topology bundle {}", topology_ref.path),
+        false,
+        &mut progress_line_len,
+    );
     let topology: TopologyBundle = read_topology_bundle(&topology_ref.path)
         .with_context(|| format!("reading topology bundle {}", topology_ref.path))?;
+    render_profile_compile_message(
+        "Load Dataset",
+        "Reading acceleration bundle metadata".to_string(),
+        false,
+        &mut progress_line_len,
+    );
     let acceleration: Option<(DatasetAccelerationBundle, CacheBundleId)> = dataset_manifest
         .acceleration_bundle
         .as_ref()
@@ -362,13 +382,14 @@ fn profile_compile(paths: &WorkspacePaths, dataset: &str, profile_path: &Path) -
                 .map(|bundle| (bundle, bundle_ref.bundle_id.clone()))
         })
         .transpose()?;
-    let compiled_bundle = compile_profile_bundle_with_acceleration(
+    let compiled_bundle = compile_profile_bundle_with_acceleration_with_progress(
         &profile,
         &topology,
         topology_ref.bundle_id.clone(),
         acceleration
             .as_ref()
             .map(|(bundle, bundle_id)| (bundle, bundle_id.clone())),
+        |event| render_profile_compile_progress(&event, &mut progress_line_len),
     )
     .with_context(|| {
         format!(
@@ -381,6 +402,12 @@ fn profile_compile(paths: &WorkspacePaths, dataset: &str, profile_path: &Path) -
     let bundle_path = paths
         .metric_bundles_dir
         .join(format!("metric-{compile_id}.bin"));
+    render_profile_compile_message(
+        "Write Bundle",
+        format!("Writing compiled profile bundle {}", bundle_path.display()),
+        false,
+        &mut progress_line_len,
+    );
     write_compiled_profile_bundle(&bundle_path, &compiled_bundle)?;
     let manifest = CompiledProfileManifest {
         compile_id: compile_id.clone(),
@@ -397,7 +424,27 @@ fn profile_compile(paths: &WorkspacePaths, dataset: &str, profile_path: &Path) -
             path: bundle_path.display().to_string(),
         },
     };
+    render_profile_compile_message(
+        "Write Manifest",
+        format!(
+            "Writing compiled profile manifest for '{}'",
+            profile.profile.id
+        ),
+        false,
+        &mut progress_line_len,
+    );
     let path = write_compiled_profile_manifest(paths, &manifest)?;
+    render_profile_compile_message(
+        "Complete",
+        format!(
+            "Compiled profile '{}' for dataset '{}' into {} edge metrics",
+            manifest.profile_id,
+            manifest.dataset_id.0,
+            compiled_bundle.edge_metrics.len()
+        ),
+        true,
+        &mut progress_line_len,
+    );
     println!(
         "compiled profile '{}' for dataset '{}' into {} edge metrics",
         manifest.profile_id,
@@ -406,6 +453,35 @@ fn profile_compile(paths: &WorkspacePaths, dataset: &str, profile_path: &Path) -
     );
     println!("compiled profile manifest written to {}", path.display());
     Ok(())
+}
+
+fn render_profile_compile_progress(event: &ProfileCompileProgress, last_line_len: &mut usize) {
+    render_profile_compile_message(
+        event.stage.label(),
+        event.message.clone(),
+        matches!(event.stage, ProfileCompileStage::Complete),
+        last_line_len,
+    );
+}
+
+fn render_profile_compile_message(
+    stage_label: &str,
+    message: String,
+    done: bool,
+    last_line_len: &mut usize,
+) {
+    let mut line = format!("[{stage_label}] {message}");
+    if done {
+        line.push_str(" [done]");
+    }
+    let padding = last_line_len.saturating_sub(line.len());
+    eprint!("\r{line}{:padding$}", "");
+    if done {
+        eprintln!();
+        *last_line_len = 0;
+    } else {
+        *last_line_len = line.len();
+    }
 }
 
 fn analyze_route(paths: &WorkspacePaths, args: RouteArgs) -> Result<()> {
@@ -976,16 +1052,16 @@ fn engine_description(topology: &TopologyBundle) -> EngineDescription {
         EngineDescription {
             route_engine: "astar_exact_multi_edge_turns",
             route_summary: "Exact forward A* shortest-path search over the compiled directed edge graph with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences.",
-            batch_engine: "astar_exact_multi_edge_turns_repeated",
-            batch_summary: "Repeated exact forward A* shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences.",
+            batch_engine: "astar_exact_multi_edge_turns_batch_reuse",
+            batch_summary: "Exact forward A* shortest-path searches over the compiled directed edge graph with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences, with per-batch snap reuse and duplicate snapped-pair solve reuse for OD and matrix execution.",
             acceleration: "spatial_index+a_star+turn_automaton",
         }
     } else {
         EngineDescription {
             route_engine: "bidirectional_exact_pairwise_turns",
             route_summary: "Exact bidirectional shortest-path search over the compiled directed edge graph with edge-phantom snapping for endpoints and pairwise turn prohibitions.",
-            batch_engine: "bidirectional_exact_pairwise_turns_repeated",
-            batch_summary: "Repeated exact bidirectional shortest-path searches over the compiled directed edge graph, one OD pair or matrix cell at a time, with edge-phantom snapping for endpoints and pairwise turn prohibitions.",
+            batch_engine: "bidirectional_exact_pairwise_turns_batch_reuse",
+            batch_summary: "Exact bidirectional shortest-path searches over the compiled directed edge graph with edge-phantom snapping for endpoints and pairwise turn prohibitions, with per-batch snap reuse and duplicate snapped-pair solve reuse for OD and matrix execution.",
             acceleration: "spatial_index+edge_phantoms",
         }
     }

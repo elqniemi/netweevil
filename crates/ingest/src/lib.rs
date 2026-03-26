@@ -35,6 +35,7 @@ pub enum DatasetImportStage {
     ScanRoutableObjects,
     LoadNodeCoords,
     BuildTopology,
+    BuildAcceleration,
     WriteTopologyBundle,
     WriteManifest,
     Complete,
@@ -47,6 +48,7 @@ impl DatasetImportStage {
             Self::ScanRoutableObjects => "Scan Routable Objects",
             Self::LoadNodeCoords => "Load Node Coords",
             Self::BuildTopology => "Build Topology",
+            Self::BuildAcceleration => "Build Acceleration",
             Self::WriteTopologyBundle => "Write Topology Bundle",
             Self::WriteManifest => "Write Dataset Manifest",
             Self::Complete => "Complete",
@@ -113,7 +115,8 @@ where
         .join(format!("{}.bin", acceleration_bundle_id.0));
     let (bundle, edge_name_bundle, topology_meta) =
         build_topology_bundle(source_path, size, &sha256, &mut progress)?;
-    let acceleration_bundle = build_dataset_acceleration_bundle(&bundle, bundle_id.clone());
+    let acceleration_bundle =
+        build_dataset_acceleration_bundle_with_progress(&bundle, bundle_id.clone(), &mut progress);
     emit_progress(
         &mut progress,
         DatasetImportStage::WriteTopologyBundle,
@@ -422,6 +425,15 @@ fn build_topology_bundle(
         );
     }
 
+    emit_progress(
+        progress,
+        DatasetImportStage::BuildTopology,
+        Some(100.0),
+        format!(
+            "Resolving {} turn restrictions",
+            restriction_candidates.len()
+        ),
+    );
     let turn_restrictions =
         build_turn_restrictions(&restriction_candidates, &pending_ways, &node_lookup, &edges);
 
@@ -432,6 +444,15 @@ fn build_topology_bundle(
 
     let edge_name_bundle = EdgeNameBundle { names };
 
+    emit_progress(
+        progress,
+        DatasetImportStage::BuildTopology,
+        Some(100.0),
+        format!(
+            "Building edge-transition topology from {} directed edges",
+            edges.len()
+        ),
+    );
     let edge_based_topology = build_edge_based_topology(nodes.len(), &edges);
 
     let bundle = TopologyBundle {
@@ -508,10 +529,27 @@ fn build_edge_based_topology(node_count: usize, edges: &[DirectedEdge]) -> EdgeB
     }
 }
 
+#[cfg(test)]
 fn build_dataset_acceleration_bundle(
     topology: &TopologyBundle,
     source_topology_bundle_id: CacheBundleId,
 ) -> DatasetAccelerationBundle {
+    build_dataset_acceleration_bundle_with_progress(
+        topology,
+        source_topology_bundle_id,
+        &mut |_| {},
+    )
+}
+
+fn build_dataset_acceleration_bundle_with_progress(
+    topology: &TopologyBundle,
+    source_topology_bundle_id: CacheBundleId,
+    progress: &mut impl FnMut(DatasetImportProgress),
+) -> DatasetAccelerationBundle {
+    const MAX_SHORTCUT_PATH_LEN: u32 = 64;
+    const MAX_SHORTCUTS_PER_CONTRACTED_EDGE: usize = 1_024;
+    const MAX_SHORTCUT_BUDGET_PER_EDGE: usize = 4;
+
     let transition_topology = &topology.edge_based_topology;
     let edge_count = topology.edges.len();
     let mut in_degree = vec![0_u32; edge_count];
@@ -549,63 +587,230 @@ fn build_dataset_acceleration_bundle(
         edge_rank[edge_index as usize] = rank as u32;
     }
 
-    let mut upward_degree = vec![0_u32; edge_count];
-    let mut downward_degree = vec![0_u32; edge_count];
+    emit_progress(
+        progress,
+        DatasetImportStage::BuildAcceleration,
+        Some(0.0),
+        format!("Building acceleration 0% ({} edge states)", edge_count),
+    );
+
+    let mut arcs = Vec::<ShortcutArc>::new();
+    let mut seen_arc_pairs = HashSet::with_capacity(
+        transition_topology
+            .edge_transition_edges
+            .len()
+            .saturating_mul(2),
+    );
+    let mut active_out = vec![Vec::<u32>::new(); edge_count];
+    let mut active_in = vec![Vec::<u32>::new(); edge_count];
     if transition_topology.edge_transition_first_out.len() == edge_count + 1 {
         for edge_index in 0..edge_count {
             let start = transition_topology.edge_transition_first_out[edge_index] as usize;
             let end = transition_topology.edge_transition_first_out[edge_index + 1] as usize;
             for &next_edge in &transition_topology.edge_transition_edges[start..end] {
-                if edge_rank[edge_index] < edge_rank[next_edge as usize] {
-                    upward_degree[edge_index] += 1;
-                } else {
-                    downward_degree[edge_index] += 1;
+                if !seen_arc_pairs.insert(shortcut_arc_key(edge_index as u32, next_edge)) {
+                    continue;
                 }
+                let arc_id = arcs.len() as u32;
+                arcs.push(ShortcutArc {
+                    tail: edge_index as u32,
+                    head: next_edge,
+                    path_len: 1,
+                    kind: ShortcutArcKind::Base,
+                });
+                active_out[edge_index].push(arc_id);
+                active_in[next_edge as usize].push(arc_id);
             }
         }
     }
+    let base_arc_count = arcs.len();
+    let max_shortcut_count = edge_count.saturating_mul(MAX_SHORTCUT_BUDGET_PER_EDGE);
+    let mut added_shortcuts = 0_usize;
 
-    let mut upward_first_out = vec![0_u32; edge_count + 1];
-    let mut downward_first_out = vec![0_u32; edge_count + 1];
-    for edge_index in 0..edge_count {
-        upward_first_out[edge_index + 1] = upward_first_out[edge_index] + upward_degree[edge_index];
-        downward_first_out[edge_index + 1] =
-            downward_first_out[edge_index] + downward_degree[edge_index];
-    }
+    let mut active_vertex = vec![true; edge_count];
+    let mut reporter = PercentReporter::starting_at_zero();
+    for (order_index, &contracted_edge) in edge_order.iter().enumerate() {
+        let contracted_edge = contracted_edge as usize;
+        let incoming = active_in[contracted_edge]
+            .iter()
+            .copied()
+            .filter(|&arc_id| {
+                let arc = &arcs[arc_id as usize];
+                active_vertex[arc.tail as usize]
+                    && active_vertex[arc.head as usize]
+                    && arc.head as usize == contracted_edge
+                    && arc.tail as usize != contracted_edge
+            })
+            .collect::<Vec<_>>();
+        let outgoing = active_out[contracted_edge]
+            .iter()
+            .copied()
+            .filter(|&arc_id| {
+                let arc = &arcs[arc_id as usize];
+                active_vertex[arc.tail as usize]
+                    && active_vertex[arc.head as usize]
+                    && arc.tail as usize == contracted_edge
+                    && arc.head as usize != contracted_edge
+            })
+            .collect::<Vec<_>>();
 
-    let mut upward_head = vec![0_u32; upward_first_out[edge_count] as usize];
-    let mut downward_head = vec![0_u32; downward_first_out[edge_count] as usize];
-    let mut upward_write_positions = upward_first_out[..edge_count].to_vec();
-    let mut downward_write_positions = downward_first_out[..edge_count].to_vec();
-    if transition_topology.edge_transition_first_out.len() == edge_count + 1 {
-        for edge_index in 0..edge_count {
-            let start = transition_topology.edge_transition_first_out[edge_index] as usize;
-            let end = transition_topology.edge_transition_first_out[edge_index + 1] as usize;
-            for &next_edge in &transition_topology.edge_transition_edges[start..end] {
-                if edge_rank[edge_index] < edge_rank[next_edge as usize] {
-                    let write_index = &mut upward_write_positions[edge_index];
-                    upward_head[*write_index as usize] = next_edge;
-                    *write_index += 1;
-                } else {
-                    let write_index = &mut downward_write_positions[edge_index];
-                    downward_head[*write_index as usize] = next_edge;
-                    *write_index += 1;
+        let remaining_shortcut_budget = max_shortcut_count.saturating_sub(added_shortcuts);
+        let local_shortcut_budget =
+            remaining_shortcut_budget.min(MAX_SHORTCUTS_PER_CONTRACTED_EDGE);
+        let mut added_for_vertex = 0_usize;
+        for incoming_arc in incoming {
+            let tail = arcs[incoming_arc as usize].tail as usize;
+            for &outgoing_arc in &outgoing {
+                if added_for_vertex >= local_shortcut_budget {
+                    break;
                 }
+                let head = arcs[outgoing_arc as usize].head as usize;
+                if tail == head {
+                    continue;
+                }
+                let path_len = arcs[incoming_arc as usize]
+                    .path_len
+                    .saturating_add(arcs[outgoing_arc as usize].path_len);
+                if path_len > MAX_SHORTCUT_PATH_LEN {
+                    continue;
+                }
+                if !seen_arc_pairs.insert(shortcut_arc_key(tail as u32, head as u32)) {
+                    continue;
+                }
+                let arc_id = arcs.len() as u32;
+                arcs.push(ShortcutArc {
+                    tail: tail as u32,
+                    head: head as u32,
+                    path_len,
+                    kind: ShortcutArcKind::Shortcut {
+                        left: incoming_arc,
+                        right: outgoing_arc,
+                    },
+                });
+                active_out[tail].push(arc_id);
+                active_in[head].push(arc_id);
+                added_shortcuts += 1;
+                added_for_vertex += 1;
+            }
+            if added_for_vertex >= local_shortcut_budget {
+                break;
             }
         }
+        active_vertex[contracted_edge] = false;
+        reporter.emit_if_needed(
+            (order_index + 1) as u64,
+            edge_order.len() as u64,
+            DatasetImportStage::BuildAcceleration,
+            progress,
+            |percent| {
+                format!(
+                    "Building acceleration {:.0}% ({}/{}) with {} arcs ({} base, {} shortcuts)",
+                    percent,
+                    order_index + 1,
+                    edge_order.len(),
+                    arcs.len(),
+                    base_arc_count,
+                    added_shortcuts
+                )
+            },
+        );
+    }
+    emit_progress(
+        progress,
+        DatasetImportStage::BuildAcceleration,
+        Some(100.0),
+        format!(
+            "Building acceleration 100% ({} arcs: {} base, {} shortcuts)",
+            arcs.len(),
+            base_arc_count,
+            added_shortcuts
+        ),
+    );
+
+    let mut upward_first_out = Vec::with_capacity(edge_count + 1);
+    let mut downward_first_out = Vec::with_capacity(edge_count + 1);
+    upward_first_out.push(0);
+    downward_first_out.push(0);
+
+    let mut upward_head = Vec::new();
+    let mut downward_head = Vec::new();
+    let mut upward_path_first_out = Vec::new();
+    let mut downward_path_first_out = Vec::new();
+    let mut upward_path_edges = Vec::new();
+    let mut downward_path_edges = Vec::new();
+    let mut path_stack = Vec::new();
+    upward_path_first_out.push(0);
+    downward_path_first_out.push(0);
+
+    for tail in 0..edge_count {
+        for &arc_id in &active_out[tail] {
+            let arc = &arcs[arc_id as usize];
+            if edge_rank[arc.tail as usize] < edge_rank[arc.head as usize] {
+                upward_head.push(arc.head);
+                append_shortcut_arc_path(&arcs, arc_id, &mut upward_path_edges, &mut path_stack);
+                upward_path_first_out.push(upward_path_edges.len() as u32);
+            } else {
+                downward_head.push(arc.head);
+                append_shortcut_arc_path(&arcs, arc_id, &mut downward_path_edges, &mut path_stack);
+                downward_path_first_out.push(downward_path_edges.len() as u32);
+            }
+        }
+        upward_first_out.push(upward_head.len() as u32);
+        downward_first_out.push(downward_head.len() as u32);
     }
 
     DatasetAccelerationBundle {
-        schema_version: 1,
+        schema_version: 2,
         source_topology_bundle_id,
-        algorithm: "edge_based_transition_order_v1".to_string(),
+        algorithm: "edge_based_shortcut_ch_v1".to_string(),
         edge_order,
         edge_rank,
         upward_first_out,
         upward_head,
+        upward_path_first_out,
+        upward_path_edges,
         downward_first_out,
         downward_head,
+        downward_path_first_out,
+        downward_path_edges,
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ShortcutArc {
+    tail: u32,
+    head: u32,
+    path_len: u32,
+    kind: ShortcutArcKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ShortcutArcKind {
+    Base,
+    Shortcut { left: u32, right: u32 },
+}
+
+fn append_shortcut_arc_path(
+    arcs: &[ShortcutArc],
+    arc_id: u32,
+    output: &mut Vec<u32>,
+    stack: &mut Vec<u32>,
+) {
+    stack.clear();
+    stack.push(arc_id);
+    while let Some(current_arc_id) = stack.pop() {
+        match arcs[current_arc_id as usize].kind {
+            ShortcutArcKind::Base => output.push(arcs[current_arc_id as usize].head),
+            ShortcutArcKind::Shortcut { left, right } => {
+                stack.push(right);
+                stack.push(left);
+            }
+        }
+    }
+}
+
+fn shortcut_arc_key(tail: u32, head: u32) -> u64 {
+    ((tail as u64) << 32) | head as u64
 }
 
 fn scan_routable_objects(
@@ -2183,13 +2388,17 @@ mod tests {
         let bundle =
             build_dataset_acceleration_bundle(&topology, CacheBundleId::new("topology-test"));
 
-        assert_eq!(bundle.algorithm, "edge_based_transition_order_v1");
+        assert_eq!(bundle.algorithm, "edge_based_shortcut_ch_v1");
         assert_eq!(bundle.edge_order, vec![2, 0, 1]);
         assert_eq!(bundle.edge_rank, vec![1, 2, 0]);
         assert_eq!(bundle.upward_first_out, vec![0, 1, 1, 1]);
         assert_eq!(bundle.upward_head, vec![1]);
+        assert_eq!(bundle.upward_path_first_out, vec![0, 1]);
+        assert_eq!(bundle.upward_path_edges, vec![1]);
         assert_eq!(bundle.downward_first_out, vec![0, 0, 1, 1]);
         assert_eq!(bundle.downward_head, vec![2]);
+        assert_eq!(bundle.downward_path_first_out, vec![0, 1]);
+        assert_eq!(bundle.downward_path_edges, vec![2]);
     }
 
     fn pending_way(osm_way_id: i64, node_ids: &[i64]) -> PendingWay {

@@ -1731,6 +1731,10 @@ mod tests {
                 snapped_lon: 6.0,
                 snapped_lat: 53.0,
                 snap_distance_m: 10.0,
+                snapped_edge_id: None,
+                snapped_edge_fraction: None,
+                snapped_from_node_id: None,
+                snapped_to_node_id: None,
             },
             destination: SnappedPoint {
                 point_id: "destination".to_string(),
@@ -1740,6 +1744,10 @@ mod tests {
                 snapped_lon: 6.2,
                 snapped_lat: 53.2,
                 snap_distance_m: 20.0,
+                snapped_edge_id: None,
+                snapped_edge_fraction: None,
+                snapped_from_node_id: None,
+                snapped_to_node_id: None,
             },
             summary: RouteSummary {
                 total_distance_m: 1_000,

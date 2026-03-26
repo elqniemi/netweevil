@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,6 +12,21 @@ use netan_core::{
 };
 use netan_profile::ReturnConfig;
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineMode {
+    #[default]
+    Auto,
+    IgnoreMultiEdgeRestrictions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveEngineDescription {
+    pub route_engine: &'static str,
+    pub batch_engine: &'static str,
+    pub acceleration: &'static str,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RouteRequest {
@@ -498,17 +513,31 @@ pub struct MatrixResult {
 pub struct PreparedRoutingEngine {
     topology: Arc<TopologyBundle>,
     metrics: Arc<CompiledProfileBundle>,
-    routing_graph: RoutingGraph,
+    default_routing_graph: RoutingGraph,
+    ignore_multi_edge_restrictions_graph: Option<RoutingGraph>,
 }
 
 impl PreparedRoutingEngine {
     pub fn new(topology: Arc<TopologyBundle>, metrics: Arc<CompiledProfileBundle>) -> Result<Self> {
         validate_execution_inputs(topology.as_ref(), metrics.as_ref())?;
-        let routing_graph = build_routing_graph(topology.as_ref(), metrics.as_ref())?;
+        let default_routing_graph = build_routing_graph(topology.as_ref(), metrics.as_ref())?;
+        let ignore_multi_edge_restrictions_graph =
+            if default_routing_graph.has_restriction_sequences() {
+                Some(build_routing_graph_with_options(
+                    topology.as_ref(),
+                    metrics.as_ref(),
+                    RoutingGraphBuildOptions {
+                        ignore_multi_edge_restriction_sequences: true,
+                    },
+                )?)
+            } else {
+                None
+            };
         Ok(Self {
             topology,
             metrics,
-            routing_graph,
+            default_routing_graph,
+            ignore_multi_edge_restrictions_graph,
         })
     }
 
@@ -521,7 +550,7 @@ impl PreparedRoutingEngine {
     }
 
     pub fn execute_route(&self, request: &RouteRequest) -> Result<RouteResult> {
-        self.execute_route_with_optional_edge_names(request, None)
+        self.execute_route_with_optional_edge_names(request, None, EngineMode::Auto)
     }
 
     pub fn execute_route_with_edge_names(
@@ -529,28 +558,56 @@ impl PreparedRoutingEngine {
         request: &RouteRequest,
         edge_names: &[String],
     ) -> Result<RouteResult> {
-        self.execute_route_with_optional_edge_names(request, Some(edge_names))
+        self.execute_route_with_optional_edge_names(request, Some(edge_names), EngineMode::Auto)
+    }
+
+    pub fn execute_route_with_mode(
+        &self,
+        request: &RouteRequest,
+        mode: EngineMode,
+    ) -> Result<RouteResult> {
+        self.execute_route_with_optional_edge_names(request, None, mode)
+    }
+
+    pub fn execute_route_with_edge_names_and_mode(
+        &self,
+        request: &RouteRequest,
+        edge_names: &[String],
+        mode: EngineMode,
+    ) -> Result<RouteResult> {
+        self.execute_route_with_optional_edge_names(request, Some(edge_names), mode)
     }
 
     fn execute_route_with_optional_edge_names(
         &self,
         request: &RouteRequest,
         edge_names: Option<&[String]>,
+        mode: EngineMode,
     ) -> Result<RouteResult> {
+        let (routing_graph, _) = self.routing_graph_for_mode(mode);
         execute_route_with_graph(
             self.topology.as_ref(),
             self.metrics.as_ref(),
-            &self.routing_graph,
+            routing_graph,
             request,
             edge_names,
         )
     }
 
     pub fn execute_od(&self, document: &OdPairsDocument) -> Result<OdResult> {
+        self.execute_od_with_mode(document, EngineMode::Auto)
+    }
+
+    pub fn execute_od_with_mode(
+        &self,
+        document: &OdPairsDocument,
+        mode: EngineMode,
+    ) -> Result<OdResult> {
+        let (routing_graph, _) = self.routing_graph_for_mode(mode);
         execute_od_with_graph(
             self.topology.as_ref(),
             self.metrics.as_ref(),
-            &self.routing_graph,
+            routing_graph,
             document,
         )
     }
@@ -560,13 +617,62 @@ impl PreparedRoutingEngine {
         origins: &PointSetDocument,
         destinations: &PointSetDocument,
     ) -> Result<MatrixResult> {
+        self.execute_matrix_with_mode(origins, destinations, EngineMode::Auto)
+    }
+
+    pub fn execute_matrix_with_mode(
+        &self,
+        origins: &PointSetDocument,
+        destinations: &PointSetDocument,
+        mode: EngineMode,
+    ) -> Result<MatrixResult> {
+        let (routing_graph, _) = self.routing_graph_for_mode(mode);
         execute_matrix_with_graph(
             self.topology.as_ref(),
             self.metrics.as_ref(),
-            &self.routing_graph,
+            routing_graph,
             origins,
             destinations,
         )
+    }
+
+    pub fn effective_engine_description(&self, mode: EngineMode) -> EffectiveEngineDescription {
+        self.routing_graph_for_mode(mode).1
+    }
+
+    fn routing_graph_for_mode(
+        &self,
+        mode: EngineMode,
+    ) -> (&RoutingGraph, EffectiveEngineDescription) {
+        match mode {
+            EngineMode::Auto => (
+                &self.default_routing_graph,
+                effective_engine_description(&self.default_routing_graph),
+            ),
+            EngineMode::IgnoreMultiEdgeRestrictions => {
+                let graph = self
+                    .ignore_multi_edge_restrictions_graph
+                    .as_ref()
+                    .unwrap_or(&self.default_routing_graph);
+                (graph, effective_engine_description(graph))
+            }
+        }
+    }
+}
+
+fn effective_engine_description(routing_graph: &RoutingGraph) -> EffectiveEngineDescription {
+    if routing_graph.has_restriction_sequences() {
+        EffectiveEngineDescription {
+            route_engine: "astar_exact_multi_edge_turns",
+            batch_engine: "astar_exact_multi_edge_turns_batch_reuse",
+            acceleration: "spatial_index+a_star+turn_automaton",
+        }
+    } else {
+        EffectiveEngineDescription {
+            route_engine: "bidirectional_exact_pairwise_turns",
+            batch_engine: "bidirectional_exact_pairwise_turns_batch_reuse",
+            acceleration: "spatial_index+edge_phantoms",
+        }
     }
 }
 
@@ -577,45 +683,64 @@ fn execute_od_with_graph(
     document: &OdPairsDocument,
 ) -> Result<OdResult> {
     let mut snap_cache = HashMap::new();
+    let origin_snaps = document
+        .pairs
+        .iter()
+        .map(|pair| {
+            cached_snap_candidates(
+                &mut snap_cache,
+                topology,
+                routing_graph,
+                &pair.origin,
+                document.snap.max_distance_m,
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    let destination_snaps = document
+        .pairs
+        .iter()
+        .map(|pair| {
+            cached_snap_candidates(
+                &mut snap_cache,
+                topology,
+                routing_graph,
+                &pair.destination,
+                document.snap.max_distance_m,
+                false,
+            )
+        })
+        .collect::<Vec<_>>();
+    let (origin_refs, unique_origin_candidates) = intern_candidate_sets(origin_snaps);
+    let (destination_refs, unique_destination_candidates) =
+        intern_candidate_sets(destination_snaps);
+    let mut route_cache = HashMap::new();
+    let mut origin_tree_cache = HashMap::new();
     let mut pairs = Vec::with_capacity(document.pairs.len());
     let mut succeeded_count = 0_usize;
 
-    for pair in &document.pairs {
-        let request = RouteRequest {
-            route_id: pair.pair_id.clone(),
-            origin: pair.origin.clone(),
-            destination: pair.destination.clone(),
-            snap: document.snap.clone(),
-            returns: document.returns.clone(),
-        };
-        let origin_candidates = cached_snap_candidates(
-            &mut snap_cache,
-            topology,
-            routing_graph,
-            &pair.origin,
-            document.snap.max_distance_m,
-            true,
-        );
-        let destination_candidates = cached_snap_candidates(
-            &mut snap_cache,
-            topology,
-            routing_graph,
-            &pair.destination,
-            document.snap.max_distance_m,
-            false,
-        );
-        let route = match (origin_candidates, destination_candidates) {
-            (Ok(origin_candidates), Ok(destination_candidates)) => execute_route_with_candidates(
+    for ((pair, origin_ref), destination_ref) in document
+        .pairs
+        .iter()
+        .zip(&origin_refs)
+        .zip(&destination_refs)
+    {
+        let route = match (origin_ref, destination_ref) {
+            (Ok(origin_set_id), Ok(destination_set_id)) => cached_batch_route_result(
+                &mut route_cache,
+                &mut origin_tree_cache,
                 topology,
                 metrics,
                 routing_graph,
-                &request,
-                &origin_candidates,
-                &destination_candidates,
-                None,
+                "",
+                &document.returns,
+                &unique_origin_candidates,
+                *origin_set_id,
+                &unique_destination_candidates,
+                *destination_set_id,
             ),
-            (Err(error), _) => Err(anyhow::anyhow!(error)),
-            (_, Err(error)) => Err(anyhow::anyhow!(error)),
+            (Err(error), _) => Err(anyhow::anyhow!(error.clone())),
+            (_, Err(error)) => Err(anyhow::anyhow!(error.clone())),
         };
         match route {
             Ok(route) => {
@@ -659,7 +784,7 @@ fn execute_od_with_graph(
         pairs,
         warnings: {
             let mut warnings = vec![
-                "Batch OD execution repeats the exact single-route solver per pair.".to_string(),
+                "Batch OD execution now reuses exact single-source search trees and duplicate snapped solves within the batch; multi-edge restriction cases still fall back to per-pair automaton search.".to_string(),
             ];
             warnings.extend(execution_warnings(metrics));
             warnings
@@ -685,40 +810,36 @@ fn execute_matrix_with_graph(
         &origins.points,
         snap_max_distance_m,
     );
+    let (origin_refs, unique_origin_candidates) = intern_candidate_sets(origin_snaps);
     let destination_snaps = presnap_point_set(
         topology,
         routing_graph,
         &destinations.points,
         snap_max_distance_m,
     );
+    let (destination_refs, unique_destination_candidates) =
+        intern_candidate_sets(destination_snaps);
+    let mut route_cache = HashMap::new();
+    let mut origin_tree_cache = HashMap::new();
     let mut cells = Vec::with_capacity(origins.points.len() * destinations.points.len());
     let mut succeeded_count = 0_usize;
 
-    for (origin, origin_candidates) in origins.points.iter().zip(&origin_snaps) {
-        for (destination, destination_candidates) in
-            destinations.points.iter().zip(&destination_snaps)
-        {
-            let request = RouteRequest {
-                route_id: format!("{}__{}", origin.id, destination.id),
-                origin: origin.clone(),
-                destination: destination.clone(),
-                snap: SnapOptions {
-                    max_distance_m: snap_max_distance_m,
-                },
-                returns: returns.clone(),
-            };
-            let route = match (origin_candidates, destination_candidates) {
-                (Ok(origin_candidates), Ok(destination_candidates)) => {
-                    execute_route_with_candidates(
-                        topology,
-                        metrics,
-                        routing_graph,
-                        &request,
-                        origin_candidates,
-                        destination_candidates,
-                        None,
-                    )
-                }
+    for (origin, origin_ref) in origins.points.iter().zip(&origin_refs) {
+        for (destination, destination_ref) in destinations.points.iter().zip(&destination_refs) {
+            let route = match (origin_ref, destination_ref) {
+                (Ok(origin_set_id), Ok(destination_set_id)) => cached_batch_route_result(
+                    &mut route_cache,
+                    &mut origin_tree_cache,
+                    topology,
+                    metrics,
+                    routing_graph,
+                    "",
+                    &returns,
+                    &unique_origin_candidates,
+                    *origin_set_id,
+                    &unique_destination_candidates,
+                    *destination_set_id,
+                ),
                 (Err(error), _) => Err(anyhow::anyhow!(error.clone())),
                 (_, Err(error)) => Err(anyhow::anyhow!(error.clone())),
             };
@@ -765,8 +886,7 @@ fn execute_matrix_with_graph(
         cells,
         warnings: {
             let mut warnings = vec![
-                "Matrix execution currently repeats the exact single-route solver per origin/destination cell."
-                    .to_string(),
+                "Matrix execution now reuses exact single-source search trees and duplicate snapped solves within the batch; multi-edge restriction cases still fall back to per-cell automaton search.".to_string(),
             ];
             warnings.extend(execution_warnings(metrics));
             warnings
@@ -860,7 +980,8 @@ fn execute_route_with_graph(
         topology,
         metrics,
         routing_graph,
-        request,
+        &request.route_id,
+        &request.returns,
         &origin_candidates,
         &destination_candidates,
         edge_names,
@@ -871,7 +992,8 @@ fn execute_route_with_candidates(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     routing_graph: &RoutingGraph,
-    request: &RouteRequest,
+    route_id: &str,
+    returns: &ReturnConfig,
     origin_candidates: &[SnappedPoint],
     destination_candidates: &[SnappedPoint],
     edge_names: Option<&[String]>,
@@ -884,12 +1006,9 @@ fn execute_route_with_candidates(
         destination_candidates,
     )?;
 
-    let include_detailed_paths = request_returns_detailed_path(request);
-    let needs_node_path = include_detailed_paths
-        || !matches!(
-            request.returns.geometry,
-            netan_profile::ReturnGeometry::None
-        );
+    let include_detailed_paths = request_returns_detailed_path(returns);
+    let needs_node_path =
+        include_detailed_paths || !matches!(returns.geometry, netan_profile::ReturnGeometry::None);
     let node_path = if needs_node_path {
         let mut node_path = Vec::with_capacity(path.edge_indexes.len() + 1);
         if let Some(&first_edge) = path.edge_indexes.first() {
@@ -905,7 +1024,7 @@ fn execute_route_with_candidates(
         Vec::new()
     };
 
-    let geometry = match request.returns.geometry {
+    let geometry = match returns.geometry {
         netan_profile::ReturnGeometry::None => None,
         _ => Some(build_route_geometry(
             topology,
@@ -915,7 +1034,7 @@ fn execute_route_with_candidates(
         )),
     };
 
-    let segments = if request.returns.segment_rows {
+    let segments = if returns.segment_rows {
         let edge_names = edge_names.unwrap_or(&topology.names);
         Some(
             path.edge_indexes
@@ -952,11 +1071,11 @@ fn execute_route_with_candidates(
         None
     };
 
-    let breakdowns = build_breakdowns(topology, metrics, &path.edge_indexes, &request.returns);
+    let breakdowns = build_breakdowns(topology, metrics, &path.edge_indexes, returns);
     let warnings = execution_warnings(metrics);
 
     Ok(RouteResult {
-        route_id: request.route_id.clone(),
+        route_id: route_id.to_string(),
         origin,
         destination,
         summary: RouteSummary {
@@ -981,15 +1100,13 @@ fn execute_route_with_candidates(
     })
 }
 
-fn request_returns_detailed_path(request: &RouteRequest) -> bool {
-    !matches!(
-        request.returns.geometry,
-        netan_profile::ReturnGeometry::None
-    ) || request.returns.segment_rows
-        || !request.returns.road_type_breakdown.is_empty()
-        || !request.returns.surface_breakdown.is_empty()
-        || request.returns.penalty_breakdown
-        || request.returns.explain_cost_derivation
+fn request_returns_detailed_path(returns: &ReturnConfig) -> bool {
+    !matches!(returns.geometry, netan_profile::ReturnGeometry::None)
+        || returns.segment_rows
+        || !returns.road_type_breakdown.is_empty()
+        || !returns.surface_breakdown.is_empty()
+        || returns.penalty_breakdown
+        || returns.explain_cost_derivation
 }
 
 fn presnap_point_set(
@@ -998,35 +1115,362 @@ fn presnap_point_set(
     points: &[LabeledPoint],
     max_distance_m: f64,
 ) -> Vec<Result<Vec<SnappedPoint>, String>> {
+    let mut snap_cache = HashMap::new();
     points
         .iter()
         .map(|point| {
-            snap_candidates(topology, routing_graph, point, max_distance_m)
-                .map_err(|error| error.to_string())
+            cached_snap_candidates(
+                &mut snap_cache,
+                topology,
+                routing_graph,
+                point,
+                max_distance_m,
+                true,
+            )
         })
         .collect()
 }
 
 fn cached_snap_candidates(
-    cache: &mut HashMap<(bool, String, u64, u64, u64), Result<Vec<SnappedPoint>, String>>,
+    cache: &mut HashMap<(bool, u64, u64, u64), Result<Vec<SnappedPoint>, String>>,
     topology: &TopologyBundle,
     routing_graph: &RoutingGraph,
     point: &LabeledPoint,
     max_distance_m: f64,
     is_origin: bool,
 ) -> Result<Vec<SnappedPoint>, String> {
-    let key = (
-        is_origin,
-        point.id.clone(),
-        point.lon.to_bits(),
-        point.lat.to_bits(),
-        max_distance_m.to_bits(),
-    );
+    let key = snap_point_cache_key(point, max_distance_m, is_origin);
     let value = cache.entry(key).or_insert_with(|| {
         snap_candidates(topology, routing_graph, point, max_distance_m)
             .map_err(|error| error.to_string())
     });
     value.clone()
+}
+
+fn snap_point_cache_key(
+    point: &LabeledPoint,
+    max_distance_m: f64,
+    is_origin: bool,
+) -> (bool, u64, u64, u64) {
+    (
+        is_origin,
+        point.lon.to_bits(),
+        point.lat.to_bits(),
+        max_distance_m.to_bits(),
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct BatchSnapCandidateKey {
+    snapped_edge_id: u32,
+    snapped_edge_fraction_bits: u64,
+    snapped_node_id: u32,
+    snap_distance_bits: u64,
+}
+
+fn batch_snap_candidate_key(candidate: &SnappedPoint) -> BatchSnapCandidateKey {
+    BatchSnapCandidateKey {
+        snapped_edge_id: candidate.snapped_edge_id.unwrap_or(u32::MAX),
+        snapped_edge_fraction_bits: candidate
+            .snapped_edge_fraction
+            .unwrap_or_default()
+            .to_bits(),
+        snapped_node_id: candidate.snapped_node_id,
+        snap_distance_bits: candidate.snap_distance_m.to_bits(),
+    }
+}
+
+fn batch_candidate_set_key(candidates: &[SnappedPoint]) -> Vec<BatchSnapCandidateKey> {
+    candidates.iter().map(batch_snap_candidate_key).collect()
+}
+
+fn intern_candidate_sets(
+    candidate_sets: Vec<Result<Vec<SnappedPoint>, String>>,
+) -> (Vec<Result<usize, String>>, Vec<Vec<SnappedPoint>>) {
+    let mut unique = Vec::new();
+    let mut interned = HashMap::new();
+    let mut refs = Vec::with_capacity(candidate_sets.len());
+
+    for candidates in candidate_sets {
+        match candidates {
+            Ok(candidates) => {
+                let key = batch_candidate_set_key(&candidates);
+                if let Some(&set_id) = interned.get(&key) {
+                    refs.push(Ok(set_id));
+                    continue;
+                }
+                let set_id = unique.len();
+                interned.insert(key, set_id);
+                unique.push(candidates);
+                refs.push(Ok(set_id));
+            }
+            Err(error) => refs.push(Err(error)),
+        }
+    }
+
+    (refs, unique)
+}
+
+fn cached_batch_route_result(
+    cache: &mut HashMap<(usize, usize), Result<RouteResult, String>>,
+    origin_tree_cache: &mut HashMap<(u32, u64, u64), Result<SingleSourceEdgeTree, String>>,
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    route_id: &str,
+    returns: &ReturnConfig,
+    origin_candidates: &[Vec<SnappedPoint>],
+    origin_set_id: usize,
+    destination_candidates: &[Vec<SnappedPoint>],
+    destination_set_id: usize,
+) -> Result<RouteResult> {
+    let key = (origin_set_id, destination_set_id);
+    let value = cache.entry(key).or_insert_with(|| {
+        execute_batched_route_with_candidates(
+            origin_tree_cache,
+            topology,
+            metrics,
+            routing_graph,
+            route_id,
+            returns,
+            &origin_candidates[origin_set_id],
+            &destination_candidates[destination_set_id],
+        )
+        .map_err(|error| error.to_string())
+    });
+    value.clone().map_err(anyhow::Error::msg)
+}
+
+fn execute_batched_route_with_candidates(
+    origin_tree_cache: &mut HashMap<(u32, u64, u64), Result<SingleSourceEdgeTree, String>>,
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    route_id: &str,
+    returns: &ReturnConfig,
+    origin_candidates: &[SnappedPoint],
+    destination_candidates: &[SnappedPoint],
+) -> Result<RouteResult> {
+    if routing_graph.has_restriction_sequences() {
+        return execute_route_with_candidates(
+            topology,
+            metrics,
+            routing_graph,
+            route_id,
+            returns,
+            origin_candidates,
+            destination_candidates,
+            None,
+        );
+    }
+
+    for origin in origin_candidates {
+        let tree =
+            cached_single_source_edge_tree(origin_tree_cache, topology, routing_graph, origin)?;
+        for destination in destination_candidates {
+            if same_edge_reverse_pair(origin, destination) {
+                continue;
+            }
+            let path = best_path_from_origin_tree(routing_graph, &tree, origin, destination);
+            if let Some(path) = path {
+                let path =
+                    finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
+                return Ok(RouteResult {
+                    route_id: route_id.to_string(),
+                    origin: origin.clone(),
+                    destination: destination.clone(),
+                    summary: RouteSummary {
+                        total_distance_m: path.total_distance_m,
+                        total_travel_time_s: path.total_travel_time_s,
+                        total_generalized_cost: path.total_generalized_cost,
+                        segment_count: path.edge_indexes.len(),
+                    },
+                    node_path: Vec::new(),
+                    edge_path: Vec::new(),
+                    geometry: match returns.geometry {
+                        netan_profile::ReturnGeometry::None => None,
+                        _ => Some(build_route_geometry(
+                            topology,
+                            &path.edge_indexes,
+                            origin,
+                            destination,
+                        )),
+                    },
+                    segments: if returns.segment_rows {
+                        Some(
+                            path.edge_indexes
+                                .iter()
+                                .map(|&edge_index| {
+                                    let edge = &topology.edges[edge_index];
+                                    let metric = &metrics.edge_metrics[edge_index];
+                                    let factor = edge_traversal_factor(
+                                        edge_index,
+                                        path.edge_indexes.first().copied(),
+                                        path.edge_indexes.last().copied(),
+                                        origin,
+                                        destination,
+                                    );
+                                    RouteSegment {
+                                        edge_id: edge.edge_id.0,
+                                        from_node_id: edge.from.0,
+                                        to_node_id: edge.to.0,
+                                        source_way_id: edge.source_way_id,
+                                        length_m: (edge.length_m as f64 * factor).round() as u32,
+                                        travel_time_s: metric.travel_time_s.unwrap_or_default()
+                                            * factor,
+                                        generalized_cost: metric
+                                            .generalized_cost
+                                            .unwrap_or_default()
+                                            * factor,
+                                        road_class: edge.road_class,
+                                        surface: edge.surface,
+                                        name: edge
+                                            .name_index
+                                            .and_then(|index| topology.names.get(index as usize))
+                                            .cloned(),
+                                    }
+                                })
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    },
+                    breakdowns: build_breakdowns(topology, metrics, &path.edge_indexes, returns),
+                    warnings: execution_warnings(metrics),
+                });
+            }
+        }
+    }
+
+    bail!("no route found between the snapped origin and destination")
+}
+
+fn cached_single_source_edge_tree(
+    cache: &mut HashMap<(u32, u64, u64), Result<SingleSourceEdgeTree, String>>,
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    origin: &SnappedPoint,
+) -> Result<SingleSourceEdgeTree> {
+    let key = snap_cache_key(origin);
+    let value = cache.entry(key).or_insert_with(|| {
+        build_single_source_edge_tree(topology, routing_graph, origin)
+            .map_err(|error| error.to_string())
+    });
+    value.clone().map_err(anyhow::Error::msg)
+}
+
+fn build_single_source_edge_tree(
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    origin: &SnappedPoint,
+) -> Result<SingleSourceEdgeTree> {
+    let _ = topology;
+    let origin_seeds = origin_edge_seeds(routing_graph, origin);
+    SINGLE_SOURCE_SEARCH_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        scratch.prepare(routing_graph.edge_costs.len());
+
+        for (edge_index, cost) in origin_seeds {
+            if !scratch.update(edge_index, cost, NO_PREVIOUS_EDGE) {
+                continue;
+            }
+            scratch.heap.push(State {
+                edge_index,
+                automaton_state: 0,
+                cost,
+                score: cost,
+            });
+        }
+
+        while let Some(State {
+            edge_index,
+            automaton_state: _,
+            cost,
+            score: _,
+        }) = scratch.heap.pop()
+        {
+            if cost > scratch.dist[edge_index] {
+                continue;
+            }
+            for transition_index in routing_graph.transition_range(edge_index) {
+                let next_edge = routing_graph.transition_edges[transition_index] as usize;
+                let next_cost = cost + routing_graph.transition_costs[transition_index];
+                if !scratch.update(next_edge, next_cost, edge_index as u32) {
+                    continue;
+                }
+                scratch.heap.push(State {
+                    edge_index: next_edge,
+                    automaton_state: 0,
+                    cost: next_cost,
+                    score: next_cost,
+                });
+            }
+        }
+
+        Ok(SingleSourceEdgeTree {
+            dist: scratch.dist.clone(),
+            previous: scratch.previous.clone(),
+        })
+    })
+}
+
+fn best_path_from_origin_tree(
+    routing_graph: &RoutingGraph,
+    tree: &SingleSourceEdgeTree,
+    origin: &SnappedPoint,
+    destination: &SnappedPoint,
+) -> Option<RoutePath> {
+    let mut best_path = direct_same_edge_path(routing_graph, origin, destination);
+    let mut best_cost = best_path
+        .as_ref()
+        .map(|path| path.total_generalized_cost)
+        .unwrap_or(f64::INFINITY);
+    let mut best_edge = None;
+
+    for (edge_index, adjustment) in destination_edge_seeds(routing_graph, destination) {
+        let base_cost = tree.dist.get(edge_index).copied().unwrap_or(f64::INFINITY);
+        if !base_cost.is_finite() {
+            continue;
+        }
+        let total_cost = base_cost + adjustment;
+        if total_cost < best_cost {
+            best_cost = total_cost;
+            best_edge = Some(edge_index);
+        }
+    }
+
+    if let Some(edge_index) = best_edge {
+        best_path = Some(reconstruct_single_source_route_path(
+            tree, edge_index, best_cost,
+        ));
+    }
+
+    best_path
+}
+
+fn reconstruct_single_source_route_path(
+    tree: &SingleSourceEdgeTree,
+    target_edge: usize,
+    total_generalized_cost: f64,
+) -> RoutePath {
+    let mut edge_indexes = Vec::new();
+    let mut cursor = target_edge;
+    loop {
+        edge_indexes.push(cursor);
+        let previous_edge = tree.previous[cursor];
+        if previous_edge == NO_PREVIOUS_EDGE {
+            break;
+        }
+        cursor = previous_edge as usize;
+    }
+    edge_indexes.reverse();
+
+    RoutePath {
+        edge_indexes,
+        total_distance_m: 0,
+        total_travel_time_s: 0.0,
+        total_generalized_cost,
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1196,6 +1640,8 @@ thread_local! {
         RefCell::new(BidirectionalAccelerationScratch::default());
     static RESTRICTED_SEARCH_SCRATCH: RefCell<RestrictedSearchScratch> =
         RefCell::new(RestrictedSearchScratch::default());
+    static SINGLE_SOURCE_SEARCH_SCRATCH: RefCell<SingleSourceEdgeSearchScratch> =
+        RefCell::new(SingleSourceEdgeSearchScratch::default());
 }
 
 #[derive(Default)]
@@ -1342,6 +1788,47 @@ impl RestrictedSearchScratch {
         self.previous.clear();
         self.heap.clear();
     }
+}
+
+#[derive(Default)]
+struct SingleSourceEdgeSearchScratch {
+    dist: Vec<f64>,
+    previous: Vec<u32>,
+    touched: Vec<u32>,
+    heap: BinaryHeap<State>,
+}
+
+impl SingleSourceEdgeSearchScratch {
+    fn prepare(&mut self, edge_count: usize) {
+        if self.dist.len() < edge_count {
+            self.dist.resize(edge_count, f64::INFINITY);
+            self.previous.resize(edge_count, NO_PREVIOUS_EDGE);
+        }
+        for &edge_index in &self.touched {
+            self.dist[edge_index as usize] = f64::INFINITY;
+            self.previous[edge_index as usize] = NO_PREVIOUS_EDGE;
+        }
+        self.touched.clear();
+        self.heap.clear();
+    }
+
+    fn update(&mut self, edge_index: usize, cost: f64, previous_edge: u32) -> bool {
+        if !cost.is_finite() || cost + f64::EPSILON >= self.dist[edge_index] {
+            return false;
+        }
+        if !self.dist[edge_index].is_finite() {
+            self.touched.push(edge_index as u32);
+        }
+        self.dist[edge_index] = cost;
+        self.previous[edge_index] = previous_edge;
+        true
+    }
+}
+
+#[derive(Clone)]
+struct SingleSourceEdgeTree {
+    dist: Vec<f64>,
+    previous: Vec<u32>,
 }
 
 struct EdgeBasedTopologyView<'a> {
@@ -1526,9 +2013,22 @@ impl RestrictionAutomaton {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct RoutingGraphBuildOptions {
+    ignore_multi_edge_restriction_sequences: bool,
+}
+
 fn build_routing_graph(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
+) -> Result<RoutingGraph> {
+    build_routing_graph_with_options(topology, metrics, RoutingGraphBuildOptions::default())
+}
+
+fn build_routing_graph_with_options(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    options: RoutingGraphBuildOptions,
 ) -> Result<RoutingGraph> {
     let mut out_degree = vec![0_u32; topology.nodes.len()];
     let mut in_degree = vec![0_u32; topology.nodes.len()];
@@ -1606,6 +2106,9 @@ fn build_routing_graph(
         }
         if restriction.edge_path.len() == 2 {
             pairwise_forbidden.push((restriction.edge_path[0].0, restriction.edge_path[1].0));
+            continue;
+        }
+        if options.ignore_multi_edge_restriction_sequences {
             continue;
         }
         restricted_sequences.push(
@@ -1746,13 +2249,6 @@ fn build_acceleration_graph(
     let Some(acceleration) = metrics.acceleration.as_ref() else {
         return Ok(None);
     };
-    if acceleration.algorithm == "oriented_paths_v1"
-        || acceleration.algorithm.ends_with("+oriented_paths_v1")
-    {
-        // The current persisted oriented transition bundle is only preprocessing scaffolding.
-        // It is not a shortcut graph and should not be used on the hot query path.
-        return Ok(None);
-    }
     if acceleration.edge_order.len() != edge_count
         || acceleration.edge_rank.len() != edge_count
         || acceleration.upward_first_out.len() != edge_count + 1
@@ -2868,21 +3364,20 @@ fn snap_candidates(
         );
     }
 
-    let mut candidate_edges = BTreeSet::<u32>::new();
+    let mut candidate_edges = Vec::<u32>::new();
     for &(node_id, _) in &nearby_nodes {
-        for &edge_index in routing_graph.outgoing_edges(node_id as usize) {
-            candidate_edges.insert(edge_index);
-        }
-        for &edge_index in routing_graph.incoming_edges(node_id as usize) {
-            candidate_edges.insert(edge_index);
-        }
+        candidate_edges.extend_from_slice(routing_graph.outgoing_edges(node_id as usize));
+        candidate_edges.extend_from_slice(routing_graph.incoming_edges(node_id as usize));
     }
     if candidate_edges.is_empty() {
         for edge_index in 0..topology.edges.len() {
             if routing_graph.edge_costs[edge_index].is_finite() {
-                candidate_edges.insert(edge_index as u32);
+                candidate_edges.push(edge_index as u32);
             }
         }
+    } else {
+        candidate_edges.sort_unstable();
+        candidate_edges.dedup();
     }
 
     for edge_index in candidate_edges {
@@ -3194,7 +3689,7 @@ fn haversine_meters(from_lon: f64, from_lat: f64, to_lon: f64, to_lat: f64) -> f
 #[cfg(test)]
 mod tests {
     use super::{
-        AnalysisKind, OdPair, OdPairsDocument, PointSetDocument, PreparedRoutingEngine,
+        AnalysisKind, EngineMode, OdPair, OdPairsDocument, PointSetDocument, PreparedRoutingEngine,
         RouteRequest, SnapOptions, build_routing_graph, execute_matrix, execute_od, execute_route,
         execute_route_with_edge_names, load_experiment, load_od_pairs, load_point_set,
     };
@@ -3673,6 +4168,166 @@ mod tests {
     }
 
     #[test]
+    fn matrix_matches_repeated_exact_route_execution() {
+        let topology = test_topology();
+        let metrics = test_metrics();
+        let origins = PointSetDocument {
+            points: vec![
+                super::LabeledPoint {
+                    id: "a".to_string(),
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                super::LabeledPoint {
+                    id: "b".to_string(),
+                    lon: 6.001,
+                    lat: 53.0,
+                },
+            ],
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            returns: ReturnConfig {
+                geometry: ReturnGeometry::Full,
+                ..ReturnConfig::default()
+            },
+        };
+        let destinations = PointSetDocument {
+            points: vec![
+                super::LabeledPoint {
+                    id: "b".to_string(),
+                    lon: 6.001,
+                    lat: 53.0,
+                },
+                super::LabeledPoint {
+                    id: "c".to_string(),
+                    lon: 6.002,
+                    lat: 53.0,
+                },
+            ],
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            returns: ReturnConfig {
+                geometry: ReturnGeometry::Full,
+                ..ReturnConfig::default()
+            },
+        };
+
+        let matrix =
+            execute_matrix(&topology, &metrics, &origins, &destinations).expect("matrix succeeds");
+
+        for (cell, (origin, destination)) in
+            matrix
+                .cells
+                .iter()
+                .zip(origins.points.iter().flat_map(|origin| {
+                    destinations
+                        .points
+                        .iter()
+                        .map(move |destination| (origin, destination))
+                }))
+        {
+            let route = execute_route(
+                &topology,
+                &metrics,
+                &RouteRequest {
+                    route_id: format!("{}__{}", origin.id, destination.id),
+                    origin: origin.clone(),
+                    destination: destination.clone(),
+                    snap: origins.snap.clone(),
+                    returns: origins.returns.clone(),
+                },
+            )
+            .expect("route succeeds");
+            assert_eq!(cell.total_distance_m, Some(route.summary.total_distance_m));
+            assert_eq!(
+                cell.total_travel_time_s,
+                Some(route.summary.total_travel_time_s)
+            );
+            assert_eq!(
+                cell.total_generalized_cost,
+                Some(route.summary.total_generalized_cost)
+            );
+            assert_eq!(cell.geometry, route.geometry);
+        }
+    }
+
+    #[test]
+    fn accelerated_engine_matches_exact_engine_on_small_topology() {
+        let topology = test_topology();
+        let exact_engine =
+            PreparedRoutingEngine::new(Arc::new(topology.clone()), Arc::new(test_metrics()))
+                .expect("exact engine builds");
+        let accelerated_engine =
+            PreparedRoutingEngine::new(Arc::new(topology), Arc::new(accelerated_test_metrics()))
+                .expect("accelerated engine builds");
+
+        let requests = [
+            RouteRequest {
+                route_id: "a_to_c".to_string(),
+                origin: super::LabeledPoint {
+                    id: "a".to_string(),
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                destination: super::LabeledPoint {
+                    id: "c".to_string(),
+                    lon: 6.002,
+                    lat: 53.0,
+                },
+                snap: SnapOptions {
+                    max_distance_m: 500.0,
+                },
+                returns: ReturnConfig {
+                    geometry: ReturnGeometry::Full,
+                    ..ReturnConfig::default()
+                },
+            },
+            RouteRequest {
+                route_id: "a_to_b".to_string(),
+                origin: super::LabeledPoint {
+                    id: "a".to_string(),
+                    lon: 6.0,
+                    lat: 53.0,
+                },
+                destination: super::LabeledPoint {
+                    id: "b".to_string(),
+                    lon: 6.001,
+                    lat: 53.0,
+                },
+                snap: SnapOptions {
+                    max_distance_m: 500.0,
+                },
+                returns: ReturnConfig::default(),
+            },
+        ];
+
+        for request in requests {
+            let exact = exact_engine
+                .execute_route(&request)
+                .expect("exact route succeeds");
+            let accelerated = accelerated_engine
+                .execute_route(&request)
+                .expect("accelerated route succeeds");
+            assert_eq!(
+                accelerated.summary.total_distance_m,
+                exact.summary.total_distance_m
+            );
+            assert_eq!(
+                accelerated.summary.total_travel_time_s,
+                exact.summary.total_travel_time_s
+            );
+            assert_eq!(
+                accelerated.summary.total_generalized_cost,
+                exact.summary.total_generalized_cost
+            );
+            assert_eq!(accelerated.geometry, exact.geometry);
+            assert_eq!(accelerated.edge_path, exact.edge_path);
+        }
+    }
+
+    #[test]
     fn respects_turn_restrictions() {
         let topology = restricted_topology();
         let metrics = restricted_metrics();
@@ -3876,6 +4531,52 @@ mod tests {
         let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
         assert_eq!(result.edge_path, vec![3, 2]);
         assert_eq!(result.summary.total_distance_m, 300);
+    }
+
+    #[test]
+    fn can_ignore_multi_edge_restriction_sequences_via_engine_mode() {
+        let topology = multi_edge_restricted_topology();
+        let mut metrics = restricted_metrics();
+        metrics.edge_metrics[3].travel_time_s = Some(25.0);
+        metrics.edge_metrics[3].generalized_cost = Some(25.0);
+        let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(metrics))
+            .expect("prepared engine builds");
+        let request = RouteRequest {
+            route_id: "multi-edge-override".to_string(),
+            origin: super::LabeledPoint {
+                id: "a".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "d".to_string(),
+                lon: 6.003,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            returns: ReturnConfig {
+                geometry: ReturnGeometry::Full,
+                ..ReturnConfig::default()
+            },
+        };
+
+        let exact = engine
+            .execute_route_with_mode(&request, EngineMode::Auto)
+            .expect("exact route succeeds");
+        let override_route = engine
+            .execute_route_with_mode(&request, EngineMode::IgnoreMultiEdgeRestrictions)
+            .expect("override route succeeds");
+        let override_engine =
+            engine.effective_engine_description(EngineMode::IgnoreMultiEdgeRestrictions);
+
+        assert_eq!(exact.edge_path, vec![3, 2]);
+        assert_eq!(override_route.edge_path, vec![0, 1, 2]);
+        assert_eq!(
+            override_engine.route_engine,
+            "bidirectional_exact_pairwise_turns"
+        );
     }
 
     #[test]

@@ -12,6 +12,30 @@ use netan_core::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileCompileStage {
+    CompileEdgeMetrics,
+    CompileAcceleration,
+    Complete,
+}
+
+impl ProfileCompileStage {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CompileEdgeMetrics => "Compile Edge Metrics",
+            Self::CompileAcceleration => "Compile Acceleration",
+            Self::Complete => "Complete",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileCompileProgress {
+    pub stage: ProfileCompileStage,
+    pub stage_percent: Option<f64>,
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileDocument {
     pub profile: ProfileHeader,
@@ -272,39 +296,112 @@ pub fn compile_profile_bundle_with_acceleration(
     source_topology_bundle_id: CacheBundleId,
     acceleration: Option<(&DatasetAccelerationBundle, CacheBundleId)>,
 ) -> Result<CompiledProfileBundle> {
+    compile_profile_bundle_with_acceleration_with_progress(
+        profile,
+        topology,
+        source_topology_bundle_id,
+        acceleration,
+        |_| {},
+    )
+}
+
+pub fn compile_profile_bundle_with_acceleration_with_progress<F>(
+    profile: &ProfileDocument,
+    topology: &TopologyBundle,
+    source_topology_bundle_id: CacheBundleId,
+    acceleration: Option<(&DatasetAccelerationBundle, CacheBundleId)>,
+    mut progress: F,
+) -> Result<CompiledProfileBundle>
+where
+    F: FnMut(ProfileCompileProgress),
+{
     ensure_supported_matchers(profile)?;
     let profile_hash = profile.fingerprint()?;
     let mode_bit = mode_access_bit(profile.profile.mode);
     let mut edge_metrics = Vec::with_capacity(topology.edges.len());
+    let mut edge_reporter = PercentReporter::starting_at_zero();
 
-    for edge in &topology.edges {
-        if !edge.access_mask.contains(mode_bit)
+    emit_compile_progress(
+        &mut progress,
+        ProfileCompileStage::CompileEdgeMetrics,
+        Some(0.0),
+        format!("Compiling edge metrics 0% (0/{})", topology.edges.len()),
+    );
+
+    for (edge_index, edge) in topology.edges.iter().enumerate() {
+        let metric = if !edge.access_mask.contains(mode_bit)
             || (edge.road_class == RoadClass::Ferry && !profile.ferry.allow)
             || is_excluded(profile, edge)
         {
-            edge_metrics.push(CompiledEdgeMetric {
+            CompiledEdgeMetric {
                 edge_id: edge.edge_id,
                 travel_time_s: None,
                 generalized_cost: None,
-            });
-            continue;
-        }
-
-        let Some(travel_time_s) = edge_travel_time_s(profile, edge) else {
-            edge_metrics.push(CompiledEdgeMetric {
+            }
+        } else if let Some(travel_time_s) = edge_travel_time_s(profile, edge) {
+            CompiledEdgeMetric {
+                edge_id: edge.edge_id,
+                travel_time_s: Some(travel_time_s),
+                generalized_cost: Some(generalized_cost(profile, edge, travel_time_s)),
+            }
+        } else {
+            CompiledEdgeMetric {
                 edge_id: edge.edge_id,
                 travel_time_s: None,
                 generalized_cost: None,
-            });
-            continue;
+            }
         };
 
-        edge_metrics.push(CompiledEdgeMetric {
-            edge_id: edge.edge_id,
-            travel_time_s: Some(travel_time_s),
-            generalized_cost: Some(generalized_cost(profile, edge, travel_time_s)),
-        });
+        edge_metrics.push(metric);
+
+        edge_reporter.emit_if_needed(
+            (edge_index + 1) as u64,
+            topology.edges.len() as u64,
+            ProfileCompileStage::CompileEdgeMetrics,
+            &mut progress,
+            |percent| {
+                format!(
+                    "Compiling edge metrics {:.0}% ({}/{})",
+                    percent,
+                    edge_index + 1,
+                    topology.edges.len()
+                )
+            },
+        );
     }
+
+    emit_compile_progress(
+        &mut progress,
+        ProfileCompileStage::CompileEdgeMetrics,
+        Some(100.0),
+        format!(
+            "Compiling edge metrics 100% ({}/{})",
+            topology.edges.len(),
+            topology.edges.len()
+        ),
+    );
+
+    let compiled_acceleration = acceleration.map(|(bundle, bundle_id)| {
+        compile_acceleration_with_progress(
+            bundle,
+            bundle_id,
+            topology,
+            &edge_metrics,
+            profile,
+            &mut progress,
+        )
+    });
+
+    emit_compile_progress(
+        &mut progress,
+        ProfileCompileStage::Complete,
+        Some(100.0),
+        format!(
+            "Compiled profile '{}' into {} edge metrics",
+            profile.profile.id,
+            edge_metrics.len()
+        ),
+    );
 
     Ok(CompiledProfileBundle {
         schema_version: 3,
@@ -320,90 +417,238 @@ pub fn compile_profile_bundle_with_acceleration(
             cost_time_weight: profile.cost.time_weight,
         },
         source_topology_bundle_id,
-        acceleration: acceleration.map(|(bundle, bundle_id)| {
-            compile_acceleration(bundle, bundle_id, topology, &edge_metrics, profile)
-        }),
+        acceleration: compiled_acceleration,
         edge_metrics,
     })
 }
 
-fn compile_acceleration(
+fn compile_acceleration_with_progress(
     bundle: &DatasetAccelerationBundle,
     source_acceleration_bundle_id: CacheBundleId,
     topology: &TopologyBundle,
     edge_metrics: &[CompiledEdgeMetric],
     profile: &ProfileDocument,
+    progress: &mut impl FnMut(ProfileCompileProgress),
 ) -> CompiledAcceleration {
-    let upward_weight = compile_oriented_transition_weights(
+    let (upward_path_first_out, upward_path_edges) =
+        if bundle.upward_path_first_out.is_empty() && bundle.upward_path_edges.is_empty() {
+            (
+                (0..=bundle.upward_head.len() as u32).collect::<Vec<_>>(),
+                bundle.upward_head.clone(),
+            )
+        } else {
+            (
+                bundle.upward_path_first_out.clone(),
+                bundle.upward_path_edges.clone(),
+            )
+        };
+    let (downward_path_first_out, downward_path_edges) =
+        if bundle.downward_path_first_out.is_empty() && bundle.downward_path_edges.is_empty() {
+            (
+                (0..=bundle.downward_head.len() as u32).collect::<Vec<_>>(),
+                bundle.downward_head.clone(),
+            )
+        } else {
+            (
+                bundle.downward_path_first_out.clone(),
+                bundle.downward_path_edges.clone(),
+            )
+        };
+    emit_compile_progress(
+        progress,
+        ProfileCompileStage::CompileAcceleration,
+        Some(0.0),
+        format!(
+            "Customizing acceleration 0% (upward {} arcs, downward {} arcs)",
+            bundle.upward_head.len(),
+            bundle.downward_head.len()
+        ),
+    );
+    let upward_weight = compile_acceleration_arc_weights_with_progress(
         topology,
         edge_metrics,
         profile,
         &bundle.upward_first_out,
-        &bundle.upward_head,
+        &upward_path_first_out,
+        &upward_path_edges,
+        ProfileCompileStage::CompileAcceleration,
+        progress,
+        0.0,
+        50.0,
+        "upward",
     );
-    let downward_weight = compile_oriented_transition_weights(
+    let downward_weight = compile_acceleration_arc_weights_with_progress(
         topology,
         edge_metrics,
         profile,
         &bundle.downward_first_out,
-        &bundle.downward_head,
+        &downward_path_first_out,
+        &downward_path_edges,
+        ProfileCompileStage::CompileAcceleration,
+        progress,
+        50.0,
+        100.0,
+        "downward",
     );
-    let upward_path_first_out = (0..=bundle.upward_head.len() as u32).collect::<Vec<_>>();
-    let downward_path_first_out = (0..=bundle.downward_head.len() as u32).collect::<Vec<_>>();
+
+    emit_compile_progress(
+        progress,
+        ProfileCompileStage::CompileAcceleration,
+        Some(100.0),
+        format!(
+            "Customizing acceleration 100% (upward {} arcs, downward {} arcs)",
+            bundle.upward_head.len(),
+            bundle.downward_head.len()
+        ),
+    );
 
     CompiledAcceleration {
         schema_version: 1,
         source_acceleration_bundle_id,
-        algorithm: format!("{}+oriented_paths_v1", bundle.algorithm),
+        algorithm: bundle.algorithm.clone(),
         edge_order: bundle.edge_order.clone(),
         edge_rank: bundle.edge_rank.clone(),
         upward_first_out: bundle.upward_first_out.clone(),
         upward_head: bundle.upward_head.clone(),
         upward_weight,
         upward_path_first_out,
-        upward_path_edges: bundle.upward_head.clone(),
+        upward_path_edges,
         downward_first_out: bundle.downward_first_out.clone(),
         downward_head: bundle.downward_head.clone(),
         downward_weight,
         downward_path_first_out,
-        downward_path_edges: bundle.downward_head.clone(),
+        downward_path_edges,
     }
 }
 
-fn compile_oriented_transition_weights(
+fn compile_acceleration_arc_weights_with_progress(
     topology: &TopologyBundle,
     edge_metrics: &[CompiledEdgeMetric],
     profile: &ProfileDocument,
     first_out: &[u32],
-    head: &[u32],
+    path_first_out: &[u32],
+    path_edges: &[u32],
+    stage: ProfileCompileStage,
+    progress: &mut impl FnMut(ProfileCompileProgress),
+    percent_start: f64,
+    percent_end: f64,
+    direction_label: &str,
 ) -> Vec<f64> {
-    let mut weights = vec![f64::INFINITY; head.len()];
+    let mut weights = vec![f64::INFINITY; first_out.last().copied().unwrap_or_default() as usize];
     if first_out.len() != topology.edges.len() + 1 {
         return weights;
     }
+    let mut reporter = PercentReporter::starting_at_zero();
     for edge_index in 0..topology.edges.len() {
         let start = first_out[edge_index] as usize;
         let end = first_out[edge_index + 1] as usize;
         for slot in start..end {
-            let next_edge = head[slot] as usize;
-            let Some(next_cost) = edge_metrics[next_edge].generalized_cost else {
+            let path_start = path_first_out.get(slot).copied().unwrap_or_default() as usize;
+            let path_end = path_first_out.get(slot + 1).copied().unwrap_or_default() as usize;
+            if path_end <= path_start {
                 continue;
-            };
-            weights[slot] = next_cost
-                + transition_turn_penalty_cost(
-                    topology,
-                    edge_index,
-                    next_edge,
-                    profile.turns.left_penalty_s,
-                    profile.turns.right_penalty_s,
-                    profile.turns.uturn_penalty_s,
-                    profile.turns.traffic_signal_penalty_s,
-                    profile.turns.roundabout_entry_penalty_s,
-                    profile.cost.time_weight,
-                );
+            }
+            let mut total_cost = 0.0;
+            let mut previous_edge = edge_index;
+            let mut valid = true;
+            for &next_edge in &path_edges[path_start..path_end] {
+                let next_edge = next_edge as usize;
+                let Some(next_cost) = edge_metrics[next_edge].generalized_cost else {
+                    valid = false;
+                    break;
+                };
+                total_cost += next_cost
+                    + transition_turn_penalty_cost(
+                        topology,
+                        previous_edge,
+                        next_edge,
+                        profile.turns.left_penalty_s,
+                        profile.turns.right_penalty_s,
+                        profile.turns.uturn_penalty_s,
+                        profile.turns.traffic_signal_penalty_s,
+                        profile.turns.roundabout_entry_penalty_s,
+                        profile.cost.time_weight,
+                    );
+                previous_edge = next_edge;
+            }
+            if valid {
+                weights[slot] = total_cost;
+            }
         }
+        reporter.emit_if_needed(
+            (edge_index + 1) as u64,
+            topology.edges.len() as u64,
+            stage,
+            progress,
+            |percent| {
+                let scaled = percent_start + ((percent / 100.0) * (percent_end - percent_start));
+                format!(
+                    "Customizing acceleration {:.0}% ({}/{}) [{}]",
+                    scaled,
+                    edge_index + 1,
+                    topology.edges.len(),
+                    direction_label
+                )
+            },
+        );
     }
     weights
+}
+
+fn emit_compile_progress(
+    progress: &mut impl FnMut(ProfileCompileProgress),
+    stage: ProfileCompileStage,
+    stage_percent: Option<f64>,
+    message: String,
+) {
+    progress(ProfileCompileProgress {
+        stage,
+        stage_percent,
+        message,
+    });
+}
+
+struct PercentReporter {
+    last_bucket: Option<u32>,
+}
+
+impl PercentReporter {
+    fn starting_at_zero() -> Self {
+        Self {
+            last_bucket: Some(0),
+        }
+    }
+
+    fn emit_if_needed<F>(
+        &mut self,
+        completed: u64,
+        total: u64,
+        stage: ProfileCompileStage,
+        progress: &mut impl FnMut(ProfileCompileProgress),
+        message: F,
+    ) where
+        F: FnOnce(f64) -> String,
+    {
+        if total == 0 {
+            return;
+        }
+        let percent = ((completed as f64 / total as f64) * 100.0).clamp(0.0, 100.0);
+        if percent >= 100.0 {
+            return;
+        }
+        let bucket = (percent / 5.0).floor() as u32;
+        if self.last_bucket == Some(bucket) {
+            return;
+        }
+        self.last_bucket = Some(bucket);
+        let quantized_percent = (bucket * 5) as f64;
+        emit_compile_progress(
+            progress,
+            stage,
+            Some(quantized_percent),
+            message(quantized_percent),
+        );
+    }
 }
 
 fn edge_travel_time_s(profile: &ProfileDocument, edge: &DirectedEdge) -> Option<f64> {
@@ -1047,13 +1292,17 @@ mod tests {
         let acceleration = DatasetAccelerationBundle {
             schema_version: 1,
             source_topology_bundle_id: CacheBundleId::new("topology-test"),
-            algorithm: "edge_based_transition_order_v1".to_string(),
+            algorithm: "edge_based_shortcut_ch_v1".to_string(),
             edge_order: vec![0, 1],
             edge_rank: vec![0, 1],
             upward_first_out: vec![0, 1, 1],
             upward_head: vec![1],
+            upward_path_first_out: vec![0, 1],
+            upward_path_edges: vec![1],
             downward_first_out: vec![0, 0, 0],
             downward_head: vec![],
+            downward_path_first_out: vec![0],
+            downward_path_edges: vec![],
         };
 
         let compiled = compile_profile_bundle_with_acceleration(

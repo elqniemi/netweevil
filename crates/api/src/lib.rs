@@ -23,13 +23,14 @@ use netan_profile::{
     ProfileDocument, ReturnGeometry, compile_profile_bundle_with_acceleration, load_profile,
 };
 use netan_query::{
-    MatrixResult, OdPairsDocument, OdResult, PointSetDocument, PreparedRoutingEngine, RouteRequest,
-    RouteResult,
+    EffectiveEngineDescription, EngineMode, MatrixResult, OdPairsDocument, OdResult,
+    PointSetDocument, PreparedRoutingEngine, RouteRequest, RouteResult,
 };
 use netan_report::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
@@ -52,6 +53,7 @@ struct ServiceRuntime {
     dataset_manifest: DatasetManifest,
     topology: Arc<TopologyBundle>,
     edge_names: OnceLock<Option<Arc<[String]>>>,
+    routing_workers: Arc<Semaphore>,
     default_profile_id: String,
     profiles: BTreeMap<String, LoadedProfile>,
     capabilities: ServiceCapabilities,
@@ -62,7 +64,7 @@ struct LoadedProfile {
     source_path: PathBuf,
     document: ProfileDocument,
     manifest: CompiledProfileManifest,
-    engine: PreparedRoutingEngine,
+    engine: Arc<PreparedRoutingEngine>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -128,6 +130,8 @@ pub struct ProfileInfo {
 pub struct RouteExecutionRequest {
     #[serde(default)]
     pub profile_id: Option<String>,
+    #[serde(default)]
+    pub engine_mode: EngineMode,
     pub request: RouteRequest,
 }
 
@@ -135,6 +139,8 @@ pub struct RouteExecutionRequest {
 pub struct OdExecutionRequest {
     #[serde(default)]
     pub profile_id: Option<String>,
+    #[serde(default)]
+    pub engine_mode: EngineMode,
     pub request: OdPairsDocument,
 }
 
@@ -142,6 +148,8 @@ pub struct OdExecutionRequest {
 pub struct MatrixExecutionRequest {
     #[serde(default)]
     pub profile_id: Option<String>,
+    #[serde(default)]
+    pub engine_mode: EngineMode,
     pub request: MatrixRequest,
 }
 
@@ -298,6 +306,12 @@ fn load_service_runtime(
         "topology loaded"
     );
     let engine = engine_description(topology.as_ref());
+    let routing_workers = Arc::new(Semaphore::new(
+        std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(1)
+            .max(1),
+    ));
 
     let mut loaded_profiles: BTreeMap<String, LoadedProfile> = BTreeMap::new();
     let mut requested_paths = Vec::with_capacity(options.profiles.len() + 1);
@@ -354,6 +368,7 @@ fn load_service_runtime(
         dataset_manifest,
         topology,
         edge_names: OnceLock::new(),
+        routing_workers,
         default_profile_id,
         profiles: loaded_profiles,
         capabilities: ServiceCapabilities {
@@ -434,13 +449,14 @@ fn load_or_compile_profile(
     let compiled_bundle: CompiledProfileBundle =
         read_compiled_profile_bundle(&manifest.bundle.path)
             .with_context(|| format!("reading compiled profile bundle {}", manifest.bundle.path))?;
-    let engine =
+    let engine = Arc::new(
         PreparedRoutingEngine::new(topology, Arc::new(compiled_bundle)).with_context(|| {
             format!(
                 "preparing in-memory routing engine for profile '{}'",
                 document.profile.id
             )
-        })?;
+        })?,
+    );
 
     Ok(LoadedProfile {
         source_path: profile_path.to_path_buf(),
@@ -489,27 +505,34 @@ async fn route_handler(
         endpoint = "route",
         profile_id = %profile_id,
         route_id = %payload.request.route_id,
+        engine_mode = ?payload.engine_mode,
         format = query.format.as_deref().unwrap_or("json"),
         "request"
     );
     let mut request = payload.request;
+    let engine_mode = payload.engine_mode;
     if wants_geojson(&query) {
         request.returns.geometry = ReturnGeometry::Full;
     }
+    let effective_engine = profile.engine.effective_engine_description(engine_mode);
+    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let engine = Arc::clone(&profile.engine);
+    let route_id = request.route_id.clone();
     let edge_names = if request.returns.segment_rows {
         load_edge_names(state.service.as_ref())?
     } else {
         None
     };
-    let result = (if let Some(edge_names) = edge_names.as_deref() {
-        profile
-            .engine
-            .execute_route_with_edge_names(&request, edge_names)
-    } else {
-        profile.engine.execute_route(&request)
+    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+        if let Some(edge_names) = edge_names.as_deref() {
+            engine.execute_route_with_edge_names_and_mode(&request, edge_names, engine_mode)
+        } else {
+            engine.execute_route_with_mode(&request, engine_mode)
+        }
     })
+    .await
     .map_err(|error| {
-        warn!(endpoint = "route", route_id = %request.route_id, %error, "request failed");
+        warn!(endpoint = "route", route_id = %route_id, %error, "request failed");
         ApiError::bad_request(error.to_string())
     })?;
     info!(
@@ -520,7 +543,6 @@ async fn route_handler(
         segments = result.summary.segment_count,
         "response"
     );
-    let service = execution_context(state.service.as_ref(), profile);
     if wants_geojson(&query) {
         return geojson_response(route_result_geojson(
             state.service.as_ref(),
@@ -543,14 +565,23 @@ async fn od_handler(
         endpoint = "od",
         profile_id = %profile_id,
         pair_count = pair_count,
+        engine_mode = ?payload.engine_mode,
         format = query.format.as_deref().unwrap_or("json"),
         "request"
     );
     let mut request = payload.request;
+    let engine_mode = payload.engine_mode;
     if wants_geojson(&query) {
         request.returns.geometry = ReturnGeometry::Full;
     }
-    let result = profile.engine.execute_od(&request).map_err(|error| {
+    let effective_engine = profile.engine.effective_engine_description(engine_mode);
+    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let engine = Arc::clone(&profile.engine);
+    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+        engine.execute_od_with_mode(&request, engine_mode)
+    })
+    .await
+    .map_err(|error| {
         warn!(endpoint = "od", %error, "request failed");
         ApiError::bad_request(error.to_string())
     })?;
@@ -561,7 +592,6 @@ async fn od_handler(
         failed = result.failed_count,
         "response"
     );
-    let service = execution_context(state.service.as_ref(), profile);
     if wants_geojson(&query) {
         return geojson_response(od_result_geojson(&service, &result));
     }
@@ -580,6 +610,7 @@ async fn matrix_handler(
     info!(
         endpoint = "matrix",
         profile_id = %profile_id,
+        engine_mode = ?payload.engine_mode,
         origins = origin_count,
         destinations = destination_count,
         cells = origin_count * destination_count,
@@ -587,17 +618,22 @@ async fn matrix_handler(
         "request"
     );
     let mut request = payload.request;
+    let engine_mode = payload.engine_mode;
     if wants_geojson(&query) {
         request.origins.returns.geometry = ReturnGeometry::Full;
         request.destinations.returns.geometry = ReturnGeometry::Full;
     }
-    let result = profile
-        .engine
-        .execute_matrix(&request.origins, &request.destinations)
-        .map_err(|error| {
-            warn!(endpoint = "matrix", %error, "request failed");
-            ApiError::bad_request(error.to_string())
-        })?;
+    let effective_engine = profile.engine.effective_engine_description(engine_mode);
+    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let engine = Arc::clone(&profile.engine);
+    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+        engine.execute_matrix_with_mode(&request.origins, &request.destinations, engine_mode)
+    })
+    .await
+    .map_err(|error| {
+        warn!(endpoint = "matrix", %error, "request failed");
+        ApiError::bad_request(error.to_string())
+    })?;
     info!(
         endpoint = "matrix",
         cells = result.cell_count,
@@ -605,7 +641,6 @@ async fn matrix_handler(
         failed = result.failed_count,
         "response"
     );
-    let service = execution_context(state.service.as_ref(), profile);
     if wants_geojson(&query) {
         return geojson_response(matrix_result_geojson(&service, &result));
     }
@@ -621,6 +656,28 @@ fn resolve_profile<'a>(
         .profiles
         .get(profile_id)
         .ok_or_else(|| ApiError::not_found(format!("unknown profile_id '{}'", profile_id)))
+}
+
+async fn execute_on_routing_worker<T, F>(
+    service: &ServiceRuntime,
+    job: F,
+) -> Result<T, anyhow::Error>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    let permit = service
+        .routing_workers
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| anyhow::anyhow!("routing worker pool closed: {error}"))?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        job()
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("routing worker panicked: {error}"))?
 }
 
 fn load_edge_names(service: &ServiceRuntime) -> Result<Option<Arc<[String]>>, ApiError> {
@@ -697,14 +754,18 @@ fn profile_info(profile: &LoadedProfile) -> ProfileInfo {
     }
 }
 
-fn execution_context(service: &ServiceRuntime, profile: &LoadedProfile) -> ExecutionContext {
+fn execution_context(
+    service: &ServiceRuntime,
+    profile: &LoadedProfile,
+    engine: EffectiveEngineDescription,
+) -> ExecutionContext {
     ExecutionContext {
         dataset_id: service.dataset_manifest.dataset_id.0.clone(),
         profile_id: profile.document.profile.id.clone(),
         profile_hash: profile.manifest.profile_hash.clone(),
-        route_engine: service.engine.route_engine.to_string(),
-        batch_engine: service.engine.batch_engine.to_string(),
-        acceleration: service.engine.acceleration.to_string(),
+        route_engine: engine.route_engine.to_string(),
+        batch_engine: engine.batch_engine.to_string(),
+        acceleration: engine.acceleration.to_string(),
     }
 }
 
@@ -716,13 +777,13 @@ fn engine_description(topology: &TopologyBundle) -> EngineDescription {
     if has_multi_edge_restrictions {
         EngineDescription {
             route_engine: "astar_exact_multi_edge_turns",
-            batch_engine: "astar_exact_multi_edge_turns_repeated",
+            batch_engine: "astar_exact_multi_edge_turns_batch_reuse",
             acceleration: "spatial_index+a_star+turn_automaton",
         }
     } else {
         EngineDescription {
             route_engine: "bidirectional_exact_pairwise_turns",
-            batch_engine: "bidirectional_exact_pairwise_turns_repeated",
+            batch_engine: "bidirectional_exact_pairwise_turns_batch_reuse",
             acceleration: "spatial_index+edge_phantoms",
         }
     }
@@ -909,7 +970,7 @@ mod tests {
             engine.route_engine,
             EngineDescription {
                 route_engine: "bidirectional_exact_pairwise_turns",
-                batch_engine: "bidirectional_exact_pairwise_turns_repeated",
+                batch_engine: "bidirectional_exact_pairwise_turns_batch_reuse",
                 acceleration: "spatial_index+edge_phantoms",
             }
             .route_engine

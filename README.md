@@ -11,7 +11,7 @@ This repository now includes:
 - explicit manifests and bundles under `.netan/`
 - local exports to `json`, `csv`, `geojson`, `gpkg`, `parquet`, and `geoparquet`
 
-Via-way turn restriction handling is present. Turn penalties, acceleration structures, and broader packaging are still pending. See [`PROGRESS.md`](/home/elmeriniemi/stuff/netan/PROGRESS.md).
+Via-way turn restriction handling, turn penalties, persisted acceleration bundles, and the preloadable API path are present. See [`PROGRESS.md`](/home/elmeriniemi/stuff/netan/PROGRESS.md).
 
 ## Workspace Layout
 
@@ -96,19 +96,106 @@ cargo run -p netan-cli -- dataset import datasets/groningen-260317.osm.pbf --nam
 cargo run -p netan-cli -- profile compile --dataset groningen_2026_03 --profile examples/profiles/car_research_v1.yml
 ```
 
-## Fast API Flow
+## Build A Routing-Only `.osm.pbf` With Osmium
 
-This is now the recommended interactive workflow, including QGIS use.
+If you want a smaller source `.osm.pbf` that only keeps the OSM objects `netan` currently needs for routing, you can prefilter it with `osmium`.
 
-For the lowest warm-query latency on the current exact engine:
+The current importer uses:
+
+- routable `way` objects with `highway=*`
+- ferry `way` objects with `route=ferry` or `ferry=*`
+- turn-restriction `relation` objects with `type=restriction`
+- traffic-signal `node` objects with `highway=traffic_signals`
+- referenced way nodes and relation member objects needed to keep the routing topology valid
+
+This means you can safely drop buildings, landuse, addresses, POIs, admin boundaries, and most other non-routing data before import.
+
+This filtered file is meant for `netan` routing import, not as a general-purpose OSM extract.
+
+Example script using a polygon extract:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+SRC_PBF="${1:?usage: ./make_routing_only_pbf.sh <source.osm.pbf> <region.poly> <output.osm.pbf>}"
+POLY="${2:?usage: ./make_routing_only_pbf.sh <source.osm.pbf> <region.poly> <output.osm.pbf>}"
+OUT_PBF="${3:?usage: ./make_routing_only_pbf.sh <source.osm.pbf> <region.poly> <output.osm.pbf>}"
+
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
+
+REGION_PBF="$TMP_DIR/region.osm.pbf"
+FILTERS_TXT="$TMP_DIR/netan-routing-filters.txt"
+
+cat > "$FILTERS_TXT" <<'EOF'
+w/highway
+w/route=ferry
+w/ferry
+r/type=restriction
+n/highway=traffic_signals
+EOF
+
+# 1. Clip to the study area first.
+osmium extract \
+  --polygon "$POLY" \
+  "$SRC_PBF" \
+  -o "$REGION_PBF" \
+  -O
+
+# 2. Keep only routing-relevant objects.
+#    By default, osmium tags-filter also keeps referenced objects.
+#    --remove-tags strips tags from referenced non-matching objects to shrink the file further
+#    while still preserving node coordinates and relation/way references needed by netan.
+osmium tags-filter \
+  --expressions="$FILTERS_TXT" \
+  --remove-tags \
+  "$REGION_PBF" \
+  -o "$OUT_PBF" \
+  -O
+
+# 3. Print a quick summary of the result.
+osmium fileinfo -e "$OUT_PBF"
+```
+
+If you prefer a bounding box instead of a polygon, replace the extract step with:
+
+```bash
+osmium extract \
+  --bbox=min_lon,min_lat,max_lon,max_lat \
+  "$SRC_PBF" \
+  -o "$REGION_PBF" \
+  -O
+```
+
+Then import the filtered file normally:
+
+```bash
+cargo run -p netan-cli -- dataset import path/to/routing-only.osm.pbf --name groningen_2026_03
+```
+
+Notes:
+
+- Keep `r/type=restriction` or you will lose turn restrictions.
+- Keep `n/highway=traffic_signals` or traffic-signal turn penalties will stop working.
+- Keep ferry ways if your profiles or study area depend on ferry connectivity.
+- Do not pass `-R/--omit-referenced` to `osmium tags-filter`; `netan` needs the referenced topology objects.
+
+## Performant API
+
+This is the recommended interactive path, including QGIS use.
+
+### Startup And Network Loading
+
+For the current fast path:
 
 - import the dataset again with the current format
-- compile every profile you want to use before startup
-- start the API with `--default-profile` plus extra `--profile` flags to preload profiles
-- use JSON responses, not `format=geojson`
-- keep route requests summary-only unless you explicitly need geometry or segment rows
+- compile every profile you want available before startup
+- start the API with one `--default-profile` and any extra repeatable `--profile` flags
 
-Example:
+When you run `api serve`, the service loads the dataset manifest, hot topology bundle, persisted acceleration bundle, and one prepared in-memory routing engine per preloaded profile before it starts accepting requests. The edge-name bundle stays cold and is only loaded if you ask for `segment_rows`.
+
+Start the API:
 
 ```bash
 cargo run -p netan-cli -- api serve \
@@ -118,30 +205,124 @@ cargo run -p netan-cli -- api serve \
   --bind 127.0.0.1:8080
 ```
 
-Fast summary-only route request:
+`api serve` options:
+
+- `--dataset <dataset_id>`: required; selects the imported dataset manifest under `.netan/datasets/`
+- `--default-profile <path>`: required; default profile loaded at startup and used when requests omit `profile_id`
+- `--profile <path>`: optional and repeatable; preload additional selectable profiles at startup
+- `--bind <host:port>`: optional; defaults to `127.0.0.1:8080`
+
+Useful discovery endpoints after startup:
+
+- `GET /healthz`
+- `GET /readyz`
+- `GET /v1/service`
+- `GET /v1/profiles`
+- `GET /v1/profiles/{profile_id}`
+
+### Response Formats
+
+For `POST /v1/route`, `POST /v1/od`, and `POST /v1/matrix`:
+
+- default response is JSON
+- `?format=geojson` switches the response to GeoJSON
+
+Performance tradeoff:
+
+- plain JSON is the warmest path
+- `format=geojson` does extra response shaping
+- `segment_rows: true` loads cold edge-name data
+- `geometry: none` keeps geometry work minimal
+- `geometry: full` or `geometry: segments` returns route coordinates and costs more
+
+Pure summary-only route JSON also omits `node_path` and `edge_path`. If you request richer detail, those path arrays are included again.
+
+### Request Options
+
+Common route request fields:
+
+- `profile_id`: optional wrapper field on all execution endpoints; uses the service default if omitted
+- `request.route_id`: required string
+- `request.origin` and `request.destination`: required points with `id`, `lon`, and `lat`
+- `request.snap.max_distance_m`: optional; defaults to `500.0`
+- `request.returns.geometry`: optional; one of `none`, `full`, or `segments`
+- `request.returns.segment_rows`: optional boolean
+- `request.returns.road_type_breakdown`: optional array of `distance_m` and/or `time_s`
+- `request.returns.surface_breakdown`: optional array of `distance_m` and/or `time_s`
+- `request.returns.penalty_breakdown`: optional boolean
+- `request.returns.explain_cost_derivation`: optional boolean
+
+Current response enrichment is centered on geometry, segment rows, and road/surface breakdowns. The `penalty_breakdown` and `explain_cost_derivation` flags are accepted in the request shape for forward compatibility, but they do not currently add separate response sections.
+
+OD request fields:
+
+- `request.pairs`: array of `{ pair_id, origin, destination }`
+- `request.snap.max_distance_m`: optional; defaults to `500.0`
+- `request.returns.geometry`: optional; use `full` if you want route geometries in successful pair rows
+
+Matrix request fields:
+
+- `request.origins.points`: array of `{ id, lon, lat }`
+- `request.destinations.points`: array of `{ id, lon, lat }`
+- `request.origins.snap.max_distance_m` and `request.destinations.snap.max_distance_m`: optional; default `500.0`
+- `request.origins.returns.geometry` and `request.destinations.returns.geometry`: optional; use `full` if you want geometries in successful cells
+
+### Rich Geometry Examples
+
+Route with geometry, segments, names, and breakdowns:
 
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/route \
   -H 'content-type: application/json' \
   --data '{
+    "profile_id": "car_research_v1",
     "request": {
-      "route_id": "fast_route_001",
+      "route_id": "rich_route_001",
       "origin": { "id": "a", "lon": 6.5665, "lat": 53.2194 },
       "destination": { "id": "b", "lon": 6.5716, "lat": 53.2148 },
+      "snap": { "max_distance_m": 500.0 },
       "returns": {
-        "geometry": "none",
-        "segment_rows": false,
-        "road_type_breakdown": [],
-        "surface_breakdown": [],
-        "penalty_breakdown": false,
-        "explain_cost_derivation": false
+        "geometry": "full",
+        "segment_rows": true,
+        "road_type_breakdown": ["distance_m", "time_s"],
+        "surface_breakdown": ["distance_m", "time_s"],
+        "penalty_breakdown": true,
+        "explain_cost_derivation": true
       }
     }
   }'
 ```
 
-That path keeps edge names cold, avoids geometry materialization, and uses the prepared in-memory routing engine plus scratch reuse.
-Pure summary-only route responses now also omit `node_path` and `edge_path`, so the API does not serialize full path ID arrays unless you request richer route detail.
+The same route as GeoJSON:
+
+```bash
+curl -X POST 'http://127.0.0.1:8080/v1/route?format=geojson' \
+  -H 'content-type: application/json' \
+  --data @examples/api/ile_de_france_route_car.json
+```
+
+OD with geometries:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/od \
+  -H 'content-type: application/json' \
+  --data @examples/api/ile_de_france_od.json
+```
+
+Matrix with geometries:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/matrix \
+  -H 'content-type: application/json' \
+  --data @examples/api/ile_de_france_matrix.json
+```
+
+Inspect the loaded service metadata:
+
+```bash
+curl http://127.0.0.1:8080/v1/service
+curl http://127.0.0.1:8080/v1/profiles
+```
 
 ## QGIS Plugin
 

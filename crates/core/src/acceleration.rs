@@ -16,7 +16,15 @@ pub struct DatasetAccelerationBundle {
     #[serde(default)]
     pub upward_head: Vec<u32>,
     #[serde(default)]
+    pub upward_path_first_out: Vec<u32>,
+    #[serde(default)]
+    pub upward_path_edges: Vec<u32>,
+    #[serde(default)]
     pub downward_first_out: Vec<u32>,
     #[serde(default)]
     pub downward_head: Vec<u32>,
+    #[serde(default)]
+    pub downward_path_first_out: Vec<u32>,
+    #[serde(default)]
+    pub downward_path_edges: Vec<u32>,
 }

@@ -341,13 +341,17 @@ mod tests {
         let bundle = DatasetAccelerationBundle {
             schema_version: 1,
             source_topology_bundle_id: CacheBundleId::new("topology-test"),
-            algorithm: "edge_based_transition_order_v1".to_string(),
+            algorithm: "edge_based_shortcut_ch_v1".to_string(),
             edge_order: vec![0, 2, 1],
             edge_rank: vec![0, 2, 1],
             upward_first_out: vec![0, 1, 1, 1],
             upward_head: vec![2],
+            upward_path_first_out: vec![0, 1],
+            upward_path_edges: vec![2],
             downward_first_out: vec![0, 0, 1, 1],
             downward_head: vec![0],
+            downward_path_first_out: vec![0, 1],
+            downward_path_edges: vec![0],
         };
 
         let unique = SystemTime::now()
