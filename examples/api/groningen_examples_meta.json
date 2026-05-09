@@ -1,0 +1,12 @@
+{
+  "province_relation_id": 47826,
+  "province_name": "Groningen",
+  "sample_source": "drivable_highway_geometry_inside_exact_admin_polygon",
+  "counts": {
+    "road_backed_points_considered": 89278,
+    "od_pairs": 1000,
+    "matrix_origins": 50,
+    "matrix_destinations": 50,
+    "route_requests": 100
+  }
+}

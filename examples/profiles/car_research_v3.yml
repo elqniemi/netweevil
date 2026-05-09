@@ -1,6 +1,6 @@
 profile:
-  id: car_research_v2
-  label: "Car profile for paper scenario A v2"
+  id: car_research_v3
+  label: "Car profile for paper scenario A v3"
   mode: car
   defaults_pack: eu_car_2026_01
   extends: car_default

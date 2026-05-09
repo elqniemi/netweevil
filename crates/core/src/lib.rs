@@ -3,14 +3,17 @@ pub mod dataset;
 pub mod graph;
 pub mod metrics;
 
-pub use acceleration::DatasetAccelerationBundle;
+pub use acceleration::{
+    AccelerationBuildProfile, AccelerationBuildSettings, AccelerationBundleStats,
+    DatasetAccelerationBundle,
+};
 pub use dataset::{BuildStage, CacheBundleId, DatasetId, TravelMode};
 pub use graph::{
     AccessMask, ConnectedComponentKind, ConnectedComponentsMeta, DirectedEdge,
     EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId,
-    EdgeNameBundle, NodeId, NodeSpatialIndex, RoadClass, SmoothnessClass, SpatialIndexCell,
-    SurfaceClass, TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyNode,
-    TurnRestriction, TurnRestrictionKind,
+    EdgeNameBundle, EdgePresentation, EdgeProfileAttributes, NodeId, NodeSpatialIndex, RoadClass,
+    RoutingEdge, SmoothnessClass, SpatialIndexCell, SurfaceClass, TopologyBounds, TopologyBundle,
+    TopologyBundleMeta, TopologyEdgeLayers, TopologyNode, TurnRestriction, TurnRestrictionKind,
 };
 pub use metrics::{
     CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle, CompiledTurnCostConfig,

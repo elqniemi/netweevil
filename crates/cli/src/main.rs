@@ -2,11 +2,15 @@ use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use netan_api::{ApiServeOptions, serve as serve_api};
-use netan_core::{CacheBundleId, CompiledProfileBundle, DatasetAccelerationBundle, TopologyBundle};
+use netan_core::{
+    AccelerationBuildProfile, AccelerationBuildSettings, CacheBundleId, CompiledProfileBundle,
+    DatasetAccelerationBundle, TopologyBundle,
+};
 use netan_ingest::{
     DatasetImportOptions, DatasetImportProgress, DatasetImportStage, import_dataset_with_progress,
 };
@@ -21,14 +25,14 @@ use netan_profile::{
     compile_profile_bundle_with_acceleration_with_progress, load_profile,
 };
 use netan_query::{
-    AnalysisKind, MatrixResult, OdResult, RouteResult, ServiceAreaResult, analysis_failure,
-    execute_matrix, execute_od, execute_route, execute_route_with_edge_names, execute_service_area,
-    load_experiment, load_od_pairs, load_point_set, load_route_request, load_service_area_request,
+    AnalysisKind, MatrixResult, OdResult, PreparedRoutingEngine, RouteBatchResult, RouteResult,
+    ServiceAreaResult, analysis_failure, load_experiment, load_od_pairs, load_point_set,
+    load_route_batch, load_route_request, load_service_area_request,
 };
 use netan_report::{
     BundleRef, CompiledProfileManifest, RunKind, RunStatus, SoftwareInfo, load_run_result_summary,
     new_run_manifest, render_run_html, render_run_markdown, write_matrix_result, write_od_result,
-    write_route_result, write_service_area_result,
+    write_route_batch_result, write_route_result, write_service_area_result,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -108,6 +112,7 @@ fn main() -> Result<()> {
         },
         Command::Analyze { command: analyze } => match analyze {
             AnalyzeCommand::Route(args) => analyze_route(&paths, args),
+            AnalyzeCommand::RouteBatch(args) => analyze_route_batch(&paths, args),
             AnalyzeCommand::Od(args) => analyze_od(&paths, args),
             AnalyzeCommand::Matrix(args) => analyze_matrix(&paths, args),
             AnalyzeCommand::ServiceArea(args) => analyze_service_area(&paths, args),
@@ -183,6 +188,31 @@ struct DatasetImportArgs {
     source: PathBuf,
     #[arg(long)]
     name: String,
+    #[arg(long, value_enum, default_value_t = AccelerationProfileArg::Compact)]
+    acceleration_profile: AccelerationProfileArg,
+    #[arg(long)]
+    max_shortcut_path_len: Option<u32>,
+    #[arg(long)]
+    max_shortcuts_per_contracted_edge: Option<u32>,
+    #[arg(long)]
+    max_shortcut_budget_per_edge: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AccelerationProfileArg {
+    Compact,
+    Balanced,
+    Aggressive,
+}
+
+impl From<AccelerationProfileArg> for AccelerationBuildProfile {
+    fn from(value: AccelerationProfileArg) -> Self {
+        match value {
+            AccelerationProfileArg::Compact => Self::Compact,
+            AccelerationProfileArg::Balanced => Self::Balanced,
+            AccelerationProfileArg::Aggressive => Self::Aggressive,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -201,6 +231,7 @@ enum ProfileCommand {
 #[derive(Subcommand, Debug)]
 enum AnalyzeCommand {
     Route(RouteArgs),
+    RouteBatch(RouteBatchArgs),
     Od(OdArgs),
     Matrix(MatrixArgs),
     ServiceArea(ServiceAreaArgs),
@@ -255,6 +286,18 @@ struct RouteArgs {
 }
 
 #[derive(Args, Debug)]
+struct RouteBatchArgs {
+    #[arg(long)]
+    dataset: String,
+    #[arg(long)]
+    profile: PathBuf,
+    #[arg(long)]
+    requests: PathBuf,
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 struct OdArgs {
     #[arg(long)]
     dataset: String,
@@ -294,16 +337,28 @@ struct ServiceAreaArgs {
 
 fn dataset_import(paths: &WorkspacePaths, args: DatasetImportArgs) -> Result<()> {
     let mut progress_line_len = 0_usize;
+    let mut acceleration_settings =
+        AccelerationBuildSettings::for_profile(args.acceleration_profile.into());
+    if let Some(value) = args.max_shortcut_path_len {
+        acceleration_settings.max_shortcut_path_len = value;
+    }
+    if let Some(value) = args.max_shortcuts_per_contracted_edge {
+        acceleration_settings.max_shortcuts_per_contracted_edge = value;
+    }
+    if let Some(value) = args.max_shortcut_budget_per_edge {
+        acceleration_settings.max_shortcut_budget_per_edge = value;
+    }
     let manifest = import_dataset_with_progress(
         paths,
         &args.source,
         DatasetImportOptions {
             name: args.name,
             source: args.source.display().to_string(),
+            acceleration_settings,
         },
         |event| render_import_progress(&event, &mut progress_line_len),
     )?;
-    println!(
+    let mut summary = format!(
         "imported dataset '{}' with {} nodes and {} directed edges (sha256 {})",
         manifest.dataset_id.0,
         manifest
@@ -318,6 +373,13 @@ fn dataset_import(paths: &WorkspacePaths, args: DatasetImportArgs) -> Result<()>
             .unwrap_or_default(),
         manifest.source_sha256
     );
+    if let Some(stats) = manifest.acceleration_stats.as_ref() {
+        summary.push_str(&format!(
+            ", acceleration arcs {} ({} base, {} shortcuts)",
+            stats.total_arc_count, stats.base_arc_count, stats.shortcut_arc_count
+        ));
+    }
+    println!("{summary}");
     Ok(())
 }
 
@@ -521,6 +583,39 @@ fn analyze_route(paths: &WorkspacePaths, args: RouteArgs) -> Result<()> {
     Ok(())
 }
 
+fn analyze_route_batch(paths: &WorkspacePaths, args: RouteBatchArgs) -> Result<()> {
+    let profile = load_profile(&args.profile)?;
+    profile.validate()?;
+    let mut requests = load_route_batch(&args.requests)?;
+    if args.out.as_deref().is_some_and(output_needs_geometry) {
+        for entry in &mut requests.requests {
+            if matches!(entry.request.returns.geometry, ReturnGeometry::None) {
+                entry.request.returns.geometry = ReturnGeometry::Full;
+            }
+        }
+    }
+    let stored = match run_route_batch_analysis(
+        paths,
+        &args.dataset,
+        &profile,
+        &args.requests,
+        requests,
+        args.out,
+    ) {
+        Ok(stored) => stored,
+        Err(error) => {
+            emit_structured_failure_diagnostics(&error);
+            return Err(error);
+        }
+    };
+    println!(
+        "route batch result written to {}",
+        stored.result_path.display()
+    );
+    println!("run manifest written to {}", stored.manifest_path.display());
+    Ok(())
+}
+
 fn analyze_od(paths: &WorkspacePaths, args: OdArgs) -> Result<()> {
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
@@ -619,18 +714,24 @@ fn run_route_analysis(
     {
         request.returns.geometry = ReturnGeometry::Full;
     }
-    let (topology, compiled_manifest, compiled_bundle) =
+    let (topology, acceleration, compiled_manifest, compiled_bundle) =
         load_route_execution_inputs(paths, dataset_id, profile)?;
     let engine = engine_description(&topology);
+    let prepared = PreparedRoutingEngine::new(
+        Arc::new(topology.clone()),
+        Arc::new(compiled_bundle.clone()),
+        acceleration.map(Arc::new),
+    )
+    .context("preparing routing engine")?;
     let edge_names = if request.returns.segment_rows {
         load_edge_names(paths, dataset_id)?
     } else {
         None
     };
     let result = if let Some(edge_names) = edge_names.as_ref() {
-        execute_route_with_edge_names(&topology, &compiled_bundle, &request, edge_names)
+        prepared.execute_route_with_edge_names(&request, edge_names)
     } else {
-        execute_route(&topology, &compiled_bundle, &request)
+        prepared.execute_route(&request)
     }
     .with_context(|| format!("executing route '{}'", request.route_id))?;
     store_route_run(
@@ -639,6 +740,118 @@ fn run_route_analysis(
         profile,
         request_path,
         &request,
+        &result,
+        &compiled_manifest,
+        engine,
+        out,
+    )
+}
+
+fn run_route_batch_analysis(
+    paths: &WorkspacePaths,
+    dataset_id: &str,
+    profile: &ProfileDocument,
+    requests_path: &Path,
+    requests: netan_query::RouteBatchDocument,
+    out: Option<PathBuf>,
+) -> Result<StoredRun> {
+    let (topology, acceleration, compiled_manifest, compiled_bundle) =
+        load_route_execution_inputs(paths, dataset_id, profile)?;
+    let engine = engine_description(&topology);
+    let prepared = PreparedRoutingEngine::new(
+        Arc::new(topology.clone()),
+        Arc::new(compiled_bundle.clone()),
+        acceleration.map(Arc::new),
+    )
+    .context("preparing routing engine")?;
+
+    let needs_edge_names = requests
+        .requests
+        .iter()
+        .any(|entry| entry.request.returns.segment_rows);
+    let edge_names = if needs_edge_names {
+        load_edge_names(paths, dataset_id)?
+    } else {
+        None
+    };
+
+    let mut items = Vec::with_capacity(requests.requests.len());
+    let mut succeeded_count = 0_usize;
+    let mut failed_count = 0_usize;
+    let mut warnings = Vec::new();
+    let route_count = requests.requests.len();
+
+    for (index, entry) in requests.requests.iter().enumerate() {
+        if let Some(profile_id) = entry.profile_id.as_deref() {
+            if profile_id != profile.profile.id {
+                anyhow::bail!(
+                    "route '{}' requests profile_id '{}' but CLI batch is using profile '{}'",
+                    entry.request.route_id,
+                    profile_id,
+                    profile.profile.id
+                );
+            }
+        }
+
+        let execution = if let Some(edge_names) = edge_names.as_ref() {
+            prepared.execute_route_with_edge_names(&entry.request, edge_names)
+        } else {
+            prepared.execute_route(&entry.request)
+        };
+
+        match execution {
+            Ok(route) => {
+                succeeded_count += 1;
+                if !route.warnings.is_empty() {
+                    warnings.extend(route.warnings.clone());
+                }
+                items.push(netan_query::RouteBatchItemResult {
+                    route_id: route.route_id.clone(),
+                    origin_id: entry.request.origin.id.clone(),
+                    destination_id: entry.request.destination.id.clone(),
+                    status: netan_query::BatchItemStatus::Succeeded,
+                    route: Some(route),
+                    error: None,
+                });
+            }
+            Err(error) => {
+                failed_count += 1;
+                items.push(netan_query::RouteBatchItemResult {
+                    route_id: entry.request.route_id.clone(),
+                    origin_id: entry.request.origin.id.clone(),
+                    destination_id: entry.request.destination.id.clone(),
+                    status: netan_query::BatchItemStatus::Failed,
+                    route: None,
+                    error: Some(error.to_string()),
+                });
+            }
+        }
+
+        if route_count <= 20 || (index + 1) % 10 == 0 || index + 1 == route_count {
+            eprintln!(
+                "[route-batch] solved {}/{} routes ({} succeeded, {} failed)",
+                index + 1,
+                route_count,
+                succeeded_count,
+                failed_count
+            );
+        }
+    }
+
+    let result = RouteBatchResult {
+        route_count: items.len(),
+        succeeded_count,
+        failed_count,
+        items,
+        warnings,
+    };
+
+    store_route_batch_run(
+        paths,
+        dataset_id,
+        profile,
+        requests_path,
+        &requests,
         &result,
         &compiled_manifest,
         engine,
@@ -659,10 +872,17 @@ fn run_od_analysis(
     {
         request.returns.geometry = ReturnGeometry::Full;
     }
-    let (topology, compiled_manifest, compiled_bundle) =
+    let (topology, acceleration, compiled_manifest, compiled_bundle) =
         load_route_execution_inputs(paths, dataset_id, profile)?;
     let engine = engine_description(&topology);
-    let result = execute_od(&topology, &compiled_bundle, &request)
+    let prepared = PreparedRoutingEngine::new(
+        Arc::new(topology.clone()),
+        Arc::new(compiled_bundle.clone()),
+        acceleration.map(Arc::new),
+    )
+    .context("preparing routing engine")?;
+    let result = prepared
+        .execute_od(&request)
         .with_context(|| format!("executing OD pairs from '{}'", pairs_path.display()))?;
     store_od_run(
         paths,
@@ -695,10 +915,17 @@ fn run_matrix_analysis(
             destinations.returns.geometry = ReturnGeometry::Full;
         }
     }
-    let (topology, compiled_manifest, compiled_bundle) =
+    let (topology, acceleration, compiled_manifest, compiled_bundle) =
         load_route_execution_inputs(paths, dataset_id, profile)?;
     let engine = engine_description(&topology);
-    let result = execute_matrix(&topology, &compiled_bundle, &origins, &destinations)
+    let prepared = PreparedRoutingEngine::new(
+        Arc::new(topology.clone()),
+        Arc::new(compiled_bundle.clone()),
+        acceleration.map(Arc::new),
+    )
+    .context("preparing routing engine")?;
+    let result = prepared
+        .execute_matrix(&origins, &destinations)
         .with_context(|| {
             format!(
                 "executing matrix from '{}' to '{}'",
@@ -729,10 +956,17 @@ fn run_service_area_analysis(
     request: &netan_query::ServiceAreaRequest,
     out: Option<PathBuf>,
 ) -> Result<StoredRun> {
-    let (topology, compiled_manifest, compiled_bundle) =
+    let (topology, acceleration, compiled_manifest, compiled_bundle) =
         load_route_execution_inputs(paths, dataset_id, profile)?;
     let engine = engine_description(&topology);
-    let result = execute_service_area(&topology, &compiled_bundle, request)
+    let prepared = PreparedRoutingEngine::new(
+        Arc::new(topology.clone()),
+        Arc::new(compiled_bundle.clone()),
+        acceleration.map(Arc::new),
+    )
+    .context("preparing routing engine")?;
+    let result = prepared
+        .execute_service_area(request)
         .with_context(|| format!("executing service-area '{}'", request.analysis_id))?;
     store_service_area_run(
         paths,
@@ -802,6 +1036,64 @@ fn store_route_run(
             "violation_count": result.summary.violation_count,
             "violation_types": result.summary.violation_types,
             "segment_count": result.summary.segment_count,
+        })),
+    })
+}
+
+fn store_route_batch_run(
+    paths: &WorkspacePaths,
+    dataset_id: &str,
+    profile: &ProfileDocument,
+    requests_path: &Path,
+    requests: &netan_query::RouteBatchDocument,
+    result: &RouteBatchResult,
+    compiled_manifest: &CompiledProfileManifest,
+    engine: EngineDescription,
+    out: Option<PathBuf>,
+) -> Result<StoredRun> {
+    let mut manifest = new_run_manifest(
+        RunKind::RouteBatch,
+        dataset_id.to_string(),
+        profile,
+        requests_path.display().to_string(),
+        RunStatus::Succeeded,
+        format!(
+            "Route batch completed with {} succeeded routes and {} failed routes.",
+            result.succeeded_count, result.failed_count
+        ),
+        software_info(),
+        Some(compiled_manifest.bundle.bundle_id.0.clone()),
+    )?;
+    manifest.algorithm.engine = engine.route_engine.to_string();
+    manifest.algorithm.acceleration = engine.acceleration.to_string();
+    manifest.methods_summary.plain_language = format!(
+        "{} Route-batch execution reused one prepared routing engine for {} route requests and wrote one consolidated result file.",
+        engine.route_summary, result.route_count,
+    );
+    manifest.connectivity_policy = requests
+        .requests
+        .first()
+        .map(|entry| entry.request.connectivity.clone());
+    manifest.fallback_policy = requests
+        .requests
+        .first()
+        .map(|entry| entry.request.fallback.clone());
+
+    let result_path = out.unwrap_or_else(|| {
+        paths
+            .runs_dir
+            .join(format!("{}-result.json", manifest.run_id))
+    });
+    write_route_batch_result(&result_path, requests, result)?;
+    manifest.result_path = Some(result_path.display().to_string());
+    let manifest_path = write_run_manifest(paths, &manifest)?;
+    Ok(StoredRun {
+        result_path,
+        manifest_path,
+        summary: Some(serde_json::json!({
+            "route_count": result.route_count,
+            "succeeded_count": result.succeeded_count,
+            "failed_count": result.failed_count,
         })),
     })
 }
@@ -1195,6 +1487,7 @@ fn load_route_execution_inputs(
     profile: &ProfileDocument,
 ) -> Result<(
     TopologyBundle,
+    Option<DatasetAccelerationBundle>,
     CompiledProfileManifest,
     CompiledProfileBundle,
 )> {
@@ -1206,6 +1499,14 @@ fn load_route_execution_inputs(
         .context("dataset is missing a topology bundle; run `netan dataset import` first")?;
     let topology: TopologyBundle = read_topology_bundle(&topology_ref.path)
         .with_context(|| format!("reading topology bundle {}", topology_ref.path))?;
+    let acceleration = dataset_manifest
+        .acceleration_bundle
+        .as_ref()
+        .map(|bundle_ref| {
+            read_acceleration_bundle(&bundle_ref.path)
+                .with_context(|| format!("reading acceleration bundle {}", bundle_ref.path))
+        })
+        .transpose()?;
     let wanted_hash = profile.fingerprint()?;
     let compiled_manifest = read_compiled_profile_manifests(paths)?
         .into_iter()
@@ -1220,7 +1521,7 @@ fn load_route_execution_inputs(
                 compiled_manifest.bundle.path
             )
         })?;
-    Ok((topology, compiled_manifest, compiled_bundle))
+    Ok((topology, acceleration, compiled_manifest, compiled_bundle))
 }
 
 fn load_edge_names(paths: &WorkspacePaths, dataset_id: &str) -> Result<Option<Vec<String>>> {

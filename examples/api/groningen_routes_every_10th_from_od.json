@@ -1,0 +1,3306 @@
+{
+  "source": "every_10th_pair_from_examples/api/groningen_od_1000.json",
+  "count": 100,
+  "requests": [
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0001",
+        "origin": {
+          "id": "groningen_o_0001",
+          "lon": 7.083121,
+          "lat": 52.838689
+        },
+        "destination": {
+          "id": "groningen_d_0001",
+          "lon": 6.600146,
+          "lat": 53.201353
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0011",
+        "origin": {
+          "id": "groningen_o_0011",
+          "lon": 7.07398,
+          "lat": 52.87196
+        },
+        "destination": {
+          "id": "groningen_d_0011",
+          "lon": 6.599906,
+          "lat": 53.23754
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0021",
+        "origin": {
+          "id": "groningen_o_0021",
+          "lon": 7.057701,
+          "lat": 52.879822
+        },
+        "destination": {
+          "id": "groningen_d_0021",
+          "lon": 6.908994,
+          "lat": 53.324598
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0031",
+        "origin": {
+          "id": "groningen_o_0031",
+          "lon": 7.070954,
+          "lat": 52.890407
+        },
+        "destination": {
+          "id": "groningen_d_0031",
+          "lon": 6.561213,
+          "lat": 53.211479
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0041",
+        "origin": {
+          "id": "groningen_o_0041",
+          "lon": 7.106987,
+          "lat": 52.924418
+        },
+        "destination": {
+          "id": "groningen_d_0041",
+          "lon": 6.546402,
+          "lat": 53.252917
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0051",
+        "origin": {
+          "id": "groningen_o_0051",
+          "lon": 7.017099,
+          "lat": 52.933316
+        },
+        "destination": {
+          "id": "groningen_d_0051",
+          "lon": 6.639286,
+          "lat": 53.347213
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0061",
+        "origin": {
+          "id": "groningen_o_0061",
+          "lon": 7.130326,
+          "lat": 52.946503
+        },
+        "destination": {
+          "id": "groningen_d_0061",
+          "lon": 6.560934,
+          "lat": 53.220664
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0071",
+        "origin": {
+          "id": "groningen_o_0071",
+          "lon": 6.977847,
+          "lat": 52.96099
+        },
+        "destination": {
+          "id": "groningen_d_0071",
+          "lon": 6.53316,
+          "lat": 53.292655
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0081",
+        "origin": {
+          "id": "groningen_o_0081",
+          "lon": 7.151307,
+          "lat": 52.976602
+        },
+        "destination": {
+          "id": "groningen_d_0081",
+          "lon": 6.556437,
+          "lat": 53.198051
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0091",
+        "origin": {
+          "id": "groningen_o_0091",
+          "lon": 6.967341,
+          "lat": 52.98397
+        },
+        "destination": {
+          "id": "groningen_d_0091",
+          "lon": 6.541112,
+          "lat": 53.233513
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0101",
+        "origin": {
+          "id": "groningen_o_0101",
+          "lon": 6.977889,
+          "lat": 52.987689
+        },
+        "destination": {
+          "id": "groningen_d_0101",
+          "lon": 6.842323,
+          "lat": 53.318452
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0111",
+        "origin": {
+          "id": "groningen_o_0111",
+          "lon": 6.950239,
+          "lat": 52.991718
+        },
+        "destination": {
+          "id": "groningen_d_0111",
+          "lon": 6.646569,
+          "lat": 53.20806
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0121",
+        "origin": {
+          "id": "groningen_o_0121",
+          "lon": 6.940618,
+          "lat": 52.996256
+        },
+        "destination": {
+          "id": "groningen_d_0121",
+          "lon": 6.96441,
+          "lat": 53.246871
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0131",
+        "origin": {
+          "id": "groningen_o_0131",
+          "lon": 7.200271,
+          "lat": 53.001906
+        },
+        "destination": {
+          "id": "groningen_d_0131",
+          "lon": 6.568817,
+          "lat": 53.336694
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0141",
+        "origin": {
+          "id": "groningen_o_0141",
+          "lon": 6.97513,
+          "lat": 53.008557
+        },
+        "destination": {
+          "id": "groningen_d_0141",
+          "lon": 6.27124,
+          "lat": 53.216402
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0151",
+        "origin": {
+          "id": "groningen_o_0151",
+          "lon": 7.157157,
+          "lat": 53.019453
+        },
+        "destination": {
+          "id": "groningen_d_0151",
+          "lon": 6.784074,
+          "lat": 53.274924
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0161",
+        "origin": {
+          "id": "groningen_o_0161",
+          "lon": 7.114541,
+          "lat": 53.028938
+        },
+        "destination": {
+          "id": "groningen_d_0161",
+          "lon": 6.550146,
+          "lat": 53.194178
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0171",
+        "origin": {
+          "id": "groningen_o_0171",
+          "lon": 7.045183,
+          "lat": 53.03589
+        },
+        "destination": {
+          "id": "groningen_d_0171",
+          "lon": 6.358819,
+          "lat": 53.228884
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0181",
+        "origin": {
+          "id": "groningen_o_0181",
+          "lon": 7.029159,
+          "lat": 53.044483
+        },
+        "destination": {
+          "id": "groningen_d_0181",
+          "lon": 6.44205,
+          "lat": 53.309192
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0191",
+        "origin": {
+          "id": "groningen_o_0191",
+          "lon": 6.847309,
+          "lat": 53.054175
+        },
+        "destination": {
+          "id": "groningen_d_0191",
+          "lon": 7.044684,
+          "lat": 53.204203
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0201",
+        "origin": {
+          "id": "groningen_o_0201",
+          "lon": 6.94476,
+          "lat": 53.06558
+        },
+        "destination": {
+          "id": "groningen_d_0201",
+          "lon": 6.587908,
+          "lat": 53.242314
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0211",
+        "origin": {
+          "id": "groningen_o_0211",
+          "lon": 6.929754,
+          "lat": 53.07322
+        },
+        "destination": {
+          "id": "groningen_d_0211",
+          "lon": 6.907712,
+          "lat": 53.330058
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0221",
+        "origin": {
+          "id": "groningen_o_0221",
+          "lon": 6.961841,
+          "lat": 53.078795
+        },
+        "destination": {
+          "id": "groningen_d_0221",
+          "lon": 6.587308,
+          "lat": 53.21366
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0231",
+        "origin": {
+          "id": "groningen_o_0231",
+          "lon": 6.863251,
+          "lat": 53.084206
+        },
+        "destination": {
+          "id": "groningen_d_0231",
+          "lon": 6.309819,
+          "lat": 53.262151
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0241",
+        "origin": {
+          "id": "groningen_o_0241",
+          "lon": 6.895816,
+          "lat": 53.087881
+        },
+        "destination": {
+          "id": "groningen_d_0241",
+          "lon": 6.331887,
+          "lat": 53.358978
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0251",
+        "origin": {
+          "id": "groningen_o_0251",
+          "lon": 6.858402,
+          "lat": 53.091848
+        },
+        "destination": {
+          "id": "groningen_d_0251",
+          "lon": 6.57325,
+          "lat": 53.224096
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0261",
+        "origin": {
+          "id": "groningen_o_0261",
+          "lon": 7.007404,
+          "lat": 53.095446
+        },
+        "destination": {
+          "id": "groningen_d_0261",
+          "lon": 7.034284,
+          "lat": 53.300658
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0271",
+        "origin": {
+          "id": "groningen_o_0271",
+          "lon": 7.186097,
+          "lat": 53.098271
+        },
+        "destination": {
+          "id": "groningen_d_0271",
+          "lon": 7.030697,
+          "lat": 53.20049
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0281",
+        "origin": {
+          "id": "groningen_o_0281",
+          "lon": 7.145157,
+          "lat": 53.100819
+        },
+        "destination": {
+          "id": "groningen_d_0281",
+          "lon": 6.595351,
+          "lat": 53.236494
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0291",
+        "origin": {
+          "id": "groningen_o_0291",
+          "lon": 6.312432,
+          "lat": 53.103024
+        },
+        "destination": {
+          "id": "groningen_d_0291",
+          "lon": 6.8599,
+          "lat": 53.322934
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0301",
+        "origin": {
+          "id": "groningen_o_0301",
+          "lon": 7.000905,
+          "lat": 53.10516
+        },
+        "destination": {
+          "id": "groningen_d_0301",
+          "lon": 6.798674,
+          "lat": 53.210671
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0311",
+        "origin": {
+          "id": "groningen_o_0311",
+          "lon": 6.871298,
+          "lat": 53.10682
+        },
+        "destination": {
+          "id": "groningen_d_0311",
+          "lon": 6.406527,
+          "lat": 53.250624
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0321",
+        "origin": {
+          "id": "groningen_o_0321",
+          "lon": 6.826313,
+          "lat": 53.108624
+        },
+        "destination": {
+          "id": "groningen_d_0321",
+          "lon": 6.906164,
+          "lat": 53.344042
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0331",
+        "origin": {
+          "id": "groningen_o_0331",
+          "lon": 6.994322,
+          "lat": 53.111148
+        },
+        "destination": {
+          "id": "groningen_d_0331",
+          "lon": 6.539586,
+          "lat": 53.219405
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0341",
+        "origin": {
+          "id": "groningen_o_0341",
+          "lon": 6.29364,
+          "lat": 53.11382
+        },
+        "destination": {
+          "id": "groningen_d_0341",
+          "lon": 6.9731,
+          "lat": 53.287248
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0351",
+        "origin": {
+          "id": "groningen_o_0351",
+          "lon": 7.055804,
+          "lat": 53.116318
+        },
+        "destination": {
+          "id": "groningen_d_0351",
+          "lon": 6.569993,
+          "lat": 53.19731
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0361",
+        "origin": {
+          "id": "groningen_o_0361",
+          "lon": 6.671739,
+          "lat": 53.119928
+        },
+        "destination": {
+          "id": "groningen_d_0361",
+          "lon": 6.651878,
+          "lat": 53.232356
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0371",
+        "origin": {
+          "id": "groningen_o_0371",
+          "lon": 6.243348,
+          "lat": 53.123528
+        },
+        "destination": {
+          "id": "groningen_d_0371",
+          "lon": 6.851096,
+          "lat": 53.316737
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0381",
+        "origin": {
+          "id": "groningen_o_0381",
+          "lon": 6.288466,
+          "lat": 53.127472
+        },
+        "destination": {
+          "id": "groningen_d_0381",
+          "lon": 6.567592,
+          "lat": 53.207197
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0391",
+        "origin": {
+          "id": "groningen_o_0391",
+          "lon": 6.91155,
+          "lat": 53.131321
+        },
+        "destination": {
+          "id": "groningen_d_0391",
+          "lon": 6.97718,
+          "lat": 53.245867
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0401",
+        "origin": {
+          "id": "groningen_o_0401",
+          "lon": 6.274392,
+          "lat": 53.133402
+        },
+        "destination": {
+          "id": "groningen_d_0401",
+          "lon": 6.844847,
+          "lat": 53.335004
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0411",
+        "origin": {
+          "id": "groningen_o_0411",
+          "lon": 6.898853,
+          "lat": 53.134683
+        },
+        "destination": {
+          "id": "groningen_d_0411",
+          "lon": 6.498923,
+          "lat": 53.215677
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0421",
+        "origin": {
+          "id": "groningen_o_0421",
+          "lon": 7.025019,
+          "lat": 53.135854
+        },
+        "destination": {
+          "id": "groningen_d_0421",
+          "lon": 6.459811,
+          "lat": 53.271607
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0431",
+        "origin": {
+          "id": "groningen_o_0431",
+          "lon": 6.72402,
+          "lat": 53.137264
+        },
+        "destination": {
+          "id": "groningen_d_0431",
+          "lon": 6.850542,
+          "lat": 53.193277
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0441",
+        "origin": {
+          "id": "groningen_o_0441",
+          "lon": 6.267319,
+          "lat": 53.138702
+        },
+        "destination": {
+          "id": "groningen_d_0441",
+          "lon": 6.958588,
+          "lat": 53.227679
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0451",
+        "origin": {
+          "id": "groningen_o_0451",
+          "lon": 7.015558,
+          "lat": 53.139922
+        },
+        "destination": {
+          "id": "groningen_d_0451",
+          "lon": 6.594364,
+          "lat": 53.306359
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0461",
+        "origin": {
+          "id": "groningen_o_0461",
+          "lon": 7.053003,
+          "lat": 53.14106
+        },
+        "destination": {
+          "id": "groningen_d_0461",
+          "lon": 6.54916,
+          "lat": 53.203385
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0471",
+        "origin": {
+          "id": "groningen_o_0471",
+          "lon": 6.236667,
+          "lat": 53.142187
+        },
+        "destination": {
+          "id": "groningen_d_0471",
+          "lon": 6.406691,
+          "lat": 53.241
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0481",
+        "origin": {
+          "id": "groningen_o_0481",
+          "lon": 7.021516,
+          "lat": 53.143301
+        },
+        "destination": {
+          "id": "groningen_d_0481",
+          "lon": 6.920655,
+          "lat": 53.327884
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0491",
+        "origin": {
+          "id": "groningen_o_0491",
+          "lon": 6.374132,
+          "lat": 53.144258
+        },
+        "destination": {
+          "id": "groningen_d_0491",
+          "lon": 6.567739,
+          "lat": 53.212968
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0501",
+        "origin": {
+          "id": "groningen_o_0501",
+          "lon": 6.26504,
+          "lat": 53.14521
+        },
+        "destination": {
+          "id": "groningen_d_0501",
+          "lon": 6.305188,
+          "lat": 53.259224
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0511",
+        "origin": {
+          "id": "groningen_o_0511",
+          "lon": 7.018425,
+          "lat": 53.146292
+        },
+        "destination": {
+          "id": "groningen_d_0511",
+          "lon": 6.515774,
+          "lat": 53.3561
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0521",
+        "origin": {
+          "id": "groningen_o_0521",
+          "lon": 7.042251,
+          "lat": 53.147125
+        },
+        "destination": {
+          "id": "groningen_d_0521",
+          "lon": 6.58859,
+          "lat": 53.222915
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0531",
+        "origin": {
+          "id": "groningen_o_0531",
+          "lon": 7.051856,
+          "lat": 53.14802
+        },
+        "destination": {
+          "id": "groningen_d_0531",
+          "lon": 6.662917,
+          "lat": 53.298564
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0541",
+        "origin": {
+          "id": "groningen_o_0541",
+          "lon": 6.991555,
+          "lat": 53.148899
+        },
+        "destination": {
+          "id": "groningen_d_0541",
+          "lon": 6.574658,
+          "lat": 53.199712
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0551",
+        "origin": {
+          "id": "groningen_o_0551",
+          "lon": 6.753611,
+          "lat": 53.149729
+        },
+        "destination": {
+          "id": "groningen_d_0551",
+          "lon": 6.4113,
+          "lat": 53.23547
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0561",
+        "origin": {
+          "id": "groningen_o_0561",
+          "lon": 7.049005,
+          "lat": 53.150603
+        },
+        "destination": {
+          "id": "groningen_d_0561",
+          "lon": 6.844073,
+          "lat": 53.321331
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0571",
+        "origin": {
+          "id": "groningen_o_0571",
+          "lon": 6.738423,
+          "lat": 53.151375
+        },
+        "destination": {
+          "id": "groningen_d_0571",
+          "lon": 6.543878,
+          "lat": 53.209834
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0581",
+        "origin": {
+          "id": "groningen_o_0581",
+          "lon": 7.05303,
+          "lat": 53.152139
+        },
+        "destination": {
+          "id": "groningen_d_0581",
+          "lon": 6.573316,
+          "lat": 53.249087
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0591",
+        "origin": {
+          "id": "groningen_o_0591",
+          "lon": 6.271286,
+          "lat": 53.152958
+        },
+        "destination": {
+          "id": "groningen_d_0591",
+          "lon": 6.403909,
+          "lat": 53.341054
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0601",
+        "origin": {
+          "id": "groningen_o_0601",
+          "lon": 7.058826,
+          "lat": 53.153931
+        },
+        "destination": {
+          "id": "groningen_d_0601",
+          "lon": 6.581847,
+          "lat": 53.218311
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0611",
+        "origin": {
+          "id": "groningen_o_0611",
+          "lon": 6.373316,
+          "lat": 53.154673
+        },
+        "destination": {
+          "id": "groningen_d_0611",
+          "lon": 6.708678,
+          "lat": 53.282093
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0621",
+        "origin": {
+          "id": "groningen_o_0621",
+          "lon": 6.887246,
+          "lat": 53.155486
+        },
+        "destination": {
+          "id": "groningen_d_0621",
+          "lon": 7.084424,
+          "lat": 53.196338
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0631",
+        "origin": {
+          "id": "groningen_o_0631",
+          "lon": 6.748343,
+          "lat": 53.156202
+        },
+        "destination": {
+          "id": "groningen_d_0631",
+          "lon": 6.531336,
+          "lat": 53.231065
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0641",
+        "origin": {
+          "id": "groningen_o_0641",
+          "lon": 6.643859,
+          "lat": 53.156882
+        },
+        "destination": {
+          "id": "groningen_d_0641",
+          "lon": 6.867557,
+          "lat": 53.314097
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0651",
+        "origin": {
+          "id": "groningen_o_0651",
+          "lon": 6.773438,
+          "lat": 53.157859
+        },
+        "destination": {
+          "id": "groningen_d_0651",
+          "lon": 7.180263,
+          "lat": 53.206118
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0661",
+        "origin": {
+          "id": "groningen_o_0661",
+          "lon": 7.035203,
+          "lat": 53.158927
+        },
+        "destination": {
+          "id": "groningen_d_0661",
+          "lon": 6.596255,
+          "lat": 53.244746
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0671",
+        "origin": {
+          "id": "groningen_o_0671",
+          "lon": 6.326883,
+          "lat": 53.15983
+        },
+        "destination": {
+          "id": "groningen_d_0671",
+          "lon": 6.513917,
+          "lat": 53.333218
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0681",
+        "origin": {
+          "id": "groningen_o_0681",
+          "lon": 6.739565,
+          "lat": 53.16079
+        },
+        "destination": {
+          "id": "groningen_d_0681",
+          "lon": 6.585848,
+          "lat": 53.214982
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0691",
+        "origin": {
+          "id": "groningen_o_0691",
+          "lon": 6.37927,
+          "lat": 53.16173
+        },
+        "destination": {
+          "id": "groningen_d_0691",
+          "lon": 6.837033,
+          "lat": 53.267579
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0701",
+        "origin": {
+          "id": "groningen_o_0701",
+          "lon": 6.781481,
+          "lat": 53.162784
+        },
+        "destination": {
+          "id": "groningen_d_0701",
+          "lon": 6.626485,
+          "lat": 53.192405
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0711",
+        "origin": {
+          "id": "groningen_o_0711",
+          "lon": 6.742446,
+          "lat": 53.163608
+        },
+        "destination": {
+          "id": "groningen_d_0711",
+          "lon": 6.638836,
+          "lat": 53.226483
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0721",
+        "origin": {
+          "id": "groningen_o_0721",
+          "lon": 6.871323,
+          "lat": 53.164361
+        },
+        "destination": {
+          "id": "groningen_d_0721",
+          "lon": 6.973196,
+          "lat": 53.304287
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0731",
+        "origin": {
+          "id": "groningen_o_0731",
+          "lon": 6.613934,
+          "lat": 53.165225
+        },
+        "destination": {
+          "id": "groningen_d_0731",
+          "lon": 6.523758,
+          "lat": 53.202348
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0741",
+        "origin": {
+          "id": "groningen_o_0741",
+          "lon": 6.761534,
+          "lat": 53.166005
+        },
+        "destination": {
+          "id": "groningen_d_0741",
+          "lon": 6.589641,
+          "lat": 53.239034
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0751",
+        "origin": {
+          "id": "groningen_o_0751",
+          "lon": 6.993329,
+          "lat": 53.166829
+        },
+        "destination": {
+          "id": "groningen_d_0751",
+          "lon": 6.521169,
+          "lat": 53.326229
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0761",
+        "origin": {
+          "id": "groningen_o_0761",
+          "lon": 6.589784,
+          "lat": 53.167683
+        },
+        "destination": {
+          "id": "groningen_d_0761",
+          "lon": 6.560172,
+          "lat": 53.212218
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0771",
+        "origin": {
+          "id": "groningen_o_0771",
+          "lon": 6.723832,
+          "lat": 53.168534
+        },
+        "destination": {
+          "id": "groningen_d_0771",
+          "lon": 6.939517,
+          "lat": 53.256017
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0781",
+        "origin": {
+          "id": "groningen_o_0781",
+          "lon": 6.188376,
+          "lat": 53.169371
+        },
+        "destination": {
+          "id": "groningen_d_0781",
+          "lon": 6.453428,
+          "lat": 53.35129
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0791",
+        "origin": {
+          "id": "groningen_o_0791",
+          "lon": 6.963698,
+          "lat": 53.170011
+        },
+        "destination": {
+          "id": "groningen_d_0791",
+          "lon": 6.552172,
+          "lat": 53.221752
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0801",
+        "origin": {
+          "id": "groningen_o_0801",
+          "lon": 6.631316,
+          "lat": 53.170749
+        },
+        "destination": {
+          "id": "groningen_d_0801",
+          "lon": 6.599256,
+          "lat": 53.295626
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0811",
+        "origin": {
+          "id": "groningen_o_0811",
+          "lon": 7.05645,
+          "lat": 53.171431
+        },
+        "destination": {
+          "id": "groningen_d_0811",
+          "lon": 6.455568,
+          "lat": 53.198847
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0821",
+        "origin": {
+          "id": "groningen_o_0821",
+          "lon": 6.97437,
+          "lat": 53.172176
+        },
+        "destination": {
+          "id": "groningen_d_0821",
+          "lon": 6.621021,
+          "lat": 53.234578
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0831",
+        "origin": {
+          "id": "groningen_o_0831",
+          "lon": 6.974343,
+          "lat": 53.172978
+        },
+        "destination": {
+          "id": "groningen_d_0831",
+          "lon": 6.909624,
+          "lat": 53.319873
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0841",
+        "origin": {
+          "id": "groningen_o_0841",
+          "lon": 7.097072,
+          "lat": 53.173877
+        },
+        "destination": {
+          "id": "groningen_d_0841",
+          "lon": 6.26504,
+          "lat": 53.208974
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0851",
+        "origin": {
+          "id": "groningen_o_0851",
+          "lon": 7.089366,
+          "lat": 53.174655
+        },
+        "destination": {
+          "id": "groningen_d_0851",
+          "lon": 6.384347,
+          "lat": 53.248012
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0861",
+        "origin": {
+          "id": "groningen_o_0861",
+          "lon": 6.34811,
+          "lat": 53.1754
+        },
+        "destination": {
+          "id": "groningen_d_0861",
+          "lon": 6.867057,
+          "lat": 53.338515
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0871",
+        "origin": {
+          "id": "groningen_o_0871",
+          "lon": 6.688028,
+          "lat": 53.176273
+        },
+        "destination": {
+          "id": "groningen_d_0871",
+          "lon": 6.879931,
+          "lat": 53.217304
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0881",
+        "origin": {
+          "id": "groningen_o_0881",
+          "lon": 6.599982,
+          "lat": 53.177159
+        },
+        "destination": {
+          "id": "groningen_d_0881",
+          "lon": 6.601227,
+          "lat": 53.278145
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0891",
+        "origin": {
+          "id": "groningen_o_0891",
+          "lon": 6.976597,
+          "lat": 53.178019
+        },
+        "destination": {
+          "id": "groningen_d_0891",
+          "lon": 7.005724,
+          "lat": 53.195164
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0901",
+        "origin": {
+          "id": "groningen_o_0901",
+          "lon": 6.871079,
+          "lat": 53.178921
+        },
+        "destination": {
+          "id": "groningen_d_0901",
+          "lon": 6.668942,
+          "lat": 53.22999
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0911",
+        "origin": {
+          "id": "groningen_o_0911",
+          "lon": 6.929786,
+          "lat": 53.180174
+        },
+        "destination": {
+          "id": "groningen_d_0911",
+          "lon": 6.337939,
+          "lat": 53.311488
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0921",
+        "origin": {
+          "id": "groningen_o_0921",
+          "lon": 7.127862,
+          "lat": 53.181351
+        },
+        "destination": {
+          "id": "groningen_d_0921",
+          "lon": 6.511386,
+          "lat": 53.20516
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0931",
+        "origin": {
+          "id": "groningen_o_0931",
+          "lon": 6.600207,
+          "lat": 53.182589
+        },
+        "destination": {
+          "id": "groningen_d_0931",
+          "lon": 6.597773,
+          "lat": 53.243492
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0941",
+        "origin": {
+          "id": "groningen_o_0941",
+          "lon": 7.207009,
+          "lat": 53.183573
+        },
+        "destination": {
+          "id": "groningen_d_0941",
+          "lon": 6.908981,
+          "lat": 53.331777
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0951",
+        "origin": {
+          "id": "groningen_o_0951",
+          "lon": 6.974877,
+          "lat": 53.184792
+        },
+        "destination": {
+          "id": "groningen_d_0951",
+          "lon": 6.500814,
+          "lat": 53.214355
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0961",
+        "origin": {
+          "id": "groningen_o_0961",
+          "lon": 6.667734,
+          "lat": 53.185934
+        },
+        "destination": {
+          "id": "groningen_d_0961",
+          "lon": 6.984603,
+          "lat": 53.264713
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0971",
+        "origin": {
+          "id": "groningen_o_0971",
+          "lon": 6.585308,
+          "lat": 53.187398
+        },
+        "destination": {
+          "id": "groningen_d_0971",
+          "lon": 6.570913,
+          "lat": 53.191267
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0981",
+        "origin": {
+          "id": "groningen_o_0981",
+          "lon": 6.548272,
+          "lat": 53.188617
+        },
+        "destination": {
+          "id": "groningen_d_0981",
+          "lon": 6.614132,
+          "lat": 53.225431
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    },
+    {
+      "profile_id": "car_research_v3",
+      "request": {
+        "route_id": "groningen_route_0991",
+        "origin": {
+          "id": "groningen_o_0991",
+          "lon": 6.617918,
+          "lat": 53.189801
+        },
+        "destination": {
+          "id": "groningen_d_0991",
+          "lon": 6.585736,
+          "lat": 53.302417
+        },
+        "snap": {
+          "max_distance_m": 500.0
+        },
+        "returns": {
+          "geometry": "full",
+          "segment_rows": true,
+          "road_type_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "surface_breakdown": [
+            "time_s",
+            "distance_m"
+          ],
+          "penalty_breakdown": true,
+          "explain_cost_derivation": true
+        }
+      }
+    }
+  ]
+}

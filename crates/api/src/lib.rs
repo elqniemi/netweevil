@@ -444,6 +444,15 @@ fn load_or_compile_profile(
         .with_context(|| format!("loading {}", profile_path.display()))?;
     document.validate()?;
     let profile_hash = document.fingerprint()?;
+    let dataset_acceleration: Option<Arc<DatasetAccelerationBundle>> = dataset_manifest
+        .acceleration_bundle
+        .as_ref()
+        .map(|bundle_ref| {
+            read_acceleration_bundle(&bundle_ref.path)
+                .with_context(|| format!("reading acceleration bundle {}", bundle_ref.path))
+                .map(Arc::new)
+        })
+        .transpose()?;
 
     let manifest = if let Some(existing) = compiled_manifests.iter().find(|manifest| {
         manifest.dataset_id.0 == dataset_manifest.dataset_id.0
@@ -451,22 +460,15 @@ fn load_or_compile_profile(
     }) {
         existing.clone()
     } else {
-        let acceleration: Option<(DatasetAccelerationBundle, CacheBundleId)> = dataset_manifest
-            .acceleration_bundle
-            .as_ref()
-            .map(|bundle_ref| {
-                read_acceleration_bundle(&bundle_ref.path)
-                    .with_context(|| format!("reading acceleration bundle {}", bundle_ref.path))
-                    .map(|bundle| (bundle, bundle_ref.bundle_id.clone()))
-            })
-            .transpose()?;
         let compiled_bundle = compile_profile_bundle_with_acceleration(
             &document,
             topology.as_ref(),
             topology_bundle_id,
-            acceleration
+            dataset_manifest
+                .acceleration_bundle
                 .as_ref()
-                .map(|(bundle, bundle_id)| (bundle, bundle_id.clone())),
+                .zip(dataset_acceleration.as_ref())
+                .map(|(bundle_ref, bundle)| (bundle.as_ref(), bundle_ref.bundle_id.clone())),
         )
         .with_context(|| {
             format!(
@@ -502,12 +504,13 @@ fn load_or_compile_profile(
         read_compiled_profile_bundle(&manifest.bundle.path)
             .with_context(|| format!("reading compiled profile bundle {}", manifest.bundle.path))?;
     let engine = Arc::new(
-        PreparedRoutingEngine::new(topology, Arc::new(compiled_bundle)).with_context(|| {
-            format!(
-                "preparing in-memory routing engine for profile '{}'",
-                document.profile.id
-            )
-        })?,
+        PreparedRoutingEngine::new(topology, Arc::new(compiled_bundle), dataset_acceleration)
+            .with_context(|| {
+                format!(
+                    "preparing in-memory routing engine for profile '{}'",
+                    document.profile.id
+                )
+            })?,
     );
 
     Ok(LoadedProfile {
@@ -1140,6 +1143,7 @@ mod tests {
             source_path: "test".to_string(),
             source_sha256: "abc".to_string(),
             nodes: vec![],
+            edge_layers: Default::default(),
             edges: vec![],
             turn_restrictions: vec![],
             names: vec![],

@@ -3,10 +3,14 @@ use serde::{Deserialize, Serialize};
 pub const EDGE_FLAG_ROUNDABOUT: u32 = 1 << 0;
 pub const EDGE_FLAG_TARGET_TRAFFIC_SIGNAL: u32 = 1 << 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub struct NodeId(pub u32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
+)]
 pub struct EdgeId(pub u32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -74,7 +78,7 @@ pub enum SmoothnessClass {
     Unknown,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct DirectedEdge {
     pub edge_id: EdgeId,
     pub from: NodeId,
@@ -94,6 +98,82 @@ pub struct DirectedEdge {
     pub geometry_offset: u64,
     pub geometry_len: u32,
     pub flags: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct RoutingEdge {
+    pub edge_id: EdgeId,
+    pub from: NodeId,
+    pub to: NodeId,
+    pub source_way_id: i64,
+    pub length_m: u32,
+    pub flags: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct EdgeProfileAttributes {
+    #[serde(default)]
+    pub duration_s: Option<f64>,
+    pub road_class: RoadClass,
+    pub surface: SurfaceClass,
+    #[serde(default)]
+    pub smoothness: SmoothnessClass,
+    pub access_mask: AccessMask,
+    #[serde(default)]
+    pub is_toll: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct EdgePresentation {
+    pub name_index: Option<u32>,
+    pub geometry_offset: u64,
+    pub geometry_len: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TopologyEdgeLayers {
+    #[serde(default)]
+    pub routing: Vec<RoutingEdge>,
+    #[serde(default)]
+    pub profile: Vec<EdgeProfileAttributes>,
+    #[serde(default)]
+    pub presentation: Vec<EdgePresentation>,
+}
+
+impl TopologyEdgeLayers {
+    pub fn from_directed_edges(edges: &[DirectedEdge]) -> Self {
+        let mut routing = Vec::with_capacity(edges.len());
+        let mut profile = Vec::with_capacity(edges.len());
+        let mut presentation = Vec::with_capacity(edges.len());
+        for edge in edges {
+            routing.push(RoutingEdge {
+                edge_id: edge.edge_id,
+                from: edge.from,
+                to: edge.to,
+                source_way_id: edge.source_way_id,
+                length_m: edge.length_m,
+                flags: edge.flags,
+            });
+            profile.push(EdgeProfileAttributes {
+                duration_s: edge.duration_s,
+                road_class: edge.road_class,
+                surface: edge.surface,
+                smoothness: edge.smoothness,
+                access_mask: edge.access_mask,
+                is_toll: edge.is_toll,
+            });
+            presentation.push(EdgePresentation {
+                name_index: edge.name_index,
+                geometry_offset: edge.geometry_offset,
+                geometry_len: edge.geometry_len,
+            });
+        }
+        Self {
+            routing,
+            profile,
+            presentation,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -208,6 +288,9 @@ pub struct TopologyBundle {
     pub source_path: String,
     pub source_sha256: String,
     pub nodes: Vec<TopologyNode>,
+    #[serde(default)]
+    pub edge_layers: TopologyEdgeLayers,
+    #[serde(default)]
     pub edges: Vec<DirectedEdge>,
     #[serde(default)]
     pub turn_restrictions: Vec<TurnRestriction>,
@@ -224,6 +307,133 @@ pub struct TopologyBundle {
 }
 
 impl TopologyBundle {
+    pub fn edge_count(&self) -> usize {
+        if !self.edge_layers.routing.is_empty() {
+            self.edge_layers.routing.len()
+        } else {
+            self.edges.len()
+        }
+    }
+
+    pub fn routing_edge(&self, edge_index: usize) -> RoutingEdge {
+        if let Some(edge) = self.edge_layers.routing.get(edge_index) {
+            *edge
+        } else {
+            let edge = self.edges[edge_index];
+            RoutingEdge {
+                edge_id: edge.edge_id,
+                from: edge.from,
+                to: edge.to,
+                source_way_id: edge.source_way_id,
+                length_m: edge.length_m,
+                flags: edge.flags,
+            }
+        }
+    }
+
+    pub fn edge_profile(&self, edge_index: usize) -> EdgeProfileAttributes {
+        if let Some(edge) = self.edge_layers.profile.get(edge_index) {
+            *edge
+        } else {
+            let edge = self.edges[edge_index];
+            EdgeProfileAttributes {
+                duration_s: edge.duration_s,
+                road_class: edge.road_class,
+                surface: edge.surface,
+                smoothness: edge.smoothness,
+                access_mask: edge.access_mask,
+                is_toll: edge.is_toll,
+            }
+        }
+    }
+
+    pub fn edge_presentation(&self, edge_index: usize) -> EdgePresentation {
+        if let Some(edge) = self.edge_layers.presentation.get(edge_index) {
+            *edge
+        } else {
+            let edge = self.edges[edge_index];
+            EdgePresentation {
+                name_index: edge.name_index,
+                geometry_offset: edge.geometry_offset,
+                geometry_len: edge.geometry_len,
+            }
+        }
+    }
+
+    pub fn edge(&self, edge_index: usize) -> DirectedEdge {
+        if let Some(edge) = self.edges.get(edge_index) {
+            *edge
+        } else {
+            let routing = self.routing_edge(edge_index);
+            let profile = self.edge_profile(edge_index);
+            let presentation = self.edge_presentation(edge_index);
+            DirectedEdge {
+                edge_id: routing.edge_id,
+                from: routing.from,
+                to: routing.to,
+                source_way_id: routing.source_way_id,
+                length_m: routing.length_m,
+                duration_s: profile.duration_s,
+                road_class: profile.road_class,
+                surface: profile.surface,
+                smoothness: profile.smoothness,
+                access_mask: profile.access_mask,
+                is_toll: profile.is_toll,
+                name_index: presentation.name_index,
+                geometry_offset: presentation.geometry_offset,
+                geometry_len: presentation.geometry_len,
+                flags: routing.flags,
+            }
+        }
+    }
+
+    pub fn push_edge(&mut self, edge: DirectedEdge) {
+        if !self.edges.is_empty() || self.edge_layers.routing.is_empty() {
+            self.edges.push(edge);
+        }
+        if !self.edge_layers.routing.is_empty() || self.edges.is_empty() {
+            self.edge_layers.routing.push(RoutingEdge {
+                edge_id: edge.edge_id,
+                from: edge.from,
+                to: edge.to,
+                source_way_id: edge.source_way_id,
+                length_m: edge.length_m,
+                flags: edge.flags,
+            });
+            self.edge_layers.profile.push(EdgeProfileAttributes {
+                duration_s: edge.duration_s,
+                road_class: edge.road_class,
+                surface: edge.surface,
+                smoothness: edge.smoothness,
+                access_mask: edge.access_mask,
+                is_toll: edge.is_toll,
+            });
+            self.edge_layers.presentation.push(EdgePresentation {
+                name_index: edge.name_index,
+                geometry_offset: edge.geometry_offset,
+                geometry_len: edge.geometry_len,
+            });
+        }
+    }
+
+    pub fn set_edge_name_index(&mut self, edge_index: usize, name_index: Option<u32>) {
+        if let Some(edge) = self.edges.get_mut(edge_index) {
+            edge.name_index = name_index;
+        }
+        if let Some(edge) = self.edge_layers.presentation.get_mut(edge_index) {
+            edge.name_index = name_index;
+        }
+    }
+
+    pub fn set_edge_flags(&mut self, edge_index: usize, flags: u32) {
+        if let Some(edge) = self.edges.get_mut(edge_index) {
+            edge.flags = flags;
+        }
+        if let Some(edge) = self.edge_layers.routing.get_mut(edge_index) {
+            edge.flags = flags;
+        }
+    }
+
     pub fn node_component_id(&self, node_id: u32) -> Option<u32> {
         self.node_component_ids.get(node_id as usize).copied()
     }

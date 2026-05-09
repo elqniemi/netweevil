@@ -4,18 +4,23 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use netan_core::{BuildStage, CacheBundleId, DatasetId, TopologyBundleMeta, TravelMode};
+use netan_core::{
+    AccelerationBuildSettings, AccelerationBundleStats, BuildStage, CacheBundleId, DatasetId,
+    TopologyBundleMeta, TravelMode,
+};
 use netan_profile::ProfileDocument;
 use netan_query::{
-    AnalysisOutcome, ConnectivityPolicy, FallbackPolicy, MatrixResult, OdResult, RouteResult,
-    ServiceAreaBandMode, ServiceAreaMultiOriginMode, ServiceAreaOutputMode, ServiceAreaResult,
+    AnalysisOutcome, ConnectivityPolicy, FallbackPolicy, MatrixResult, OdResult, RouteBatchResult,
+    RouteResult, ServiceAreaBandMode, ServiceAreaMultiOriginMode, ServiceAreaOutputMode,
+    ServiceAreaResult,
 };
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
 pub use output::{
-    write_matrix_result, write_od_result, write_route_result, write_service_area_result,
+    write_matrix_result, write_od_result, write_route_batch_result, write_route_result,
+    write_service_area_result,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +40,10 @@ pub struct DatasetManifest {
     pub acceleration_bundle: Option<BundleRef>,
     #[serde(default)]
     pub topology_meta: Option<TopologyBundleMeta>,
+    #[serde(default)]
+    pub acceleration_settings: Option<AccelerationBuildSettings>,
+    #[serde(default)]
+    pub acceleration_stats: Option<AccelerationBundleStats>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +97,7 @@ pub struct RunManifest {
 #[serde(rename_all = "snake_case")]
 pub enum RunKind {
     Route,
+    RouteBatch,
     Od,
     Matrix,
     ServiceArea,
@@ -253,6 +263,28 @@ pub fn load_run_result_summary(manifest: &RunManifest) -> Result<Option<RunResul
                 segment_count: route.summary.segment_count,
                 diagnostics_count: route.diagnostics.len(),
                 warnings: route.warnings,
+            })
+        }
+        RunKind::RouteBatch => {
+            let batch: RouteBatchResult =
+                serde_json::from_str(&raw).context("parsing route-batch result JSON")?;
+            let tally = tally_outcomes(batch.items.iter().filter_map(|item| {
+                item.route
+                    .as_ref()
+                    .map(|route| (route.outcome, route.diagnostics.len()))
+            }));
+            RunResultSummary::Batch(BatchSummary {
+                label: "routes",
+                item_count: batch.route_count,
+                succeeded_count: batch.succeeded_count,
+                failed_count: batch.failed_count,
+                ignored_count: 0,
+                legal_count: tally.legal_count,
+                degraded_count: tally.degraded_count,
+                partial_count: tally.partial_count,
+                unreachable_count: tally.unreachable_count,
+                diagnostics_count: tally.diagnostics_count,
+                warnings: batch.warnings,
             })
         }
         RunKind::Od => {

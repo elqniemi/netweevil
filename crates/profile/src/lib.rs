@@ -318,31 +318,33 @@ where
     ensure_supported_matchers(profile)?;
     let profile_hash = profile.fingerprint()?;
     let mode_bit = mode_access_bit(profile.profile.mode);
-    let mut edge_metrics = Vec::with_capacity(topology.edges.len());
+    let edge_count = topology.edge_count();
+    let mut edge_metrics = Vec::with_capacity(edge_count);
     let mut edge_reporter = PercentReporter::starting_at_zero();
 
     emit_compile_progress(
         &mut progress,
         ProfileCompileStage::CompileEdgeMetrics,
         Some(0.0),
-        format!("Compiling edge metrics 0% (0/{})", topology.edges.len()),
+        format!("Compiling edge metrics 0% (0/{})", edge_count),
     );
 
-    for (edge_index, edge) in topology.edges.iter().enumerate() {
+    for edge_index in 0..edge_count {
+        let edge = topology.edge(edge_index);
         let metric = if !edge.access_mask.contains(mode_bit)
             || (edge.road_class == RoadClass::Ferry && !profile.ferry.allow)
-            || is_excluded(profile, edge)
+            || is_excluded(profile, &edge)
         {
             CompiledEdgeMetric {
                 edge_id: edge.edge_id,
                 travel_time_s: None,
                 generalized_cost: None,
             }
-        } else if let Some(travel_time_s) = edge_travel_time_s(profile, edge) {
+        } else if let Some(travel_time_s) = edge_travel_time_s(profile, &edge) {
             CompiledEdgeMetric {
                 edge_id: edge.edge_id,
                 travel_time_s: Some(travel_time_s),
-                generalized_cost: Some(generalized_cost(profile, edge, travel_time_s)),
+                generalized_cost: Some(generalized_cost(profile, &edge, travel_time_s)),
             }
         } else {
             CompiledEdgeMetric {
@@ -356,7 +358,7 @@ where
 
         edge_reporter.emit_if_needed(
             (edge_index + 1) as u64,
-            topology.edges.len() as u64,
+            edge_count as u64,
             ProfileCompileStage::CompileEdgeMetrics,
             &mut progress,
             |percent| {
@@ -364,7 +366,7 @@ where
                     "Compiling edge metrics {:.0}% ({}/{})",
                     percent,
                     edge_index + 1,
-                    topology.edges.len()
+                    edge_count
                 )
             },
         );
@@ -376,8 +378,7 @@ where
         Some(100.0),
         format!(
             "Compiling edge metrics 100% ({}/{})",
-            topology.edges.len(),
-            topology.edges.len()
+            edge_count, edge_count
         ),
     );
 
@@ -430,6 +431,8 @@ fn compile_acceleration_with_progress(
     profile: &ProfileDocument,
     progress: &mut impl FnMut(ProfileCompileProgress),
 ) -> CompiledAcceleration {
+    let pairwise_forbidden_turns =
+        build_pairwise_forbidden_turn_table(topology, mode_access_bit(profile.profile.mode));
     let (upward_path_first_out, upward_path_edges) =
         if bundle.upward_path_first_out.is_empty() && bundle.upward_path_edges.is_empty() {
             (
@@ -471,6 +474,7 @@ fn compile_acceleration_with_progress(
         &bundle.upward_first_out,
         &upward_path_first_out,
         &upward_path_edges,
+        &pairwise_forbidden_turns,
         ProfileCompileStage::CompileAcceleration,
         progress,
         0.0,
@@ -484,6 +488,7 @@ fn compile_acceleration_with_progress(
         &bundle.downward_first_out,
         &downward_path_first_out,
         &downward_path_edges,
+        &pairwise_forbidden_turns,
         ProfileCompileStage::CompileAcceleration,
         progress,
         50.0,
@@ -503,21 +508,21 @@ fn compile_acceleration_with_progress(
     );
 
     CompiledAcceleration {
-        schema_version: 1,
+        schema_version: 2,
         source_acceleration_bundle_id,
         algorithm: bundle.algorithm.clone(),
-        edge_order: bundle.edge_order.clone(),
-        edge_rank: bundle.edge_rank.clone(),
-        upward_first_out: bundle.upward_first_out.clone(),
-        upward_head: bundle.upward_head.clone(),
+        edge_order: Vec::new(),
+        edge_rank: Vec::new(),
+        upward_first_out: Vec::new(),
+        upward_head: Vec::new(),
         upward_weight,
-        upward_path_first_out,
-        upward_path_edges,
-        downward_first_out: bundle.downward_first_out.clone(),
-        downward_head: bundle.downward_head.clone(),
+        upward_path_first_out: Vec::new(),
+        upward_path_edges: Vec::new(),
+        downward_first_out: Vec::new(),
+        downward_head: Vec::new(),
         downward_weight,
-        downward_path_first_out,
-        downward_path_edges,
+        downward_path_first_out: Vec::new(),
+        downward_path_edges: Vec::new(),
     }
 }
 
@@ -528,6 +533,7 @@ fn compile_acceleration_arc_weights_with_progress(
     first_out: &[u32],
     path_first_out: &[u32],
     path_edges: &[u32],
+    forbidden_turns: &[Vec<u32>],
     stage: ProfileCompileStage,
     progress: &mut impl FnMut(ProfileCompileProgress),
     percent_start: f64,
@@ -535,11 +541,12 @@ fn compile_acceleration_arc_weights_with_progress(
     direction_label: &str,
 ) -> Vec<f64> {
     let mut weights = vec![f64::INFINITY; first_out.last().copied().unwrap_or_default() as usize];
-    if first_out.len() != topology.edges.len() + 1 {
+    let edge_count = topology.edge_count();
+    if first_out.len() != edge_count + 1 {
         return weights;
     }
     let mut reporter = PercentReporter::starting_at_zero();
-    for edge_index in 0..topology.edges.len() {
+    for edge_index in 0..edge_count {
         let start = first_out[edge_index] as usize;
         let end = first_out[edge_index + 1] as usize;
         for slot in start..end {
@@ -557,6 +564,13 @@ fn compile_acceleration_arc_weights_with_progress(
                     valid = false;
                     break;
                 };
+                if forbidden_turns
+                    .get(previous_edge)
+                    .is_some_and(|blocked| blocked.binary_search(&(next_edge as u32)).is_ok())
+                {
+                    valid = false;
+                    break;
+                }
                 total_cost += next_cost
                     + transition_turn_penalty_cost(
                         topology,
@@ -577,7 +591,7 @@ fn compile_acceleration_arc_weights_with_progress(
         }
         reporter.emit_if_needed(
             (edge_index + 1) as u64,
-            topology.edges.len() as u64,
+            edge_count as u64,
             stage,
             progress,
             |percent| {
@@ -586,13 +600,34 @@ fn compile_acceleration_arc_weights_with_progress(
                     "Customizing acceleration {:.0}% ({}/{}) [{}]",
                     scaled,
                     edge_index + 1,
-                    topology.edges.len(),
+                    edge_count,
                     direction_label
                 )
             },
         );
     }
     weights
+}
+
+fn build_pairwise_forbidden_turn_table(topology: &TopologyBundle, mode_bit: u16) -> Vec<Vec<u32>> {
+    let mut forbidden = vec![Vec::new(); topology.edge_count()];
+    for restriction in topology
+        .turn_restrictions
+        .iter()
+        .filter(|restriction| restriction.mode_mask.contains(mode_bit))
+    {
+        if restriction.edge_path.len() != 2 {
+            continue;
+        }
+        let from_edge = restriction.edge_path[0].0 as usize;
+        let to_edge = restriction.edge_path[1].0;
+        forbidden[from_edge].push(to_edge);
+    }
+    for blocked in &mut forbidden {
+        blocked.sort_unstable();
+        blocked.dedup();
+    }
+    forbidden
 }
 
 fn emit_compile_progress(
@@ -873,8 +908,8 @@ fn transition_turn_penalty_seconds(
     traffic_signal_penalty_s: f64,
     roundabout_entry_penalty_s: f64,
 ) -> f64 {
-    let previous = &topology.edges[previous_edge_index];
-    let next = &topology.edges[next_edge_index];
+    let previous = topology.routing_edge(previous_edge_index);
+    let next = topology.routing_edge(next_edge_index);
 
     if previous.to != next.from {
         return 0.0;
@@ -921,8 +956,8 @@ fn classify_turn(
     const STRAIGHT_THRESHOLD_RAD: f64 = 30.0_f64.to_radians();
     const UTURN_THRESHOLD_RAD: f64 = 150.0_f64.to_radians();
 
-    let previous = &topology.edges[previous_edge_index];
-    let next = &topology.edges[next_edge_index];
+    let previous = topology.routing_edge(previous_edge_index);
+    let next = topology.routing_edge(next_edge_index);
     let from = &topology.nodes[previous.from.0 as usize];
     let via = &topology.nodes[previous.to.0 as usize];
     let to = &topology.nodes[next.to.0 as usize];
@@ -1013,6 +1048,7 @@ mod tests {
             source_path: "test.osm.pbf".to_string(),
             source_sha256: "abc".to_string(),
             nodes: vec![],
+            edge_layers: Default::default(),
             edges: vec![DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
@@ -1075,6 +1111,7 @@ mod tests {
             source_path: "test.osm.pbf".to_string(),
             source_sha256: "abc".to_string(),
             nodes: vec![],
+            edge_layers: Default::default(),
             edges: vec![],
             turn_restrictions: vec![],
             names: vec![],
@@ -1116,6 +1153,7 @@ mod tests {
             source_path: "test.osm.pbf".to_string(),
             source_sha256: "abc".to_string(),
             nodes: vec![],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -1249,6 +1287,7 @@ mod tests {
                     lat: 0.0,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -1301,6 +1340,8 @@ mod tests {
             schema_version: 1,
             source_topology_bundle_id: CacheBundleId::new("topology-test"),
             algorithm: "edge_based_shortcut_ch_v1".to_string(),
+            build_settings: Default::default(),
+            stats: Default::default(),
             edge_order: vec![0, 1],
             edge_rank: vec![0, 1],
             upward_first_out: vec![0, 1, 1],
@@ -1326,7 +1367,7 @@ mod tests {
             compiled_acceleration.source_acceleration_bundle_id.0,
             "accel-test"
         );
-        assert_eq!(compiled_acceleration.upward_head, vec![1]);
+        assert!(compiled_acceleration.upward_head.is_empty());
         assert_eq!(compiled_acceleration.upward_weight.len(), 1);
         assert!(compiled_acceleration.upward_weight[0].is_finite());
         assert!(compiled_acceleration.downward_weight.is_empty());
@@ -1376,6 +1417,7 @@ mod tests {
             source_path: "test.osm.pbf".to_string(),
             source_sha256: "abc".to_string(),
             nodes: vec![],
+            edge_layers: Default::default(),
             edges: vec![DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),

@@ -8,11 +8,12 @@ use std::sync::{
 
 use anyhow::{Context, Result, bail};
 use netan_core::{
-    AccessMask, BuildStage, CacheBundleId, ConnectedComponentKind, ConnectedComponentsMeta,
-    DatasetAccelerationBundle, DatasetId, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
-    EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId, EdgeNameBundle, NodeId, RoadClass,
-    SmoothnessClass, SpatialIndexCell, SurfaceClass, TopologyBounds, TopologyBundle,
-    TopologyBundleMeta, TopologyNode, TurnRestriction, TurnRestrictionKind,
+    AccelerationBuildSettings, AccelerationBundleStats, AccessMask, BuildStage, CacheBundleId,
+    ConnectedComponentKind, ConnectedComponentsMeta, DatasetAccelerationBundle, DatasetId,
+    DirectedEdge, EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId,
+    EdgeNameBundle, NodeId, RoadClass, SmoothnessClass, SpatialIndexCell, SurfaceClass,
+    TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyNode, TurnRestriction,
+    TurnRestrictionKind,
 };
 use netan_persist::{
     WorkspacePaths, write_acceleration_bundle, write_dataset_manifest, write_edge_name_bundle,
@@ -27,6 +28,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 pub struct DatasetImportOptions {
     pub name: String,
     pub source: String,
+    pub acceleration_settings: AccelerationBuildSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,8 +117,12 @@ where
         .join(format!("{}.bin", acceleration_bundle_id.0));
     let (bundle, edge_name_bundle, topology_meta) =
         build_topology_bundle(source_path, size, &sha256, &mut progress)?;
-    let acceleration_bundle =
-        build_dataset_acceleration_bundle_with_progress(&bundle, bundle_id.clone(), &mut progress);
+    let acceleration_bundle = build_dataset_acceleration_bundle_with_progress(
+        &bundle,
+        bundle_id.clone(),
+        options.acceleration_settings.clone(),
+        &mut progress,
+    );
     emit_progress(
         &mut progress,
         DatasetImportStage::WriteTopologyBundle,
@@ -166,6 +172,8 @@ where
             path: acceleration_bundle_path.display().to_string(),
         }),
         topology_meta: Some(topology_meta),
+        acceleration_settings: Some(acceleration_bundle.build_settings.clone()),
+        acceleration_stats: Some(acceleration_bundle.stats.clone()),
     };
 
     emit_progress(
@@ -456,12 +464,14 @@ fn build_topology_bundle(
     let edge_based_topology = build_edge_based_topology(nodes.len(), &edges);
     let components = label_weak_components(nodes.len(), &edges);
 
+    let edge_layers = netan_core::TopologyEdgeLayers::from_directed_edges(&edges);
     let bundle = TopologyBundle {
-        schema_version: 7,
+        schema_version: 8,
         source_path: source_path.display().to_string(),
         source_sha256: source_sha256.to_string(),
         nodes,
-        edges,
+        edge_layers,
+        edges: Vec::new(),
         turn_restrictions,
         names: Vec::new(),
         edge_based_topology,
@@ -471,7 +481,7 @@ fn build_topology_bundle(
     };
     let meta = TopologyBundleMeta {
         node_count: bundle.nodes.len() as u64,
-        edge_count: bundle.edges.len() as u64,
+        edge_count: bundle.edge_count() as u64,
         geometry_bytes: 0,
         turn_count: bundle.turn_restrictions.len() as u64,
         connected_components: Some(ConnectedComponentsMeta {
@@ -635,6 +645,21 @@ fn build_dataset_acceleration_bundle(
     build_dataset_acceleration_bundle_with_progress(
         topology,
         source_topology_bundle_id,
+        AccelerationBuildSettings::default(),
+        &mut |_| {},
+    )
+}
+
+#[cfg(test)]
+fn build_dataset_acceleration_bundle_with_settings(
+    topology: &TopologyBundle,
+    source_topology_bundle_id: CacheBundleId,
+    settings: AccelerationBuildSettings,
+) -> DatasetAccelerationBundle {
+    build_dataset_acceleration_bundle_with_progress(
+        topology,
+        source_topology_bundle_id,
+        settings,
         &mut |_| {},
     )
 }
@@ -642,14 +667,13 @@ fn build_dataset_acceleration_bundle(
 fn build_dataset_acceleration_bundle_with_progress(
     topology: &TopologyBundle,
     source_topology_bundle_id: CacheBundleId,
+    settings: AccelerationBuildSettings,
     progress: &mut impl FnMut(DatasetImportProgress),
 ) -> DatasetAccelerationBundle {
-    const MAX_SHORTCUT_PATH_LEN: u32 = 64;
-    const MAX_SHORTCUTS_PER_CONTRACTED_EDGE: usize = 1_024;
-    const MAX_SHORTCUT_BUDGET_PER_EDGE: usize = 4;
+    let settings = settings.normalized();
 
     let transition_topology = &topology.edge_based_topology;
-    let edge_count = topology.edges.len();
+    let edge_count = topology.edge_count();
     let mut in_degree = vec![0_u32; edge_count];
     let mut out_degree = vec![0_u32; edge_count];
 
@@ -667,18 +691,7 @@ fn build_dataset_acceleration_bundle_with_progress(
         }
     }
 
-    let mut edge_order = (0..edge_count as u32).collect::<Vec<_>>();
-    edge_order.sort_unstable_by_key(|&edge_index| {
-        let edge = &topology.edges[edge_index as usize];
-        (
-            out_degree[edge_index as usize] + in_degree[edge_index as usize],
-            out_degree[edge_index as usize],
-            in_degree[edge_index as usize],
-            edge.from.0,
-            edge.to.0,
-            edge_index,
-        )
-    });
+    let edge_order = build_recursive_spatial_edge_order(topology, &in_degree, &out_degree);
 
     let mut edge_rank = vec![0_u32; edge_count];
     for (rank, &edge_index) in edge_order.iter().enumerate() {
@@ -689,7 +702,13 @@ fn build_dataset_acceleration_bundle_with_progress(
         progress,
         DatasetImportStage::BuildAcceleration,
         Some(0.0),
-        format!("Building acceleration 0% ({} edge states)", edge_count),
+        format!(
+            "Building acceleration 0% ({} edge states, profile {:?}, budget {}/{})",
+            edge_count,
+            settings.profile,
+            settings.max_shortcut_budget_per_edge,
+            settings.max_shortcuts_per_contracted_edge
+        ),
     );
 
     let mut arcs = Vec::<ShortcutArc>::new();
@@ -722,7 +741,8 @@ fn build_dataset_acceleration_bundle_with_progress(
         }
     }
     let base_arc_count = arcs.len();
-    let max_shortcut_count = edge_count.saturating_mul(MAX_SHORTCUT_BUDGET_PER_EDGE);
+    let max_shortcut_count =
+        edge_count.saturating_mul(settings.max_shortcut_budget_per_edge as usize);
     let mut added_shortcuts = 0_usize;
 
     let mut active_vertex = vec![true; edge_count];
@@ -754,7 +774,7 @@ fn build_dataset_acceleration_bundle_with_progress(
 
         let remaining_shortcut_budget = max_shortcut_count.saturating_sub(added_shortcuts);
         let local_shortcut_budget =
-            remaining_shortcut_budget.min(MAX_SHORTCUTS_PER_CONTRACTED_EDGE);
+            remaining_shortcut_budget.min(settings.max_shortcuts_per_contracted_edge as usize);
         let mut added_for_vertex = 0_usize;
         for incoming_arc in incoming {
             let tail = arcs[incoming_arc as usize].tail as usize;
@@ -769,7 +789,7 @@ fn build_dataset_acceleration_bundle_with_progress(
                 let path_len = arcs[incoming_arc as usize]
                     .path_len
                     .saturating_add(arcs[outgoing_arc as usize].path_len);
-                if path_len > MAX_SHORTCUT_PATH_LEN {
+                if path_len > settings.max_shortcut_path_len {
                     continue;
                 }
                 if !seen_arc_pairs.insert(shortcut_arc_key(tail as u32, head as u32)) {
@@ -861,6 +881,12 @@ fn build_dataset_acceleration_bundle_with_progress(
         schema_version: 2,
         source_topology_bundle_id,
         algorithm: "edge_based_shortcut_ch_v1".to_string(),
+        build_settings: settings,
+        stats: AccelerationBundleStats {
+            base_arc_count: base_arc_count as u64,
+            shortcut_arc_count: added_shortcuts as u64,
+            total_arc_count: arcs.len() as u64,
+        },
         edge_order,
         edge_rank,
         upward_first_out,
@@ -909,6 +935,114 @@ fn append_shortcut_arc_path(
 
 fn shortcut_arc_key(tail: u32, head: u32) -> u64 {
     ((tail as u64) << 32) | head as u64
+}
+
+fn build_recursive_spatial_edge_order(
+    topology: &TopologyBundle,
+    in_degree: &[u32],
+    out_degree: &[u32],
+) -> Vec<u32> {
+    const LEAF_SIZE: usize = 1_024;
+
+    fn sort_small_block(
+        edges: &mut [u32],
+        topology: &TopologyBundle,
+        in_degree: &[u32],
+        out_degree: &[u32],
+    ) {
+        edges.sort_unstable_by_key(|&edge_index| {
+            let edge = topology.routing_edge(edge_index as usize);
+            (
+                out_degree[edge_index as usize] + in_degree[edge_index as usize],
+                out_degree[edge_index as usize],
+                in_degree[edge_index as usize],
+                edge.from.0,
+                edge.to.0,
+                edge_index,
+            )
+        });
+    }
+
+    fn recurse(
+        topology: &TopologyBundle,
+        in_degree: &[u32],
+        out_degree: &[u32],
+        edges: &mut [u32],
+        output: &mut Vec<u32>,
+    ) {
+        if edges.len() <= LEAF_SIZE {
+            sort_small_block(edges, topology, in_degree, out_degree);
+            output.extend_from_slice(edges);
+            return;
+        }
+
+        let mut min_lon = f64::INFINITY;
+        let mut max_lon = f64::NEG_INFINITY;
+        let mut min_lat = f64::INFINITY;
+        let mut max_lat = f64::NEG_INFINITY;
+        let mut coords = Vec::with_capacity(edges.len());
+        for &edge_index in edges.iter() {
+            let edge = topology.routing_edge(edge_index as usize);
+            let from = &topology.nodes[edge.from.0 as usize];
+            let to = &topology.nodes[edge.to.0 as usize];
+            let lon = (from.lon + to.lon) * 0.5;
+            let lat = (from.lat + to.lat) * 0.5;
+            min_lon = min_lon.min(lon);
+            max_lon = max_lon.max(lon);
+            min_lat = min_lat.min(lat);
+            max_lat = max_lat.max(lat);
+            coords.push((edge_index, lon, lat));
+        }
+
+        let split_lon = (max_lon - min_lon) >= (max_lat - min_lat);
+        let mut axis_values = coords
+            .iter()
+            .map(|(_, lon, lat)| if split_lon { *lon } else { *lat })
+            .collect::<Vec<_>>();
+        axis_values
+            .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+        let pivot = axis_values[axis_values.len() / 2];
+
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        let mut separator = Vec::new();
+        for (edge_index, _, _) in coords {
+            let edge = topology.routing_edge(edge_index as usize);
+            let from = &topology.nodes[edge.from.0 as usize];
+            let to = &topology.nodes[edge.to.0 as usize];
+            let from_axis = if split_lon { from.lon } else { from.lat };
+            let to_axis = if split_lon { to.lon } else { to.lat };
+            if from_axis <= pivot && to_axis <= pivot {
+                left.push(edge_index);
+            } else if from_axis > pivot && to_axis > pivot {
+                right.push(edge_index);
+            } else {
+                separator.push(edge_index);
+            }
+        }
+
+        if left.is_empty() || right.is_empty() || separator.len() == edges.len() {
+            sort_small_block(edges, topology, in_degree, out_degree);
+            output.extend_from_slice(edges);
+            return;
+        }
+
+        recurse(topology, in_degree, out_degree, &mut left, output);
+        recurse(topology, in_degree, out_degree, &mut right, output);
+        sort_small_block(&mut separator, topology, in_degree, out_degree);
+        output.extend(separator);
+    }
+
+    let mut edge_order = (0..topology.edge_count() as u32).collect::<Vec<_>>();
+    let mut ordered = Vec::with_capacity(edge_order.len());
+    recurse(
+        topology,
+        in_degree,
+        out_degree,
+        &mut edge_order,
+        &mut ordered,
+    );
+    ordered
 }
 
 fn scan_routable_objects(
@@ -2145,13 +2279,15 @@ fn haversine_meters(from_lon: f64, from_lat: f64, to_lon: f64, to_lat: f64) -> f
 mod tests {
     use super::{
         EdgeDirection, PendingWay, RestrictionKind, TurnRestrictionCandidate, ViaSpec,
-        apportioned_duration_s, build_dataset_acceleration_bundle, build_edge_based_topology,
+        apportioned_duration_s, build_dataset_acceleration_bundle,
+        build_dataset_acceleration_bundle_with_settings, build_edge_based_topology,
         build_turn_restrictions, classify_access, classify_direction, classify_highway,
         haversine_meters, parse_duration_seconds, parse_turn_restriction_relation,
     };
     use netan_core::{
-        AccessMask, CacheBundleId, DirectedEdge, EdgeId, NodeId, RoadClass, SurfaceClass,
-        TopologyBundle, TopologyNode, TurnRestrictionKind,
+        AccelerationBuildProfile, AccelerationBuildSettings, AccessMask, CacheBundleId,
+        DirectedEdge, EdgeId, NodeId, RoadClass, SurfaceClass, TopologyBundle, TopologyNode,
+        TurnRestrictionKind,
     };
     use osmpbfreader::{NodeId as OsmNodeId, OsmId, Ref, Relation, RelationId, Tags, WayId};
     use std::collections::HashMap;
@@ -2476,6 +2612,7 @@ mod tests {
                     lat: 0.0,
                 },
             ],
+            edge_layers: Default::default(),
             edges: edges.clone(),
             turn_restrictions: vec![],
             names: vec![],
@@ -2489,6 +2626,13 @@ mod tests {
             build_dataset_acceleration_bundle(&topology, CacheBundleId::new("topology-test"));
 
         assert_eq!(bundle.algorithm, "edge_based_shortcut_ch_v1");
+        assert_eq!(
+            bundle.build_settings,
+            AccelerationBuildSettings::for_profile(AccelerationBuildProfile::Balanced)
+        );
+        assert_eq!(bundle.stats.base_arc_count, 2);
+        assert_eq!(bundle.stats.shortcut_arc_count, 0);
+        assert_eq!(bundle.stats.total_arc_count, 2);
         assert_eq!(bundle.edge_order, vec![2, 0, 1]);
         assert_eq!(bundle.edge_rank, vec![1, 2, 0]);
         assert_eq!(bundle.upward_first_out, vec![0, 1, 1, 1]);
@@ -2499,6 +2643,87 @@ mod tests {
         assert_eq!(bundle.downward_head, vec![2]);
         assert_eq!(bundle.downward_path_first_out, vec![0, 1]);
         assert_eq!(bundle.downward_path_edges, vec![2]);
+    }
+
+    #[test]
+    fn compact_acceleration_profile_is_more_conservative() {
+        let compact = AccelerationBuildSettings::for_profile(AccelerationBuildProfile::Compact);
+        let balanced = AccelerationBuildSettings::for_profile(AccelerationBuildProfile::Balanced);
+        let aggressive =
+            AccelerationBuildSettings::for_profile(AccelerationBuildProfile::Aggressive);
+
+        assert!(compact.max_shortcut_path_len < balanced.max_shortcut_path_len);
+        assert!(
+            compact.max_shortcuts_per_contracted_edge < balanced.max_shortcuts_per_contracted_edge
+        );
+        assert!(compact.max_shortcut_budget_per_edge < balanced.max_shortcut_budget_per_edge);
+
+        assert!(aggressive.max_shortcut_path_len > balanced.max_shortcut_path_len);
+        assert!(
+            aggressive.max_shortcuts_per_contracted_edge
+                > balanced.max_shortcuts_per_contracted_edge
+        );
+        assert!(aggressive.max_shortcut_budget_per_edge > balanced.max_shortcut_budget_per_edge);
+    }
+
+    #[test]
+    fn persists_custom_acceleration_build_settings_in_bundle() {
+        let edges = vec![edge(0, 0, 1, 10), edge(1, 1, 2, 11), edge(2, 2, 3, 12)];
+        let topology = TopologyBundle {
+            schema_version: 1,
+            source_path: "test".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![
+                TopologyNode {
+                    node_id: NodeId(0),
+                    osm_node_id: 100,
+                    lon: 0.0,
+                    lat: 0.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(1),
+                    osm_node_id: 101,
+                    lon: 1.0,
+                    lat: 0.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(2),
+                    osm_node_id: 102,
+                    lon: 2.0,
+                    lat: 0.0,
+                },
+                TopologyNode {
+                    node_id: NodeId(3),
+                    osm_node_id: 103,
+                    lon: 3.0,
+                    lat: 0.0,
+                },
+            ],
+            edge_layers: Default::default(),
+            edges: edges.clone(),
+            turn_restrictions: vec![],
+            names: vec![],
+            edge_based_topology: build_edge_based_topology(4, &edges),
+            spatial_index: None,
+            node_component_ids: vec![0, 0, 0, 0],
+            edge_component_ids: vec![0, 0, 0, 0],
+        };
+        let settings = AccelerationBuildSettings {
+            profile: AccelerationBuildProfile::Compact,
+            max_shortcut_path_len: 8,
+            max_shortcuts_per_contracted_edge: 2,
+            max_shortcut_budget_per_edge: 0,
+        };
+
+        let bundle = build_dataset_acceleration_bundle_with_settings(
+            &topology,
+            CacheBundleId::new("topology-test"),
+            settings.clone(),
+        );
+
+        assert_eq!(bundle.build_settings, settings.normalized());
+        assert_eq!(bundle.stats.shortcut_arc_count, 0);
+        assert_eq!(bundle.stats.total_arc_count, bundle.stats.base_arc_count);
     }
 
     #[test]

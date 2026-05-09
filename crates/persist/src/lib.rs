@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 use netan_core::{
     CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, DatasetAccelerationBundle,
-    EdgeNameBundle, TopologyBundle, TravelMode,
+    EdgeNameBundle, TopologyBundle, TopologyEdgeLayers, TravelMode,
 };
 use netan_report::{CompiledProfileManifest, DatasetManifest, RunManifest};
 use serde::Serialize;
@@ -100,7 +100,12 @@ pub fn read_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
 }
 
 pub fn write_topology_bundle(path: impl AsRef<Path>, bundle: &TopologyBundle) -> Result<()> {
-    write_binary(path, bundle)
+    let mut compact = bundle.clone();
+    if compact.edge_layers.routing.is_empty() && !compact.edges.is_empty() {
+        compact.edge_layers = TopologyEdgeLayers::from_directed_edges(&compact.edges);
+    }
+    compact.edges.clear();
+    write_binary(path, &compact)
 }
 
 pub fn write_edge_name_bundle(path: impl AsRef<Path>, bundle: &EdgeNameBundle) -> Result<()> {
@@ -126,6 +131,7 @@ pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
         );
     }
     read_binary_mmap(path)
+        .or_else(|_| read_binary_mmap::<LegacyTopologyBundle>(path).map(TopologyBundle::from))
 }
 
 pub fn read_edge_name_bundle(path: impl AsRef<Path>) -> Result<EdgeNameBundle> {
@@ -205,6 +211,47 @@ fn read_binary_mmap<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
     bincode::deserialize(&mmap).with_context(|| format!("parsing binary bundle {}", path.display()))
 }
 
+#[derive(serde::Deserialize)]
+struct LegacyTopologyBundle {
+    schema_version: u32,
+    source_path: String,
+    source_sha256: String,
+    nodes: Vec<netan_core::TopologyNode>,
+    edges: Vec<netan_core::DirectedEdge>,
+    #[serde(default)]
+    turn_restrictions: Vec<netan_core::TurnRestriction>,
+    #[serde(default)]
+    names: Vec<String>,
+    #[serde(default)]
+    edge_based_topology: netan_core::EdgeBasedTopology,
+    #[serde(default)]
+    spatial_index: Option<netan_core::NodeSpatialIndex>,
+    #[serde(default)]
+    node_component_ids: Vec<u32>,
+    #[serde(default)]
+    edge_component_ids: Vec<u32>,
+}
+
+impl From<LegacyTopologyBundle> for TopologyBundle {
+    fn from(value: LegacyTopologyBundle) -> Self {
+        let edge_layers = TopologyEdgeLayers::from_directed_edges(&value.edges);
+        Self {
+            schema_version: value.schema_version,
+            source_path: value.source_path,
+            source_sha256: value.source_sha256,
+            nodes: value.nodes,
+            edge_layers,
+            edges: Vec::new(),
+            turn_restrictions: value.turn_restrictions,
+            names: value.names,
+            edge_based_topology: value.edge_based_topology,
+            spatial_index: value.spatial_index,
+            node_component_ids: value.node_component_ids,
+            edge_component_ids: value.edge_component_ids,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -242,6 +289,7 @@ mod tests {
                     lat: 53.3,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -304,15 +352,15 @@ mod tests {
         assert_eq!(round_tripped.source_path, bundle.source_path);
         assert_eq!(round_tripped.source_sha256, bundle.source_sha256);
         assert_eq!(round_tripped.nodes.len(), bundle.nodes.len());
-        assert_eq!(round_tripped.edges.len(), bundle.edges.len());
+        assert_eq!(round_tripped.edge_count(), bundle.edge_count());
         assert_eq!(
             round_tripped.turn_restrictions.len(),
             bundle.turn_restrictions.len()
         );
         assert_eq!(round_tripped.names, bundle.names);
-        assert_eq!(round_tripped.edges[0].duration_s, None);
-        assert_eq!(round_tripped.edges[1].duration_s, Some(45.0));
-        assert!(round_tripped.edges[1].is_toll);
+        assert_eq!(round_tripped.edge_profile(0).duration_s, None);
+        assert_eq!(round_tripped.edge_profile(1).duration_s, Some(45.0));
+        assert!(round_tripped.edge_profile(1).is_toll);
 
         fs::remove_file(path).expect("temporary bundle should be removed");
     }
@@ -344,6 +392,8 @@ mod tests {
             schema_version: 1,
             source_topology_bundle_id: CacheBundleId::new("topology-test"),
             algorithm: "edge_based_shortcut_ch_v1".to_string(),
+            build_settings: Default::default(),
+            stats: Default::default(),
             edge_order: vec![0, 2, 1],
             edge_rank: vec![0, 2, 1],
             upward_first_out: vec![0, 1, 1, 1],
@@ -368,6 +418,8 @@ mod tests {
 
         assert_eq!(round_tripped.schema_version, bundle.schema_version);
         assert_eq!(round_tripped.algorithm, bundle.algorithm);
+        assert_eq!(round_tripped.build_settings, bundle.build_settings);
+        assert_eq!(round_tripped.stats, bundle.stats);
         assert_eq!(round_tripped.edge_order, bundle.edge_order);
         assert_eq!(round_tripped.edge_rank, bundle.edge_rank);
         assert_eq!(round_tripped.upward_head, bundle.upward_head);

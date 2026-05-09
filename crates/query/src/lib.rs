@@ -9,8 +9,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use netan_core::{
-    CompiledEdgeMetric, CompiledProfileBundle, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
-    EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, RoadClass, SurfaceClass, TopologyBundle, TopologyNode,
+    CompiledEdgeMetric, CompiledProfileBundle, DatasetAccelerationBundle, DirectedEdge,
+    EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, RoadClass, SurfaceClass, TopologyBundle,
+    TopologyNode,
 };
 use netan_profile::ReturnConfig;
 use serde::{Deserialize, Serialize};
@@ -250,6 +251,23 @@ pub fn load_route_request(path: impl AsRef<Path>) -> Result<RouteRequest> {
     }
 }
 
+pub fn load_route_batch(path: impl AsRef<Path>) -> Result<RouteBatchDocument> {
+    let path = path.as_ref();
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("reading route batch {}", path.display()))?;
+    let document = match path.extension().and_then(|ext| ext.to_str()) {
+        Some("json") => serde_json::from_str(&raw).context("parsing JSON route batch")?,
+        Some("yaml") | Some("yml") => {
+            serde_yaml::from_str(&raw).context("parsing YAML route batch")?
+        }
+        other => bail!(
+            "unsupported route batch extension {:?}; use .json, .yml, or .yaml",
+            other
+        ),
+    };
+    Ok(document)
+}
+
 pub fn load_service_area_request(path: impl AsRef<Path>) -> Result<ServiceAreaRequest> {
     let path = path.as_ref();
     let raw = fs::read_to_string(path)
@@ -272,6 +290,19 @@ pub struct OdPair {
     pub pair_id: String,
     pub origin: LabeledPoint,
     pub destination: LabeledPoint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteBatchEntry {
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub request: RouteRequest,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteBatchDocument {
+    #[serde(default)]
+    pub requests: Vec<RouteBatchEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -969,6 +1000,28 @@ pub struct RouteResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteBatchItemResult {
+    pub route_id: String,
+    pub origin_id: String,
+    pub destination_id: String,
+    pub status: BatchItemStatus,
+    #[serde(default)]
+    pub route: Option<RouteResult>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteBatchResult {
+    pub route_count: usize,
+    pub succeeded_count: usize,
+    pub failed_count: usize,
+    pub items: Vec<RouteBatchItemResult>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BatchItemStatus {
@@ -1102,14 +1155,23 @@ pub struct PreparedRoutingEngine {
 }
 
 impl PreparedRoutingEngine {
-    pub fn new(topology: Arc<TopologyBundle>, metrics: Arc<CompiledProfileBundle>) -> Result<Self> {
+    pub fn new(
+        topology: Arc<TopologyBundle>,
+        metrics: Arc<CompiledProfileBundle>,
+        acceleration: Option<Arc<DatasetAccelerationBundle>>,
+    ) -> Result<Self> {
         validate_execution_inputs(topology.as_ref(), metrics.as_ref())?;
-        let default_routing_graph = build_routing_graph(topology.as_ref(), metrics.as_ref())?;
+        let default_routing_graph = build_routing_graph_from_shared(
+            topology.as_ref(),
+            metrics.clone(),
+            acceleration.clone(),
+        )?;
         let ignore_multi_edge_restrictions_graph =
             if default_routing_graph.has_restriction_sequences() {
-                Some(build_routing_graph_with_options(
+                Some(build_routing_graph_with_options_from_shared(
                     topology.as_ref(),
-                    metrics.as_ref(),
+                    metrics.clone(),
+                    acceleration.clone(),
                     RoutingGraphBuildOptions {
                         ignore_multi_edge_restriction_sequences: true,
                         search_time_turn_restrictions: false,
@@ -1314,6 +1376,12 @@ fn effective_engine_description(routing_graph: &RoutingGraph) -> EffectiveEngine
             route_engine: "astar_exact_multi_edge_turns",
             batch_engine: "astar_exact_multi_edge_turns_batch_reuse",
             acceleration: "spatial_index+a_star+turn_automaton",
+        }
+    } else if routing_graph.acceleration.is_some() {
+        EffectiveEngineDescription {
+            route_engine: "accelerated_pairwise_turns",
+            batch_engine: "accelerated_pairwise_turns_batch_reuse",
+            acceleration: "spatial_index+edge_phantoms+shortcut_query",
         }
     } else {
         EffectiveEngineDescription {
@@ -1973,7 +2041,7 @@ fn build_service_area_expansion(
 ) -> Result<ServiceAreaOriginExpansion> {
     let resolution =
         resolve_service_area_origin(point, candidates, snap_max_distance_m, connectivity)?;
-    let edge_count = topology.edges.len();
+    let edge_count = topology.edge_count();
     let mut edge_before_costs = vec![f64::INFINITY; edge_count];
     let mut edge_end_costs = vec![f64::INFINITY; edge_count];
     let mut edge_start_fractions = vec![0.0_f64; edge_count];
@@ -2341,7 +2409,7 @@ fn service_area_edge_cost(
     metric_kind: ServiceAreaMetricKind,
 ) -> Option<f64> {
     match metric_kind {
-        ServiceAreaMetricKind::DistanceM => Some(topology.edges[edge_index].length_m as f64),
+        ServiceAreaMetricKind::DistanceM => Some(topology.routing_edge(edge_index).length_m as f64),
         ServiceAreaMetricKind::TravelTimeS => metrics.edge_metrics[edge_index].travel_time_s,
     }
 }
@@ -2370,7 +2438,7 @@ fn service_area_intervals_for_threshold(
     boundary_mode: ServiceAreaBoundaryMode,
 ) -> Vec<ReachableEdgeInterval> {
     let mut segments = Vec::new();
-    for edge_index in 0..topology.edges.len() {
+    for edge_index in 0..topology.edge_count() {
         let before_cost = expansion.edge_before_costs[edge_index];
         let end_cost = expansion.edge_end_costs[edge_index];
         if !before_cost.is_finite() || !end_cost.is_finite() || threshold_limit <= before_cost {
@@ -2482,7 +2550,7 @@ fn summarize_service_area_segments(
     let length = segments
         .iter()
         .map(|segment| {
-            topology.edges[segment.edge_index].length_m as f64
+            topology.routing_edge(segment.edge_index).length_m as f64
                 * (segment.end_fraction - segment.start_fraction)
         })
         .sum::<f64>();
@@ -2771,7 +2839,7 @@ fn service_area_segment_coords(
     topology: &TopologyBundle,
     segment: &ReachableEdgeInterval,
 ) -> Vec<[f64; 2]> {
-    let edge = &topology.edges[segment.edge_index];
+    let edge = topology.routing_edge(segment.edge_index);
     let from_node = &topology.nodes[edge.from.0 as usize];
     let to_node = &topology.nodes[edge.to.0 as usize];
     vec![
@@ -3017,10 +3085,10 @@ fn validate_execution_inputs(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
 ) -> Result<()> {
-    if topology.edges.len() != metrics.edge_metrics.len() {
+    if topology.edge_count() != metrics.edge_metrics.len() {
         bail!(
             "topology edge count ({}) does not match compiled metric count ({})",
-            topology.edges.len(),
+            topology.edge_count(),
             metrics.edge_metrics.len()
         );
     }
@@ -3127,25 +3195,25 @@ fn build_failure_mode_bundle(
     let mut degraded_topology = topology.clone();
     let mut degraded_metrics = metrics.clone();
     degraded_metrics.acceleration = None;
-    let mut virtual_reverse_of = vec![None; degraded_topology.edges.len()];
+    let mut virtual_reverse_of = vec![None; degraded_topology.edge_count()];
 
     if fallback.allow_reverse_oneway {
-        let existing_edges = degraded_topology
-            .edges
-            .iter()
-            .enumerate()
-            .filter(|(edge_index, _)| {
+        let existing_edges = (0..degraded_topology.edge_count())
+            .filter(|&edge_index| {
                 degraded_metrics
                     .edge_metrics
-                    .get(*edge_index)
+                    .get(edge_index)
                     .and_then(|metric| metric.generalized_cost)
                     .is_some()
             })
-            .map(|(_, edge)| (edge.from.0, edge.to.0, edge.source_way_id))
+            .map(|edge_index| {
+                let edge = degraded_topology.routing_edge(edge_index);
+                (edge.from.0, edge.to.0, edge.source_way_id)
+            })
             .collect::<std::collections::BTreeSet<_>>();
-        let original_edge_count = degraded_topology.edges.len();
+        let original_edge_count = degraded_topology.edge_count();
         for edge_index in 0..original_edge_count {
-            let edge = &degraded_topology.edges[edge_index];
+            let edge = degraded_topology.edge(edge_index);
             let metric = &degraded_metrics.edge_metrics[edge_index];
             if metric.generalized_cost.is_none() || metric.travel_time_s.is_none() {
                 continue;
@@ -3153,7 +3221,7 @@ fn build_failure_mode_bundle(
             if existing_edges.contains(&(edge.to.0, edge.from.0, edge.source_way_id)) {
                 continue;
             }
-            degraded_topology.edges.push(DirectedEdge {
+            degraded_topology.push_edge(DirectedEdge {
                 edge_id: edge.edge_id,
                 from: edge.to,
                 to: edge.from,
@@ -3337,9 +3405,9 @@ fn execute_route_with_candidates(
     let node_path = if needs_node_path {
         let mut node_path = Vec::with_capacity(path.edge_indexes.len() + 1);
         if let Some(&first_edge) = path.edge_indexes.first() {
-            node_path.push(topology.edges[first_edge].from.0);
+            node_path.push(topology.routing_edge(first_edge).from.0);
             for &edge_index in &path.edge_indexes {
-                node_path.push(topology.edges[edge_index].to.0);
+                node_path.push(topology.routing_edge(edge_index).to.0);
             }
         } else if origin.snapped_edge_id.is_none() {
             node_path.push(origin.snapped_node_id);
@@ -3365,7 +3433,7 @@ fn execute_route_with_candidates(
             path.edge_indexes
                 .iter()
                 .map(|&edge_index| {
-                    let edge = &topology.edges[edge_index];
+                    let edge = topology.edge(edge_index);
                     let metric = &metrics.edge_metrics[edge_index];
                     let factor = edge_traversal_factor(
                         edge_index,
@@ -3436,7 +3504,7 @@ fn execute_route_with_candidates(
         edge_path: if include_detailed_paths {
             path.edge_indexes
                 .iter()
-                .map(|&edge_index| topology.edges[edge_index].edge_id.0)
+                .map(|&edge_index| topology.routing_edge(edge_index).edge_id.0)
                 .collect()
         } else {
             Vec::new()
@@ -3592,7 +3660,7 @@ fn analyze_route_path(
     let last_edge = path.edge_indexes.last().copied();
 
     for &edge_index in &path.edge_indexes {
-        let edge = &topology.edges[edge_index];
+        let edge = topology.routing_edge(edge_index);
         let metric = &metrics.edge_metrics[edge_index];
         let factor = edge_traversal_factor(edge_index, first_edge, last_edge, origin, destination);
         network_distance_m += (edge.length_m as f64 * factor).round() as u64;
@@ -3614,7 +3682,7 @@ fn analyze_route_path(
             penalty_cost += edge_penalty_cost;
             violations.push(RouteViolation {
                 violation_type: route_violation_type,
-                edge_id: Some(topology.edges[original_edge_index].edge_id.0),
+                edge_id: Some(topology.routing_edge(original_edge_index).edge_id.0),
                 from_edge_id: None,
                 to_edge_id: None,
                 distance_m: Some(edge.length_m as f64 * factor),
@@ -3674,8 +3742,8 @@ fn analyze_route_path(
                 violations.push(RouteViolation {
                     violation_type,
                     edge_id: None,
-                    from_edge_id: Some(topology.edges[previous_edge_index].edge_id.0),
-                    to_edge_id: Some(topology.edges[edge_index].edge_id.0),
+                    from_edge_id: Some(topology.routing_edge(previous_edge_index).edge_id.0),
+                    to_edge_id: Some(topology.routing_edge(edge_index).edge_id.0),
                     distance_m: None,
                     penalty_s: local_penalty_s,
                     penalty_generalized_cost: local_penalty_cost,
@@ -4288,7 +4356,7 @@ fn execute_batched_route_with_candidates(
                             path.edge_indexes
                                 .iter()
                                 .map(|&edge_index| {
-                                    let edge = &topology.edges[edge_index];
+                                    let edge = topology.edge(edge_index);
                                     let metric = &metrics.edge_metrics[edge_index];
                                     let factor = edge_traversal_factor(
                                         edge_index,
@@ -4605,19 +4673,12 @@ impl RoutingGraph {
 }
 
 struct AccelerationGraph {
+    source: Arc<DatasetAccelerationBundle>,
+    metrics: Arc<CompiledProfileBundle>,
     upward_tail: Vec<u32>,
-    upward_first_out: Vec<u32>,
-    upward_head: Vec<u32>,
-    upward_weight: Vec<f64>,
-    upward_path_first_out: Vec<u32>,
-    upward_path_edges: Vec<u32>,
-    downward_head: Vec<u32>,
-    downward_path_first_out: Vec<u32>,
-    downward_path_edges: Vec<u32>,
     reverse_downward_first_out: Vec<u32>,
     reverse_downward_edge: Vec<u32>,
     reverse_downward_arc: Vec<u32>,
-    reverse_downward_weight: Vec<f64>,
 }
 
 #[derive(Default)]
@@ -4849,9 +4910,10 @@ struct EdgeBasedTopologyView<'a> {
 
 fn edge_based_topology_view(topology: &TopologyBundle) -> Option<EdgeBasedTopologyView<'_>> {
     let edge_topology = &topology.edge_based_topology;
+    let edge_count = topology.edge_count();
     if edge_topology.node_first_out.len() != topology.nodes.len() + 1
-        || edge_topology.node_edge_order.len() != topology.edges.len()
-        || edge_topology.edge_transition_first_out.len() != topology.edges.len() + 1
+        || edge_topology.node_edge_order.len() != edge_count
+        || edge_topology.edge_transition_first_out.len() != edge_count + 1
     {
         return None;
     }
@@ -4873,8 +4935,10 @@ fn edge_based_topology_view(topology: &TopologyBundle) -> Option<EdgeBasedTopolo
 
 fn build_edge_based_topology_fallback(topology: &TopologyBundle) -> netan_core::EdgeBasedTopology {
     let mut out_degree = vec![0_u32; topology.nodes.len()];
-    let mut head = vec![0_u32; topology.edges.len()];
-    for (edge_index, edge) in topology.edges.iter().enumerate() {
+    let edge_count = topology.edge_count();
+    let mut head = vec![0_u32; edge_count];
+    for edge_index in 0..edge_count {
+        let edge = topology.routing_edge(edge_index);
         out_degree[edge.from.0 as usize] += 1;
         head[edge_index] = edge.to.0;
     }
@@ -4884,25 +4948,25 @@ fn build_edge_based_topology_fallback(topology: &TopologyBundle) -> netan_core::
         node_first_out[node_index + 1] = node_first_out[node_index] + degree;
     }
 
-    let mut node_edge_order = vec![0_u32; topology.edges.len()];
+    let mut node_edge_order = vec![0_u32; edge_count];
     let mut write_positions = node_first_out[..topology.nodes.len()].to_vec();
-    for (edge_index, edge) in topology.edges.iter().enumerate() {
+    for edge_index in 0..edge_count {
+        let edge = topology.routing_edge(edge_index);
         let write_index = &mut write_positions[edge.from.0 as usize];
         node_edge_order[*write_index as usize] = edge_index as u32;
         *write_index += 1;
     }
 
-    let mut edge_transition_first_out = vec![0_u32; topology.edges.len() + 1];
-    for edge_index in 0..topology.edges.len() {
+    let mut edge_transition_first_out = vec![0_u32; edge_count + 1];
+    for edge_index in 0..edge_count {
         let head_node = head[edge_index] as usize;
         edge_transition_first_out[edge_index + 1] = edge_transition_first_out[edge_index]
             + (node_first_out[head_node + 1] - node_first_out[head_node]);
     }
 
-    let mut edge_transition_edges =
-        vec![0_u32; edge_transition_first_out[topology.edges.len()] as usize];
-    let mut transition_write_positions = edge_transition_first_out[..topology.edges.len()].to_vec();
-    for edge_index in 0..topology.edges.len() {
+    let mut edge_transition_edges = vec![0_u32; edge_transition_first_out[edge_count] as usize];
+    let mut transition_write_positions = edge_transition_first_out[..edge_count].to_vec();
+    for edge_index in 0..edge_count {
         let head_node = head[edge_index] as usize;
         for &next_edge in &node_edge_order
             [node_first_out[head_node] as usize..node_first_out[head_node + 1] as usize]
@@ -5062,11 +5126,35 @@ fn build_routing_graph_with_options(
     metrics: &CompiledProfileBundle,
     options: RoutingGraphBuildOptions,
 ) -> Result<RoutingGraph> {
+    build_routing_graph_with_options_from_shared(topology, Arc::new(metrics.clone()), None, options)
+}
+
+fn build_routing_graph_from_shared(
+    topology: &TopologyBundle,
+    metrics: Arc<CompiledProfileBundle>,
+    acceleration: Option<Arc<DatasetAccelerationBundle>>,
+) -> Result<RoutingGraph> {
+    build_routing_graph_with_options_from_shared(
+        topology,
+        metrics,
+        acceleration,
+        RoutingGraphBuildOptions::default(),
+    )
+}
+
+fn build_routing_graph_with_options_from_shared(
+    topology: &TopologyBundle,
+    metrics: Arc<CompiledProfileBundle>,
+    acceleration: Option<Arc<DatasetAccelerationBundle>>,
+    options: RoutingGraphBuildOptions,
+) -> Result<RoutingGraph> {
+    let edge_count = topology.edge_count();
     let mut out_degree = vec![0_u32; topology.nodes.len()];
     let mut in_degree = vec![0_u32; topology.nodes.len()];
-    let mut edge_costs = vec![f64::INFINITY; topology.edges.len()];
+    let mut edge_costs = vec![f64::INFINITY; edge_count];
 
-    for (edge_index, edge) in topology.edges.iter().enumerate() {
+    for edge_index in 0..edge_count {
+        let edge = topology.routing_edge(edge_index);
         let metric = &metrics.edge_metrics[edge_index];
         if let (Some(cost), Some(_)) = (metric.generalized_cost, metric.travel_time_s) {
             edge_costs[edge_index] = cost;
@@ -5112,7 +5200,7 @@ fn build_routing_graph_with_options(
             let write_index = &mut write_positions[node_index];
             edge_order[*write_index as usize] = edge_index;
             *write_index += 1;
-            let head_node = topology.edges[edge_index as usize].to.0 as usize;
+            let head_node = topology.routing_edge(edge_index as usize).to.0 as usize;
             let incoming_write_index = &mut incoming_write_positions[head_node];
             incoming_edge_order[*incoming_write_index as usize] = edge_index;
             *incoming_write_index += 1;
@@ -5161,23 +5249,23 @@ fn build_routing_graph_with_options(
 
     pairwise_forbidden.sort_unstable();
     pairwise_forbidden.dedup();
-    let mut forbidden_turn_first_out = vec![0_u32; topology.edges.len() + 1];
+    let mut forbidden_turn_first_out = vec![0_u32; edge_count + 1];
     for &(from_edge, _) in &pairwise_forbidden {
         forbidden_turn_first_out[from_edge as usize + 1] += 1;
     }
-    for edge_index in 0..topology.edges.len() {
+    for edge_index in 0..edge_count {
         forbidden_turn_first_out[edge_index + 1] += forbidden_turn_first_out[edge_index];
     }
     let mut forbidden_turns = vec![0_u32; pairwise_forbidden.len()];
-    let mut write_positions = forbidden_turn_first_out[..topology.edges.len()].to_vec();
+    let mut write_positions = forbidden_turn_first_out[..edge_count].to_vec();
     for (from_edge, to_edge) in pairwise_forbidden {
         let write_index = &mut write_positions[from_edge as usize];
         forbidden_turns[*write_index as usize] = to_edge;
         *write_index += 1;
     }
 
-    let mut transition_degree = vec![0_u32; topology.edges.len()];
-    for edge_index in 0..topology.edges.len() {
+    let mut transition_degree = vec![0_u32; edge_count];
+    for edge_index in 0..edge_count {
         if !edge_costs[edge_index].is_finite() {
             continue;
         }
@@ -5199,16 +5287,16 @@ fn build_routing_graph_with_options(
             }
         }
     }
-    let mut transition_first_out = vec![0_u32; topology.edges.len() + 1];
-    for edge_index in 0..topology.edges.len() {
+    let mut transition_first_out = vec![0_u32; edge_count + 1];
+    for edge_index in 0..edge_count {
         transition_first_out[edge_index + 1] =
             transition_first_out[edge_index] + transition_degree[edge_index];
     }
-    let transition_count = transition_first_out[topology.edges.len()] as usize;
+    let transition_count = transition_first_out[edge_count] as usize;
     let mut transition_edges = vec![0_u32; transition_count];
     let mut transition_costs = vec![0.0_f64; transition_count];
-    let mut transition_write_positions = transition_first_out[..topology.edges.len()].to_vec();
-    for edge_index in 0..topology.edges.len() {
+    let mut transition_write_positions = transition_first_out[..edge_count].to_vec();
+    for edge_index in 0..edge_count {
         if !edge_costs[edge_index].is_finite() {
             continue;
         }
@@ -5232,22 +5320,22 @@ fn build_routing_graph_with_options(
             }
             let slot = *write_index as usize;
             transition_edges[slot] = next_edge as u32;
-            transition_costs[slot] =
-                edge_costs[next_edge] + turn_penalty_cost(metrics, topology, edge_index, next_edge);
+            transition_costs[slot] = edge_costs[next_edge]
+                + turn_penalty_cost(metrics.as_ref(), topology, edge_index, next_edge);
             *write_index += 1;
         }
     }
-    let mut reverse_transition_first_out = vec![0_u32; topology.edges.len() + 1];
+    let mut reverse_transition_first_out = vec![0_u32; edge_count + 1];
     for &next_edge in &transition_edges {
         reverse_transition_first_out[next_edge as usize + 1] += 1;
     }
-    for edge_index in 0..topology.edges.len() {
+    for edge_index in 0..edge_count {
         reverse_transition_first_out[edge_index + 1] += reverse_transition_first_out[edge_index];
     }
     let mut reverse_transition_edges = vec![0_u32; transition_count];
     let mut reverse_transition_costs = vec![0.0_f64; transition_count];
-    let mut reverse_write_positions = reverse_transition_first_out[..topology.edges.len()].to_vec();
-    for edge_index in 0..topology.edges.len() {
+    let mut reverse_write_positions = reverse_transition_first_out[..edge_count].to_vec();
+    for edge_index in 0..edge_count {
         for transition_index in
             transition_first_out[edge_index] as usize..transition_first_out[edge_index + 1] as usize
         {
@@ -5272,77 +5360,110 @@ fn build_routing_graph_with_options(
         reverse_transition_first_out,
         reverse_transition_edges,
         reverse_transition_costs,
-        acceleration: build_acceleration_graph(metrics, topology.edges.len())?,
+        acceleration: build_acceleration_graph(metrics, acceleration, edge_count)?,
         automaton: RestrictionAutomaton::build(&restricted_sequences),
-        virtual_reverse_of: vec![None; topology.edges.len()],
+        virtual_reverse_of: vec![None; edge_count],
     })
 }
 
 fn build_acceleration_graph(
-    metrics: &CompiledProfileBundle,
+    metrics: Arc<CompiledProfileBundle>,
+    dataset_acceleration: Option<Arc<DatasetAccelerationBundle>>,
     edge_count: usize,
 ) -> Result<Option<AccelerationGraph>> {
     let Some(acceleration) = metrics.acceleration.as_ref() else {
         return Ok(None);
     };
-    if acceleration.edge_order.len() != edge_count
-        || acceleration.edge_rank.len() != edge_count
-        || acceleration.upward_first_out.len() != edge_count + 1
-        || acceleration.downward_first_out.len() != edge_count + 1
+    let topology_source = if let Some(bundle) = dataset_acceleration {
+        if bundle.source_topology_bundle_id != metrics.source_topology_bundle_id {
+            bail!(
+                "dataset acceleration bundle does not match the compiled topology bundle; re-import the dataset and recompile the profile"
+            );
+        }
+        bundle
+    } else if !acceleration.upward_first_out.is_empty()
+        || !acceleration.downward_first_out.is_empty()
+        || !acceleration.upward_head.is_empty()
+        || !acceleration.downward_head.is_empty()
+    {
+        Arc::new(DatasetAccelerationBundle {
+            schema_version: 0,
+            source_topology_bundle_id: metrics.source_topology_bundle_id.clone(),
+            algorithm: acceleration.algorithm.clone(),
+            build_settings: Default::default(),
+            stats: Default::default(),
+            edge_order: acceleration.edge_order.clone(),
+            edge_rank: acceleration.edge_rank.clone(),
+            upward_first_out: acceleration.upward_first_out.clone(),
+            upward_head: acceleration.upward_head.clone(),
+            upward_path_first_out: acceleration.upward_path_first_out.clone(),
+            upward_path_edges: acceleration.upward_path_edges.clone(),
+            downward_first_out: acceleration.downward_first_out.clone(),
+            downward_head: acceleration.downward_head.clone(),
+            downward_path_first_out: acceleration.downward_path_first_out.clone(),
+            downward_path_edges: acceleration.downward_path_edges.clone(),
+        })
+    } else {
+        return Ok(None);
+    };
+    if topology_source.edge_order.len() != edge_count
+        || topology_source.edge_rank.len() != edge_count
+        || topology_source.upward_first_out.len() != edge_count + 1
+        || topology_source.downward_first_out.len() != edge_count + 1
     {
         bail!(
-            "compiled acceleration bundle does not match topology edge count; recompile the profile with the current acceleration format"
+            "acceleration topology does not match topology edge count; re-import the dataset and recompile the profile"
         );
     }
-    let upward_len = acceleration
+    let upward_len = topology_source
         .upward_first_out
         .last()
         .copied()
         .unwrap_or_default() as usize;
-    let downward_len = acceleration
+    let downward_len = topology_source
         .downward_first_out
         .last()
         .copied()
         .unwrap_or_default() as usize;
-    if acceleration.upward_head.len() != upward_len
+    if topology_source.upward_head.len() != upward_len
         || acceleration.upward_weight.len() != upward_len
-        || acceleration.upward_path_first_out.len() != upward_len + 1
+        || topology_source.upward_path_first_out.len() != upward_len + 1
     {
         bail!(
-            "compiled acceleration upward arrays are inconsistent; recompile the profile with the current acceleration format"
+            "acceleration upward arrays are inconsistent; re-import the dataset and recompile the profile"
         );
     }
-    if acceleration.downward_head.len() != downward_len
+    if topology_source.downward_head.len() != downward_len
         || acceleration.downward_weight.len() != downward_len
-        || acceleration.downward_path_first_out.len() != downward_len + 1
+        || topology_source.downward_path_first_out.len() != downward_len + 1
     {
         bail!(
-            "compiled acceleration downward arrays are inconsistent; recompile the profile with the current acceleration format"
+            "acceleration downward arrays are inconsistent; re-import the dataset and recompile the profile"
         );
     }
-    let upward_path_len = acceleration
+    let upward_path_len = topology_source
         .upward_path_first_out
         .last()
         .copied()
         .unwrap_or_default() as usize;
-    if acceleration.upward_path_edges.len() != upward_path_len {
+    if topology_source.upward_path_edges.len() != upward_path_len {
         bail!(
-            "compiled acceleration upward path arrays are inconsistent; recompile the profile with the current acceleration format"
+            "acceleration upward path arrays are inconsistent; re-import the dataset and recompile the profile"
         );
     }
-    let downward_path_len = acceleration
+    let downward_path_len = topology_source
         .downward_path_first_out
         .last()
         .copied()
         .unwrap_or_default() as usize;
-    if acceleration.downward_path_edges.len() != downward_path_len {
+    if topology_source.downward_path_edges.len() != downward_path_len {
         bail!(
-            "compiled acceleration downward path arrays are inconsistent; recompile the profile with the current acceleration format"
+            "acceleration downward path arrays are inconsistent; re-import the dataset and recompile the profile"
         );
     }
 
     let mut reverse_downward_first_out = vec![0_u32; edge_count + 1];
-    for &next_edge in &acceleration.downward_head {
+    for &next_edge in &topology_source.downward_head {
         reverse_downward_first_out[next_edge as usize + 1] += 1;
     }
     for edge_index in 0..edge_count {
@@ -5350,44 +5471,35 @@ fn build_acceleration_graph(
     }
     let mut reverse_downward_edge = vec![0_u32; downward_len];
     let mut reverse_downward_arc = vec![0_u32; downward_len];
-    let mut reverse_downward_weight = vec![0.0_f64; downward_len];
     let mut write_positions = reverse_downward_first_out[..edge_count].to_vec();
     for edge_index in 0..edge_count {
-        for slot in acceleration.downward_first_out[edge_index] as usize
-            ..acceleration.downward_first_out[edge_index + 1] as usize
+        for slot in topology_source.downward_first_out[edge_index] as usize
+            ..topology_source.downward_first_out[edge_index + 1] as usize
         {
-            let next_edge = acceleration.downward_head[slot] as usize;
+            let next_edge = topology_source.downward_head[slot] as usize;
             let write_index = &mut write_positions[next_edge];
             let target_slot = *write_index as usize;
             reverse_downward_edge[target_slot] = edge_index as u32;
             reverse_downward_arc[target_slot] = slot as u32;
-            reverse_downward_weight[target_slot] = acceleration.downward_weight[slot];
             *write_index += 1;
         }
     }
 
     let mut upward_tail = vec![0_u32; upward_len];
     for edge_index in 0..edge_count {
-        for slot in acceleration.upward_first_out[edge_index] as usize
-            ..acceleration.upward_first_out[edge_index + 1] as usize
+        for slot in topology_source.upward_first_out[edge_index] as usize
+            ..topology_source.upward_first_out[edge_index + 1] as usize
         {
             upward_tail[slot] = edge_index as u32;
         }
     }
     Ok(Some(AccelerationGraph {
+        source: topology_source,
+        metrics,
         upward_tail,
-        upward_first_out: acceleration.upward_first_out.clone(),
-        upward_head: acceleration.upward_head.clone(),
-        upward_weight: acceleration.upward_weight.clone(),
-        upward_path_first_out: acceleration.upward_path_first_out.clone(),
-        upward_path_edges: acceleration.upward_path_edges.clone(),
-        downward_head: acceleration.downward_head.clone(),
-        downward_path_first_out: acceleration.downward_path_first_out.clone(),
-        downward_path_edges: acceleration.downward_path_edges.clone(),
         reverse_downward_first_out,
         reverse_downward_edge,
         reverse_downward_arc,
-        reverse_downward_weight,
     }))
 }
 
@@ -5473,19 +5585,12 @@ fn route_between_candidates(
                 } else if routing_graph.acceleration.is_some() {
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);
                     let destination_seeds = destination_edge_seeds(routing_graph, destination);
-                    let acceleration_candidate = accelerated_route_query_seeded(
+                    accelerated_route_query_seeded(
                         topology,
                         routing_graph,
                         &origin_seeds,
                         &destination_seeds,
                         direct_path.clone(),
-                    )?;
-                    seeded_bidirectional_dijkstra_on_edge_transitions(
-                        topology,
-                        routing_graph,
-                        &origin_seeds,
-                        &destination_seeds,
-                        acceleration_candidate.or(direct_path.clone()),
                     )?
                 } else {
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);
@@ -5699,10 +5804,10 @@ fn reconstruct_accelerated_route_path(
     }
     edge_indexes.push(cursor);
     for arc_index in forward_arc_ids.into_iter().rev() {
-        let start = acceleration.upward_path_first_out[arc_index] as usize;
-        let end = acceleration.upward_path_first_out[arc_index + 1] as usize;
+        let start = acceleration.source.upward_path_first_out[arc_index] as usize;
+        let end = acceleration.source.upward_path_first_out[arc_index + 1] as usize;
         edge_indexes.extend(
-            acceleration.upward_path_edges[start..end]
+            acceleration.source.upward_path_edges[start..end]
                 .iter()
                 .map(|&edge_index| edge_index as usize),
         );
@@ -5715,14 +5820,14 @@ fn reconstruct_accelerated_route_path(
             break;
         }
         let next_arc = next_arc as usize;
-        let start = acceleration.downward_path_first_out[next_arc] as usize;
-        let end = acceleration.downward_path_first_out[next_arc + 1] as usize;
+        let start = acceleration.source.downward_path_first_out[next_arc] as usize;
+        let end = acceleration.source.downward_path_first_out[next_arc + 1] as usize;
         edge_indexes.extend(
-            acceleration.downward_path_edges[start..end]
+            acceleration.source.downward_path_edges[start..end]
                 .iter()
                 .map(|&edge_index| edge_index as usize),
         );
-        cursor = acceleration.downward_head[next_arc] as usize;
+        cursor = acceleration.source.downward_head[next_arc] as usize;
     }
 
     RoutePath {
@@ -5782,7 +5887,7 @@ fn accelerated_route_query_seeded(
 
     ACCELERATION_SEARCH_SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
-        scratch.prepare(topology.edges.len());
+        scratch.prepare(topology.edge_count());
 
         for &(edge_index, cost) in origin_seeds {
             if !scratch.update_forward(edge_index, cost, NO_PREVIOUS_ARC) {
@@ -5853,11 +5958,16 @@ fn accelerated_route_query_seeded(
                     continue;
                 }
 
-                for slot in acceleration.upward_first_out[edge_index] as usize
-                    ..acceleration.upward_first_out[edge_index + 1] as usize
+                let compiled = acceleration
+                    .metrics
+                    .acceleration
+                    .as_ref()
+                    .expect("validated acceleration weights");
+                for slot in acceleration.source.upward_first_out[edge_index] as usize
+                    ..acceleration.source.upward_first_out[edge_index + 1] as usize
                 {
-                    let next_edge = acceleration.upward_head[slot] as usize;
-                    let next_cost = cost + acceleration.upward_weight[slot];
+                    let next_edge = acceleration.source.upward_head[slot] as usize;
+                    let next_cost = cost + compiled.upward_weight[slot];
                     if !scratch.update_forward(next_edge, next_cost, slot as u32) {
                         continue;
                     }
@@ -5892,11 +6002,18 @@ fn accelerated_route_query_seeded(
                     continue;
                 }
 
+                let compiled = acceleration
+                    .metrics
+                    .acceleration
+                    .as_ref()
+                    .expect("validated acceleration weights");
                 for slot in acceleration.reverse_downward_first_out[edge_index] as usize
                     ..acceleration.reverse_downward_first_out[edge_index + 1] as usize
                 {
                     let previous_edge = acceleration.reverse_downward_edge[slot] as usize;
-                    let next_cost = cost + acceleration.reverse_downward_weight[slot];
+                    let next_cost = cost
+                        + compiled.downward_weight
+                            [acceleration.reverse_downward_arc[slot] as usize];
                     if !scratch.update_backward(
                         previous_edge,
                         next_cost,
@@ -5938,7 +6055,7 @@ fn seeded_bidirectional_dijkstra_on_edge_transitions(
 ) -> Result<Option<RoutePath>> {
     EDGE_SEARCH_SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
-        scratch.prepare(topology.edges.len());
+        scratch.prepare(topology.edge_count());
 
         for &(edge_index, cost) in origin_seeds {
             if !scratch.update_forward(edge_index, cost, NO_PREVIOUS_EDGE) {
@@ -6355,7 +6472,7 @@ fn build_route_geometry(
     let mut geometry = Vec::with_capacity(edge_indexes.len() + 2);
     geometry.push([origin.snapped_lon, origin.snapped_lat]);
     for &edge_index in edge_indexes {
-        let node = &topology.nodes[topology.edges[edge_index].to.0 as usize];
+        let node = &topology.nodes[topology.routing_edge(edge_index).to.0 as usize];
         geometry.push([node.lon, node.lat]);
     }
     if geometry.last().is_none_or(|point| {
@@ -6387,8 +6504,8 @@ fn turn_penalty_seconds(
     previous_edge_index: usize,
     next_edge_index: usize,
 ) -> f64 {
-    let previous = &topology.edges[previous_edge_index];
-    let next = &topology.edges[next_edge_index];
+    let previous = topology.routing_edge(previous_edge_index);
+    let next = topology.routing_edge(next_edge_index);
 
     if previous.to != next.from {
         return 0.0;
@@ -6435,8 +6552,8 @@ fn classify_turn(
     const STRAIGHT_THRESHOLD_RAD: f64 = 30.0_f64.to_radians();
     const UTURN_THRESHOLD_RAD: f64 = 150.0_f64.to_radians();
 
-    let previous = &topology.edges[previous_edge_index];
-    let next = &topology.edges[next_edge_index];
+    let previous = topology.routing_edge(previous_edge_index);
+    let next = topology.routing_edge(next_edge_index);
     let from = &topology.nodes[previous.from.0 as usize];
     let via = &topology.nodes[previous.to.0 as usize];
     let to = &topology.nodes[next.to.0 as usize];
@@ -6540,7 +6657,7 @@ fn snap_candidates(
         candidate_edges.extend_from_slice(routing_graph.incoming_edges(node_id as usize));
     }
     if candidate_edges.is_empty() {
-        for edge_index in 0..topology.edges.len() {
+        for edge_index in 0..topology.edge_count() {
             if routing_graph.edge_costs[edge_index].is_finite() {
                 candidate_edges.push(edge_index as u32);
             }
@@ -6551,7 +6668,7 @@ fn snap_candidates(
     }
 
     for edge_index in candidate_edges {
-        let edge = &topology.edges[edge_index as usize];
+        let edge = topology.routing_edge(edge_index as usize);
         let from = &topology.nodes[edge.from.0 as usize];
         let to = &topology.nodes[edge.to.0 as usize];
         let projection = project_point_onto_segment(point.lon, point.lat, from, to);
@@ -6776,7 +6893,7 @@ fn build_breakdowns(
 
     let mut breakdowns = RouteBreakdowns::default();
     for &edge_index in edge_indexes {
-        let edge = &topology.edges[edge_index];
+        let edge = topology.edge(edge_index);
         let metric = &metrics.edge_metrics[edge_index];
 
         if want_road {
@@ -6983,8 +7100,8 @@ mod tests {
     fn uses_external_edge_name_bundle_for_segment_rows() {
         let mut topology = test_topology();
         topology.names.clear();
-        topology.edges[0].name_index = Some(0);
-        topology.edges[1].name_index = Some(1);
+        topology.set_edge_name_index(0, Some(0));
+        topology.set_edge_name_index(1, Some(1));
         let request = RouteRequest {
             route_id: "route".to_string(),
             origin: super::LabeledPoint {
@@ -7025,7 +7142,7 @@ mod tests {
     #[test]
     fn prepared_engine_reuses_prebuilt_graph() {
         let engine =
-            PreparedRoutingEngine::new(Arc::new(test_topology()), Arc::new(test_metrics()))
+            PreparedRoutingEngine::new(Arc::new(test_topology()), Arc::new(test_metrics()), None)
                 .expect("prepared engine builds");
         let request = RouteRequest {
             route_id: "prepared-route".to_string(),
@@ -7177,7 +7294,7 @@ mod tests {
     #[test]
     fn snap_candidates_keep_only_the_nearest_eight() {
         let topology = snap_test_topology();
-        let metrics = uniform_metrics(topology.edges.len(), 1.0);
+        let metrics = uniform_metrics(topology.edge_count(), 1.0);
         let graph = build_routing_graph(&topology, &metrics).expect("graph builds");
         let point = super::LabeledPoint {
             id: "snap".to_string(),
@@ -7472,11 +7589,14 @@ mod tests {
     fn accelerated_engine_matches_exact_engine_on_small_topology() {
         let topology = test_topology();
         let exact_engine =
-            PreparedRoutingEngine::new(Arc::new(topology.clone()), Arc::new(test_metrics()))
+            PreparedRoutingEngine::new(Arc::new(topology.clone()), Arc::new(test_metrics()), None)
                 .expect("exact engine builds");
-        let accelerated_engine =
-            PreparedRoutingEngine::new(Arc::new(topology), Arc::new(accelerated_test_metrics()))
-                .expect("accelerated engine builds");
+        let accelerated_engine = PreparedRoutingEngine::new(
+            Arc::new(topology),
+            Arc::new(accelerated_test_metrics()),
+            None,
+        )
+        .expect("accelerated engine builds");
 
         let requests = [
             RouteRequest {
@@ -7780,7 +7900,7 @@ mod tests {
         let mut metrics = restricted_metrics();
         metrics.edge_metrics[3].travel_time_s = Some(25.0);
         metrics.edge_metrics[3].generalized_cost = Some(25.0);
-        let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(metrics))
+        let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(metrics), None)
             .expect("prepared engine builds");
         let request = RouteRequest {
             route_id: "multi-edge-override".to_string(),
@@ -7917,6 +8037,7 @@ scenarios:
                     lat: 53.0,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -8033,6 +8154,7 @@ scenarios:
                     lat: 53.0,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -8155,6 +8277,7 @@ scenarios:
                     lat: 53.0,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -8358,6 +8481,7 @@ scenarios:
                     lat: 53.001,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -8467,7 +8591,7 @@ scenarios:
 
     fn traffic_signal_penalty_topology() -> TopologyBundle {
         let mut topology = turn_penalty_topology();
-        topology.edges[1].flags = EDGE_FLAG_TARGET_TRAFFIC_SIGNAL;
+        topology.set_edge_flags(1, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL);
         topology
     }
 
@@ -8502,6 +8626,7 @@ scenarios:
                     lat: 53.001,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -8651,6 +8776,7 @@ scenarios:
             source_path: "test".to_string(),
             source_sha256: "abc".to_string(),
             nodes,
+            edge_layers: Default::default(),
             edges,
             turn_restrictions: vec![],
             names: vec![],
@@ -8664,7 +8790,7 @@ scenarios:
     fn with_edge_based_topology(mut topology: TopologyBundle) -> TopologyBundle {
         topology.edge_based_topology = super::build_edge_based_topology_fallback(&topology);
         if topology.node_component_ids.len() != topology.nodes.len()
-            || topology.edge_component_ids.len() != topology.edges.len()
+            || topology.edge_component_ids.len() != topology.edge_count()
         {
             let (node_component_ids, edge_component_ids) = weak_components_for_test(&topology);
             topology.node_component_ids = node_component_ids;
@@ -8677,7 +8803,8 @@ scenarios:
         let node_count = topology.nodes.len();
         let mut parent = (0..node_count as u32).collect::<Vec<_>>();
 
-        for edge in &topology.edges {
+        for edge_index in 0..topology.edge_count() {
+            let edge = topology.routing_edge(edge_index);
             union_test_components(&mut parent, edge.from.0 as usize, edge.to.0 as usize);
         }
 
@@ -8690,10 +8817,8 @@ scenarios:
             node_component_ids[node_index] = component_id;
         }
 
-        let edge_component_ids = topology
-            .edges
-            .iter()
-            .map(|edge| node_component_ids[edge.from.0 as usize])
+        let edge_component_ids = (0..topology.edge_count())
+            .map(|edge_index| node_component_ids[topology.routing_edge(edge_index).from.0 as usize])
             .collect();
         (node_component_ids, edge_component_ids)
     }
@@ -8786,6 +8911,7 @@ scenarios:
                     lat: 53.0,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -8867,6 +8993,7 @@ scenarios:
                     lat: 53.0,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(1),
@@ -8924,6 +9051,7 @@ scenarios:
                     lat: 53.0,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -9016,6 +9144,7 @@ scenarios:
                     lat: 53.001,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -9114,6 +9243,7 @@ scenarios:
                     lat: 53.0,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -9429,7 +9559,7 @@ scenarios:
     #[test]
     fn allows_reverse_oneway_when_requested() {
         let topology = one_way_dead_end_topology();
-        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let metrics = uniform_metrics(topology.edge_count(), 10.0);
         let request = RouteRequest {
             route_id: "reverse-oneway".to_string(),
             origin: super::LabeledPoint {
@@ -9471,7 +9601,7 @@ scenarios:
     #[test]
     fn strict_route_still_fails_on_oneway_dead_end() {
         let topology = one_way_dead_end_topology();
-        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let metrics = uniform_metrics(topology.edge_count(), 10.0);
         let request = RouteRequest {
             route_id: "reverse-oneway-strict".to_string(),
             origin: super::LabeledPoint {
@@ -9498,7 +9628,7 @@ scenarios:
     #[test]
     fn auto_relaxes_unreachable_route_with_minimal_reverse_oneway_policy() {
         let topology = one_way_dead_end_topology();
-        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let metrics = uniform_metrics(topology.edge_count(), 10.0);
         let request = RouteRequest {
             route_id: "reverse-oneway-auto".to_string(),
             origin: super::LabeledPoint {
@@ -9539,7 +9669,7 @@ scenarios:
     #[test]
     fn allows_illegal_turn_when_requested() {
         let topology = illegal_turn_only_topology();
-        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let metrics = uniform_metrics(topology.edge_count(), 10.0);
         let request = RouteRequest {
             route_id: "illegal-turn".to_string(),
             origin: super::LabeledPoint {
@@ -9581,7 +9711,7 @@ scenarios:
     #[test]
     fn ignores_multi_edge_restriction_only_when_explicitly_requested() {
         let topology = ignored_restriction_only_topology();
-        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let metrics = uniform_metrics(topology.edge_count(), 10.0);
         let strict_request = RouteRequest {
             route_id: "ignored-restriction-strict".to_string(),
             origin: super::LabeledPoint {
@@ -9628,7 +9758,7 @@ scenarios:
     #[test]
     fn allows_forbidden_uturn_when_requested() {
         let topology = forbidden_uturn_topology();
-        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let metrics = uniform_metrics(topology.edge_count(), 10.0);
         let strict_request = RouteRequest {
             route_id: "forbidden-uturn-strict".to_string(),
             origin: super::LabeledPoint {
@@ -9674,7 +9804,7 @@ scenarios:
     #[test]
     fn detects_ferry_only_component_fixture() {
         let topology = ferry_only_subnetwork_topology();
-        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let metrics = uniform_metrics(topology.edge_count(), 10.0);
         let request = RouteRequest {
             route_id: "ferry-component".to_string(),
             origin: super::LabeledPoint {
@@ -10104,7 +10234,7 @@ scenarios:
     #[test]
     fn skips_non_traversable_nodes_when_snapping_route_endpoints() {
         let topology = dead_node_snap_topology();
-        let metrics = uniform_metrics(topology.edges.len(), 10.0);
+        let metrics = uniform_metrics(topology.edge_count(), 10.0);
         let request = RouteRequest {
             route_id: "dead-node-snap".to_string(),
             origin: super::LabeledPoint {
@@ -10162,6 +10292,7 @@ scenarios:
                     lat: 53.0,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
@@ -10238,6 +10369,7 @@ scenarios:
                     lat: 53.0,
                 },
             ],
+            edge_layers: Default::default(),
             edges: vec![
                 DirectedEdge {
                     edge_id: EdgeId(0),
