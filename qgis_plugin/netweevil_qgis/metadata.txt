@@ -1,0 +1,14 @@
+[general]
+name=netweevil
+qgisMinimumVersion=3.28
+qgisMaximumVersion=4.99.0
+description=Run netweevil API route, OD, matrix, and service-area analyses with advanced route detail, connectivity, and grouped output layers directly in QGIS 3 and QGIS 4.
+version=0.6.0
+author=OpenAI Codex
+email=none@example.invalid
+about=Connects QGIS directly to the netweevil HTTP API, discovers the loaded dataset and profiles, submits route/OD/matrix/service-area JSON requests with advanced analysis controls, and loads grouped route, segment, hop, violation, and breakdown outputs from API JSON or GeoJSON responses.
+category=Vector
+hasProcessingProvider=no
+
+[help]
+homepage=https://example.invalid/netweevil

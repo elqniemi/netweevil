@@ -8,9 +8,9 @@ This repository is a Rust workspace centered on one shared routing engine with C
 - `crates/ingest`: dataset import and future OSM PBF topology build
 - `crates/profile`: YAML/TOML profile schema and validation
 - `crates/query`: route, OD, matrix, and experiment request models
-- `crates/persist`: local cache/state layout under `.netan/`
+- `crates/persist`: local cache/state layout under `.netweevil/`
 - `crates/report`: dataset/profile/run manifests and report rendering
-- `crates/cli`: `netan` CLI entry point
+- `crates/cli`: `netweevil` CLI entry point
 - `crates/api`: preloadable HTTP API
 - `qgis_plugin/`: QGIS plugin package
 - `examples/`: sample profiles and requests
@@ -23,9 +23,9 @@ Track roadmap and implementation status in `PROGRESS.md`.
 - `cargo fmt --all`: format the entire workspace
 - `cargo check`: fast compile check across all crates
 - `cargo test`: run unit and integration tests when present
-- `cargo run -p netan-cli -- profile validate examples/profiles/car_research_v1.yml`: validate a sample profile
-- `cargo run -p netan-cli -- dataset import datasets/groningen-260317.osm.pbf --name groningen_2026_03`: register a local dataset
-- `cargo run -p netan-cli -- cache list`: inspect cached manifests
+- `cargo run -p netweevil-cli -- profile validate examples/profiles/car_research_v1.yml`: validate a sample profile
+- `cargo run -p netweevil-cli -- dataset import datasets/groningen-260317.osm.pbf --name groningen_2026_03`: register a local dataset
+- `cargo run -p netweevil-cli -- cache list`: inspect cached manifests
 
 ## Coding Style & Naming Conventions
 

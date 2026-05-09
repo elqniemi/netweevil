@@ -8,12 +8,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use netan_core::{
+use netweevil_core::{
     CompiledEdgeMetric, CompiledProfileBundle, DatasetAccelerationBundle, DirectedEdge,
     EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, RoadClass, SurfaceClass, TopologyBundle,
     TopologyNode,
 };
-use netan_profile::ReturnConfig;
+use netweevil_profile::ReturnConfig;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -813,7 +813,7 @@ fn validate_service_area_request(request: ServiceAreaRequest) -> Result<ServiceA
 
 fn merge_point_set_returns(left: &ReturnConfig, right: &ReturnConfig) -> ReturnConfig {
     let mut merged = left.clone();
-    if matches!(merged.geometry, netan_profile::ReturnGeometry::None) {
+    if matches!(merged.geometry, netweevil_profile::ReturnGeometry::None) {
         merged.geometry = right.geometry;
     }
     merged.segment_rows |= right.segment_rows;
@@ -3444,8 +3444,8 @@ fn execute_route_with_candidates(
     };
 
     let include_detailed_paths = request_returns_detailed_path(returns);
-    let needs_node_path =
-        include_detailed_paths || !matches!(returns.geometry, netan_profile::ReturnGeometry::None);
+    let needs_node_path = include_detailed_paths
+        || !matches!(returns.geometry, netweevil_profile::ReturnGeometry::None);
     let node_path = if needs_node_path {
         let mut node_path = Vec::with_capacity(path.edge_indexes.len() + 1);
         if let Some(&first_edge) = path.edge_indexes.first() {
@@ -3462,7 +3462,7 @@ fn execute_route_with_candidates(
     };
 
     let geometry = match returns.geometry {
-        netan_profile::ReturnGeometry::None => None,
+        netweevil_profile::ReturnGeometry::None => None,
         _ => Some(build_route_geometry(
             topology,
             &path.edge_indexes,
@@ -3651,7 +3651,7 @@ fn try_auto_relaxed_route_with_candidates(
 }
 
 fn request_returns_detailed_path(returns: &ReturnConfig) -> bool {
-    !matches!(returns.geometry, netan_profile::ReturnGeometry::None)
+    !matches!(returns.geometry, netweevil_profile::ReturnGeometry::None)
         || returns.segment_rows
         || !returns.road_type_breakdown.is_empty()
         || !returns.surface_breakdown.is_empty()
@@ -4390,7 +4390,7 @@ fn execute_batched_route_with_candidates(
                     node_path: Vec::new(),
                     edge_path: Vec::new(),
                     geometry: match returns.geometry {
-                        netan_profile::ReturnGeometry::None => None,
+                        netweevil_profile::ReturnGeometry::None => None,
                         _ => Some(build_route_geometry(
                             topology,
                             &path.edge_indexes,
@@ -5025,7 +5025,9 @@ fn edge_based_topology_view(topology: &TopologyBundle) -> Option<EdgeBasedTopolo
     })
 }
 
-fn build_edge_based_topology_fallback(topology: &TopologyBundle) -> netan_core::EdgeBasedTopology {
+fn build_edge_based_topology_fallback(
+    topology: &TopologyBundle,
+) -> netweevil_core::EdgeBasedTopology {
     let mut out_degree = vec![0_u32; topology.nodes.len()];
     let edge_count = topology.edge_count();
     let mut head = vec![0_u32; edge_count];
@@ -5069,7 +5071,7 @@ fn build_edge_based_topology_fallback(topology: &TopologyBundle) -> netan_core::
         }
     }
 
-    netan_core::EdgeBasedTopology {
+    netweevil_core::EdgeBasedTopology {
         node_first_out,
         node_edge_order,
         edge_transition_first_out,
@@ -6882,7 +6884,7 @@ fn snap_candidate_key(candidate: &SnappedPoint) -> (u32, u64, u64) {
 
 fn spatial_snap_nodes(
     topology: &TopologyBundle,
-    spatial_index: &netan_core::NodeSpatialIndex,
+    spatial_index: &netweevil_core::NodeSpatialIndex,
     point: &LabeledPoint,
     max_distance_m: f64,
 ) -> Vec<(u32, f64)> {
@@ -6955,7 +6957,7 @@ fn push_best_snap_candidate(
 }
 
 fn spatial_index_cell_for_point(
-    spatial_index: &netan_core::NodeSpatialIndex,
+    spatial_index: &netweevil_core::NodeSpatialIndex,
     lon: f64,
     lat: f64,
 ) -> Option<(i32, i32)> {
@@ -7033,10 +7035,10 @@ fn fill_metric_breakdown(
     };
     for metric in metrics {
         match metric {
-            netan_profile::BreakdownMetric::DistanceM => {
+            netweevil_profile::BreakdownMetric::DistanceM => {
                 *entry.distance_m.get_or_insert(0) += distance_m;
             }
-            netan_profile::BreakdownMetric::TimeS => {
+            netweevil_profile::BreakdownMetric::TimeS => {
                 *entry.time_s.get_or_insert(0.0) += time_s;
             }
         }
@@ -7102,14 +7104,14 @@ mod tests {
         execute_route_with_edge_names, execute_service_area, load_experiment, load_od_pairs,
         load_point_set, load_service_area_request,
     };
-    use netan_core::{
+    use netweevil_core::{
         AccessMask, CacheBundleId, CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle,
         CompiledTurnCostConfig, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
         EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeId, NodeId, NodeSpatialIndex, RoadClass,
         SmoothnessClass, SpatialIndexCell, SurfaceClass, TopologyBounds, TopologyBundle,
         TopologyNode, TravelMode, TurnRestriction, TurnRestrictionKind,
     };
-    use netan_profile::{BreakdownMetric, ReturnConfig, ReturnGeometry};
+    use netweevil_profile::{BreakdownMetric, ReturnConfig, ReturnGeometry};
     use std::fs;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -10560,7 +10562,7 @@ scenarios:
             .duration_since(UNIX_EPOCH)
             .expect("time works")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netan-query-{unique}-{name}"));
+        let path = std::env::temp_dir().join(format!("netweevil-query-{unique}-{name}"));
         fs::write(&path, contents).expect("fixture written");
         path
     }

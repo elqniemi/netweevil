@@ -1,5 +1,5 @@
 [package]
-name = "netan-persist"
+name = "netweevil-persist"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,7 +10,7 @@ anyhow.workspace = true
 bincode.workspace = true
 flate2.workspace = true
 memmap2.workspace = true
-netan-core = { path = "../core" }
-netan-report = { path = "../report" }
+netweevil-core = { path = "../core" }
+netweevil-report = { path = "../report" }
 serde.workspace = true
 serde_json.workspace = true

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use netan_core::{
+use netweevil_core::{
     CacheBundleId, CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle,
     CompiledTurnCostConfig, DatasetAccelerationBundle, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
     EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle,
@@ -1007,7 +1007,7 @@ mod tests {
         ProfileDocument, ProfileHeader, ReturnConfig, SpeedRule, TagMatch, compile_profile_bundle,
         compile_profile_bundle_with_acceleration,
     };
-    use netan_core::{
+    use netweevil_core::{
         AccessMask, CacheBundleId, DatasetAccelerationBundle, DirectedEdge, EdgeBasedTopology,
         EdgeId, NodeId, RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle, TopologyNode,
         TravelMode,

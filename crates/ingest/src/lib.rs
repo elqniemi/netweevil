@@ -7,7 +7,7 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result, bail};
-use netan_core::{
+use netweevil_core::{
     AccelerationBuildSettings, AccelerationBundleStats, AccessMask, BuildStage, CacheBundleId,
     ConnectedComponentKind, ConnectedComponentsMeta, DatasetAccelerationBundle, DatasetId,
     DirectedEdge, EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId,
@@ -15,11 +15,11 @@ use netan_core::{
     TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyNode, TurnRestriction,
     TurnRestrictionKind,
 };
-use netan_persist::{
+use netweevil_persist::{
     WorkspacePaths, write_acceleration_bundle, write_dataset_manifest, write_edge_name_bundle,
     write_topology_bundle,
 };
-use netan_report::{BundleRef, DatasetManifest, now_rfc3339};
+use netweevil_report::{BundleRef, DatasetManifest, now_rfc3339};
 use osmpbfreader::{OsmId, OsmObj, OsmPbfReader, Relation, Tags};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -464,7 +464,7 @@ fn build_topology_bundle(
     let edge_based_topology = build_edge_based_topology(nodes.len(), &edges);
     let components = label_weak_components(nodes.len(), &edges);
 
-    let edge_layers = netan_core::TopologyEdgeLayers::from_directed_edges(&edges);
+    let edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges);
     let bundle = TopologyBundle {
         schema_version: 8,
         source_path: source_path.display().to_string(),
@@ -1261,7 +1261,7 @@ fn build_name_lookup(ways: &[PendingWay]) -> BTreeMap<String, u32> {
         .collect()
 }
 
-fn build_spatial_index(nodes: &[TopologyNode]) -> Option<netan_core::NodeSpatialIndex> {
+fn build_spatial_index(nodes: &[TopologyNode]) -> Option<netweevil_core::NodeSpatialIndex> {
     const TARGET_CELL_SPAN_M: f64 = 750.0;
     const METERS_PER_DEGREE_LAT: f64 = 111_320.0;
 
@@ -1330,7 +1330,7 @@ fn build_spatial_index(nodes: &[TopologyNode]) -> Option<netan_core::NodeSpatial
         write_positions[cell_index] += 1;
     }
 
-    Some(netan_core::NodeSpatialIndex {
+    Some(netweevil_core::NodeSpatialIndex {
         bounds,
         columns,
         rows,
@@ -2284,7 +2284,7 @@ mod tests {
         build_turn_restrictions, classify_access, classify_direction, classify_highway,
         haversine_meters, parse_duration_seconds, parse_turn_restriction_relation,
     };
-    use netan_core::{
+    use netweevil_core::{
         AccelerationBuildProfile, AccelerationBuildSettings, AccessMask, CacheBundleId,
         DirectedEdge, EdgeId, NodeId, RoadClass, SurfaceClass, TopologyBundle, TopologyNode,
         TurnRestrictionKind,

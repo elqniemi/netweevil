@@ -16,8 +16,8 @@ CONNECT_TIMEOUT_SECONDS="${CONNECT_TIMEOUT_SECONDS:-2}"
 MAX_TIME_SECONDS="${MAX_TIME_SECONDS:-120}"
 START_API="${START_API:-1}"
 KEEP_API_RUNNING="${KEEP_API_RUNNING:-0}"
-SERVER_LOG_PATH="${SERVER_LOG_PATH:-${ROOT_DIR}/.netan/runs/perf-api-server.log}"
-RESULTS_PATH="${RESULTS_PATH:-${ROOT_DIR}/.netan/runs/perf-route-corpus-results.jsonl}"
+SERVER_LOG_PATH="${SERVER_LOG_PATH:-${ROOT_DIR}/.netweevil/runs/perf-api-server.log}"
+RESULTS_PATH="${RESULTS_PATH:-${ROOT_DIR}/.netweevil/runs/perf-route-corpus-results.jsonl}"
 
 if ! command -v cargo >/dev/null 2>&1; then
   echo "cargo is required" >&2
@@ -73,7 +73,7 @@ start_api_if_needed() {
   echo "Starting API for dataset ${DATASET_ID} on ${API_BIND}"
   (
     cd "${ROOT_DIR}"
-    cargo run -p netan-cli -- api serve \
+    cargo run -p netweevil-cli -- api serve \
       --dataset "${DATASET_ID}" \
       --default-profile "${PROFILE_PATH}" \
       --bind "${API_BIND}"

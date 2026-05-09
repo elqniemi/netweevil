@@ -5,7 +5,7 @@
 **/*.rmeta
 
 # Workspace runtime/cache data (local run state, manifests, bundles, reports)
-/.netan/
+/.netweevil/
 
 # Local dataset/extracts
 *.osm

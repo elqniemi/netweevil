@@ -10,24 +10,28 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use netan_core::{
+use netweevil_core::{
     CacheBundleId, CompiledProfileBundle, ConnectedComponentsMeta, DatasetAccelerationBundle,
     DatasetId, TopologyBounds, TopologyBundle,
 };
-use netan_persist::{
+use netweevil_persist::{
     WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
-    read_compiled_profile_manifests, read_dataset_manifest, read_edge_name_bundle,
+    read_compiled_profile_manifests, read_dataset_manifest, read_edge_name_bundle, read_json,
     read_topology_bundle, write_compiled_profile_bundle, write_compiled_profile_manifest,
 };
-use netan_profile::{
+use netweevil_profile::{
     ProfileDocument, ReturnGeometry, compile_profile_bundle_with_acceleration, load_profile,
 };
-use netan_query::{
+use netweevil_query::{
     AnalysisDiagnostic, EffectiveEngineDescription, EngineMode, MatrixResult, OdPairsDocument,
     OdResult, PointSetDocument, PreparedRoutingEngine, RouteRequest, RouteResult,
     ServiceAreaRequest, ServiceAreaResult, analysis_failure,
 };
-use netan_report::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
+use netweevil_report::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
+use netweevil_transit::{
+    TransitBundle, TransitFeedManifest, TransitRouteRequest, TransitRouteResult,
+    execute_transit_route, read_transit_bundle,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::net::TcpListener;
@@ -42,6 +46,7 @@ pub struct ApiServeOptions {
     pub dataset_id: String,
     pub default_profile: PathBuf,
     pub profiles: Vec<PathBuf>,
+    pub transit_feeds: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -57,6 +62,7 @@ struct ServiceRuntime {
     routing_workers: Arc<Semaphore>,
     default_profile_id: String,
     profiles: BTreeMap<String, LoadedProfile>,
+    transit_feeds: BTreeMap<String, LoadedTransitFeed>,
     capabilities: ServiceCapabilities,
     engine: EngineDescription,
 }
@@ -66,6 +72,11 @@ struct LoadedProfile {
     document: ProfileDocument,
     manifest: CompiledProfileManifest,
     engine: Arc<PreparedRoutingEngine>,
+}
+
+struct LoadedTransitFeed {
+    manifest: TransitFeedManifest,
+    bundle: Arc<TransitBundle>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -95,6 +106,7 @@ pub struct ServiceInfoResponse {
     dataset: DatasetInfo,
     default_profile_id: String,
     loaded_profiles: Vec<ProfileInfo>,
+    loaded_transit_feeds: Vec<TransitFeedInfo>,
     capabilities: ServiceCapabilities,
     engine: EngineDescription,
 }
@@ -129,6 +141,18 @@ pub struct ProfileInfo {
     created_at: String,
     edge_count: Option<u64>,
     default_returns: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransitFeedInfo {
+    feed_id: String,
+    source_path: String,
+    service_start_date: String,
+    service_days: u32,
+    stop_count: u64,
+    route_count: u64,
+    trip_count: u64,
+    connection_count: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,6 +190,12 @@ pub struct ServiceAreaExecutionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct TransitRouteExecutionRequest {
+    pub feed_id: String,
+    pub request: TransitRouteRequest,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct MatrixRequest {
     pub origins: PointSetDocument,
     pub destinations: PointSetDocument,
@@ -195,6 +225,12 @@ pub struct ServiceAreaExecutionResponse {
     result: ServiceAreaResult,
 }
 
+#[derive(Debug, Serialize)]
+pub struct TransitRouteExecutionResponse {
+    service: TransitExecutionContext,
+    result: TransitRouteResult,
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct ResponseFormatQuery {
     format: Option<String>,
@@ -208,6 +244,14 @@ pub struct ExecutionContext {
     route_engine: String,
     batch_engine: String,
     acceleration: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransitExecutionContext {
+    feed_id: String,
+    service_start_date: String,
+    service_days: u32,
+    route_engine: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -284,7 +328,7 @@ pub async fn serve(paths: WorkspacePaths, options: ApiServeOptions) -> Result<()
         bind = %options.bind,
         dataset_id = %options.dataset_id,
         default_profile = %options.default_profile.display(),
-        "starting netan api"
+        "starting netweevil api"
     );
 
     let listener = TcpListener::bind(options.bind)
@@ -304,6 +348,7 @@ fn router(state: ApiState) -> Router {
         .route("/v1/profiles", get(list_profiles))
         .route("/v1/profiles/{profile_id}", get(get_profile))
         .route("/v1/route", post(route_handler))
+        .route("/v1/transit-route", post(transit_route_handler))
         .route("/v1/od", post(od_handler))
         .route("/v1/matrix", post(matrix_handler))
         .route("/v1/service-area", post(service_area_handler))
@@ -326,7 +371,7 @@ fn load_service_runtime(
     let topology_ref = dataset_manifest
         .topology_bundle
         .clone()
-        .context("dataset is missing a topology bundle; run `netan dataset import` first")?;
+        .context("dataset is missing a topology bundle; run `netweevil dataset import` first")?;
 
     info!(
         bundle = %topology_ref.path,
@@ -394,8 +439,32 @@ fn load_service_runtime(
     let default_profile_id =
         default_profile_id.context("default profile could not be loaded into the API runtime")?;
 
+    let mut loaded_transit_feeds = BTreeMap::new();
+    for feed_id in &options.transit_feeds {
+        let manifest_path = paths.transit_feeds_dir.join(format!("{feed_id}.json"));
+        let manifest: TransitFeedManifest = read_json(&manifest_path).with_context(|| {
+            format!("reading transit feed manifest {}", manifest_path.display())
+        })?;
+        let bundle = read_transit_bundle(&manifest.bundle_path)
+            .with_context(|| format!("reading transit bundle {}", manifest.bundle_path))?;
+        info!(
+            feed_id = %manifest.feed_id,
+            stop_count = manifest.stop_count,
+            connection_count = manifest.connection_count,
+            "transit feed ready"
+        );
+        loaded_transit_feeds.insert(
+            manifest.feed_id.clone(),
+            LoadedTransitFeed {
+                manifest,
+                bundle: Arc::new(bundle),
+            },
+        );
+    }
+
     info!(
         profile_count = loaded_profiles.len(),
+        transit_feed_count = loaded_transit_feeds.len(),
         default_profile = %default_profile_id,
         route_engine = %engine.route_engine,
         "network ready"
@@ -409,8 +478,9 @@ fn load_service_runtime(
         routing_workers,
         default_profile_id,
         profiles: loaded_profiles,
+        transit_feeds: loaded_transit_feeds,
         capabilities: ServiceCapabilities {
-            analyses: vec!["route", "od", "matrix", "service_area"],
+            analyses: vec!["route", "od", "matrix", "service_area", "transit_route"],
             geometry: vec!["none", "full", "segments"],
             breakdown_metrics: vec!["time_s", "distance_m"],
             connectivity_policies: vec![
@@ -606,6 +676,45 @@ async fn route_handler(
         ));
     }
     Ok(Json(RouteExecutionResponse { service, result }).into_response())
+}
+
+async fn transit_route_handler(
+    State(state): State<ApiState>,
+    Json(payload): Json<TransitRouteExecutionRequest>,
+) -> Result<Json<TransitRouteExecutionResponse>, ApiError> {
+    let feed = state
+        .service
+        .transit_feeds
+        .get(&payload.feed_id)
+        .ok_or_else(|| {
+            ApiError::not_found(format!("unknown transit feed '{}'", payload.feed_id))
+        })?;
+    info!(
+        endpoint = "transit_route",
+        feed_id = %payload.feed_id,
+        route_id = %payload.request.route_id,
+        "request"
+    );
+    let bundle = Arc::clone(&feed.bundle);
+    let manifest = feed.manifest.clone();
+    let route_id = payload.request.route_id.clone();
+    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+        execute_transit_route(bundle.as_ref(), &payload.request)
+    })
+    .await
+    .map_err(|error| {
+        warn!(endpoint = "transit_route", route_id = %route_id, %error, "request failed");
+        ApiError::bad_request(error.to_string())
+    })?;
+    Ok(Json(TransitRouteExecutionResponse {
+        service: TransitExecutionContext {
+            feed_id: manifest.feed_id,
+            service_start_date: manifest.service_start_date,
+            service_days: manifest.service_days,
+            route_engine: "scheduled_connection_scan_pedestrian_transit".to_string(),
+        },
+        result,
+    }))
 }
 
 async fn od_handler(
@@ -833,6 +942,7 @@ fn build_service_info(service: &ServiceRuntime) -> ServiceInfoResponse {
         },
         default_profile_id: service.default_profile_id.clone(),
         loaded_profiles: build_profile_infos(service),
+        loaded_transit_feeds: build_transit_feed_infos(service),
         capabilities: service.capabilities.clone(),
         engine: service.engine,
     }
@@ -840,6 +950,23 @@ fn build_service_info(service: &ServiceRuntime) -> ServiceInfoResponse {
 
 fn build_profile_infos(service: &ServiceRuntime) -> Vec<ProfileInfo> {
     service.profiles.values().map(profile_info).collect()
+}
+
+fn build_transit_feed_infos(service: &ServiceRuntime) -> Vec<TransitFeedInfo> {
+    service
+        .transit_feeds
+        .values()
+        .map(|feed| TransitFeedInfo {
+            feed_id: feed.manifest.feed_id.clone(),
+            source_path: feed.manifest.source_path.clone(),
+            service_start_date: feed.manifest.service_start_date.clone(),
+            service_days: feed.manifest.service_days,
+            stop_count: feed.manifest.stop_count,
+            route_count: feed.manifest.route_count,
+            trip_count: feed.manifest.trip_count,
+            connection_count: feed.manifest.connection_count,
+        })
+        .collect()
 }
 
 fn profile_info(profile: &LoadedProfile) -> ProfileInfo {
@@ -1131,8 +1258,8 @@ mod tests {
         EngineDescription, ExecutionContext, engine_description, matrix_result_geojson,
         od_result_geojson,
     };
-    use netan_core::{EdgeBasedTopology, TopologyBundle};
-    use netan_query::{
+    use netweevil_core::{EdgeBasedTopology, TopologyBundle};
+    use netweevil_query::{
         AnalysisOutcome, BatchItemStatus, MatrixCellResult, MatrixResult, OdPairResult, OdResult,
     };
 

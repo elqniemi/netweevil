@@ -1,5 +1,5 @@
 [package]
-name = "netan-cli"
+name = "netweevil-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,19 +7,20 @@ rust-version.workspace = true
 build = "build.rs"
 
 [[bin]]
-name = "netan"
+name = "netweevil"
 path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
-netan-api = { path = "../api" }
-netan-core = { path = "../core" }
-netan-ingest = { path = "../ingest" }
-netan-persist = { path = "../persist" }
-netan-profile = { path = "../profile" }
-netan-query = { path = "../query" }
-netan-report = { path = "../report" }
+netweevil-api = { path = "../api" }
+netweevil-core = { path = "../core" }
+netweevil-ingest = { path = "../ingest" }
+netweevil-persist = { path = "../persist" }
+netweevil-profile = { path = "../profile" }
+netweevil-query = { path = "../query" }
+netweevil-report = { path = "../report" }
+netweevil-transit = { path = "../transit" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

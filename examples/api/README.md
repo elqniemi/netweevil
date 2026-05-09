@@ -1,4 +1,4 @@
-# Netan API Examples
+# Netweevil API Examples
 
 ## Groningen Batch Examples
 
@@ -40,37 +40,37 @@ The generated request points in the Groningen examples are sampled deterministic
 
 The current API path expects datasets imported with the new uncompressed bundle layout:
 
-- topology: `.netan/bundles/topology/*.bin`
-- edge names: `.netan/bundles/names/*.bin`
-- acceleration: `.netan/bundles/acceleration/*.bin`
-- compiled profile metrics: `.netan/bundles/metrics/*.bin`
+- topology: `.netweevil/bundles/topology/*.bin`
+- edge names: `.netweevil/bundles/names/*.bin`
+- acceleration: `.netweevil/bundles/acceleration/*.bin`
+- compiled profile metrics: `.netweevil/bundles/metrics/*.bin`
 
 If you have older cached datasets from the previous format, remove them first and re-import.
 
 Remove the old cache state for a clean rebuild:
 
 ```bash
-rm -rf .netan/datasets .netan/bundles/topology .netan/bundles/names .netan/bundles/acceleration .netan/bundles/metrics .netan/compiled_profiles
-mkdir -p .netan/bundles/topology .netan/bundles/names .netan/bundles/acceleration .netan/bundles/metrics .netan/datasets .netan/compiled_profiles
+rm -rf .netweevil/datasets .netweevil/bundles/topology .netweevil/bundles/names .netweevil/bundles/acceleration .netweevil/bundles/metrics .netweevil/compiled_profiles
+mkdir -p .netweevil/bundles/topology .netweevil/bundles/names .netweevil/bundles/acceleration .netweevil/bundles/metrics .netweevil/datasets .netweevil/compiled_profiles
 ```
 
 Import the dataset again in the new format:
 
 ```bash
-cargo run -p netan-cli -- dataset import datasets/ile-de-france-latest.osm.pbf --name ile_de_france_2026_03
+cargo run -p netweevil-cli -- dataset import datasets/ile-de-france-latest.osm.pbf --name ile_de_france_2026_03
 ```
 
 Compile every profile you want hot before starting the API:
 
 ```bash
-cargo run -p netan-cli -- profile compile --dataset ile_de_france_2026_03 --profile examples/profiles/car_research_v1.yml
-cargo run -p netan-cli -- profile compile --dataset ile_de_france_2026_03 --profile examples/profiles/pedestrian_research_v1.yml
+cargo run -p netweevil-cli -- profile compile --dataset ile_de_france_2026_03 --profile examples/profiles/car_research_v1.yml
+cargo run -p netweevil-cli -- profile compile --dataset ile_de_france_2026_03 --profile examples/profiles/pedestrian_research_v1.yml
 ```
 
 For the Groningen batch examples, compile the v3 car profile against the Groningen dataset:
 
 ```bash
-cargo run -p netan-cli -- profile compile --dataset groningen_2026_03 --profile examples/profiles/car_research_v3.yml
+cargo run -p netweevil-cli -- profile compile --dataset groningen_2026_03 --profile examples/profiles/car_research_v3.yml
 ```
 
 ## Start The API
@@ -78,7 +78,7 @@ cargo run -p netan-cli -- profile compile --dataset groningen_2026_03 --profile 
 Start the API with one default profile and preload any additional selectable profiles:
 
 ```bash
-cargo run -p netan-cli -- api serve \
+cargo run -p netweevil-cli -- api serve \
   --dataset ile_de_france_2026_03 \
   --default-profile examples/profiles/car_research_v1.yml \
   --profile examples/profiles/pedestrian_research_v1.yml \
@@ -88,7 +88,7 @@ cargo run -p netan-cli -- api serve \
 Start the API for the Groningen examples:
 
 ```bash
-cargo run -p netan-cli -- api serve \
+cargo run -p netweevil-cli -- api serve \
   --dataset groningen_2026_03 \
   --default-profile examples/profiles/car_research_v3.yml \
   --bind 127.0.0.1:8080
@@ -231,11 +231,11 @@ PY
 If you want one QGIS-ready GeoPackage with assigned route geometry plus per-route detail tables, use the dedicated route-batch CLI path instead of posting 100 single route requests:
 
 ```bash
-cargo run --release -p netan-cli -- analyze route-batch \
+cargo run --release -p netweevil-cli -- analyze route-batch \
   --dataset groningen_2026_03 \
   --profile examples/profiles/car_research_v3.yml \
   --requests examples/api/groningen_routes_every_10th_from_od.json \
-  --out .netan/runs/groningen_routes_every_10th.gpkg
+  --out .netweevil/runs/groningen_routes_every_10th.gpkg
 ```
 
 That writes one GeoPackage containing:

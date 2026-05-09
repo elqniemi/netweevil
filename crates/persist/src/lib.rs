@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
-use netan_core::{
+use netweevil_core::{
     CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, DatasetAccelerationBundle,
     EdgeNameBundle, TopologyBundle, TopologyEdgeLayers, TravelMode,
 };
-use netan_report::{CompiledProfileManifest, DatasetManifest, RunManifest};
+use netweevil_report::{CompiledProfileManifest, DatasetManifest, RunManifest};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -22,7 +22,9 @@ pub struct WorkspacePaths {
     pub edge_name_bundles_dir: PathBuf,
     pub acceleration_bundles_dir: PathBuf,
     pub metric_bundles_dir: PathBuf,
+    pub transit_bundles_dir: PathBuf,
     pub datasets_dir: PathBuf,
+    pub transit_feeds_dir: PathBuf,
     pub compiled_profiles_dir: PathBuf,
     pub runs_dir: PathBuf,
     pub reports_dir: PathBuf,
@@ -31,7 +33,7 @@ pub struct WorkspacePaths {
 impl WorkspacePaths {
     pub fn discover(root: impl AsRef<Path>) -> Result<Self> {
         let root = root.as_ref().to_path_buf();
-        let state_dir = root.join(".netan");
+        let state_dir = root.join(".netweevil");
         let paths = Self {
             root,
             bundles_dir: state_dir.join("bundles"),
@@ -39,7 +41,9 @@ impl WorkspacePaths {
             edge_name_bundles_dir: state_dir.join("bundles").join("names"),
             acceleration_bundles_dir: state_dir.join("bundles").join("acceleration"),
             metric_bundles_dir: state_dir.join("bundles").join("metrics"),
+            transit_bundles_dir: state_dir.join("bundles").join("transit"),
             datasets_dir: state_dir.join("datasets"),
+            transit_feeds_dir: state_dir.join("transit_feeds"),
             compiled_profiles_dir: state_dir.join("compiled_profiles"),
             runs_dir: state_dir.join("runs"),
             reports_dir: state_dir.join("reports"),
@@ -57,7 +61,9 @@ impl WorkspacePaths {
             &self.edge_name_bundles_dir,
             &self.acceleration_bundles_dir,
             &self.metric_bundles_dir,
+            &self.transit_bundles_dir,
             &self.datasets_dir,
+            &self.transit_feeds_dir,
             &self.compiled_profiles_dir,
             &self.runs_dir,
             &self.reports_dir,
@@ -216,16 +222,16 @@ struct LegacyTopologyBundle {
     schema_version: u32,
     source_path: String,
     source_sha256: String,
-    nodes: Vec<netan_core::TopologyNode>,
-    edges: Vec<netan_core::DirectedEdge>,
+    nodes: Vec<netweevil_core::TopologyNode>,
+    edges: Vec<netweevil_core::DirectedEdge>,
     #[serde(default)]
-    turn_restrictions: Vec<netan_core::TurnRestriction>,
+    turn_restrictions: Vec<netweevil_core::TurnRestriction>,
     #[serde(default)]
     names: Vec<String>,
     #[serde(default)]
-    edge_based_topology: netan_core::EdgeBasedTopology,
+    edge_based_topology: netweevil_core::EdgeBasedTopology,
     #[serde(default)]
-    spatial_index: Option<netan_core::NodeSpatialIndex>,
+    spatial_index: Option<netweevil_core::NodeSpatialIndex>,
     #[serde(default)]
     node_component_ids: Vec<u32>,
     #[serde(default)]
@@ -259,8 +265,8 @@ mod tests {
         read_topology_bundle, write_acceleration_bundle, write_binary, write_edge_name_bundle,
         write_topology_bundle,
     };
-    use netan_core::DatasetAccelerationBundle;
-    use netan_core::{
+    use netweevil_core::DatasetAccelerationBundle;
+    use netweevil_core::{
         AccessMask, CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle,
         CompiledTurnCostConfig, DirectedEdge, EdgeId, EdgeNameBundle, NodeId, RoadClass,
         SmoothnessClass, SurfaceClass, TopologyBundle, TopologyNode, TravelMode, TurnRestriction,
@@ -343,7 +349,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netan-persist-topology-{unique}.bin"));
+        let path = std::env::temp_dir().join(format!("netweevil-persist-topology-{unique}.bin"));
 
         write_topology_bundle(&path, &bundle).expect("bundle should serialize");
         let round_tripped = read_topology_bundle(&path).expect("bundle should deserialize");
@@ -375,7 +381,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netan-persist-edge-names-{unique}.bin"));
+        let path = std::env::temp_dir().join(format!("netweevil-persist-edge-names-{unique}.bin"));
 
         write_edge_name_bundle(&path, &bundle).expect("bundle should serialize");
         let round_tripped =
@@ -410,7 +416,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netan-persist-acceleration-{unique}.bin"));
+        let path =
+            std::env::temp_dir().join(format!("netweevil-persist-acceleration-{unique}.bin"));
 
         write_acceleration_bundle(&path, &bundle).expect("bundle should serialize");
         let round_tripped =
@@ -457,7 +464,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netan-persist-metrics-{unique}.bin"));
+        let path = std::env::temp_dir().join(format!("netweevil-persist-metrics-{unique}.bin"));
 
         write_binary(&path, &bundle).expect("bundle should serialize");
         let round_tripped =
@@ -498,7 +505,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netan-persist-metrics-{unique}.bin"));
+        let path = std::env::temp_dir().join(format!("netweevil-persist-metrics-{unique}.bin"));
 
         write_binary(&path, &bundle).expect("bundle should serialize");
         let round_tripped = read_compiled_profile_bundle(&path).expect("bundle should deserialize");

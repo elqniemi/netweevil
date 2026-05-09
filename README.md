@@ -1,25 +1,27 @@
-# netan
+# netweevil
 
-`netan` is a Rust-first local network analysis tool for OSM-based routing research.
+`netweevil` is a Rust-first local network analysis tool for OSM-based routing research.
 
 This repository now includes:
 
 - a shared Rust routing core
 - a CLI for reproducible local runs
 - a preloadable HTTP API for interactive execution
+- an additive GTFS transit processor and pedestrian+transit route command
 - an in-repo QGIS plugin for QGIS 3 and QGIS 4 that talks to the API and loads spatial outputs
-- explicit manifests and bundles under `.netan/`
+- explicit manifests and bundles under `.netweevil/`
 - local exports to `json`, `csv`, `geojson`, `gpkg`, `parquet`, and `geoparquet`
 
-Via-way turn restriction handling, turn penalties, persisted acceleration bundles, and the preloadable API path are present. See [`PROGRESS.md`](/home/elmeriniemi/stuff/netan/PROGRESS.md).
+Via-way turn restriction handling, turn penalties, persisted acceleration bundles, and the preloadable API path are present. See [`PROGRESS.md`](/home/elmeriniemi/stuff/netweevil/PROGRESS.md).
 
 ## Workspace Layout
 
-- [`crates/cli`](/home/elmeriniemi/stuff/netan/crates/cli): `netan` CLI entry point
-- [`crates/api`](/home/elmeriniemi/stuff/netan/crates/api): preloadable HTTP API
-- [`examples/profiles`](/home/elmeriniemi/stuff/netan/examples/profiles): reusable example profiles
-- [`examples/requests`](/home/elmeriniemi/stuff/netan/examples/requests): route, OD, and matrix inputs
-- [`qgis_plugin/netan_qgis`](/home/elmeriniemi/stuff/netan/qgis_plugin/netan_qgis): QGIS plugin package
+- [`crates/cli`](/home/elmeriniemi/stuff/netweevil/crates/cli): `netweevil` CLI entry point
+- [`crates/api`](/home/elmeriniemi/stuff/netweevil/crates/api): preloadable HTTP API
+- [`crates/transit`](/home/elmeriniemi/stuff/netweevil/crates/transit): GTFS schedule import and pedestrian+transit routing
+- [`examples/profiles`](/home/elmeriniemi/stuff/netweevil/examples/profiles): reusable example profiles
+- [`examples/requests`](/home/elmeriniemi/stuff/netweevil/examples/requests): route, OD, and matrix inputs
+- [`qgis_plugin/netweevil_qgis`](/home/elmeriniemi/stuff/netweevil/qgis_plugin/netweevil_qgis): QGIS plugin package
 
 ## Build
 
@@ -34,71 +36,91 @@ cargo test
 Import a dataset:
 
 ```bash
-cargo run -p netan-cli -- dataset import datasets/groningen-260317.osm.pbf --name groningen_2026_03
+cargo run -p netweevil-cli -- dataset import datasets/groningen-260317.osm.pbf --name groningen_2026_03
 ```
 
 Validate and compile a profile:
 
 ```bash
-cargo run -p netan-cli -- profile validate examples/profiles/car_research_v1.yml
-cargo run -p netan-cli -- profile compile --dataset groningen_2026_03 --profile examples/profiles/car_research_v1.yml
+cargo run -p netweevil-cli -- profile validate examples/profiles/car_research_v1.yml
+cargo run -p netweevil-cli -- profile compile --dataset groningen_2026_03 --profile examples/profiles/car_research_v1.yml
 ```
 
 Run a route and write a spatial result QGIS can open directly:
 
 ```bash
-cargo run -p netan-cli -- analyze route \
+cargo run -p netweevil-cli -- analyze route \
   --dataset groningen_2026_03 \
   --profile examples/profiles/car_research_v1.yml \
   --request examples/requests/route.json \
-  --out .netan/runs/example-route.geojson
+  --out .netweevil/runs/example-route.geojson
 ```
 
 Run OD and matrix examples:
 
 ```bash
-cargo run -p netan-cli -- analyze od \
+cargo run -p netweevil-cli -- analyze od \
   --dataset groningen_2026_03 \
   --profile examples/profiles/car_research_v1.yml \
   --pairs examples/requests/od_pairs.csv \
-  --out .netan/runs/example-od.gpkg
+  --out .netweevil/runs/example-od.gpkg
 
-cargo run -p netan-cli -- analyze matrix \
+cargo run -p netweevil-cli -- analyze matrix \
   --dataset groningen_2026_03 \
   --profile examples/profiles/car_research_v1.yml \
   --origins examples/requests/matrix_origins.csv \
   --destinations examples/requests/matrix_destinations.csv \
-  --out .netan/runs/example-matrix.gpkg
+  --out .netweevil/runs/example-matrix.gpkg
+```
+
+Import the OpenOV GTFS feed for a reproducible one-week transit window:
+
+```bash
+curl -L https://gtfs.openov.nl/gtfs-rt/gtfs-openov-nl.zip -o datasets/gtfs-openov-nl.zip
+
+cargo run -p netweevil-cli -- transit import datasets/gtfs-openov-nl.zip \
+  --name openov_nl_2026_05_09 \
+  --service-start 2026-05-09 \
+  --service-days 7
+```
+
+Run a pedestrian+transit route with selectable allowed transit modes:
+
+```bash
+cargo run -p netweevil-cli -- analyze transit-route \
+  --feed openov_nl_2026_05_09 \
+  --request examples/requests/transit_openov_groningen.json \
+  --out .netweevil/runs/example-transit-route.json
 ```
 
 Inspect persistent state:
 
 ```bash
-cargo run -p netan-cli -- cache list
+cargo run -p netweevil-cli -- cache list
 ```
 
 ## Current Dataset Format
 
 The current fast path expects freshly imported datasets in the new bundle layout:
 
-- `.netan/bundles/topology/*.bin`
-- `.netan/bundles/names/*.bin`
-- `.netan/bundles/acceleration/*.bin`
-- `.netan/bundles/metrics/*.bin`
+- `.netweevil/bundles/topology/*.bin`
+- `.netweevil/bundles/names/*.bin`
+- `.netweevil/bundles/acceleration/*.bin`
+- `.netweevil/bundles/metrics/*.bin`
 
 Older gzip topology bundles and older dataset imports are no longer part of the supported execution path. Rebuild cached datasets before using the API or running new analyses:
 
 ```bash
-rm -rf .netan/datasets .netan/bundles/topology .netan/bundles/names .netan/bundles/acceleration .netan/bundles/metrics .netan/compiled_profiles
-mkdir -p .netan/bundles/topology .netan/bundles/names .netan/bundles/acceleration .netan/bundles/metrics .netan/datasets .netan/compiled_profiles
+rm -rf .netweevil/datasets .netweevil/bundles/topology .netweevil/bundles/names .netweevil/bundles/acceleration .netweevil/bundles/metrics .netweevil/compiled_profiles
+mkdir -p .netweevil/bundles/topology .netweevil/bundles/names .netweevil/bundles/acceleration .netweevil/bundles/metrics .netweevil/datasets .netweevil/compiled_profiles
 
-cargo run -p netan-cli -- dataset import datasets/groningen-260317.osm.pbf --name groningen_2026_03
-cargo run -p netan-cli -- profile compile --dataset groningen_2026_03 --profile examples/profiles/car_research_v1.yml
+cargo run -p netweevil-cli -- dataset import datasets/groningen-260317.osm.pbf --name groningen_2026_03
+cargo run -p netweevil-cli -- profile compile --dataset groningen_2026_03 --profile examples/profiles/car_research_v1.yml
 ```
 
 ## Build A Routing-Only `.osm.pbf` With Osmium
 
-If you want a smaller source `.osm.pbf` that only keeps the OSM objects `netan` currently needs for routing, you can prefilter it with `osmium`.
+If you want a smaller source `.osm.pbf` that only keeps the OSM objects `netweevil` currently needs for routing, you can prefilter it with `osmium`.
 
 The current importer uses:
 
@@ -110,7 +132,7 @@ The current importer uses:
 
 This means you can safely drop buildings, landuse, addresses, POIs, admin boundaries, and most other non-routing data before import.
 
-This filtered file is meant for `netan` routing import, not as a general-purpose OSM extract.
+This filtered file is meant for `netweevil` routing import, not as a general-purpose OSM extract.
 
 Example script using a polygon extract:
 
@@ -126,7 +148,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 REGION_PBF="$TMP_DIR/region.osm.pbf"
-FILTERS_TXT="$TMP_DIR/netan-routing-filters.txt"
+FILTERS_TXT="$TMP_DIR/netweevil-routing-filters.txt"
 
 cat > "$FILTERS_TXT" <<'EOF'
 w/highway
@@ -146,7 +168,7 @@ osmium extract \
 # 2. Keep only routing-relevant objects.
 #    By default, osmium tags-filter also keeps referenced objects.
 #    --remove-tags strips tags from referenced non-matching objects to shrink the file further
-#    while still preserving node coordinates and relation/way references needed by netan.
+#    while still preserving node coordinates and relation/way references needed by netweevil.
 osmium tags-filter \
   --expressions="$FILTERS_TXT" \
   --remove-tags \
@@ -171,7 +193,7 @@ osmium extract \
 Then import the filtered file normally:
 
 ```bash
-cargo run -p netan-cli -- dataset import path/to/routing-only.osm.pbf --name groningen_2026_03
+cargo run -p netweevil-cli -- dataset import path/to/routing-only.osm.pbf --name groningen_2026_03
 ```
 
 Notes:
@@ -179,7 +201,7 @@ Notes:
 - Keep `r/type=restriction` or you will lose turn restrictions.
 - Keep `n/highway=traffic_signals` or traffic-signal turn penalties will stop working.
 - Keep ferry ways if your profiles or study area depend on ferry connectivity.
-- Do not pass `-R/--omit-referenced` to `osmium tags-filter`; `netan` needs the referenced topology objects.
+- Do not pass `-R/--omit-referenced` to `osmium tags-filter`; `netweevil` needs the referenced topology objects.
 
 ## Performant API
 
@@ -198,18 +220,20 @@ When you run `api serve`, the service loads the dataset manifest, hot topology b
 Start the API:
 
 ```bash
-cargo run -p netan-cli -- api serve \
+cargo run -p netweevil-cli -- api serve \
   --dataset groningen_2026_03 \
   --default-profile examples/profiles/car_research_v1.yml \
   --profile examples/profiles/pedestrian_research_v1.yml \
+  --transit-feed openov_nl_2026_05_09 \
   --bind 127.0.0.1:8080
 ```
 
 `api serve` options:
 
-- `--dataset <dataset_id>`: required; selects the imported dataset manifest under `.netan/datasets/`
+- `--dataset <dataset_id>`: required; selects the imported dataset manifest under `.netweevil/datasets/`
 - `--default-profile <path>`: required; default profile loaded at startup and used when requests omit `profile_id`
 - `--profile <path>`: optional and repeatable; preload additional selectable profiles at startup
+- `--transit-feed <feed_id>`: optional and repeatable; preload imported GTFS transit feeds for `/v1/transit-route`
 - `--bind <host:port>`: optional; defaults to `127.0.0.1:8080`
 
 Useful discovery endpoints after startup:
@@ -326,14 +350,14 @@ curl http://127.0.0.1:8080/v1/profiles
 
 ## QGIS Plugin
 
-The QGIS plugin lives under [`qgis_plugin/netan_qgis`](/home/elmeriniemi/stuff/netan/qgis_plugin/netan_qgis). Full setup instructions are in [`qgis_plugin/README.md`](/home/elmeriniemi/stuff/netan/qgis_plugin/README.md).
+The QGIS plugin lives under [`qgis_plugin/netweevil_qgis`](/home/elmeriniemi/stuff/netweevil/qgis_plugin/netweevil_qgis). Full setup instructions are in [`qgis_plugin/README.md`](/home/elmeriniemi/stuff/netweevil/qgis_plugin/README.md).
 
 Minimal install flow:
 
 1. Start the API:
 
 ```bash
-cargo run -p netan-cli -- api serve \
+cargo run -p netweevil-cli -- api serve \
   --dataset groningen_2026_03 \
   --default-profile examples/profiles/car_research_v1.yml \
   --profile examples/profiles/pedestrian_research_v1.yml \
@@ -346,28 +370,28 @@ Linux QGIS example:
 
 ```bash
 mkdir -p ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins
-ln -s /home/elmeriniemi/stuff/netan/qgis_plugin/netan_qgis ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/netan_qgis
+ln -s /home/elmeriniemi/stuff/netweevil/qgis_plugin/netweevil_qgis ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/netweevil_qgis
 ```
 
 Windows QGIS 4 example for a repo living in WSL:
 
 ```powershell
 New-Item -ItemType Directory -Force "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins"
-cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netan_qgis" "\\wsl$\Ubuntu\home\elmeriniemi\stuff\netan\qgis_plugin\netan_qgis"
+cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netweevil_qgis" "\\wsl$\Ubuntu\home\elmeriniemi\stuff\netweevil\qgis_plugin\netweevil_qgis"
 ```
 
 3. In QGIS, point the plugin at the API.
 
-- `Workspace root`: `/home/elmeriniemi/stuff/netan` on Linux, or any Windows-visible folder you want to use for request and response files
+- `Workspace root`: `/home/elmeriniemi/stuff/netweevil` on Linux, or any Windows-visible folder you want to use for request and response files
 - `API base URL`: `http://127.0.0.1:8080`
 - `Response format`: `JSON` or `GeoJSON`
 - `Profile`: the service default or any profile preloaded by the API
 
 4. Press `Refresh Service`, then use:
 
-- `Run Route` with output `.netan/runs/qgis-route.geojson`
-- `Run OD` with output `.netan/runs/qgis-od.gpkg`
-- `Run Matrix` with output `.netan/runs/qgis-matrix.gpkg`
+- `Run Route` with output `.netweevil/runs/qgis-route.geojson`
+- `Run OD` with output `.netweevil/runs/qgis-od.gpkg`
+- `Run Matrix` with output `.netweevil/runs/qgis-matrix.gpkg`
 
 The plugin auto-loads spatial outputs into the current QGIS project after successful runs.
 
@@ -375,7 +399,7 @@ The plugin auto-loads spatial outputs into the current QGIS project after succes
 
 This section assumes:
 
-- your source repo lives in WSL at `/home/elmeriniemi/stuff/netan`
+- your source repo lives in WSL at `/home/elmeriniemi/stuff/netweevil`
 - you have a Windows-visible mount or symlink at `/windownloads`
 - you want to use Windows QGIS 4
 
@@ -383,11 +407,11 @@ This section assumes:
 
 This is the simplest path if you are already developing in WSL.
 
-1. Build `netan` in WSL:
+1. Build `netweevil` in WSL:
 
 ```bash
-cd /home/elmeriniemi/stuff/netan
-cargo build -p netan-cli
+cd /home/elmeriniemi/stuff/netweevil
+cargo build -p netweevil-cli
 ```
 
 2. Make sure the workspace has the data and outputs you want available to Windows QGIS.
@@ -395,10 +419,10 @@ cargo build -p netan-cli
 If you want to copy the repo to Windows but skip Rust build output:
 
 ```bash
-cd /home/elmeriniemi/stuff/netan
-mkdir -p /windownloads/netan
+cd /home/elmeriniemi/stuff/netweevil
+mkdir -p /windownloads/netweevil
 for p in .* *; do
-  [ "$p" = "." ] || [ "$p" = ".." ] || [ "$p" = "target" ] || cp -a -- "$p" /windownloads/netan/
+  [ "$p" = "." ] || [ "$p" = ".." ] || [ "$p" = "target" ] || cp -a -- "$p" /windownloads/netweevil/
 done
 ```
 
@@ -410,14 +434,14 @@ If you want QGIS to use the plugin directly from the WSL repo:
 
 ```powershell
 New-Item -ItemType Directory -Force "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins"
-cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netan_qgis" "\\wsl$\Ubuntu\home\elmeriniemi\stuff\netan\qgis_plugin\netan_qgis"
+cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netweevil_qgis" "\\wsl$\Ubuntu\home\elmeriniemi\stuff\netweevil\qgis_plugin\netweevil_qgis"
 ```
 
 If you copied the repo to Windows first, point the symlink at the Windows copy instead:
 
 ```powershell
 New-Item -ItemType Directory -Force "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins"
-cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netan_qgis" "C:\path\to\netan\qgis_plugin\netan_qgis"
+cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netweevil_qgis" "C:\path\to\netweevil\qgis_plugin\netweevil_qgis"
 ```
 
 4. Start QGIS 4 and enable the plugin from `Plugins -> Manage and Install Plugins`.
@@ -425,8 +449,8 @@ cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netan_
 5. Start the API in WSL:
 
 ```bash
-cd /home/elmeriniemi/stuff/netan
-cargo run -p netan-cli -- api serve \
+cd /home/elmeriniemi/stuff/netweevil
+cargo run -p netweevil-cli -- api serve \
   --dataset groningen_2026_03 \
   --default-profile examples/profiles/car_research_v1.yml \
   --bind 127.0.0.1:8080
@@ -434,58 +458,58 @@ cargo run -p netan-cli -- api serve \
 
 6. In the plugin dock, use:
 
-- `Workspace root`: `\\wsl$\Ubuntu\home\elmeriniemi\stuff\netan`
+- `Workspace root`: `\\wsl$\Ubuntu\home\elmeriniemi\stuff\netweevil`
 - `API base URL`: `http://127.0.0.1:8080`
 - `Profile`: `examples/profiles/car_research_v1.yml`
 
 7. Press `Refresh Service`, then run:
 
-- `Route` with output `.netan/runs/qgis-route.geojson`
-- `OD` with output `.netan/runs/qgis-od.gpkg`
-- `Matrix` with output `.netan/runs/qgis-matrix.gpkg`
+- `Route` with output `.netweevil/runs/qgis-route.geojson`
+- `OD` with output `.netweevil/runs/qgis-od.gpkg`
+- `Matrix` with output `.netweevil/runs/qgis-matrix.gpkg`
 
 ### Option B: Use a native Windows build
 
-Use this if you want QGIS to run `netan.exe` directly without `wsl.exe`.
+Use this if you want QGIS to run `netweevil.exe` directly without `wsl.exe`.
 
 1. Copy the repo to Windows.
 
 From WSL:
 
 ```bash
-cd /home/elmeriniemi/stuff/netan
-mkdir -p /windownloads/netan
+cd /home/elmeriniemi/stuff/netweevil
+mkdir -p /windownloads/netweevil
 for p in .* *; do
-  [ "$p" = "." ] || [ "$p" = ".." ] || [ "$p" = "target" ] || cp -a -- "$p" /windownloads/netan/
+  [ "$p" = "." ] || [ "$p" = ".." ] || [ "$p" = "target" ] || cp -a -- "$p" /windownloads/netweevil/
 done
 ```
 
 2. Open Windows PowerShell, then start the API from the Windows copy:
 
 ```powershell
-cd C:\path\to\netan
-cargo run -p netan-cli -- api serve --dataset groningen_2026_03 --default-profile examples/profiles/car_research_v1.yml --bind 127.0.0.1:8080
+cd C:\path\to\netweevil
+cargo run -p netweevil-cli -- api serve --dataset groningen_2026_03 --default-profile examples/profiles/car_research_v1.yml --bind 127.0.0.1:8080
 ```
 
 3. Install the plugin into QGIS 4:
 
 ```powershell
 New-Item -ItemType Directory -Force "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins"
-cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netan_qgis" "C:\path\to\netan\qgis_plugin\netan_qgis"
+cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netweevil_qgis" "C:\path\to\netweevil\qgis_plugin\netweevil_qgis"
 ```
 
 4. In QGIS 4, use:
 
-- `Workspace root`: `C:\path\to\netan`
+- `Workspace root`: `C:\path\to\netweevil`
 - `API base URL`: `http://127.0.0.1:8080`
 - `Profile`: `examples/profiles/car_research_v1.yml`
 
 5. Import and run from PowerShell, then use the plugin against that API:
 
 ```powershell
-cd C:\path\to\netan
-.\target\debug\netan.exe dataset import datasets\groningen-260317.osm.pbf --name groningen_2026_03
-.\target\debug\netan.exe profile compile --dataset groningen_2026_03 --profile examples\profiles\car_research_v1.yml
+cd C:\path\to\netweevil
+.\target\debug\netweevil.exe dataset import datasets\groningen-260317.osm.pbf --name groningen_2026_03
+.\target\debug\netweevil.exe profile compile --dataset groningen_2026_03 --profile examples\profiles\car_research_v1.yml
 ```
 
 6. In the plugin, press `Refresh Service` and run analyses normally.

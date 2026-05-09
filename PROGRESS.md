@@ -1,4 +1,4 @@
-# NETAN Progress
+# NETWEEVIL Progress
 
 ## Product Goal
 
@@ -23,6 +23,7 @@ The system targets local OSM routing and network analysis with explicit, version
   - `report`
   - `cli`
   - `api`
+  - `transit`
 - [x] Define shared schema for:
   - profile configuration
   - route request input
@@ -41,12 +42,15 @@ The system targets local OSM routing and network analysis with explicit, version
   - `report render`
   - `cache list`
   - `api serve`
+  - `transit import`
+  - `transit list`
+  - `analyze transit-route`
 - [x] Add example research profile and route request files
-- [x] Add a cache/workspace layout under `.netan/`
+- [x] Add a cache/workspace layout under `.netweevil/`
 - [x] Smoke-test the initial scaffold with:
-  - `netan profile validate examples/profiles/car_research_v1.yml`
-  - `netan dataset import datasets/groningen-260317.osm.pbf --name groningen_2026_03`
-  - `netan cache list`
+  - `netweevil profile validate examples/profiles/car_research_v1.yml`
+  - `netweevil dataset import datasets/groningen-260317.osm.pbf --name groningen_2026_03`
+  - `netweevil cache list`
 
 ### In Progress
 
@@ -90,7 +94,7 @@ The system targets local OSM routing and network analysis with explicit, version
 - Verified locally on 2026-03-18: `cargo test` passes after adding ferry-duration ingest and profile compilation handling.
 - Verified locally on 2026-03-18: the rebuilt CLI accepts `examples/requests/od_pairs.csv`, `examples/requests/matrix_origins.csv`, and `examples/requests/matrix_destinations.csv`, writes route outputs to CSV and GeoJSON, and writes matrix outputs to GeoPackage.
 - Verified locally on 2026-03-18: re-importing `datasets/groningen-260317.osm.pbf` as `groningen_2026_03_turns`, recompiling `car_research_v1`, and rerunning `analyze route` succeeds on the new topology schema; that extract reported `turn_count: 0` under the current first-pass node-based restriction support.
-- Verified locally on 2026-03-18: `experiment run examples/experiments/baseline_sweep.yml` now executes route, OD, and matrix scenarios sequentially, writes per-scenario outputs plus run manifests, and writes an experiment summary JSON under `.netan/runs/`.
+- Verified locally on 2026-03-18: `experiment run examples/experiments/baseline_sweep.yml` now executes route, OD, and matrix scenarios sequentially, writes per-scenario outputs plus run manifests, and writes an experiment summary JSON under `.netweevil/runs/`.
 - Verified locally on 2026-03-18: `report render` now emits Markdown, HTML, or a report bundle directory with `index.md`, `index.html`, `run-manifest.json`, and a copied result artifact when present.
 - Verified locally on 2026-03-18: `cargo test` passes after adding experiment schema coverage, report rendering tests, and report bundle export tests.
 - Verified locally on 2026-03-18: `cargo test` passes after adding via-way turn-restriction sequence ingest, bidirectional exact routing with A* fallback for multi-edge restrictions, Parquet/GeoParquet writers, and mmap-backed binary bundle loading.
@@ -100,6 +104,7 @@ The system targets local OSM routing and network analysis with explicit, version
 - [x] Remove the deprecated native GUI crate and make the QGIS plugin plus HTTP API the supported interactive workflow
 - [x] Add an in-repo QGIS plugin package that talks directly to the HTTP API and loads spatial outputs into QGIS
 - [x] Add a preloadable JSON HTTP API for route, OD, and matrix execution with selectable compiled profiles
+- [x] Add GTFS schedule import and a separate pedestrian+transit route command with one-week service-window filtering and selectable allowed transit modes
 
 - [x] Convert `dataset import` from dataset registration into real PBF ingest
 - [x] Build immutable topology bundles from `.osm.pbf`
@@ -128,25 +133,27 @@ The system targets local OSM routing and network analysis with explicit, version
 - [x] Parquet and GeoParquet writers
 - [x] Memory-mapped bundle loading
 
-- `dataset import` now scans `.osm.pbf` input, extracts a first-pass directed topology bundle, and writes a binary bundle under `.netan/bundles/topology/` for mmap-backed loading.
-- `dataset import` now writes edge names to a separate binary bundle under `.netan/bundles/names/`, so prepared routing can keep cold labels out of the hot topology load.
-- `dataset import` now also writes a dataset-level acceleration bundle under `.netan/bundles/acceleration/`, containing a deterministic order over the edge-transition graph plus upward/downward oriented transition topology for future CCH preprocessing.
+- `dataset import` now scans `.osm.pbf` input, extracts a first-pass directed topology bundle, and writes a binary bundle under `.netweevil/bundles/topology/` for mmap-backed loading.
+- `dataset import` now writes edge names to a separate binary bundle under `.netweevil/bundles/names/`, so prepared routing can keep cold labels out of the hot topology load.
+- `dataset import` now also writes a dataset-level acceleration bundle under `.netweevil/bundles/acceleration/`, containing a deterministic order over the edge-transition graph plus upward/downward oriented transition topology for future CCH preprocessing.
 - The topology bundle remains correctness-first: directed edges, persisted raw edge-based adjacency/successor topology, expanded node-based and via-way prohibited turn sequences, optional ferry-duration metadata, per-edge roundabout and traffic-signal flags, road/surface classes, and name tables are persisted, while geometry payloads remain pending.
 - Route execution now reads the cold edge-name bundle only when segment-row output is requested, and dataset-backed execution now expects the current format rather than older in-topology-name imports.
 - Prepared routing engines now reuse persisted edge-based bundle topology directly; older dataset imports must be rebuilt into the current format instead of relying on startup rebuild compatibility.
-- `profile compile` now reads the topology bundle and writes a separate binary metric bundle under `.netan/bundles/metrics/`, keeping profile-aware weights distinct from the immutable topology artifact while enabling mmap-backed loading at execution time.
+- `profile compile` now reads the topology bundle and writes a separate binary metric bundle under `.netweevil/bundles/metrics/`, keeping profile-aware weights distinct from the immutable topology artifact while enabling mmap-backed loading at execution time.
 - `profile compile` now also reads the dataset acceleration bundle when present and persists customized upward/downward acceleration-arc weights inside the compiled profile bundle.
 - Ferry durations now prefer tagged OSM durations when available, are apportioned across emitted ferry segments during ingest, and fall back to inferred speed-based duration only when `ferry.infer_duration_when_missing` is enabled.
 - Turn restriction ingest now parses `type=restriction` relations with `from` way, `via` node or ordered `via` way members, and `to` way members, expands `no_*` and `only_*` restrictions into prohibited edge sequences, and stores them in the topology bundle with broader mode-mask coverage.
 - `analyze od` now accepts CSV files with `id,source_x,source_y,target_x,target_y`, and `analyze matrix` now accepts CSV origin/destination point sets with `id,x,y`.
 - Result output format is now inferred from the `--out` extension: `.json`, `.csv`, `.geojson`, `.gpkg`, `.parquet`, and `.geoparquet` are supported for route, OD, and matrix runs.
 - Route spatial exports write the solved path geometry, while OD and matrix spatial exports write requested desire lines with batch metrics attached as feature attributes.
-- `analyze route` now loads the compiled topology and metric bundles through mmap-backed binary readers, snaps origin/destination to traversable nodes or interior edge phantoms, runs the compact shortcut query when profile acceleration is available, falls back to exact bidirectional edge-based search when needed, uses the automaton-augmented exact search only for multi-edge via-way restriction sequences, reconstructs the original edge/node path, and writes a result plus succeeded run manifest under `.netan/runs/`.
+- `analyze route` now loads the compiled topology and metric bundles through mmap-backed binary readers, snaps origin/destination to traversable nodes or interior edge phantoms, runs the compact shortcut query when profile acceleration is available, falls back to exact bidirectional edge-based search when needed, uses the automaton-augmented exact search only for multi-edge via-way restriction sequences, reconstructs the original edge/node path, and writes a result plus succeeded run manifest under `.netweevil/runs/`.
 - Unrestricted route queries now keep first/last edge summaries plus geometry partial-edge aware for phantom snaps; CLI execution moves large topology and metric bundles into the prepared engine instead of cloning them during startup.
-- `analyze od` and `analyze matrix` now adapt between compact pairwise shortcut/bidirectional searches for sparse batches and cached single-source trees for dense batches, reuse duplicate snapped solves, borrow cached trees without cloning full edge arrays, and write compact per-pair and per-cell result tables plus succeeded run manifests under `.netan/runs/`.
+- `analyze od` and `analyze matrix` now adapt between compact pairwise shortcut/bidirectional searches for sparse batches and cached single-source trees for dense batches, reuse duplicate snapped solves, borrow cached trees without cloning full edge arrays, and write compact per-pair and per-cell result tables plus succeeded run manifests under `.netweevil/runs/`.
 - Service-area execution now bounds graph expansion by the largest requested threshold for each metric while preserving partial edge frontiers, avoiding whole-network expansion for local isochrone bands.
 - `experiment run` now resolves scenario-local paths relative to the study file, recompiles profiles as needed, executes route/OD/matrix scenarios sequentially, and writes a batch summary JSON with per-scenario status, output paths, run manifest paths, and compact metrics.
 - `report render` now reads the run manifest plus result JSON when available, includes a concrete results section in the rendered report, writes Markdown for `.md`, HTML for `.html`, and writes a small archival report bundle when pointed at a directory-like output path.
 - `api serve` now loads one chosen dataset into memory at startup, preloads and/or compiles the requested profiles into reusable prepared routing engines, exposes JSON endpoints under `/v1/` for route, OD, matrix, and profile metadata, and defaults requests to the configured startup profile when `profile_id` is omitted.
+- `transit import` now reads GTFS zip or directory sources such as OpenOV, filters service calendars to an explicit date window, and persists a transit schedule bundle under `.netweevil/bundles/transit/` with a feed manifest under `.netweevil/transit_feeds/`.
+- `analyze transit-route` and API `/v1/transit-route` now execute a first pedestrian+transit scheduled route search with walking access, walking transfers, walking egress, departure-time search windows, and request-level allowed GTFS transit modes.
 - Summary-only route execution now omits `node_path` and `edge_path` from route JSON unless geometry, segment rows, or other richer route detail is requested, reducing hot-path API payload size.
 - The current exact kernel now models compiled edge costs, ferry durations and boarding costs, geometric turn penalties, traffic-signal and roundabout-entry penalties, persisted prohibited turn sequences, and mode-specific access semantics; many-to-many acceleration and contraction-based speedups remain pending.

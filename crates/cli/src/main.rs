@@ -6,33 +6,37 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use netan_api::{ApiServeOptions, serve as serve_api};
-use netan_core::{
+use netweevil_api::{ApiServeOptions, serve as serve_api};
+use netweevil_core::{
     AccelerationBuildProfile, AccelerationBuildSettings, CacheBundleId, CompiledProfileBundle,
     DatasetAccelerationBundle, TopologyBundle,
 };
-use netan_ingest::{
+use netweevil_ingest::{
     DatasetImportOptions, DatasetImportProgress, DatasetImportStage, import_dataset_with_progress,
 };
-use netan_persist::{
+use netweevil_persist::{
     WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
     read_compiled_profile_manifests, read_dataset_manifest, read_dataset_manifests,
     read_edge_name_bundle, read_run_manifest, read_topology_bundle, write_compiled_profile_bundle,
     write_compiled_profile_manifest, write_json, write_run_manifest,
 };
-use netan_profile::{
+use netweevil_profile::{
     ProfileCompileProgress, ProfileCompileStage, ProfileDocument, ReturnGeometry,
     compile_profile_bundle_with_acceleration_with_progress, load_profile,
 };
-use netan_query::{
+use netweevil_query::{
     AnalysisKind, MatrixResult, OdResult, PreparedRoutingEngine, RouteBatchResult, RouteResult,
     ServiceAreaResult, analysis_failure, load_experiment, load_od_pairs, load_point_set,
     load_route_batch, load_route_request, load_service_area_request,
 };
-use netan_report::{
+use netweevil_report::{
     BundleRef, CompiledProfileManifest, RunKind, RunStatus, SoftwareInfo, load_run_result_summary,
     new_run_manifest, render_run_html, render_run_markdown, write_matrix_result, write_od_result,
     write_route_batch_result, write_route_result, write_service_area_result,
+};
+use netweevil_transit::{
+    OPENOV_GTFS_URL, TransitFeedManifest, TransitImportOptions, execute_transit_route, import_gtfs,
+    load_transit_request, read_transit_bundle, transit_import_summary, write_transit_bundle,
 };
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
@@ -104,6 +108,10 @@ fn main() -> Result<()> {
             DatasetCommand::Import(args) => dataset_import(&paths, args),
             DatasetCommand::List => dataset_list(&paths),
         },
+        Command::Transit { command: transit } => match transit {
+            TransitCommand::Import(args) => transit_import(&paths, args),
+            TransitCommand::List => transit_list(&paths),
+        },
         Command::Profile { command: profile } => match profile {
             ProfileCommand::Validate { profile } => profile_validate(&profile),
             ProfileCommand::Compile { dataset, profile } => {
@@ -116,6 +124,7 @@ fn main() -> Result<()> {
             AnalyzeCommand::Od(args) => analyze_od(&paths, args),
             AnalyzeCommand::Matrix(args) => analyze_matrix(&paths, args),
             AnalyzeCommand::ServiceArea(args) => analyze_service_area(&paths, args),
+            AnalyzeCommand::TransitRoute(args) => analyze_transit_route(&paths, args),
         },
         Command::Experiment {
             command: experiment,
@@ -136,7 +145,7 @@ fn main() -> Result<()> {
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "netan",
+    name = "netweevil",
     version,
     about = "Rust-first OSM network analysis tool"
 )]
@@ -150,6 +159,10 @@ enum Command {
     Dataset {
         #[command(subcommand)]
         command: DatasetCommand,
+    },
+    Transit {
+        #[command(subcommand)]
+        command: TransitCommand,
     },
     Profile {
         #[command(subcommand)]
@@ -183,6 +196,12 @@ enum DatasetCommand {
     List,
 }
 
+#[derive(Subcommand, Debug)]
+enum TransitCommand {
+    Import(TransitImportArgs),
+    List,
+}
+
 #[derive(Args, Debug)]
 struct DatasetImportArgs {
     source: PathBuf,
@@ -196,6 +215,17 @@ struct DatasetImportArgs {
     max_shortcuts_per_contracted_edge: Option<u32>,
     #[arg(long)]
     max_shortcut_budget_per_edge: Option<u32>,
+}
+
+#[derive(Args, Debug)]
+struct TransitImportArgs {
+    source: PathBuf,
+    #[arg(long)]
+    name: String,
+    #[arg(long)]
+    service_start: String,
+    #[arg(long, default_value_t = 7)]
+    service_days: u32,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -235,6 +265,7 @@ enum AnalyzeCommand {
     Od(OdArgs),
     Matrix(MatrixArgs),
     ServiceArea(ServiceAreaArgs),
+    TransitRoute(TransitRouteArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -271,6 +302,8 @@ struct ApiServeArgs {
     bind: SocketAddr,
     #[arg(long = "profile")]
     profiles: Vec<PathBuf>,
+    #[arg(long = "transit-feed")]
+    transit_feeds: Vec<String>,
 }
 
 #[derive(Args, Debug)]
@@ -329,6 +362,16 @@ struct ServiceAreaArgs {
     dataset: String,
     #[arg(long)]
     profile: PathBuf,
+    #[arg(long)]
+    request: PathBuf,
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct TransitRouteArgs {
+    #[arg(long)]
+    feed: String,
     #[arg(long)]
     request: PathBuf,
     #[arg(long)]
@@ -408,6 +451,102 @@ fn dataset_list(paths: &WorkspacePaths) -> Result<()> {
     Ok(())
 }
 
+fn transit_import(paths: &WorkspacePaths, args: TransitImportArgs) -> Result<()> {
+    let bundle = import_gtfs(
+        &args.source,
+        TransitImportOptions {
+            name: args.name.clone(),
+            source_label: args.source.display().to_string(),
+            service_start_date: args.service_start.clone(),
+            service_days: args.service_days,
+        },
+    )
+    .with_context(|| format!("importing GTFS feed {}", args.source.display()))?;
+    let summary = transit_import_summary(&bundle);
+    let bundle_path = paths.transit_bundles_dir.join(format!(
+        "transit-{}-{}.bin",
+        args.name,
+        &summary.source_sha256[..12]
+    ));
+    write_transit_bundle(&bundle_path, &bundle)?;
+    let manifest = TransitFeedManifest {
+        feed_id: args.name.clone(),
+        label: format!("GTFS transit feed {}", args.name),
+        source_path: args.source.display().to_string(),
+        source_sha256: summary.source_sha256.clone(),
+        imported_at: netweevil_report::now_rfc3339()?,
+        service_start_date: args.service_start,
+        service_days: args.service_days,
+        stop_count: summary.stop_count as u64,
+        route_count: summary.route_count as u64,
+        trip_count: summary.trip_count as u64,
+        connection_count: summary.connection_count as u64,
+        bundle_path: bundle_path.display().to_string(),
+    };
+    let manifest_path = paths
+        .transit_feeds_dir
+        .join(format!("{}.json", manifest.feed_id));
+    write_json(&manifest_path, &manifest)?;
+    println!(
+        "imported transit feed '{}' with {} stops, {} routes, {} trips, {} scheduled connections",
+        manifest.feed_id,
+        manifest.stop_count,
+        manifest.route_count,
+        manifest.trip_count,
+        manifest.connection_count
+    );
+    println!("transit bundle written to {}", bundle_path.display());
+    println!(
+        "transit feed manifest written to {}",
+        manifest_path.display()
+    );
+    println!("openov source URL: {OPENOV_GTFS_URL}");
+    Ok(())
+}
+
+fn transit_list(paths: &WorkspacePaths) -> Result<()> {
+    for manifest in read_transit_manifests(paths)? {
+        println!(
+            "{}\t{}..+{}d\t{} stops\t{} connections\t{}",
+            manifest.feed_id,
+            manifest.service_start_date,
+            manifest.service_days,
+            manifest.stop_count,
+            manifest.connection_count,
+            manifest.source_path
+        );
+    }
+    Ok(())
+}
+
+fn read_transit_manifests(paths: &WorkspacePaths) -> Result<Vec<TransitFeedManifest>> {
+    let mut manifests = Vec::new();
+    if !paths.transit_feeds_dir.exists() {
+        return Ok(manifests);
+    }
+    for entry in fs::read_dir(&paths.transit_feeds_dir)
+        .with_context(|| format!("reading {}", paths.transit_feeds_dir.display()))?
+    {
+        let entry = entry?;
+        if entry
+            .path()
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+        {
+            manifests.push(netweevil_persist::read_json(entry.path())?);
+        }
+    }
+    manifests.sort_by(|left, right| left.feed_id.cmp(&right.feed_id));
+    Ok(manifests)
+}
+
+fn read_transit_manifest(paths: &WorkspacePaths, feed_id: &str) -> Result<TransitFeedManifest> {
+    let path = paths.transit_feeds_dir.join(format!("{feed_id}.json"));
+    netweevil_persist::read_json(&path)
+        .with_context(|| format!("reading transit feed manifest {}", path.display()))
+}
+
 fn profile_validate(path: &Path) -> Result<()> {
     let profile = load_profile(path)?;
     profile.validate()?;
@@ -434,7 +573,7 @@ fn profile_compile(paths: &WorkspacePaths, dataset: &str, profile_path: &Path) -
     let topology_ref = dataset_manifest
         .topology_bundle
         .clone()
-        .context("dataset is missing a topology bundle; run `netan dataset import` first")?;
+        .context("dataset is missing a topology bundle; run `netweevil dataset import` first")?;
     render_profile_compile_message(
         "Load Dataset",
         format!("Reading topology bundle {}", topology_ref.path),
@@ -487,12 +626,12 @@ fn profile_compile(paths: &WorkspacePaths, dataset: &str, profile_path: &Path) -
     write_compiled_profile_bundle(&bundle_path, &compiled_bundle)?;
     let manifest = CompiledProfileManifest {
         compile_id: compile_id.clone(),
-        dataset_id: netan_core::DatasetId::new(dataset.to_string()),
+        dataset_id: netweevil_core::DatasetId::new(dataset.to_string()),
         profile_id: profile.profile.id.clone(),
         profile_hash,
         defaults_pack: profile.profile.defaults_pack.clone(),
         mode: profile.profile.mode,
-        created_at: netan_report::now_rfc3339()?,
+        created_at: netweevil_report::now_rfc3339()?,
         topology_bundle_id: Some(topology_ref.bundle_id),
         edge_count: Some(compiled_bundle.edge_metrics.len() as u64),
         bundle: BundleRef {
@@ -701,12 +840,29 @@ fn analyze_service_area(paths: &WorkspacePaths, args: ServiceAreaArgs) -> Result
     Ok(())
 }
 
+fn analyze_transit_route(paths: &WorkspacePaths, args: TransitRouteArgs) -> Result<()> {
+    let manifest = read_transit_manifest(paths, &args.feed)?;
+    let bundle = read_transit_bundle(&manifest.bundle_path)
+        .with_context(|| format!("reading transit bundle {}", manifest.bundle_path))?;
+    let request = load_transit_request(&args.request)?;
+    let result = execute_transit_route(&bundle, &request)
+        .with_context(|| format!("executing transit route '{}'", request.route_id))?;
+    let result_path = args.out.unwrap_or_else(|| {
+        paths
+            .runs_dir
+            .join(format!("transit-route-{}.json", request.route_id))
+    });
+    write_json(&result_path, &result)?;
+    println!("transit route result written to {}", result_path.display());
+    Ok(())
+}
+
 fn run_route_analysis(
     paths: &WorkspacePaths,
     dataset_id: &str,
     profile: &ProfileDocument,
     request_path: &Path,
-    mut request: netan_query::RouteRequest,
+    mut request: netweevil_query::RouteRequest,
     out: Option<PathBuf>,
 ) -> Result<StoredRun> {
     if out.as_deref().is_some_and(output_needs_geometry)
@@ -752,7 +908,7 @@ fn run_route_batch_analysis(
     dataset_id: &str,
     profile: &ProfileDocument,
     requests_path: &Path,
-    requests: netan_query::RouteBatchDocument,
+    requests: netweevil_query::RouteBatchDocument,
     out: Option<PathBuf>,
 ) -> Result<StoredRun> {
     let (topology, acceleration, compiled_manifest, compiled_bundle) =
@@ -805,22 +961,22 @@ fn run_route_batch_analysis(
                 if !route.warnings.is_empty() {
                     warnings.extend(route.warnings.clone());
                 }
-                items.push(netan_query::RouteBatchItemResult {
+                items.push(netweevil_query::RouteBatchItemResult {
                     route_id: route.route_id.clone(),
                     origin_id: entry.request.origin.id.clone(),
                     destination_id: entry.request.destination.id.clone(),
-                    status: netan_query::BatchItemStatus::Succeeded,
+                    status: netweevil_query::BatchItemStatus::Succeeded,
                     route: Some(route),
                     error: None,
                 });
             }
             Err(error) => {
                 failed_count += 1;
-                items.push(netan_query::RouteBatchItemResult {
+                items.push(netweevil_query::RouteBatchItemResult {
                     route_id: entry.request.route_id.clone(),
                     origin_id: entry.request.origin.id.clone(),
                     destination_id: entry.request.destination.id.clone(),
-                    status: netan_query::BatchItemStatus::Failed,
+                    status: netweevil_query::BatchItemStatus::Failed,
                     route: None,
                     error: Some(error.to_string()),
                 });
@@ -864,7 +1020,7 @@ fn run_od_analysis(
     dataset_id: &str,
     profile: &ProfileDocument,
     pairs_path: &Path,
-    mut request: netan_query::OdPairsDocument,
+    mut request: netweevil_query::OdPairsDocument,
     out: Option<PathBuf>,
 ) -> Result<StoredRun> {
     if out.as_deref().is_some_and(output_needs_geometry)
@@ -903,8 +1059,8 @@ fn run_matrix_analysis(
     profile: &ProfileDocument,
     origins_path: &Path,
     destinations_path: &Path,
-    mut origins: netan_query::PointSetDocument,
-    mut destinations: netan_query::PointSetDocument,
+    mut origins: netweevil_query::PointSetDocument,
+    mut destinations: netweevil_query::PointSetDocument,
     out: Option<PathBuf>,
 ) -> Result<StoredRun> {
     if out.as_deref().is_some_and(output_needs_geometry) {
@@ -953,7 +1109,7 @@ fn run_service_area_analysis(
     dataset_id: &str,
     profile: &ProfileDocument,
     request_path: &Path,
-    request: &netan_query::ServiceAreaRequest,
+    request: &netweevil_query::ServiceAreaRequest,
     out: Option<PathBuf>,
 ) -> Result<StoredRun> {
     let (topology, acceleration, compiled_manifest, compiled_bundle) =
@@ -986,7 +1142,7 @@ fn store_route_run(
     dataset_id: &str,
     profile: &ProfileDocument,
     request_path: &Path,
-    request: &netan_query::RouteRequest,
+    request: &netweevil_query::RouteRequest,
     result: &RouteResult,
     compiled_manifest: &CompiledProfileManifest,
     engine: EngineDescription,
@@ -1045,7 +1201,7 @@ fn store_route_batch_run(
     dataset_id: &str,
     profile: &ProfileDocument,
     requests_path: &Path,
-    requests: &netan_query::RouteBatchDocument,
+    requests: &netweevil_query::RouteBatchDocument,
     result: &RouteBatchResult,
     compiled_manifest: &CompiledProfileManifest,
     engine: EngineDescription,
@@ -1103,7 +1259,7 @@ fn store_od_run(
     dataset_id: &str,
     profile: &ProfileDocument,
     pairs_path: &Path,
-    request: &netan_query::OdPairsDocument,
+    request: &netweevil_query::OdPairsDocument,
     result: &OdResult,
     compiled_manifest: &CompiledProfileManifest,
     engine: EngineDescription,
@@ -1153,8 +1309,8 @@ fn store_matrix_run(
     profile: &ProfileDocument,
     origins_path: &Path,
     destinations_path: &Path,
-    origins: &netan_query::PointSetDocument,
-    destinations: &netan_query::PointSetDocument,
+    origins: &netweevil_query::PointSetDocument,
+    destinations: &netweevil_query::PointSetDocument,
     result: &MatrixResult,
     compiled_manifest: &CompiledProfileManifest,
     engine: EngineDescription,
@@ -1181,14 +1337,14 @@ fn store_matrix_run(
     manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.batch_summary.to_string();
     manifest.connectivity_policy = Some(
-        if origins.connectivity == netan_query::ConnectivityPolicy::default() {
+        if origins.connectivity == netweevil_query::ConnectivityPolicy::default() {
             destinations.connectivity.clone()
         } else {
             origins.connectivity.clone()
         },
     );
     manifest.fallback_policy = Some(
-        if origins.fallback == netan_query::FallbackPolicy::default() {
+        if origins.fallback == netweevil_query::FallbackPolicy::default() {
             destinations.fallback.clone()
         } else {
             origins.fallback.clone()
@@ -1221,7 +1377,7 @@ fn store_service_area_run(
     dataset_id: &str,
     profile: &ProfileDocument,
     request_path: &Path,
-    request: &netan_query::ServiceAreaRequest,
+    request: &netweevil_query::ServiceAreaRequest,
     result: &ServiceAreaResult,
     compiled_manifest: &CompiledProfileManifest,
     engine: EngineDescription,
@@ -1364,7 +1520,7 @@ fn experiment_run(paths: &WorkspacePaths, study: &Path) -> Result<()> {
         experiment_id: experiment.experiment.id.clone(),
         label: experiment.experiment.label.clone(),
         dataset: experiment.experiment.dataset.clone(),
-        created_at: netan_report::now_rfc3339()?,
+        created_at: netweevil_report::now_rfc3339()?,
         status: if failed_count == 0 {
             "succeeded".to_string()
         } else if succeeded_count == 0 {
@@ -1434,6 +1590,13 @@ fn cache_list(paths: &WorkspacePaths) -> Result<()> {
             profile.compile_id, profile.profile_id, profile.bundle.bundle_id.0
         );
     }
+    println!("transit feeds:");
+    for transit in read_transit_manifests(paths)? {
+        println!(
+            "  {}\t{} stops\t{} connections\t{}",
+            transit.feed_id, transit.stop_count, transit.connection_count, transit.bundle_path
+        );
+    }
     Ok(())
 }
 
@@ -1446,6 +1609,7 @@ fn api_serve(paths: WorkspacePaths, args: ApiServeArgs) -> Result<()> {
             dataset_id: args.dataset,
             default_profile: args.default_profile,
             profiles: args.profiles,
+            transit_feeds: args.transit_feeds,
         },
     ))
 }
@@ -1496,7 +1660,7 @@ fn load_route_execution_inputs(
     let topology_ref = dataset_manifest
         .topology_bundle
         .clone()
-        .context("dataset is missing a topology bundle; run `netan dataset import` first")?;
+        .context("dataset is missing a topology bundle; run `netweevil dataset import` first")?;
     let topology: TopologyBundle = read_topology_bundle(&topology_ref.path)
         .with_context(|| format!("reading topology bundle {}", topology_ref.path))?;
     let acceleration = dataset_manifest
@@ -1513,7 +1677,7 @@ fn load_route_execution_inputs(
         .find(|manifest| {
             manifest.dataset_id.0 == dataset_id && manifest.profile_hash == wanted_hash
         })
-        .context("compiled profile bundle not found; run `netan profile compile` first")?;
+        .context("compiled profile bundle not found; run `netweevil profile compile` first")?;
     let compiled_bundle: CompiledProfileBundle =
         read_compiled_profile_bundle(&compiled_manifest.bundle.path).with_context(|| {
             format!(
@@ -1540,9 +1704,9 @@ fn load_edge_names(paths: &WorkspacePaths, dataset_id: &str) -> Result<Option<Ve
 
 fn software_info() -> SoftwareInfo {
     SoftwareInfo {
-        executable: "netan".to_string(),
+        executable: "netweevil".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        git_commit: option_env!("NETAN_GIT_COMMIT").map(ToString::to_string),
+        git_commit: option_env!("NETWEEVIL_GIT_COMMIT").map(ToString::to_string),
     }
 }
 
@@ -1635,7 +1799,7 @@ fn run_experiment_scenario(
     }
 }
 
-fn scenario_id(index: usize, scenario: &netan_query::ScenarioSpec) -> String {
+fn scenario_id(index: usize, scenario: &netweevil_query::ScenarioSpec) -> String {
     scenario
         .id
         .clone()
@@ -1756,7 +1920,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time works")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netan-cli-{label}-{unique}"));
+        let path = std::env::temp_dir().join(format!("netweevil-cli-{label}-{unique}"));
         fs::create_dir_all(&path).expect("temp dir created");
         path
     }

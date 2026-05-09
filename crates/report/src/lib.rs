@@ -4,12 +4,12 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use netan_core::{
+use netweevil_core::{
     AccelerationBuildSettings, AccelerationBundleStats, BuildStage, CacheBundleId, DatasetId,
     TopologyBundleMeta, TravelMode,
 };
-use netan_profile::ProfileDocument;
-use netan_query::{
+use netweevil_profile::ProfileDocument;
+use netweevil_query::{
     AnalysisOutcome, ConnectivityPolicy, FallbackPolicy, MatrixResult, OdResult, RouteBatchResult,
     RouteResult, ServiceAreaBandMode, ServiceAreaMultiOriginMode, ServiceAreaOutputMode,
     ServiceAreaResult,
@@ -360,7 +360,7 @@ pub fn render_run_markdown(
     result_summary: Option<&RunResultSummary>,
 ) -> String {
     let mut markdown = String::new();
-    markdown.push_str("# netan run report\n\n");
+    markdown.push_str("# netweevil run report\n\n");
     markdown.push_str(&format!(
         "- Run ID: `{}`\n\
          - Status: `{:?}`\n\
@@ -437,7 +437,7 @@ pub fn render_run_html(
     let mut html = String::new();
     html.push_str(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>netan run report</title><style>\
+         <title>netweevil run report</title><style>\
          :root{color-scheme:light;font-family:Georgia,\"Iowan Old Style\",serif;}\
          body{margin:0;background:#f5f1e8;color:#1f1c18;}\
          main{max-width:960px;margin:0 auto;padding:40px 24px 64px;}\
@@ -450,7 +450,7 @@ pub fn render_run_html(
          p{line-height:1.6;}\
          </style></head><body><main>",
     );
-    html.push_str("<h1>netan run report</h1>");
+    html.push_str("<h1>netweevil run report</h1>");
     html.push_str("<section><h2>Run</h2><dl>");
     push_definition(&mut html, "Run ID", &code_html(&manifest.run_id));
     push_definition(
@@ -918,7 +918,7 @@ mod tests {
         AlgorithmInfo, MethodsSummary, RouteSummary, RunKind, RunManifest, RunResultSummary,
         RunStatus, SoftwareInfo, load_run_result_summary, render_run_html, render_run_markdown,
     };
-    use netan_query::{
+    use netweevil_query::{
         AnalysisOutcome, ConnectivityPolicy, DisconnectedNetworkMode, FallbackPolicy,
     };
     use std::fs;
@@ -960,13 +960,13 @@ mod tests {
 
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("Solved &lt;route&gt; &amp; archived."));
-        assert!(html.contains("netan run report"));
+        assert!(html.contains("netweevil run report"));
     }
 
     #[test]
     fn skips_result_summary_for_non_json_outputs() {
         let temp_path = std::env::temp_dir().join(format!(
-            "netan-report-{}.geojson",
+            "netweevil-report-{}.geojson",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("time works")
@@ -997,10 +997,10 @@ mod tests {
             profile_id: "car_research_v1".to_string(),
             compiled_profile_bundle_id: Some("metric-groningen-abc".to_string()),
             request_source: "examples/requests/route.json".to_string(),
-            result_path: Some(".netan/runs/run-123-result.json".to_string()),
+            result_path: Some(".netweevil/runs/run-123-result.json".to_string()),
             report_path: None,
             software: SoftwareInfo {
-                executable: "netan".to_string(),
+                executable: "netweevil".to_string(),
                 version: "0.1.0".to_string(),
                 git_commit: Some("abc123".to_string()),
             },

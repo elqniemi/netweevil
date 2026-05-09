@@ -10,7 +10,7 @@ fn main() {
     {
         if output.status.success() {
             let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("cargo:rustc-env=NETAN_GIT_COMMIT={commit}");
+            println!("cargo:rustc-env=NETWEEVIL_GIT_COMMIT={commit}");
         }
     }
 }

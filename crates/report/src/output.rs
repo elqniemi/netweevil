@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use arrow_array::{ArrayRef, BinaryArray, Float64Array, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::{DataType, Field, Schema};
-use netan_query::{
+use netweevil_query::{
     AnalysisOutcome, BatchItemStatus, MatrixResult, OdPairsDocument, OdResult, PointSetDocument,
     RouteBatchDocument, RouteBatchResult, RouteRequest, RouteResult, ServiceAreaGeometryType,
     ServiceAreaRequest, ServiceAreaResult,
@@ -2820,8 +2820,8 @@ fn route_coords(result: &RouteResult) -> Result<Vec<[f64; 2]>> {
 }
 
 fn od_pair_coords(
-    pair: &netan_query::OdPairResult,
-    request_pair: &netan_query::OdPair,
+    pair: &netweevil_query::OdPairResult,
+    request_pair: &netweevil_query::OdPair,
 ) -> Vec<[f64; 2]> {
     coerce_linestring_coords(&pair.geometry.clone().unwrap_or_else(|| {
         vec![
@@ -2832,9 +2832,9 @@ fn od_pair_coords(
 }
 
 fn matrix_cell_coords(
-    cell: &netan_query::MatrixCellResult,
-    origin: &netan_query::LabeledPoint,
-    destination: &netan_query::LabeledPoint,
+    cell: &netweevil_query::MatrixCellResult,
+    origin: &netweevil_query::LabeledPoint,
+    destination: &netweevil_query::LabeledPoint,
 ) -> Vec<[f64; 2]> {
     coerce_linestring_coords(
         &cell
@@ -2852,11 +2852,11 @@ fn route_geometry_geojson(result: &RouteResult) -> Result<serde_json::Value> {
 }
 
 fn service_area_threshold_metric_name(
-    metric: netan_query::ServiceAreaThresholdMetric,
+    metric: netweevil_query::ServiceAreaThresholdMetric,
 ) -> &'static str {
     match metric {
-        netan_query::ServiceAreaThresholdMetric::DistanceM => "distance_m",
-        netan_query::ServiceAreaThresholdMetric::TravelTimeS => "travel_time_s",
+        netweevil_query::ServiceAreaThresholdMetric::DistanceM => "distance_m",
+        netweevil_query::ServiceAreaThresholdMetric::TravelTimeS => "travel_time_s",
     }
 }
 
@@ -2944,7 +2944,7 @@ fn service_area_geometry_wkb(
     }
 }
 
-fn point_lookup(document: &PointSetDocument) -> BTreeMap<&str, &netan_query::LabeledPoint> {
+fn point_lookup(document: &PointSetDocument) -> BTreeMap<&str, &netweevil_query::LabeledPoint> {
     document
         .points
         .iter()
@@ -3442,9 +3442,9 @@ mod tests {
         coerce_linestring_coords, csv_escape, linestring_wkt, write_od_result,
         write_route_batch_result, write_route_result, write_service_area_result,
     };
-    use netan_core::{RoadClass, SurfaceClass};
-    use netan_profile::ReturnConfig;
-    use netan_query::{
+    use netweevil_core::{RoadClass, SurfaceClass};
+    use netweevil_profile::ReturnConfig;
+    use netweevil_query::{
         AnalysisOutcome, BatchItemStatus, LabeledPoint, MetricBreakdown, OdPair, OdPairResult,
         OdPairsDocument, OdResult, RouteBatchDocument, RouteBatchEntry, RouteBatchItemResult,
         RouteBatchResult, RouteBreakdowns, RouteRequest, RouteResult, RouteSegment, RouteSummary,
@@ -3925,6 +3925,6 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("time works")
             .as_nanos();
-        std::env::temp_dir().join(format!("netan-report-{unique}-{name}"))
+        std::env::temp_dir().join(format!("netweevil-report-{unique}-{name}"))
     }
 }

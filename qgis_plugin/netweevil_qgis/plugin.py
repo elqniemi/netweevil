@@ -48,8 +48,8 @@ from qgis.core import (
 from qgis.gui import QgsMapLayerComboBox, QgsMapToolEmitPoint, QgsVertexMarker
 
 
-PLUGIN_MENU = "&netan"
-SETTINGS_PREFIX = "netan_qgis"
+PLUGIN_MENU = "&netweevil"
+SETTINGS_PREFIX = "netweevil_qgis"
 
 
 class ResponseFormat:
@@ -97,14 +97,14 @@ def message_box_button(member_name):
     return qt_enum_value(QMessageBox, "StandardButton", member_name)
 
 
-class NetanPlugin:
+class NetweevilPlugin:
     def __init__(self, iface):
         self.iface = iface
         self.action = None
         self.dock = None
 
     def initGui(self):
-        self.action = QAction("netan", self.iface.mainWindow())
+        self.action = QAction("netweevil", self.iface.mainWindow())
         self.action.setCheckable(True)
         self.action.triggered.connect(self.toggle_dock)
         self.iface.addPluginToMenu(PLUGIN_MENU, self.action)
@@ -123,7 +123,7 @@ class NetanPlugin:
 
     def toggle_dock(self, checked=False):
         if self.dock is None:
-            self.dock = NetanDock(self.iface, self.action)
+            self.dock = NetweevilDock(self.iface, self.action)
             self.dock.visibilityChanged.connect(self.sync_action_state)
             self.iface.addDockWidget(qt_dock_area("RightDockWidgetArea"), self.dock)
         self.dock.setVisible(bool(checked))
@@ -138,13 +138,13 @@ class NetanPlugin:
         self.action.blockSignals(was_blocked)
 
 
-class NetanDock(QDockWidget):
+class NetweevilDock(QDockWidget):
     def __init__(self, iface, action):
-        super().__init__("netan", iface.mainWindow())
+        super().__init__("netweevil", iface.mainWindow())
         self.iface = iface
         self.action = action
         self.service_info = None
-        self.temp_layers_dir = Path(tempfile.gettempdir()) / "netan_qgis_layers"
+        self.temp_layers_dir = Path(tempfile.gettempdir()) / "netweevil_qgis_layers"
         self.temp_layers_dir.mkdir(parents=True, exist_ok=True)
         self.wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
         self.point_picker_tool = None
@@ -154,7 +154,7 @@ class NetanDock(QDockWidget):
         self.destination_marker = None
         self.last_output_layer_ids = []
 
-        self.setObjectName("netanDock")
+        self.setObjectName("netweevilDock")
         self.setAllowedAreas(
             qt_dock_area("LeftDockWidgetArea") | qt_dock_area("RightDockWidgetArea")
         )
@@ -263,7 +263,7 @@ class NetanDock(QDockWidget):
         layout.addLayout(button_row)
 
         description = QLabel(
-            "This plugin talks directly to the running netan API. "
+            "This plugin talks directly to the running netweevil API. "
             "Pick route points from the map canvas, or build batch analyses from QGIS layers. "
             "Route detail layers use JSON internally when needed so segmented rows and breakdown tables remain available in QGIS."
         )
@@ -430,7 +430,7 @@ class NetanDock(QDockWidget):
         self.service_area_analysis_id_edit = QLineEdit("qgis_service_area_001")
         self.service_area_snap_distance_edit = QLineEdit("500")
         self.service_area_output_path_edit = QLineEdit(
-            ".netan/runs/qgis-service-area.geojson"
+            ".netweevil/runs/qgis-service-area.geojson"
         )
         self.service_area_request_path_edit = QLineEdit(
             "examples/requests/service_area_from_qgis.json"
@@ -597,7 +597,7 @@ class NetanDock(QDockWidget):
         self.route_auto_output_path_check = QCheckBox("Keep response path in sync with route id")
         self.route_auto_output_path_check.setChecked(True)
         self.snap_distance_edit = QLineEdit("500")
-        self.route_output_path_edit = QLineEdit(".netan/runs/routes/qgis_route_001.json")
+        self.route_output_path_edit = QLineEdit(".netweevil/runs/routes/qgis_route_001.json")
         self.route_request_path_edit = QLineEdit("examples/requests/route_from_qgis.json")
         route_id_row = QWidget()
         route_id_layout = QHBoxLayout(route_id_row)
@@ -761,7 +761,7 @@ class NetanDock(QDockWidget):
         od_group = QGroupBox("OD")
         od_form = QFormLayout(od_group)
         self.od_pairs_path_edit = QLineEdit("examples/requests/od_pairs.csv")
-        self.od_output_path_edit = QLineEdit(".netan/runs/qgis-od.geojson")
+        self.od_output_path_edit = QLineEdit(".netweevil/runs/qgis-od.geojson")
         od_form.addRow(
             "Pairs file",
             self._line_with_browse(self.od_pairs_path_edit, browse_dir=False),
@@ -788,7 +788,7 @@ class NetanDock(QDockWidget):
         matrix_layout.addWidget(self._build_matrix_source_group("Destinations", is_origin=False))
 
         matrix_form = QFormLayout()
-        self.matrix_output_path_edit = QLineEdit(".netan/runs/qgis-matrix.geojson")
+        self.matrix_output_path_edit = QLineEdit(".netweevil/runs/qgis-matrix.geojson")
         matrix_form.addRow(
             "Response path",
             self._line_with_browse(
@@ -986,7 +986,7 @@ class NetanDock(QDockWidget):
                 self.log("Failed to refresh service: {}".format(exc), Qgis.Warning)
             else:
                 self.log(
-                    "netan service not reachable during startup: {}".format(exc), Qgis.Info
+                    "netweevil service not reachable during startup: {}".format(exc), Qgis.Info
                 )
             return
 
@@ -1408,7 +1408,7 @@ class NetanDock(QDockWidget):
 
     def route_output_path_for_id(self, route_id):
         clean_route_id = (route_id or "qgis_route_001").strip() or "qgis_route_001"
-        return ".netan/runs/routes/{}.json".format(clean_route_id)
+        return ".netweevil/runs/routes/{}.json".format(clean_route_id)
 
     def sync_route_output_path_from_route_id(self, *_args):
         if not self.route_auto_output_path_check.isChecked():
@@ -1626,7 +1626,7 @@ class NetanDock(QDockWidget):
 
         reply = QMessageBox.warning(
             self,
-            "netan unsafe analysis",
+            "netweevil unsafe analysis",
             "This {} request enables unsafe degraded-routing modes: {}.\n\n"
             "These options are explicit fallback analysis only. Continue?".format(
                 analysis_label, ", ".join(enabled)
@@ -1778,7 +1778,7 @@ class NetanDock(QDockWidget):
             endpoint="/v1/route",
             payload=payload,
             output_path=self.route_output_path_edit.text(),
-            layer_name=payload["request"]["route_id"] or "netan_route",
+            layer_name=payload["request"]["route_id"] or "netweevil_route",
             analysis_kind="route",
             response_format_override=ResponseFormat.JSON,
         ):
@@ -1817,7 +1817,7 @@ class NetanDock(QDockWidget):
             endpoint="/v1/od",
             payload=payload,
             output_path=self.od_output_path_edit.text(),
-            layer_name="netan_od",
+            layer_name="netweevil_od",
             analysis_kind="od",
         )
 
@@ -1868,7 +1868,7 @@ class NetanDock(QDockWidget):
             endpoint="/v1/matrix",
             payload=payload,
             output_path=self.matrix_output_path_edit.text(),
-            layer_name="netan_matrix",
+            layer_name="netweevil_matrix",
             analysis_kind="matrix",
         )
 
@@ -1907,7 +1907,7 @@ class NetanDock(QDockWidget):
             endpoint="/v1/service-area",
             payload=payload,
             output_path=self.service_area_output_path_edit.text(),
-            layer_name=request["analysis_id"] or "netan_service_area",
+            layer_name=request["analysis_id"] or "netweevil_service_area",
             analysis_kind="service_area",
         )
 
@@ -2560,7 +2560,7 @@ class NetanDock(QDockWidget):
     def load_route_layers(self, response_json, layer_name):
         service = response_json.get("service") or {}
         result = response_json.get("result") or {}
-        route_id = result.get("route_id") or layer_name or "netan_route"
+        route_id = result.get("route_id") or layer_name or "netweevil_route"
         root = QgsProject.instance().layerTreeRoot()
         existing_group = root.findGroup(route_id)
         if existing_group is not None:
@@ -2785,7 +2785,7 @@ class NetanDock(QDockWidget):
         return {"type": "LineString", "coordinates": coordinates}
 
     def write_temp_geojson(self, layer_name, geojson):
-        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", layer_name).strip("_") or "netan_layer"
+        safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", layer_name).strip("_") or "netweevil_layer"
         path = self.temp_layers_dir / "{}.geojson".format(safe_name)
         path.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
         return path
@@ -2809,7 +2809,7 @@ class NetanDock(QDockWidget):
             return
 
         metadata = geojson.get("metadata") or {}
-        analysis_id = metadata.get("analysis_id") or layer_name or "netan_service_area"
+        analysis_id = metadata.get("analysis_id") or layer_name or "netweevil_service_area"
         root = QgsProject.instance().layerTreeRoot()
         existing_group = root.findGroup(analysis_id)
         if existing_group is not None:
@@ -3123,11 +3123,11 @@ class NetanDock(QDockWidget):
         return extent
 
     def log(self, message, level=Qgis.Info):
-        QgsMessageLog.logMessage(message, "netan", level)
+        QgsMessageLog.logMessage(message, "netweevil", level)
         self.log_output.appendPlainText(message)
 
     def alert(self, message):
-        QMessageBox.warning(self, "netan", message)
+        QMessageBox.warning(self, "netweevil", message)
         self.log(message, Qgis.Warning)
 
     def cleanup(self):

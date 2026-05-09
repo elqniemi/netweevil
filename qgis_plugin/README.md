@@ -1,12 +1,12 @@
-# netan QGIS Plugin
+# netweevil QGIS Plugin
 
-This plugin talks directly to the running `netan` API.
+This plugin talks directly to the running `netweevil` API.
 
 It does not shell out to the CLI. QGIS sends JSON requests to the API, receives JSON or GeoJSON responses, and loads the returned geometries into the map immediately.
 
 ## What It Does
 
-- connects to a running `netan api serve` instance
+- connects to a running `netweevil api serve` instance
 - reads the loaded dataset and available profiles from `/v1/service`
 - lets you pick route start and end points directly from the QGIS map canvas
 - can pull route points from a selected point feature in the active layer
@@ -23,27 +23,27 @@ It does not shell out to the CLI. QGIS sends JSON requests to the API, receives 
 1. Start the API:
 
 ```bash
-cargo run -p netan-cli -- api serve \
+cargo run -p netweevil-cli -- api serve \
   --dataset ile_de_france_2026_03 \
   --default-profile examples/profiles/car_research_v1.yml \
   --profile examples/profiles/pedestrian_research_v1.yml \
   --bind 127.0.0.1:8080
 ```
 
-2. Copy or symlink [`netan_qgis`](/home/elmeriniemi/stuff/netan/qgis_plugin/netan_qgis) into your QGIS profile plugin directory.
+2. Copy or symlink [`netweevil_qgis`](/home/elmeriniemi/stuff/netweevil/qgis_plugin/netweevil_qgis) into your QGIS profile plugin directory.
 
 Linux example:
 
 ```bash
 mkdir -p ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins
-ln -s /home/elmeriniemi/stuff/netan/qgis_plugin/netan_qgis ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/netan_qgis
+ln -s /home/elmeriniemi/stuff/netweevil/qgis_plugin/netweevil_qgis ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/netweevil_qgis
 ```
 
 Windows QGIS 4 example:
 
 ```powershell
 New-Item -ItemType Directory -Force "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins"
-cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netan_qgis" "\\wsl$\Ubuntu\home\elmeriniemi\stuff\netan\qgis_plugin\netan_qgis"
+cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netweevil_qgis" "\\wsl$\Ubuntu\home\elmeriniemi\stuff\netweevil\qgis_plugin\netweevil_qgis"
 ```
 
 3. In QGIS, enable the plugin from `Plugins -> Manage and Install Plugins`.
@@ -69,7 +69,7 @@ The plugin will show:
 
 ## Windows QGIS + WSL
 
-This is simpler now than the old CLI integration. Run the API wherever `netan` lives, then point QGIS at that HTTP endpoint.
+This is simpler now than the old CLI integration. Run the API wherever `netweevil` lives, then point QGIS at that HTTP endpoint.
 
 Examples:
 
@@ -78,7 +78,7 @@ Examples:
   - `Workspace root`: any Windows-accessible folder you want to use for request and response files
 - Native Linux QGIS:
   - `API base URL`: `http://127.0.0.1:8080`
-  - `Workspace root`: `/home/elmeriniemi/stuff/netan`
+  - `Workspace root`: `/home/elmeriniemi/stuff/netweevil`
 
 ## Example Flows
 
@@ -103,7 +103,7 @@ The plugin loads the route into a grouped set of QGIS layers and tables automati
 Use:
 
 - pairs file: `examples/requests/od_pairs.csv`
-- response path: `.netan/runs/qgis-od.geojson`
+- response path: `.netweevil/runs/qgis-od.geojson`
 
 Then press `Run OD`.
 
@@ -114,7 +114,7 @@ Use either loaded point layers or files:
 - set `Origins` and `Destinations` source to `Loaded point layer` to build the matrix from QGIS layers already in the project
 - optionally choose an ID field and `Use selected features only`
 - or switch either side to `CSV or JSON file`
-- set response path: `.netan/runs/qgis-matrix.geojson`
+- set response path: `.netweevil/runs/qgis-matrix.geojson`
 
 Then press `Run Matrix`.
 
