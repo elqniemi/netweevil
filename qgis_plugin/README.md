@@ -11,7 +11,9 @@ It does not shell out to the CLI. QGIS sends JSON requests to the API, receives 
 - lets you pick route start and end points directly from the QGIS map canvas
 - can pull route points from a selected point feature in the active layer
 - submits route, OD, matrix, and service-area requests to the API
-- loads route, OD, matrix, and service-area geometries into QGIS from API responses
+- submits scheduled transit route requests when the API has preloaded GTFS feeds
+- loads route, transit, OD, matrix, and service-area geometries into QGIS from API responses
+- reloads completed JSON/GeoJSON runs and succeeded run manifests without rerunning the API request
 - can build matrix origins and destinations from loaded QGIS point layers
 - can build service-area origins from map picks, selected point features, or the current route endpoints
 - exposes disconnected-network policies and opt-in degraded-routing controls for route and batch requests
@@ -27,16 +29,19 @@ cargo run -p netweevil-cli -- api serve \
   --dataset ile_de_france_2026_03 \
   --default-profile examples/profiles/car_research_v1.yml \
   --profile examples/profiles/pedestrian_research_v1.yml \
+  --transit-feed openov_groningen \
   --bind 127.0.0.1:8080
 ```
 
-2. Copy or symlink [`netweevil_qgis`](/home/elmeriniemi/stuff/netweevil/qgis_plugin/netweevil_qgis) into your QGIS profile plugin directory.
+Omit `--transit-feed` if you only need road-network analyses.
 
-Linux example:
+2. Copy or symlink [`netweevil_qgis`](/Users/elmeriniemi/programming/netweevil/qgis_plugin/netweevil_qgis) into your QGIS profile plugin directory.
+
+macOS example:
 
 ```bash
-mkdir -p ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins
-ln -s /home/elmeriniemi/stuff/netweevil/qgis_plugin/netweevil_qgis ~/.local/share/QGIS/QGIS3/profiles/default/python/plugins/netweevil_qgis
+mkdir -p ~/Library/Application\ Support/QGIS/QGIS3/profiles/default/python/plugins
+ln -s /Users/elmeriniemi/programming/netweevil/qgis_plugin/netweevil_qgis ~/Library/Application\ Support/QGIS/QGIS3/profiles/default/python/plugins/netweevil_qgis
 ```
 
 Windows QGIS 4 example:
@@ -57,6 +62,7 @@ Set these fields in the dock:
 - `Timeout seconds`
 - `Response format`: `JSON` or `GeoJSON`
 - `Profile`: either the service default or any profile preloaded by the API
+- `Loaded transit feeds`: feed ids available to the Transit tab
 
 Then press `Refresh Service`.
 
@@ -65,6 +71,7 @@ The plugin will show:
 - the dataset currently loaded by the API
 - the API default profile
 - the available profile list
+- the loaded transit feed list
 - the loaded dataset bounds when available
 
 ## Windows QGIS + WSL
@@ -97,6 +104,32 @@ Examples:
 11. Press `Run Route`.
 
 The plugin loads the route into a grouped set of QGIS layers and tables automatically. When the API returns them, the group includes the main route, segment rows, hop segments, violations, road-type breakdowns, and surface breakdowns. After a successful run, the default route id advances so the next query does not overwrite the previous route name.
+
+### Saved Runs
+
+Use the `Runs` tab to load previous outputs without running an analysis again.
+
+1. Set `Runs directory`, usually `.netweevil/runs`.
+2. Press `Refresh Runs`.
+3. Choose a saved JSON, GeoJSON, or succeeded run manifest.
+4. Press `Use Selected`.
+5. Leave `Kind` on `Auto detect`, or choose the analysis type if the file is ambiguous.
+6. Press `Load Run`.
+
+The loader handles API response JSON, direct GeoJSON, raw CLI result JSON, and succeeded run manifests that point to a result file.
+
+### Transit
+
+Start the API with one or more `--transit-feed <feed_id>` values, then press `Refresh Service`.
+
+1. In the `Transit` tab, choose a loaded feed.
+2. Set a route id and departure time such as `2026-05-11T08:30:00+02:00`.
+3. Pick an origin and destination on the map, or use selected point features.
+4. Choose the allowed transit modes and access/transfer limits.
+5. Press `Save Request` if you want the request JSON on disk.
+6. Press `Run Transit Route`.
+
+The plugin saves the raw JSON response and loads a grouped route summary layer plus per-leg layer. Access, egress, transfer, and transit legs are styled separately.
 
 ### OD
 
@@ -148,6 +181,7 @@ The plugin saves the raw API response and loads grouped sublayers back into QGIS
 - Route points are transformed from the current map or layer CRS into WGS84 before being sent to the API.
 - YAML request files are not supported by the plugin in API mode.
 - Route detail layers use JSON responses internally when needed, even if the dock is set to `GeoJSON`, so the plugin can still load segment rows and breakdown tables.
+- Transit route requests use JSON responses because the API endpoint returns itinerary legs rather than GeoJSON directly.
 - When `Response format` is `JSON`, the plugin still builds temporary GeoJSON layers locally when geometry is present in the API response.
 - Service-area outputs are loaded into grouped sublayers so thresholds and geometry modes stay inspectable in QGIS.
 - In WSL mode, output layers are loaded back into QGIS through `\\wsl$\<distro>\...`.

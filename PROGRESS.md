@@ -58,7 +58,7 @@ The system targets local OSM routing and network analysis with explicit, version
   - Phase 1 service areas are complete for the shared backend surfaces: request/result schema, execution engine, network and polygon outputs, CLI/API execution, writers, reports, and example requests.
   - Phase 2 disconnected-network handling is complete for the shared backend surfaces, including service-area skip semantics, explicit connectivity metadata in outputs, and QGIS/plugin diagnostic surfacing.
   - Phase 3 degraded routing / failure modes is complete for route, OD, and matrix execution, including reverse-oneway, illegal-turn, ignored-restriction, and forbidden-UTurn fallbacks with explicit violation provenance.
-  - Phase 4 QGIS support for service areas and the new diagnostics is still pending.
+  - Phase 4 QGIS support for service areas, diagnostics, and transit-route execution is complete for the in-repo plugin.
   - detailed task breakdown in `IMPLEMENT_ADVANCED_ANALYSIS.md`
 
 ### Not Started
@@ -105,6 +105,8 @@ The system targets local OSM routing and network analysis with explicit, version
 - [x] Add an in-repo QGIS plugin package that talks directly to the HTTP API and loads spatial outputs into QGIS
 - [x] Add a preloadable JSON HTTP API for route, OD, and matrix execution with selectable compiled profiles
 - [x] Add GTFS schedule import and a separate pedestrian+transit route command with one-week service-window filtering and selectable allowed transit modes
+- [x] Add QGIS plugin support for scheduled transit-route execution against API-loaded GTFS feeds
+- [x] Add QGIS plugin support for reloading completed saved runs without re-executing analyses
 
 - [x] Convert `dataset import` from dataset registration into real PBF ingest
 - [x] Build immutable topology bundles from `.osm.pbf`
@@ -155,5 +157,7 @@ The system targets local OSM routing and network analysis with explicit, version
 - `api serve` now loads one chosen dataset into memory at startup, preloads and/or compiles the requested profiles into reusable prepared routing engines, exposes JSON endpoints under `/v1/` for route, OD, matrix, and profile metadata, and defaults requests to the configured startup profile when `profile_id` is omitted.
 - `transit import` now reads GTFS zip or directory sources such as OpenOV, filters service calendars to an explicit date window, and persists a transit schedule bundle under `.netweevil/bundles/transit/` with a feed manifest under `.netweevil/transit_feeds/`.
 - `analyze transit-route` and API `/v1/transit-route` now execute a first pedestrian+transit scheduled route search with walking access, walking transfers, walking egress, departure-time search windows, and request-level allowed GTFS transit modes.
+- The QGIS plugin now exposes API-loaded transit feeds, builds scheduled transit-route requests from map-picked or selected-feature endpoints, saves request/response JSON, logs itinerary diagnostics, and loads route/leg layers back into QGIS.
+- The QGIS plugin can now scan `.netweevil/runs`, reload saved API JSON/GeoJSON responses, raw CLI result JSON, and succeeded run manifests, then rebuild the corresponding QGIS layers without rerunning the API request.
 - Summary-only route execution now omits `node_path` and `edge_path` from route JSON unless geometry, segment rows, or other richer route detail is requested, reducing hot-path API payload size.
 - The current exact kernel now models compiled edge costs, ferry durations and boarding costs, geometric turn penalties, traffic-signal and roundabout-entry penalties, persisted prohibited turn sequences, and mode-specific access semantics; many-to-many acceleration and contraction-based speedups remain pending.

@@ -66,6 +66,8 @@ class PickTarget:
     ORIGIN = "origin"
     DESTINATION = "destination"
     SERVICE_AREA_ORIGIN = "service_area_origin"
+    TRANSIT_ORIGIN = "transit_origin"
+    TRANSIT_DESTINATION = "transit_destination"
 
 
 def qt_enum_value(owner, scoped_enum_name, member_name):
@@ -163,7 +165,9 @@ class NetweevilDock(QDockWidget):
             | dock_widget_feature("DockWidgetMovable")
             | dock_widget_feature("DockWidgetFloatable")
         )
-        self.setMinimumWidth(420)
+        self.setMinimumWidth(620)
+        self.setMinimumHeight(680)
+        self.resize(760, 860)
         self.setAutoFillBackground(True)
 
         container = self._build_ui()
@@ -183,12 +187,14 @@ class NetweevilDock(QDockWidget):
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._wrap_tab_scroll(self._build_api_tab()), "API")
+        self.tabs.addTab(self._wrap_tab_scroll(self._build_runs_tab()), "Runs")
         self.tabs.addTab(self._wrap_tab_scroll(self._build_route_tab()), "Route")
+        self.tabs.addTab(self._wrap_tab_scroll(self._build_transit_tab()), "Transit")
         self.tabs.addTab(self._wrap_tab_scroll(self._build_batch_tab()), "Batch")
         self.tabs.addTab(
             self._wrap_tab_scroll(self._build_service_area_tab()), "Service Area"
         )
-        layout.addWidget(self.tabs)
+        layout.addWidget(self.tabs, stretch=4)
 
         action_row = QHBoxLayout()
         zoom_output_button = QPushButton("Zoom To Last Output")
@@ -202,6 +208,7 @@ class NetweevilDock(QDockWidget):
         self.log_output = QPlainTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setPlaceholderText("API and plugin log output.")
+        self.log_output.setMaximumHeight(170)
         self.log_output.document().setMaximumBlockCount(200)
         clear_log_button.clicked.connect(self.log_output.clear)
         layout.addWidget(self.log_output, stretch=1)
@@ -233,6 +240,8 @@ class NetweevilDock(QDockWidget):
         self.dataset_id_edit.setReadOnly(True)
         self.default_profile_edit = QLineEdit()
         self.default_profile_edit.setReadOnly(True)
+        self.loaded_transit_feeds_edit = QLineEdit()
+        self.loaded_transit_feeds_edit.setReadOnly(True)
         self.dataset_bounds_edit = QLineEdit()
         self.dataset_bounds_edit.setReadOnly(True)
         self.service_status_label = QLabel("Service status: not checked yet.")
@@ -248,6 +257,7 @@ class NetweevilDock(QDockWidget):
         form.addRow("Profile", self.profile_combo)
         form.addRow("Dataset", self.dataset_id_edit)
         form.addRow("Service default profile", self.default_profile_edit)
+        form.addRow("Loaded transit feeds", self.loaded_transit_feeds_edit)
         form.addRow("Dataset bounds", self.dataset_bounds_edit)
         layout.addLayout(form)
         layout.addWidget(self.service_status_label)
@@ -270,6 +280,62 @@ class NetweevilDock(QDockWidget):
         description.setWordWrap(True)
         layout.addWidget(description)
         layout.addStretch(1)
+        return tab
+
+    def _build_runs_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        summary = QLabel(
+            "Load a saved netweevil API response, GeoJSON output, or succeeded run manifest without executing the analysis again."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        saved_group = QGroupBox("Completed runs")
+        saved_form = QFormLayout(saved_group)
+        self.saved_runs_directory_edit = QLineEdit(".netweevil/runs")
+        self.saved_runs_combo = QComboBox()
+        self.saved_runs_combo.addItem("Refresh to list completed runs", "")
+        saved_form.addRow(
+            "Runs directory",
+            self._line_with_browse(self.saved_runs_directory_edit, browse_dir=True),
+        )
+        saved_form.addRow("Saved run", self.saved_runs_combo)
+        layout.addWidget(saved_group)
+
+        file_group = QGroupBox("Load file")
+        file_form = QFormLayout(file_group)
+        self.saved_run_path_edit = QLineEdit("")
+        self.saved_run_kind_combo = QComboBox()
+        self.saved_run_kind_combo.addItem("Auto detect", "")
+        self.saved_run_kind_combo.addItem("Route", "route")
+        self.saved_run_kind_combo.addItem("Transit route", "transit_route")
+        self.saved_run_kind_combo.addItem("OD", "od")
+        self.saved_run_kind_combo.addItem("Matrix", "matrix")
+        self.saved_run_kind_combo.addItem("Service area", "service_area")
+        file_form.addRow(
+            "File",
+            self._line_with_browse(self.saved_run_path_edit, browse_dir=False),
+        )
+        file_form.addRow("Kind", self.saved_run_kind_combo)
+        layout.addWidget(file_group)
+
+        button_row = QHBoxLayout()
+        refresh_button = QPushButton("Refresh Runs")
+        refresh_button.clicked.connect(self.refresh_saved_runs)
+        use_selected_button = QPushButton("Use Selected")
+        use_selected_button.clicked.connect(self.use_selected_saved_run)
+        load_button = QPushButton("Load Run")
+        load_button.clicked.connect(self.load_saved_run)
+        button_row.addWidget(refresh_button)
+        button_row.addWidget(use_selected_button)
+        button_row.addStretch(1)
+        button_row.addWidget(load_button)
+        layout.addLayout(button_row)
+
+        layout.addStretch(1)
+        QTimer.singleShot(0, self.refresh_saved_runs)
         return tab
 
     def _build_advanced_controls(self, prefix, include_failure_modes):
@@ -754,6 +820,182 @@ class NetweevilDock(QDockWidget):
         layout.addLayout(button_row)
         return group
 
+    def _build_transit_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        summary = QLabel(
+            "Plan a pedestrian access + scheduled transit route through a GTFS feed loaded by the API."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+
+        options_group = QGroupBox("Transit route options")
+        options_form = QFormLayout(options_group)
+        self.transit_feed_combo = QComboBox()
+        self.transit_route_id_edit = QLineEdit("qgis_transit_001")
+        self.transit_auto_increment_check = QCheckBox(
+            "Prepare a fresh transit route id after each run"
+        )
+        self.transit_auto_increment_check.setChecked(True)
+        self.transit_datetime_edit = QLineEdit("2026-05-11T08:30:00+02:00")
+        self.transit_arrive_by_check = QCheckBox("Arrive by this time")
+        self.transit_arrive_by_check.setEnabled(False)
+        self.transit_search_window_edit = QLineEdit("7200")
+        self.transit_output_path_edit = QLineEdit(
+            ".netweevil/runs/transit/qgis_transit_001.json"
+        )
+        self.transit_request_path_edit = QLineEdit(
+            "examples/requests/transit_from_qgis.json"
+        )
+        transit_id_row = QWidget()
+        transit_id_layout = QHBoxLayout(transit_id_row)
+        transit_id_layout.setContentsMargins(0, 0, 0, 0)
+        transit_id_layout.addWidget(self.transit_route_id_edit)
+        new_transit_id_button = QPushButton("New")
+        new_transit_id_button.clicked.connect(self.prepare_next_transit_defaults)
+        transit_id_layout.addWidget(new_transit_id_button)
+        options_form.addRow("Feed", self.transit_feed_combo)
+        options_form.addRow("Route id", transit_id_row)
+        options_form.addRow("", self.transit_auto_increment_check)
+        options_form.addRow("Departure time", self.transit_datetime_edit)
+        options_form.addRow("", self.transit_arrive_by_check)
+        options_form.addRow("Search window s", self.transit_search_window_edit)
+        options_form.addRow(
+            "Response path",
+            self._line_with_browse(
+                self.transit_output_path_edit, browse_dir=False, save_dialog=True
+            ),
+        )
+        options_form.addRow(
+            "Optional request JSON",
+            self._line_with_browse(
+                self.transit_request_path_edit, browse_dir=False, save_dialog=True
+            ),
+        )
+        layout.addWidget(options_group)
+
+        mode_group = QGroupBox("Modes and limits")
+        mode_form = QFormLayout(mode_group)
+        self.transit_mode_checks = {}
+        transit_modes_row = QWidget()
+        transit_modes_layout = QHBoxLayout(transit_modes_row)
+        transit_modes_layout.setContentsMargins(0, 0, 0, 0)
+        for label, value, checked in [
+            ("Bus", "bus", True),
+            ("Tram", "tram", True),
+            ("Rail", "rail", True),
+            ("Subway", "subway", True),
+            ("Ferry", "ferry", True),
+            ("Coach", "coach", False),
+        ]:
+            check = QCheckBox(label)
+            check.setChecked(checked)
+            transit_modes_layout.addWidget(check)
+            self.transit_mode_checks[value] = check
+        transit_modes_layout.addStretch(1)
+        self.transit_walk_speed_edit = QLineEdit("4.8")
+        self.transit_max_access_distance_edit = QLineEdit("1200")
+        self.transit_max_egress_distance_edit = QLineEdit("1200")
+        self.transit_max_transfer_distance_edit = QLineEdit("500")
+        self.transit_board_slack_edit = QLineEdit("30")
+        self.transit_transfer_slack_edit = QLineEdit("120")
+        self.transit_max_transfers_edit = QLineEdit("3")
+        self.transit_include_geometry_check = QCheckBox("Load leg geometry")
+        self.transit_include_geometry_check.setChecked(True)
+        mode_form.addRow("Transit modes", transit_modes_row)
+        mode_form.addRow("Walk speed kph", self.transit_walk_speed_edit)
+        mode_form.addRow("Max access distance m", self.transit_max_access_distance_edit)
+        mode_form.addRow("Max egress distance m", self.transit_max_egress_distance_edit)
+        mode_form.addRow("Max transfer distance m", self.transit_max_transfer_distance_edit)
+        mode_form.addRow("Board slack s", self.transit_board_slack_edit)
+        mode_form.addRow("Transfer slack s", self.transit_transfer_slack_edit)
+        mode_form.addRow("Max transfers", self.transit_max_transfers_edit)
+        mode_form.addRow("", self.transit_include_geometry_check)
+        layout.addWidget(mode_group)
+
+        self.transit_pick_status_label = QLabel(
+            "Pick Origin or Pick Destination, then click on the map."
+        )
+        self.transit_pick_status_label.setWordWrap(True)
+        layout.addWidget(self.transit_pick_status_label)
+
+        layout.addWidget(
+            self._build_transit_point_group("Origin", PickTarget.TRANSIT_ORIGIN)
+        )
+        layout.addWidget(
+            self._build_transit_point_group("Destination", PickTarget.TRANSIT_DESTINATION)
+        )
+
+        button_row = QHBoxLayout()
+        pick_origin_button = QPushButton("Pick Origin")
+        pick_origin_button.clicked.connect(
+            lambda: self.begin_point_pick(PickTarget.TRANSIT_ORIGIN)
+        )
+        pick_destination_button = QPushButton("Pick Destination")
+        pick_destination_button.clicked.connect(
+            lambda: self.begin_point_pick(PickTarget.TRANSIT_DESTINATION)
+        )
+        swap_button = QPushButton("Swap")
+        swap_button.clicked.connect(self.swap_transit_points)
+        clear_button = QPushButton("Clear")
+        clear_button.clicked.connect(self.clear_transit_points)
+        save_request_button = QPushButton("Save Request")
+        save_request_button.clicked.connect(self.write_transit_request)
+        run_button = QPushButton("Run Transit Route")
+        run_button.clicked.connect(self.run_transit_route)
+        button_row.addWidget(pick_origin_button)
+        button_row.addWidget(pick_destination_button)
+        button_row.addWidget(swap_button)
+        button_row.addWidget(clear_button)
+        button_row.addStretch(1)
+        button_row.addWidget(save_request_button)
+        button_row.addWidget(run_button)
+        layout.addLayout(button_row)
+
+        self.transit_route_id_edit.textChanged.connect(
+            self.sync_transit_output_path_from_route_id
+        )
+        self.sync_transit_output_path_from_route_id()
+
+        layout.addStretch(1)
+        return tab
+
+    def _build_transit_point_group(self, title, target):
+        group = QGroupBox(title)
+        layout = QVBoxLayout(group)
+
+        form = QFormLayout()
+        point_id_edit = QLineEdit(
+            "origin" if target == PickTarget.TRANSIT_ORIGIN else "destination"
+        )
+        lon_edit = QLineEdit("")
+        lat_edit = QLineEdit("")
+        if target == PickTarget.TRANSIT_ORIGIN:
+            self.transit_origin_id_edit = point_id_edit
+            self.transit_origin_lon_edit = lon_edit
+            self.transit_origin_lat_edit = lat_edit
+        else:
+            self.transit_destination_id_edit = point_id_edit
+            self.transit_destination_lon_edit = lon_edit
+            self.transit_destination_lat_edit = lat_edit
+
+        form.addRow("{} id".format(title), point_id_edit)
+        form.addRow("{} lon".format(title), lon_edit)
+        form.addRow("{} lat".format(title), lat_edit)
+        layout.addLayout(form)
+
+        button_row = QHBoxLayout()
+        pick_button = QPushButton("Pick On Map")
+        pick_button.clicked.connect(lambda: self.begin_point_pick(target))
+        selected_button = QPushButton("From Selected Feature")
+        selected_button.clicked.connect(lambda: self.use_selected_feature_for_target(target))
+        button_row.addWidget(pick_button)
+        button_row.addWidget(selected_button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+        return group
+
     def _build_batch_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -977,8 +1219,11 @@ class NetweevilDock(QDockWidget):
             self.service_info = None
             self.dataset_id_edit.setText("")
             self.default_profile_edit.setText("")
+            self.loaded_transit_feeds_edit.setText("")
             self.dataset_bounds_edit.setText("")
             self.profile_combo.clear()
+            self.transit_feed_combo.clear()
+            self.transit_feed_combo.addItem("No transit feeds loaded", "")
             self.service_status_label.setText(
                 "Service status: unavailable at {}.".format(self.api_base_url() or "configured URL")
             )
@@ -1009,6 +1254,7 @@ class NetweevilDock(QDockWidget):
         self.dataset_bounds_edit.setText(bounds_text)
 
         profiles = service.get("loaded_profiles", [])
+        transit_feeds = service.get("loaded_transit_feeds", [])
         self.profile_combo.clear()
         default_profile_id = service.get("default_profile_id", "")
         self.profile_combo.addItem(
@@ -1024,6 +1270,27 @@ class NetweevilDock(QDockWidget):
         desired_index = self.profile_combo.findData(previous_profile_id)
         if desired_index >= 0:
             self.profile_combo.setCurrentIndex(desired_index)
+
+        previous_feed_id = self.read_setting("transit_feed_id", "")
+        self.transit_feed_combo.clear()
+        if transit_feeds:
+            for feed in transit_feeds:
+                label = "{} ({} stops, {} routes)".format(
+                    feed.get("feed_id", "unknown"),
+                    feed.get("stop_count", 0),
+                    feed.get("route_count", 0),
+                )
+                self.transit_feed_combo.addItem(label, feed.get("feed_id", ""))
+            desired_feed_index = self.transit_feed_combo.findData(previous_feed_id)
+            if desired_feed_index >= 0:
+                self.transit_feed_combo.setCurrentIndex(desired_feed_index)
+        else:
+            self.transit_feed_combo.addItem("No transit feeds loaded", "")
+        self.loaded_transit_feeds_edit.setText(
+            ", ".join(feed.get("feed_id", "unknown") for feed in transit_feeds)
+            if transit_feeds
+            else "none"
+        )
 
         self.service_status_label.setText(
             "Service status: connected to {} with dataset '{}'.".format(
@@ -1081,6 +1348,12 @@ class NetweevilDock(QDockWidget):
             self.pick_status_label.setText("Click the start point on the map.")
         elif target == PickTarget.DESTINATION:
             self.pick_status_label.setText("Click the end point on the map.")
+        elif target == PickTarget.TRANSIT_ORIGIN:
+            self.transit_pick_status_label.setText("Click the transit origin on the map.")
+        elif target == PickTarget.TRANSIT_DESTINATION:
+            self.transit_pick_status_label.setText(
+                "Click the transit destination on the map."
+            )
         else:
             self.service_area_pick_status_label.setText(
                 "Click one service-area origin on the map."
@@ -1107,12 +1380,6 @@ class NetweevilDock(QDockWidget):
             self.finish_point_pick()
             return
 
-        self.set_route_point(
-            self.pick_target,
-            lon=wgs84_point.x(),
-            lat=wgs84_point.y(),
-            point_id=self.default_point_id(self.pick_target),
-        )
         if self.pick_target == PickTarget.SERVICE_AREA_ORIGIN:
             self.append_service_area_origin(
                 self.default_point_id(self.pick_target),
@@ -1122,7 +1389,31 @@ class NetweevilDock(QDockWidget):
             self.service_area_pick_status_label.setText(
                 "Added one service-area origin from the map canvas."
             )
+        elif self.pick_target in [
+            PickTarget.TRANSIT_ORIGIN,
+            PickTarget.TRANSIT_DESTINATION,
+        ]:
+            self.set_transit_point(
+                self.pick_target,
+                lon=wgs84_point.x(),
+                lat=wgs84_point.y(),
+                point_id=self.default_point_id(self.pick_target),
+            )
+            label = (
+                "origin"
+                if self.pick_target == PickTarget.TRANSIT_ORIGIN
+                else "destination"
+            )
+            self.transit_pick_status_label.setText(
+                "Set the transit {} from the map canvas.".format(label)
+            )
         else:
+            self.set_route_point(
+                self.pick_target,
+                lon=wgs84_point.x(),
+                lat=wgs84_point.y(),
+                point_id=self.default_point_id(self.pick_target),
+            )
             label = "start" if self.pick_target == PickTarget.ORIGIN else "end"
             self.pick_status_label.setText(
                 "Set the {} point from the map canvas.".format(label)
@@ -1167,13 +1458,22 @@ class NetweevilDock(QDockWidget):
             return
 
         point_id = self.feature_label(feature, target)
-        self.set_route_point(target, wgs84_point.x(), wgs84_point.y(), point_id)
-        label = "start" if target == PickTarget.ORIGIN else "end"
-        self.pick_status_label.setText(
-            "Set the {} point from the selected feature in '{}'.".format(
-                label, layer.name()
+        if target in [PickTarget.TRANSIT_ORIGIN, PickTarget.TRANSIT_DESTINATION]:
+            self.set_transit_point(target, wgs84_point.x(), wgs84_point.y(), point_id)
+            label = "origin" if target == PickTarget.TRANSIT_ORIGIN else "destination"
+            self.transit_pick_status_label.setText(
+                "Set the transit {} from the selected feature in '{}'.".format(
+                    label, layer.name()
+                )
             )
-        )
+        else:
+            self.set_route_point(target, wgs84_point.x(), wgs84_point.y(), point_id)
+            label = "start" if target == PickTarget.ORIGIN else "end"
+            self.pick_status_label.setText(
+                "Set the {} point from the selected feature in '{}'.".format(
+                    label, layer.name()
+                )
+            )
 
     def feature_point(self, feature):
         geometry = feature.geometry()
@@ -1210,6 +1510,12 @@ class NetweevilDock(QDockWidget):
                 ]
             )
             return "origin_{:03d}".format(count + 1)
+        if target == PickTarget.TRANSIT_ORIGIN:
+            existing = self.transit_origin_id_edit.text().strip()
+            return existing or "origin"
+        if target == PickTarget.TRANSIT_DESTINATION:
+            existing = self.transit_destination_id_edit.text().strip()
+            return existing or "destination"
         existing = self.destination_id_edit.text().strip()
         return existing or "destination"
 
@@ -1225,6 +1531,16 @@ class NetweevilDock(QDockWidget):
             self.destination_lon_edit.setText("{:.6f}".format(lon))
             self.destination_lat_edit.setText("{:.6f}".format(lat))
         self.update_point_markers()
+
+    def set_transit_point(self, target, lon, lat, point_id):
+        if target == PickTarget.TRANSIT_ORIGIN:
+            self.transit_origin_id_edit.setText(point_id)
+            self.transit_origin_lon_edit.setText("{:.6f}".format(lon))
+            self.transit_origin_lat_edit.setText("{:.6f}".format(lat))
+        else:
+            self.transit_destination_id_edit.setText(point_id)
+            self.transit_destination_lon_edit.setText("{:.6f}".format(lon))
+            self.transit_destination_lat_edit.setText("{:.6f}".format(lat))
 
     def swap_route_points(self):
         origin = (
@@ -1257,6 +1573,38 @@ class NetweevilDock(QDockWidget):
             widget.clear()
         self.pick_status_label.setText("Pick Start or Pick End, then click on the map.")
         self.update_point_markers()
+
+    def swap_transit_points(self):
+        origin = (
+            self.transit_origin_id_edit.text(),
+            self.transit_origin_lon_edit.text(),
+            self.transit_origin_lat_edit.text(),
+        )
+        destination = (
+            self.transit_destination_id_edit.text(),
+            self.transit_destination_lon_edit.text(),
+            self.transit_destination_lat_edit.text(),
+        )
+        self.transit_origin_id_edit.setText(destination[0])
+        self.transit_origin_lon_edit.setText(destination[1])
+        self.transit_origin_lat_edit.setText(destination[2])
+        self.transit_destination_id_edit.setText(origin[0])
+        self.transit_destination_lon_edit.setText(origin[1])
+        self.transit_destination_lat_edit.setText(origin[2])
+
+    def clear_transit_points(self):
+        for widget in [
+            self.transit_origin_id_edit,
+            self.transit_origin_lon_edit,
+            self.transit_origin_lat_edit,
+            self.transit_destination_id_edit,
+            self.transit_destination_lon_edit,
+            self.transit_destination_lat_edit,
+        ]:
+            widget.clear()
+        self.transit_pick_status_label.setText(
+            "Pick Origin or Pick Destination, then click on the map."
+        )
 
     def clear_service_area_origins(self):
         self.service_area_origins_edit.clear()
@@ -1419,6 +1767,20 @@ class NetweevilDock(QDockWidget):
 
     def prepare_next_route_defaults(self):
         self.route_id_edit.setText(self.next_numbered_id(self.route_id_edit.text(), "qgis_route"))
+
+    def transit_output_path_for_id(self, route_id):
+        clean_route_id = (route_id or "qgis_transit_001").strip() or "qgis_transit_001"
+        return ".netweevil/runs/transit/{}.json".format(clean_route_id)
+
+    def sync_transit_output_path_from_route_id(self, *_args):
+        self.transit_output_path_edit.setText(
+            self.transit_output_path_for_id(self.transit_route_id_edit.text())
+        )
+
+    def prepare_next_transit_defaults(self):
+        self.transit_route_id_edit.setText(
+            self.next_numbered_id(self.transit_route_id_edit.text(), "qgis_transit")
+        )
 
     def selected_breakdown_metrics(self, distance_check, time_check):
         metrics = []
@@ -1734,6 +2096,64 @@ class NetweevilDock(QDockWidget):
             "returns": self.build_route_returns(),
         }
 
+    def selected_transit_feed_id(self):
+        return self.transit_feed_combo.currentData() or ""
+
+    def selected_transit_modes(self):
+        modes = [
+            mode
+            for mode, check in sorted(self.transit_mode_checks.items())
+            if check.isChecked()
+        ]
+        if not modes:
+            raise ValueError("Choose at least one transit mode.")
+        return modes
+
+    def build_transit_request(self):
+        return {
+            "route_id": self.transit_route_id_edit.text().strip() or "qgis_transit",
+            "origin": {
+                "id": self.transit_origin_id_edit.text().strip() or "origin",
+                "lon": float(self.transit_origin_lon_edit.text().strip()),
+                "lat": float(self.transit_origin_lat_edit.text().strip()),
+            },
+            "destination": {
+                "id": self.transit_destination_id_edit.text().strip() or "destination",
+                "lon": float(self.transit_destination_lon_edit.text().strip()),
+                "lat": float(self.transit_destination_lat_edit.text().strip()),
+            },
+            "time": {
+                "datetime": self.transit_datetime_edit.text().strip(),
+                "arrive_by": False,
+                "search_window_s": self.parse_optional_int(
+                    self.transit_search_window_edit.text(),
+                    "Transit search window",
+                )
+                or 7200,
+            },
+            "modes": {
+                "access": ["walk"],
+                "egress": ["walk"],
+                "transit": self.selected_transit_modes(),
+                "walk_speed_kph": float(self.transit_walk_speed_edit.text().strip()),
+                "max_access_distance_m": float(
+                    self.transit_max_access_distance_edit.text().strip()
+                ),
+                "max_egress_distance_m": float(
+                    self.transit_max_egress_distance_edit.text().strip()
+                ),
+                "max_transfer_distance_m": float(
+                    self.transit_max_transfer_distance_edit.text().strip()
+                ),
+                "board_slack_s": int(self.transit_board_slack_edit.text().strip()),
+                "transfer_slack_s": int(self.transit_transfer_slack_edit.text().strip()),
+                "max_transfers": int(self.transit_max_transfers_edit.text().strip()),
+            },
+            "returns": {
+                "include_geometry": self.transit_include_geometry_check.isChecked()
+            },
+        }
+
     def write_route_request(self):
         try:
             request = self.build_route_request()
@@ -1784,6 +2204,48 @@ class NetweevilDock(QDockWidget):
         ):
             if self.route_auto_increment_check.isChecked():
                 self.prepare_next_route_defaults()
+
+    def write_transit_request(self):
+        try:
+            request = self.build_transit_request()
+        except ValueError as exc:
+            self.alert("Invalid transit request values: {}".format(exc))
+            return
+
+        request_path = self.resolve_local_path(self.transit_request_path_edit.text())
+        request_path.parent.mkdir(parents=True, exist_ok=True)
+        request_path.write_text(json.dumps(request, indent=2), encoding="utf-8")
+        self.log("Wrote transit route request to {}".format(request_path))
+        self.save_settings()
+
+    def run_transit_route(self):
+        if self.service_info is None:
+            self.alert("Refresh the API service first.")
+            return
+        feed_id = self.selected_transit_feed_id()
+        if not feed_id:
+            self.alert(
+                "The API has no loaded transit feed. Start it with --transit-feed <feed_id>."
+            )
+            return
+        try:
+            request = self.build_transit_request()
+        except ValueError as exc:
+            self.alert("Invalid transit request values: {}".format(exc))
+            return
+
+        payload = {"feed_id": feed_id, "request": request}
+        self.save_settings()
+        if self.execute_api_request(
+            endpoint="/v1/transit-route",
+            payload=payload,
+            output_path=self.transit_output_path_edit.text(),
+            layer_name=request["route_id"] or "netweevil_transit",
+            analysis_kind="transit_route",
+            response_format_override=ResponseFormat.JSON,
+        ):
+            if self.transit_auto_increment_check.isChecked():
+                self.prepare_next_transit_defaults()
 
     def run_od(self):
         if self.service_info is None:
@@ -2081,6 +2543,10 @@ class NetweevilDock(QDockWidget):
             self.load_route_layers(response_json, layer_name)
             return True
 
+        if analysis_kind == "transit_route":
+            self.load_transit_route_layers(response_json, layer_name)
+            return True
+
         geojson = self.analysis_json_to_geojson(analysis_kind, response_json)
         if geojson is None:
             self.log(
@@ -2098,6 +2564,216 @@ class NetweevilDock(QDockWidget):
         if loaded_layer is not None:
             self.set_last_output_layers([loaded_layer])
         return True
+
+    def refresh_saved_runs(self):
+        directory = self.resolve_local_path(self.saved_runs_directory_edit.text())
+        self.saved_runs_combo.clear()
+        if not directory.exists():
+            self.saved_runs_combo.addItem("Runs directory does not exist", "")
+            self.log("Runs directory does not exist: {}".format(directory), Qgis.Warning)
+            return
+
+        candidates = []
+        for path in directory.rglob("*"):
+            if not path.is_file():
+                continue
+            if path.suffix.lower() not in [".json", ".geojson"]:
+                continue
+            try:
+                modified = path.stat().st_mtime
+            except OSError:
+                modified = 0
+            candidates.append((modified, path))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+
+        if not candidates:
+            self.saved_runs_combo.addItem("No JSON or GeoJSON runs found", "")
+            return
+
+        for _modified, path in candidates:
+            try:
+                label = path.relative_to(self.workspace_root())
+            except ValueError:
+                label = path
+            self.saved_runs_combo.addItem(str(label), str(path))
+        self.log("Found {} saved run file(s).".format(len(candidates)))
+
+    def use_selected_saved_run(self):
+        path = self.saved_runs_combo.currentData()
+        if not path:
+            self.alert("Refresh runs and choose a saved run first.")
+            return
+        self.saved_run_path_edit.setText(path)
+
+    def load_saved_run(self):
+        raw_path = self.saved_run_path_edit.text().strip() or self.saved_runs_combo.currentData()
+        if not raw_path:
+            self.alert("Choose a saved run file first.")
+            return
+        path = self.resolve_local_path(raw_path)
+        explicit_kind = self.saved_run_kind_combo.currentData() or None
+        try:
+            self.load_saved_run_path(path, explicit_kind)
+        except Exception as exc:
+            self.alert("Failed to load saved run: {}".format(exc))
+
+    def load_saved_run_path(self, path, explicit_kind=None):
+        path = Path(path).expanduser()
+        if not path.exists():
+            raise ValueError("file does not exist: {}".format(path))
+
+        suffix = path.suffix.lower()
+        if suffix == ".geojson":
+            geojson = self.read_json(path)
+            kind = explicit_kind or self.infer_geojson_analysis_kind(geojson)
+            layer_name = self.saved_layer_name(path, kind, geojson)
+            self.log_geojson_messages(kind or "saved_run", geojson)
+            if kind == "service_area":
+                self.load_service_area_layers(geojson, layer_name)
+            else:
+                loaded_layer = self.load_output_layer(path, layer_name)
+                if loaded_layer is not None:
+                    self.set_last_output_layers([loaded_layer])
+            self.log("Loaded saved run from {}".format(path))
+            self.save_settings()
+            return
+
+        if suffix != ".json":
+            raise ValueError("saved runs must be .json or .geojson")
+
+        payload, kind, source_path = self.load_saved_json_payload(path, explicit_kind)
+        kind = kind or explicit_kind or self.infer_json_analysis_kind(payload)
+        if not kind:
+            raise ValueError("could not infer run kind; choose one from the Kind field")
+
+        self.log_analysis_messages(kind, payload)
+        layer_name = self.saved_json_layer_name(source_path, kind, payload)
+        if kind == "route":
+            self.load_route_layers(payload, layer_name)
+        elif kind == "transit_route":
+            self.load_transit_route_layers(payload, layer_name)
+        else:
+            geojson = self.analysis_json_to_geojson(kind, payload)
+            if geojson is None:
+                raise ValueError("saved {} result has no loadable geometry".format(kind))
+            if kind == "service_area":
+                self.load_service_area_layers(geojson, layer_name)
+            else:
+                temp_path = self.write_temp_geojson(layer_name, geojson)
+                loaded_layer = self.load_output_layer(temp_path, layer_name)
+                if loaded_layer is not None:
+                    self.set_last_output_layers([loaded_layer])
+        self.log("Loaded saved {} run from {}".format(kind, source_path))
+        self.save_settings()
+
+    def load_saved_json_payload(self, path, explicit_kind=None):
+        parsed = self.read_json(path)
+        if self.is_run_manifest(parsed):
+            result_path = self.resolve_manifest_result_path(parsed)
+            result = self.read_json(result_path)
+            kind = explicit_kind or parsed.get("run_kind")
+            service = {
+                "dataset_id": parsed.get("dataset_id"),
+                "profile_id": parsed.get("profile_id"),
+                "profile_hash": (parsed.get("methods_summary") or {}).get(
+                    "locked_profile_hash"
+                ),
+                "route_engine": (parsed.get("algorithm") or {}).get("engine"),
+                "batch_engine": (parsed.get("algorithm") or {}).get("engine"),
+                "acceleration": (parsed.get("algorithm") or {}).get("acceleration"),
+            }
+            return {"service": service, "result": result}, kind, result_path
+
+        if isinstance(parsed, dict) and "service" in parsed and "result" in parsed:
+            return parsed, explicit_kind or self.infer_json_analysis_kind(parsed), path
+
+        return (
+            {"service": {}, "result": parsed},
+            explicit_kind or self.infer_result_analysis_kind(parsed),
+            path,
+        )
+
+    def is_run_manifest(self, value):
+        return (
+            isinstance(value, dict)
+            and value.get("status") == "succeeded"
+            and value.get("run_kind")
+            and value.get("result_path")
+        )
+
+    def resolve_manifest_result_path(self, manifest):
+        raw = str(manifest.get("result_path") or "").strip()
+        if not raw:
+            raise ValueError("run manifest has no result_path")
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = self.workspace_root() / path
+        if path.exists():
+            return path
+
+        alternate = Path(str(path).replace("/.netan/", "/.netweevil/"))
+        if alternate.exists():
+            return alternate
+
+        fallback = self.workspace_root() / ".netweevil" / "runs" / path.name
+        if fallback.exists():
+            return fallback
+        raise ValueError("run result file does not exist: {}".format(path))
+
+    def infer_json_analysis_kind(self, payload):
+        if isinstance(payload, dict) and "result" in payload:
+            return self.infer_result_analysis_kind(payload.get("result") or {})
+        return self.infer_result_analysis_kind(payload)
+
+    def infer_result_analysis_kind(self, result):
+        if not isinstance(result, dict):
+            return None
+        if "legs" in result and "summary" in result:
+            return "transit_route"
+        if "pairs" in result:
+            return "od"
+        if "cells" in result:
+            return "matrix"
+        if "analysis_id" in result and "features" in result:
+            return "service_area"
+        if "route_id" in result and "origin" in result and "destination" in result:
+            return "route"
+        return None
+
+    def infer_geojson_analysis_kind(self, geojson):
+        metadata = geojson.get("metadata") if isinstance(geojson, dict) else {}
+        if isinstance(metadata, dict) and metadata.get("analysis_id"):
+            return "service_area"
+        features = geojson.get("features") if isinstance(geojson, dict) else []
+        if not features:
+            return None
+        properties = (features[0] or {}).get("properties") or {}
+        if properties.get("geometry_type") in ["network", "polygon"]:
+            return "service_area"
+        if properties.get("pair_id"):
+            return "od"
+        if properties.get("origin_id") and properties.get("destination_id"):
+            return "matrix"
+        if properties.get("route_id"):
+            return "route"
+        return None
+
+    def saved_layer_name(self, path, kind, geojson):
+        metadata = geojson.get("metadata") if isinstance(geojson, dict) else {}
+        if isinstance(metadata, dict):
+            for key in ["analysis_id", "route_id"]:
+                value = metadata.get(key)
+                if value:
+                    return str(value)
+        return "{}_{}".format(kind or "saved_run", path.stem)
+
+    def saved_json_layer_name(self, path, kind, payload):
+        result = payload.get("result") or {}
+        for key in ["route_id", "analysis_id"]:
+            value = result.get(key)
+            if value:
+                return str(value)
+        return "{}_{}".format(kind or "saved_run", Path(path).stem)
 
     def load_od_document(self, path):
         suffix = path.suffix.lower()
@@ -2544,6 +3220,82 @@ class NetweevilDock(QDockWidget):
             )
         return {"type": "FeatureCollection", "features": features}
 
+    def transit_route_coordinates(self, result):
+        coordinates = []
+        for leg in result.get("legs") or []:
+            geometry = leg.get("geometry") or []
+            if not geometry:
+                continue
+            if coordinates and geometry[0] == coordinates[-1]:
+                coordinates.extend(geometry[1:])
+            else:
+                coordinates.extend(geometry)
+        return self.dedupe_coordinates(coordinates)
+
+    def transit_summary_feature_collection(self, service, result):
+        summary = result.get("summary") or {}
+        coordinates = self.transit_route_coordinates(result)
+        return {
+            "type": "FeatureCollection",
+            "features": [
+                {
+                    "type": "Feature",
+                    "geometry": self.item_geometry(coordinates),
+                    "properties": {
+                        "feed_id": service.get("feed_id"),
+                        "service_start_date": service.get("service_start_date"),
+                        "service_days": service.get("service_days"),
+                        "route_engine": service.get("route_engine"),
+                        "route_id": result.get("route_id"),
+                        "outcome": result.get("outcome"),
+                        "departure_s": summary.get("departure_s"),
+                        "arrival_s": summary.get("arrival_s"),
+                        "total_travel_time_s": summary.get("total_travel_time_s"),
+                        "transit_time_s": summary.get("transit_time_s"),
+                        "access_egress_time_s": summary.get("access_egress_time_s"),
+                        "transfer_time_s": summary.get("transfer_time_s"),
+                        "wait_time_s": summary.get("wait_time_s"),
+                        "boarding_count": summary.get("boarding_count"),
+                        "diagnostics_json": self.json_text(result.get("diagnostics") or []),
+                    },
+                }
+            ],
+        }
+
+    def transit_leg_feature_collection(self, service, result):
+        features = []
+        for index, leg in enumerate(result.get("legs") or [], start=1):
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": self.item_geometry(leg.get("geometry")),
+                    "properties": {
+                        "feed_id": service.get("feed_id"),
+                        "route_id": result.get("route_id"),
+                        "leg_index": index,
+                        "leg_type": leg.get("leg_type"),
+                        "from_id": leg.get("from_id"),
+                        "to_id": leg.get("to_id"),
+                        "from_name": leg.get("from_name"),
+                        "to_name": leg.get("to_name"),
+                        "departure_s": leg.get("departure_s"),
+                        "arrival_s": leg.get("arrival_s"),
+                        "duration_s": (
+                            leg.get("arrival_s") - leg.get("departure_s")
+                            if leg.get("arrival_s") is not None
+                            and leg.get("departure_s") is not None
+                            else None
+                        ),
+                        "mode": leg.get("mode"),
+                        "gtfs_route_id": leg.get("route_id"),
+                        "route_short_name": leg.get("route_short_name"),
+                        "trip_id": leg.get("trip_id"),
+                        "headsign": leg.get("headsign"),
+                    },
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
+
     def apply_route_line_style(self, layer, color, width, line_style="solid"):
         if QgsWkbTypes.geometryType(layer.wkbType()) != QgsWkbTypes.LineGeometry:
             return
@@ -2555,6 +3307,28 @@ class NetweevilDock(QDockWidget):
             }
         )
         layer.renderer().setSymbol(symbol)
+        layer.triggerRepaint()
+
+    def apply_transit_leg_style(self, layer):
+        if QgsWkbTypes.geometryType(layer.wkbType()) != QgsWkbTypes.LineGeometry:
+            return
+        specs = {
+            "access": ("#2b8a3e", "dash"),
+            "egress": ("#2b8a3e", "dash"),
+            "transfer": ("#d9480f", "dot"),
+            "transit": ("#1971c2", "solid"),
+        }
+        categories = []
+        for leg_type, (color, line_style) in specs.items():
+            symbol = QgsLineSymbol.createSimple(
+                {
+                    "line_color": color,
+                    "line_width": "1.0" if leg_type == "transit" else "0.8",
+                    "line_style": line_style,
+                }
+            )
+            categories.append(QgsRendererCategory(leg_type, symbol, leg_type))
+        layer.setRenderer(QgsCategorizedSymbolRenderer("leg_type", categories))
         layer.triggerRepaint()
 
     def load_route_layers(self, response_json, layer_name):
@@ -2647,6 +3421,60 @@ class NetweevilDock(QDockWidget):
             self.set_last_output_layers(loaded_layers)
         else:
             self.log("Route response had no loadable layers or tables.", Qgis.Warning)
+
+    def load_transit_route_layers(self, response_json, layer_name):
+        service = response_json.get("service") or {}
+        result = response_json.get("result") or {}
+        route_id = result.get("route_id") or layer_name or "netweevil_transit"
+        root = QgsProject.instance().layerTreeRoot()
+        existing_group = root.findGroup(route_id)
+        if existing_group is not None:
+            for tree_layer in existing_group.findLayers():
+                QgsProject.instance().removeMapLayer(tree_layer.layerId())
+            root.removeChildNode(existing_group)
+        group = root.addGroup(route_id)
+
+        layer_specs = [
+            (
+                "transit_route",
+                self.transit_summary_feature_collection(service, result),
+                "#0b7285",
+                1.6,
+                "solid",
+            ),
+            ("legs", self.transit_leg_feature_collection(service, result), None, None, None),
+        ]
+
+        loaded_layers = []
+        for sublayer_name, geojson, color, width, line_style in layer_specs:
+            features = geojson.get("features") or []
+            if not features:
+                continue
+            temp_path = self.write_temp_geojson(
+                "{}_{}".format(route_id, sublayer_name),
+                geojson,
+            )
+            layer = QgsVectorLayer(str(temp_path), sublayer_name, "ogr")
+            if not layer.isValid():
+                self.log("Failed to load layer {}".format(temp_path), Qgis.Warning)
+                continue
+            if sublayer_name == "legs":
+                self.apply_transit_leg_style(layer)
+            elif color is not None:
+                self.apply_route_line_style(layer, color, width, line_style)
+            QgsProject.instance().addMapLayer(layer, False)
+            group.addLayer(layer)
+            loaded_layers.append(layer)
+            self.log(
+                "Loaded transit layer '{}' with {} feature(s).".format(
+                    sublayer_name, len(features)
+                )
+            )
+
+        if loaded_layers:
+            self.set_last_output_layers(loaded_layers)
+        else:
+            self.log("Transit route response had no loadable layers.", Qgis.Warning)
 
     def analysis_json_to_geojson(self, analysis_kind, response_json):
         service = response_json.get("service", {})
@@ -2944,6 +3772,12 @@ class NetweevilDock(QDockWidget):
 
         diagnostics = result.get("diagnostics") or []
         for diagnostic in diagnostics:
+            if not isinstance(diagnostic, dict):
+                self.log(
+                    "{} diagnostic: {}".format(analysis_kind, diagnostic),
+                    Qgis.Warning,
+                )
+                continue
             level = Qgis.Warning
             if diagnostic.get("severity") == "error":
                 level = Qgis.Critical
@@ -2988,6 +3822,18 @@ class NetweevilDock(QDockWidget):
                     result.get("skipped_origin_count", 0),
                     result.get("fallback_origin_count", 0),
                     len(result.get("features") or []),
+                )
+            )
+            return
+
+        if analysis_kind == "transit_route":
+            summary = result.get("summary") or {}
+            self.log(
+                "transit_route outcome={} legs={} boardings={} total_time_s={}.".format(
+                    result.get("outcome", "unknown"),
+                    len(result.get("legs") or []),
+                    summary.get("boarding_count", 0),
+                    summary.get("total_travel_time_s"),
                 )
             )
             return
@@ -3262,6 +4108,9 @@ class NetweevilDock(QDockWidget):
             "timeout_seconds": self.timeout_seconds_edit.text().strip(),
             "response_format": self.response_format(),
             "profile_id": self.selected_profile_id() or "",
+            "saved_runs_directory": self.saved_runs_directory_edit.text().strip(),
+            "saved_run_path": self.saved_run_path_edit.text().strip(),
+            "saved_run_kind": self.saved_run_kind_combo.currentData() or "",
             "route_id": self.route_id_edit.text().strip(),
             "route_auto_increment": self.route_auto_increment_check.isChecked(),
             "route_auto_output_path": self.route_auto_output_path_check.isChecked(),
@@ -3282,6 +4131,28 @@ class NetweevilDock(QDockWidget):
             "destination_id": self.destination_id_edit.text().strip(),
             "destination_lon": self.destination_lon_edit.text().strip(),
             "destination_lat": self.destination_lat_edit.text().strip(),
+            "transit_feed_id": self.selected_transit_feed_id(),
+            "transit_route_id": self.transit_route_id_edit.text().strip(),
+            "transit_auto_increment": self.transit_auto_increment_check.isChecked(),
+            "transit_datetime": self.transit_datetime_edit.text().strip(),
+            "transit_arrive_by": self.transit_arrive_by_check.isChecked(),
+            "transit_search_window": self.transit_search_window_edit.text().strip(),
+            "transit_output_path": self.transit_output_path_edit.text().strip(),
+            "transit_request_path": self.transit_request_path_edit.text().strip(),
+            "transit_origin_id": self.transit_origin_id_edit.text().strip(),
+            "transit_origin_lon": self.transit_origin_lon_edit.text().strip(),
+            "transit_origin_lat": self.transit_origin_lat_edit.text().strip(),
+            "transit_destination_id": self.transit_destination_id_edit.text().strip(),
+            "transit_destination_lon": self.transit_destination_lon_edit.text().strip(),
+            "transit_destination_lat": self.transit_destination_lat_edit.text().strip(),
+            "transit_walk_speed": self.transit_walk_speed_edit.text().strip(),
+            "transit_max_access_distance": self.transit_max_access_distance_edit.text().strip(),
+            "transit_max_egress_distance": self.transit_max_egress_distance_edit.text().strip(),
+            "transit_max_transfer_distance": self.transit_max_transfer_distance_edit.text().strip(),
+            "transit_board_slack": self.transit_board_slack_edit.text().strip(),
+            "transit_transfer_slack": self.transit_transfer_slack_edit.text().strip(),
+            "transit_max_transfers": self.transit_max_transfers_edit.text().strip(),
+            "transit_include_geometry": self.transit_include_geometry_check.isChecked(),
             "od_pairs_path": self.od_pairs_path_edit.text().strip(),
             "od_output_path": self.od_output_path_edit.text().strip(),
             "matrix_output_path": self.matrix_output_path_edit.text().strip(),
@@ -3311,6 +4182,12 @@ class NetweevilDock(QDockWidget):
         for key, value in values.items():
             settings.setValue("{}/{}".format(SETTINGS_PREFIX, key), value)
 
+        for mode, check in self.transit_mode_checks.items():
+            settings.setValue(
+                "{}/transit_mode_{}".format(SETTINGS_PREFIX, mode),
+                check.isChecked(),
+            )
+
         self.save_advanced_settings(settings, "route", include_failure_modes=True)
         self.save_advanced_settings(settings, "batch", include_failure_modes=True)
         self.save_advanced_settings(settings, "service_area", include_failure_modes=False)
@@ -3339,6 +4216,16 @@ class NetweevilDock(QDockWidget):
         self.set_combo_by_data(
             self.response_format_combo,
             self.read_setting("response_format", ResponseFormat.JSON),
+        )
+        self.saved_runs_directory_edit.setText(
+            self.read_setting(
+                "saved_runs_directory", self.saved_runs_directory_edit.text()
+            )
+        )
+        self.saved_run_path_edit.setText(self.read_setting("saved_run_path", ""))
+        self.set_combo_by_data(
+            self.saved_run_kind_combo,
+            self.read_setting("saved_run_kind", ""),
         )
         self.route_id_edit.setText(self.read_setting("route_id", self.route_id_edit.text()))
         self.route_auto_increment_check.setChecked(
@@ -3391,6 +4278,82 @@ class NetweevilDock(QDockWidget):
         )
         self.destination_lon_edit.setText(self.read_setting("destination_lon", ""))
         self.destination_lat_edit.setText(self.read_setting("destination_lat", ""))
+        self.transit_route_id_edit.setText(
+            self.read_setting("transit_route_id", self.transit_route_id_edit.text())
+        )
+        self.transit_auto_increment_check.setChecked(
+            self.read_bool_setting("transit_auto_increment", True)
+        )
+        self.transit_datetime_edit.setText(
+            self.read_setting("transit_datetime", self.transit_datetime_edit.text())
+        )
+        self.transit_arrive_by_check.setChecked(
+            False
+        )
+        self.transit_search_window_edit.setText(
+            self.read_setting("transit_search_window", self.transit_search_window_edit.text())
+        )
+        self.transit_output_path_edit.setText(
+            self.read_setting("transit_output_path", self.transit_output_path_edit.text())
+        )
+        self.transit_request_path_edit.setText(
+            self.read_setting("transit_request_path", self.transit_request_path_edit.text())
+        )
+        self.transit_origin_id_edit.setText(
+            self.read_setting("transit_origin_id", self.transit_origin_id_edit.text())
+        )
+        self.transit_origin_lon_edit.setText(self.read_setting("transit_origin_lon", ""))
+        self.transit_origin_lat_edit.setText(self.read_setting("transit_origin_lat", ""))
+        self.transit_destination_id_edit.setText(
+            self.read_setting(
+                "transit_destination_id", self.transit_destination_id_edit.text()
+            )
+        )
+        self.transit_destination_lon_edit.setText(
+            self.read_setting("transit_destination_lon", "")
+        )
+        self.transit_destination_lat_edit.setText(
+            self.read_setting("transit_destination_lat", "")
+        )
+        self.transit_walk_speed_edit.setText(
+            self.read_setting("transit_walk_speed", self.transit_walk_speed_edit.text())
+        )
+        self.transit_max_access_distance_edit.setText(
+            self.read_setting(
+                "transit_max_access_distance",
+                self.transit_max_access_distance_edit.text(),
+            )
+        )
+        self.transit_max_egress_distance_edit.setText(
+            self.read_setting(
+                "transit_max_egress_distance",
+                self.transit_max_egress_distance_edit.text(),
+            )
+        )
+        self.transit_max_transfer_distance_edit.setText(
+            self.read_setting(
+                "transit_max_transfer_distance",
+                self.transit_max_transfer_distance_edit.text(),
+            )
+        )
+        self.transit_board_slack_edit.setText(
+            self.read_setting("transit_board_slack", self.transit_board_slack_edit.text())
+        )
+        self.transit_transfer_slack_edit.setText(
+            self.read_setting(
+                "transit_transfer_slack", self.transit_transfer_slack_edit.text()
+            )
+        )
+        self.transit_max_transfers_edit.setText(
+            self.read_setting("transit_max_transfers", self.transit_max_transfers_edit.text())
+        )
+        self.transit_include_geometry_check.setChecked(
+            self.read_bool_setting("transit_include_geometry", True)
+        )
+        for mode, check in self.transit_mode_checks.items():
+            check.setChecked(
+                self.read_bool_setting("transit_mode_{}".format(mode), check.isChecked())
+            )
         self.od_pairs_path_edit.setText(
             self.read_setting("od_pairs_path", self.od_pairs_path_edit.text())
         )
