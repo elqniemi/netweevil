@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::error::Error as StdError;
 use std::fmt;
 use std::fs;
@@ -44,6 +44,46 @@ pub struct RouteRequest {
     pub fallback: FallbackPolicy,
     #[serde(default)]
     pub returns: ReturnConfig,
+    #[serde(default)]
+    pub alternatives: AlternativeRouteOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AlternativeRouteOptions {
+    #[serde(default = "default_alternative_max_routes")]
+    pub max_routes: usize,
+    #[serde(default = "default_alternative_max_cost_ratio")]
+    pub max_cost_ratio: f64,
+    #[serde(default)]
+    pub max_extra_time_s: Option<f64>,
+    #[serde(default)]
+    pub max_extra_distance_m: Option<u64>,
+    #[serde(default = "default_alternative_min_jaccard_distance")]
+    pub min_jaccard_distance: f64,
+}
+
+impl Default for AlternativeRouteOptions {
+    fn default() -> Self {
+        Self {
+            max_routes: default_alternative_max_routes(),
+            max_cost_ratio: default_alternative_max_cost_ratio(),
+            max_extra_time_s: None,
+            max_extra_distance_m: None,
+            min_jaccard_distance: default_alternative_min_jaccard_distance(),
+        }
+    }
+}
+
+fn default_alternative_max_routes() -> usize {
+    1
+}
+
+fn default_alternative_max_cost_ratio() -> f64 {
+    1.35
+}
+
+fn default_alternative_min_jaccard_distance() -> f64 {
+    0.2
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -317,6 +357,8 @@ pub struct OdPairsDocument {
     pub fallback: FallbackPolicy,
     #[serde(default)]
     pub returns: ReturnConfig,
+    #[serde(default)]
+    pub alternatives: AlternativeRouteOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,6 +373,8 @@ pub struct PointSetDocument {
     pub fallback: FallbackPolicy,
     #[serde(default)]
     pub returns: ReturnConfig,
+    #[serde(default)]
+    pub alternatives: AlternativeRouteOptions,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -654,6 +698,7 @@ fn load_od_pairs_csv(raw: &str) -> Result<OdPairsDocument> {
         connectivity: ConnectivityPolicy::default(),
         fallback: FallbackPolicy::default(),
         returns: ReturnConfig::default(),
+        alternatives: AlternativeRouteOptions::default(),
     })
 }
 
@@ -681,6 +726,7 @@ fn load_point_set_csv(raw: &str) -> Result<PointSetDocument> {
         connectivity: ConnectivityPolicy::default(),
         fallback: FallbackPolicy::default(),
         returns: ReturnConfig::default(),
+        alternatives: AlternativeRouteOptions::default(),
     })
 }
 
@@ -769,6 +815,7 @@ fn parse_structured_point_set(parsed: PointSetFile) -> PointSetDocument {
             connectivity: ConnectivityPolicy::default(),
             fallback: FallbackPolicy::default(),
             returns: ReturnConfig::default(),
+            alternatives: AlternativeRouteOptions::default(),
         },
     }
 }
@@ -782,6 +829,7 @@ fn parse_structured_od_pairs(parsed: OdPairsFile) -> OdPairsDocument {
             connectivity: ConnectivityPolicy::default(),
             fallback: FallbackPolicy::default(),
             returns: ReturnConfig::default(),
+            alternatives: AlternativeRouteOptions::default(),
         },
     }
 }
@@ -844,6 +892,17 @@ fn merge_point_set_fallback_policy(
     right: &FallbackPolicy,
 ) -> FallbackPolicy {
     if *left == FallbackPolicy::default() {
+        right.clone()
+    } else {
+        left.clone()
+    }
+}
+
+fn merge_point_set_alternatives(
+    left: &AlternativeRouteOptions,
+    right: &AlternativeRouteOptions,
+) -> AlternativeRouteOptions {
+    if *left == AlternativeRouteOptions::default() {
         right.clone()
     } else {
         left.clone()
@@ -998,6 +1057,31 @@ pub struct RouteResult {
     pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
     pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<RouteAlternative>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteAlternative {
+    pub alternative_index: u32,
+    pub rank: u32,
+    pub summary: RouteSummary,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub node_path: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edge_path: Vec<u32>,
+    #[serde(default)]
+    pub geometry: Option<Vec<[f64; 2]>>,
+    #[serde(default)]
+    pub segments: Option<Vec<RouteSegment>>,
+    #[serde(default)]
+    pub breakdowns: Option<RouteBreakdowns>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub violations: Vec<RouteViolation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AnalysisDiagnostic>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1072,6 +1156,8 @@ pub struct OdPairResult {
     pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<BatchAlternativeResult>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1129,6 +1215,26 @@ pub struct MatrixCellResult {
     pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<BatchAlternativeResult>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchAlternativeResult {
+    pub alternative_index: u32,
+    pub rank: u32,
+    #[serde(default)]
+    pub total_distance_m: Option<u64>,
+    #[serde(default)]
+    pub total_travel_time_s: Option<f64>,
+    #[serde(default)]
+    pub total_generalized_cost: Option<f64>,
+    #[serde(default)]
+    pub geometry: Option<Vec<[f64; 2]>>,
+    #[serde(default)]
+    pub violation_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub violation_types: Vec<RouteViolationType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1460,6 +1566,7 @@ fn execute_od_with_graph(
                 &document.connectivity,
                 &document.fallback,
                 &document.returns,
+                &document.alternatives,
                 &unique_origin_candidates,
                 *origin_set_id,
                 &unique_destination_candidates,
@@ -1478,6 +1585,7 @@ fn execute_od_with_graph(
                 }
                 let ignored = matches!(status, BatchItemStatus::Ignored);
                 let error = batch_ignored_message(&route);
+                let alternatives = batch_alternatives_from_route(&route, ignored);
                 let geometry = route.geometry;
                 let diagnostics = route.diagnostics;
                 pairs.push(OdPairResult {
@@ -1506,6 +1614,7 @@ fn execute_od_with_graph(
                     geometry,
                     diagnostics,
                     error,
+                    alternatives,
                 });
             }
             Err(error) => {
@@ -1533,6 +1642,7 @@ fn execute_od_with_graph(
                     geometry: None,
                     diagnostics,
                     error: Some(error.to_string()),
+                    alternatives: Vec::new(),
                 });
             }
         }
@@ -1573,6 +1683,8 @@ fn execute_matrix_with_graph(
     let connectivity =
         merge_point_set_connectivity_policy(&origins.connectivity, &destinations.connectivity);
     let fallback = merge_point_set_fallback_policy(&origins.fallback, &destinations.fallback);
+    let alternatives =
+        merge_point_set_alternatives(&origins.alternatives, &destinations.alternatives);
     let origin_snaps = presnap_point_set(
         topology,
         routing_graph,
@@ -1616,6 +1728,7 @@ fn execute_matrix_with_graph(
                     &connectivity,
                     &fallback,
                     &returns,
+                    &alternatives,
                     &unique_origin_candidates,
                     *origin_set_id,
                     &unique_destination_candidates,
@@ -1634,6 +1747,7 @@ fn execute_matrix_with_graph(
                     }
                     let ignored = matches!(status, BatchItemStatus::Ignored);
                     let error = batch_ignored_message(&route);
+                    let alternatives = batch_alternatives_from_route(&route, ignored);
                     let geometry = route.geometry;
                     let diagnostics = route.diagnostics;
                     cells.push(MatrixCellResult {
@@ -1662,6 +1776,7 @@ fn execute_matrix_with_graph(
                         geometry,
                         diagnostics,
                         error,
+                        alternatives,
                     });
                 }
                 Err(error) => {
@@ -1688,6 +1803,7 @@ fn execute_matrix_with_graph(
                         geometry: None,
                         diagnostics,
                         error: Some(error.to_string()),
+                        alternatives: Vec::new(),
                     });
                 }
             }
@@ -3345,6 +3461,7 @@ fn execute_route_with_graph(
         &request.connectivity,
         &request.fallback,
         &request.returns,
+        &request.alternatives,
         &origin_candidates,
         &destination_candidates,
         edge_names,
@@ -3360,6 +3477,7 @@ fn execute_route_with_candidates(
     connectivity: &ConnectivityPolicy,
     fallback: &FallbackPolicy,
     returns: &ReturnConfig,
+    alternatives: &AlternativeRouteOptions,
     origin_candidates: &[SnappedPoint],
     destination_candidates: &[SnappedPoint],
     edge_names: Option<&[String]>,
@@ -3384,6 +3502,7 @@ fn execute_route_with_candidates(
                 connectivity,
                 fallback,
                 returns,
+                alternatives,
                 origin_candidates,
                 destination_candidates,
                 edge_names,
@@ -3531,10 +3650,10 @@ fn execute_route_with_candidates(
     let breakdowns = build_breakdowns(topology, metrics, &path.edge_indexes, returns);
     let warnings = execution_warnings(metrics);
 
-    Ok(RouteResult {
+    let mut result = RouteResult {
         route_id: route_id.to_string(),
-        origin,
-        destination,
+        origin: origin.clone(),
+        destination: destination.clone(),
         outcome: if !analysis.violations.is_empty() || hop_info.fallback_used {
             AnalysisOutcome::Degraded
         } else {
@@ -3563,7 +3682,354 @@ fn execute_route_with_candidates(
             merge_warnings(warnings, analysis.warnings),
             hop_info.warnings,
         ),
+        alternatives: Vec::new(),
+    };
+    result.alternatives = build_route_alternatives(
+        topology,
+        metrics,
+        routing_graph,
+        snap_max_distance_m,
+        connectivity,
+        fallback,
+        returns,
+        alternatives,
+        std::slice::from_ref(&origin),
+        std::slice::from_ref(&destination),
+        &path,
+        &result.summary,
+        edge_names,
+    )?;
+    Ok(result)
+}
+
+fn build_route_alternatives(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    snap_max_distance_m: f64,
+    connectivity: &ConnectivityPolicy,
+    fallback: &FallbackPolicy,
+    returns: &ReturnConfig,
+    alternatives: &AlternativeRouteOptions,
+    origin_candidates: &[SnappedPoint],
+    destination_candidates: &[SnappedPoint],
+    best_path: &RoutePath,
+    best_summary: &RouteSummary,
+    edge_names: Option<&[String]>,
+) -> Result<Vec<RouteAlternative>> {
+    if alternatives.max_routes <= 1 || best_path.edge_indexes.len() <= 1 {
+        return Ok(Vec::new());
+    }
+
+    let mut accepted_paths = vec![best_path.edge_indexes.clone()];
+    let mut accepted = Vec::new();
+    let mut tried_bans = HashSet::new();
+    for &banned_edge in &best_path.edge_indexes {
+        if accepted.len() + 1 >= alternatives.max_routes {
+            break;
+        }
+        if !tried_bans.insert(banned_edge) {
+            continue;
+        }
+        let mut banned_edges = HashSet::new();
+        banned_edges.insert(banned_edge);
+        let Some((origin, destination, path, hop_info)) =
+            route_between_candidates_with_banned_edges(
+                topology,
+                metrics,
+                routing_graph,
+                snap_max_distance_m,
+                connectivity,
+                fallback,
+                origin_candidates,
+                destination_candidates,
+                &banned_edges,
+            )?
+        else {
+            continue;
+        };
+        if path.edge_indexes == best_path.edge_indexes
+            || accepted_paths
+                .iter()
+                .any(|accepted_path| *accepted_path == path.edge_indexes)
+        {
+            continue;
+        }
+        let analysis = analyze_route_path(
+            topology,
+            metrics,
+            routing_graph,
+            fallback,
+            &path,
+            &origin,
+            &destination,
+        )?;
+        if !alternative_within_limits(&analysis.summary, best_summary, alternatives)
+            || !alternative_is_diverse(
+                &path.edge_indexes,
+                &accepted_paths,
+                alternatives.min_jaccard_distance,
+            )
+        {
+            continue;
+        }
+        let rank = accepted.len() as u32 + 1;
+        accepted_paths.push(path.edge_indexes.clone());
+        accepted.push(materialize_route_alternative(
+            topology,
+            metrics,
+            returns,
+            edge_names,
+            rank,
+            &origin,
+            &destination,
+            path,
+            hop_info,
+            analysis,
+        )?);
+    }
+
+    if accepted.len() + 1 < alternatives.max_routes {
+        let mut expanded_bans = HashSet::new();
+        for path in &accepted_paths {
+            for &edge_index in path {
+                expanded_bans.insert(edge_index);
+            }
+        }
+        if !expanded_bans.is_empty() {
+            if let Some((origin, destination, path, hop_info)) =
+                route_between_candidates_with_banned_edges(
+                    topology,
+                    metrics,
+                    routing_graph,
+                    snap_max_distance_m,
+                    connectivity,
+                    fallback,
+                    origin_candidates,
+                    destination_candidates,
+                    &expanded_bans,
+                )?
+            {
+                let duplicate = accepted_paths
+                    .iter()
+                    .any(|accepted_path| *accepted_path == path.edge_indexes);
+                let analysis = analyze_route_path(
+                    topology,
+                    metrics,
+                    routing_graph,
+                    fallback,
+                    &path,
+                    &origin,
+                    &destination,
+                )?;
+                if !duplicate
+                    && alternative_within_limits(&analysis.summary, best_summary, alternatives)
+                    && alternative_is_diverse(
+                        &path.edge_indexes,
+                        &accepted_paths,
+                        alternatives.min_jaccard_distance,
+                    )
+                {
+                    let rank = accepted.len() as u32 + 1;
+                    accepted.push(materialize_route_alternative(
+                        topology,
+                        metrics,
+                        returns,
+                        edge_names,
+                        rank,
+                        &origin,
+                        &destination,
+                        path,
+                        hop_info,
+                        analysis,
+                    )?);
+                }
+            }
+        }
+    }
+
+    Ok(accepted)
+}
+
+fn alternative_within_limits(
+    summary: &RouteSummary,
+    best: &RouteSummary,
+    alternatives: &AlternativeRouteOptions,
+) -> bool {
+    let best_cost = best.total_generalized_cost.max(1.0);
+    if summary.total_generalized_cost > best_cost * alternatives.max_cost_ratio {
+        return false;
+    }
+    if let Some(max_extra_time_s) = alternatives.max_extra_time_s {
+        if summary.total_travel_time_s > best.total_travel_time_s + max_extra_time_s {
+            return false;
+        }
+    }
+    if let Some(max_extra_distance_m) = alternatives.max_extra_distance_m {
+        if summary.total_distance_m > best.total_distance_m.saturating_add(max_extra_distance_m) {
+            return false;
+        }
+    }
+    true
+}
+
+fn alternative_is_diverse(
+    candidate: &[usize],
+    accepted_paths: &[Vec<usize>],
+    min_jaccard_distance: f64,
+) -> bool {
+    accepted_paths.iter().all(|accepted| {
+        edge_jaccard_distance(candidate, accepted) + f64::EPSILON >= min_jaccard_distance
     })
+}
+
+fn edge_jaccard_distance(left: &[usize], right: &[usize]) -> f64 {
+    if left.is_empty() && right.is_empty() {
+        return 0.0;
+    }
+    let left_set = left.iter().copied().collect::<HashSet<_>>();
+    let right_set = right.iter().copied().collect::<HashSet<_>>();
+    let intersection = left_set.intersection(&right_set).count() as f64;
+    let union = left_set.union(&right_set).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        1.0 - intersection / union
+    }
+}
+
+fn materialize_route_alternative(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    returns: &ReturnConfig,
+    edge_names: Option<&[String]>,
+    rank: u32,
+    origin: &SnappedPoint,
+    destination: &SnappedPoint,
+    path: RoutePath,
+    hop_info: HopSelectionInfo,
+    analysis: RoutePathAnalysis,
+) -> Result<RouteAlternative> {
+    let include_detailed_paths = request_returns_detailed_path(returns);
+    let needs_node_path = include_detailed_paths
+        || !matches!(returns.geometry, netweevil_profile::ReturnGeometry::None);
+    let node_path = if needs_node_path {
+        node_path_for_route(topology, origin, &path.edge_indexes)
+    } else {
+        Vec::new()
+    };
+    let geometry = match returns.geometry {
+        netweevil_profile::ReturnGeometry::None => None,
+        _ => Some(build_route_geometry(
+            topology,
+            &path.edge_indexes,
+            origin,
+            destination,
+        )),
+    };
+    let mut segments = if returns.segment_rows {
+        Some(route_segments_for_path(
+            topology,
+            metrics,
+            edge_names.unwrap_or(&topology.names),
+            &path.edge_indexes,
+            origin,
+            destination,
+        ))
+    } else {
+        None
+    };
+    if let Some(segment_rows) = segments.as_mut() {
+        for (segment, edge_index) in segment_rows.iter_mut().zip(&path.edge_indexes) {
+            segment.violation_type = analysis
+                .segment_violation_types
+                .get(edge_index)
+                .copied()
+                .flatten();
+        }
+    }
+    let warnings = merge_warnings(
+        merge_warnings(analysis.warnings, hop_info.warnings),
+        execution_warnings(metrics),
+    );
+    let diagnostics = hop_info.diagnostics;
+    Ok(RouteAlternative {
+        alternative_index: rank,
+        rank,
+        summary: analysis.summary,
+        node_path,
+        edge_path: if include_detailed_paths {
+            path.edge_indexes
+                .iter()
+                .map(|&edge_index| topology.routing_edge(edge_index).edge_id.0)
+                .collect()
+        } else {
+            Vec::new()
+        },
+        geometry,
+        segments,
+        breakdowns: build_breakdowns(topology, metrics, &path.edge_indexes, returns),
+        violations: analysis.violations,
+        diagnostics,
+        warnings,
+    })
+}
+
+fn node_path_for_route(
+    topology: &TopologyBundle,
+    origin: &SnappedPoint,
+    edge_indexes: &[usize],
+) -> Vec<u32> {
+    let mut node_path = Vec::with_capacity(edge_indexes.len() + 1);
+    if let Some(&first_edge) = edge_indexes.first() {
+        node_path.push(topology.routing_edge(first_edge).from.0);
+        for &edge_index in edge_indexes {
+            node_path.push(topology.routing_edge(edge_index).to.0);
+        }
+    } else if origin.snapped_edge_id.is_none() {
+        node_path.push(origin.snapped_node_id);
+    }
+    node_path
+}
+
+fn route_segments_for_path(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    edge_names: &[String],
+    edge_indexes: &[usize],
+    origin: &SnappedPoint,
+    destination: &SnappedPoint,
+) -> Vec<RouteSegment> {
+    edge_indexes
+        .iter()
+        .map(|&edge_index| {
+            let edge = topology.edge(edge_index);
+            let metric = &metrics.edge_metrics[edge_index];
+            let factor = edge_traversal_factor(
+                edge_index,
+                edge_indexes.first().copied(),
+                edge_indexes.last().copied(),
+                origin,
+                destination,
+            );
+            RouteSegment {
+                edge_id: edge.edge_id.0,
+                from_node_id: edge.from.0,
+                to_node_id: edge.to.0,
+                source_way_id: edge.source_way_id,
+                length_m: (edge.length_m as f64 * factor).round() as u32,
+                travel_time_s: metric.travel_time_s.unwrap_or_default() * factor,
+                generalized_cost: metric.generalized_cost.unwrap_or_default() * factor,
+                road_class: edge.road_class,
+                surface: edge.surface,
+                name: edge
+                    .name_index
+                    .and_then(|index| edge_names.get(index as usize))
+                    .cloned(),
+                violation_type: None,
+            }
+        })
+        .collect()
 }
 
 fn try_auto_relaxed_route_with_candidates(
@@ -3574,6 +4040,7 @@ fn try_auto_relaxed_route_with_candidates(
     connectivity: &ConnectivityPolicy,
     fallback: &FallbackPolicy,
     returns: &ReturnConfig,
+    alternatives: &AlternativeRouteOptions,
     origin_candidates: &[SnappedPoint],
     destination_candidates: &[SnappedPoint],
     edge_names: Option<&[String]>,
@@ -3590,6 +4057,7 @@ fn try_auto_relaxed_route_with_candidates(
         connectivity,
         &seed_fallback,
         returns,
+        alternatives,
         origin_candidates,
         destination_candidates,
         edge_names,
@@ -3620,6 +4088,7 @@ fn try_auto_relaxed_route_with_candidates(
             connectivity,
             &selected_fallback,
             returns,
+            alternatives,
             origin_candidates,
             destination_candidates,
             edge_names,
@@ -3954,6 +4423,7 @@ fn ignored_unreachable_route_result(
         violations: Vec::new(),
         diagnostics: failure.diagnostics,
         warnings: merge_warnings(warnings, vec![ignored_unreachable_warning()]),
+        alternatives: Vec::new(),
     }
 }
 
@@ -3973,6 +4443,29 @@ fn batch_ignored_message(route: &RouteResult) -> Option<String> {
             .map(|diagnostic| diagnostic.message.clone())
             .unwrap_or_else(|| "Connectivity policy ignored an unreachable pair.".to_string())
     })
+}
+
+fn batch_alternatives_from_route(
+    route: &RouteResult,
+    ignored: bool,
+) -> Vec<BatchAlternativeResult> {
+    if ignored {
+        return Vec::new();
+    }
+    route
+        .alternatives
+        .iter()
+        .map(|alternative| BatchAlternativeResult {
+            alternative_index: alternative.alternative_index,
+            rank: alternative.rank,
+            total_distance_m: Some(alternative.summary.total_distance_m),
+            total_travel_time_s: Some(alternative.summary.total_travel_time_s),
+            total_generalized_cost: Some(alternative.summary.total_generalized_cost),
+            geometry: alternative.geometry.clone(),
+            violation_count: alternative.summary.violation_count,
+            violation_types: alternative.summary.violation_types.clone(),
+        })
+        .collect()
 }
 
 fn hop_info_for_pair(
@@ -4285,6 +4778,7 @@ fn cached_batch_route_result(
     connectivity: &ConnectivityPolicy,
     fallback: &FallbackPolicy,
     returns: &ReturnConfig,
+    alternatives: &AlternativeRouteOptions,
     origin_candidates: &[Vec<SnappedPoint>],
     origin_set_id: usize,
     destination_candidates: &[Vec<SnappedPoint>],
@@ -4303,6 +4797,7 @@ fn cached_batch_route_result(
             connectivity,
             fallback,
             returns,
+            alternatives,
             &origin_candidates[origin_set_id],
             &destination_candidates[destination_set_id],
         )
@@ -4326,6 +4821,7 @@ fn execute_batched_route_with_candidates(
     connectivity: &ConnectivityPolicy,
     fallback: &FallbackPolicy,
     returns: &ReturnConfig,
+    alternatives: &AlternativeRouteOptions,
     origin_candidates: &[SnappedPoint],
     destination_candidates: &[SnappedPoint],
 ) -> Result<RouteResult> {
@@ -4333,6 +4829,7 @@ fn execute_batched_route_with_candidates(
         || routing_graph.has_restriction_sequences()
         || has_failure_modes(fallback)
         || auto_relaxation_requested(fallback)
+        || alternatives.max_routes > 1
     {
         return execute_route_with_candidates(
             topology,
@@ -4343,6 +4840,7 @@ fn execute_batched_route_with_candidates(
             connectivity,
             fallback,
             returns,
+            alternatives,
             origin_candidates,
             destination_candidates,
             None,
@@ -4450,6 +4948,7 @@ fn execute_batched_route_with_candidates(
                         merge_warnings(execution_warnings(metrics), analysis.warnings),
                         hop_info.warnings,
                     ),
+                    alternatives: Vec::new(),
                 });
             }
         }
@@ -5729,6 +6228,203 @@ fn route_between_candidates(
     }
 
     Err(no_route_failure(topology, origin_candidates, destination_candidates).into())
+}
+
+fn route_between_candidates_with_banned_edges(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    snap_max_distance_m: f64,
+    connectivity: &ConnectivityPolicy,
+    fallback: &FallbackPolicy,
+    origin_candidates: &[SnappedPoint],
+    destination_candidates: &[SnappedPoint],
+    banned_edges: &HashSet<usize>,
+) -> Result<Option<(SnappedPoint, SnappedPoint, RoutePath, HopSelectionInfo)>> {
+    let mut best: Option<(SnappedPoint, SnappedPoint, RoutePath, HopSelectionInfo)> = None;
+    for origin in origin_candidates {
+        for destination in destination_candidates {
+            if same_edge_reverse_pair(origin, destination) {
+                continue;
+            }
+            let Some(hop_info) =
+                hop_info_for_pair(origin, destination, snap_max_distance_m, connectivity)
+            else {
+                continue;
+            };
+            let direct_path =
+                direct_same_edge_path(routing_graph, origin, destination).filter(|path| {
+                    !path
+                        .edge_indexes
+                        .iter()
+                        .any(|edge| banned_edges.contains(edge))
+                });
+            let origin_seeds = origin_edge_seeds(routing_graph, origin)
+                .into_iter()
+                .filter(|(edge, _)| !banned_edges.contains(edge))
+                .collect::<Vec<_>>();
+            let destination_seeds = destination_edge_seeds(routing_graph, destination)
+                .into_iter()
+                .filter(|(edge, _)| !banned_edges.contains(edge))
+                .collect::<Vec<_>>();
+            let Some(path) = seeded_forward_dijkstra_with_banned_edges(
+                topology,
+                metrics,
+                routing_graph,
+                &origin_seeds,
+                &destination_seeds,
+                direct_path,
+                fallback,
+                banned_edges,
+            )?
+            else {
+                continue;
+            };
+            let path =
+                finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
+            let replace = best.as_ref().is_none_or(|(_, _, best_path, _)| {
+                path.total_generalized_cost < best_path.total_generalized_cost
+            });
+            if replace {
+                best = Some((origin.clone(), destination.clone(), path, hop_info));
+            }
+        }
+    }
+    Ok(best)
+}
+
+fn seeded_forward_dijkstra_with_banned_edges(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    origin_seeds: &[(usize, f64)],
+    destination_seeds: &[(usize, f64)],
+    initial_upper_bound: Option<RoutePath>,
+    fallback: &FallbackPolicy,
+    banned_edges: &HashSet<usize>,
+) -> Result<Option<RoutePath>> {
+    let mut heap = BinaryHeap::new();
+    let mut dist = HashMap::<SearchStateKey, f64>::new();
+    let mut previous = HashMap::<SearchStateKey, Option<SearchStateKey>>::new();
+    let mut destination_adjustments = HashMap::<usize, f64>::new();
+    for &(edge_index, adjustment) in destination_seeds {
+        destination_adjustments
+            .entry(edge_index)
+            .and_modify(|existing| *existing = existing.min(adjustment))
+            .or_insert(adjustment);
+    }
+
+    let mut best_path = initial_upper_bound;
+    let mut best_cost = best_path
+        .as_ref()
+        .map(|path| path.total_generalized_cost)
+        .unwrap_or(f64::INFINITY);
+    let mut best_state = None;
+
+    for &(edge_index, cost) in origin_seeds {
+        if banned_edges.contains(&edge_index) {
+            continue;
+        }
+        let (_, edge_penalty_cost) =
+            edge_failure_mode_penalty(metrics, routing_graph, fallback, edge_index);
+        let seeded_cost = cost + edge_penalty_cost;
+        if !seeded_cost.is_finite() {
+            continue;
+        }
+        let automaton_state = routing_graph.automaton.transition(0, edge_index);
+        let key = SearchStateKey {
+            edge_index,
+            automaton_state,
+        };
+        dist.insert(key, seeded_cost);
+        previous.insert(key, None);
+        heap.push(State {
+            edge_index,
+            automaton_state,
+            cost: seeded_cost,
+            score: seeded_cost,
+        });
+    }
+
+    while let Some(State {
+        edge_index,
+        automaton_state,
+        cost,
+        score: _,
+    }) = heap.pop()
+    {
+        let key = SearchStateKey {
+            edge_index,
+            automaton_state,
+        };
+        if cost > *dist.get(&key).unwrap_or(&f64::INFINITY) {
+            continue;
+        }
+        if let Some(&adjustment) = destination_adjustments.get(&edge_index) {
+            let candidate_cost = cost + adjustment;
+            if candidate_cost < best_cost {
+                best_cost = candidate_cost;
+                best_state = Some(key);
+            }
+        }
+        if cost >= best_cost {
+            continue;
+        }
+        for transition_index in routing_graph.transition_range(edge_index) {
+            let next_edge = routing_graph.transition_edges[transition_index] as usize;
+            if banned_edges.contains(&next_edge) {
+                continue;
+            }
+            let Some((_, penalty_cost)) = transition_failure_mode_penalty(
+                topology,
+                metrics,
+                routing_graph,
+                automaton_state,
+                edge_index,
+                next_edge,
+                fallback,
+            ) else {
+                continue;
+            };
+            let next_cost = cost + routing_graph.transition_costs[transition_index] + penalty_cost;
+            let next_automaton_state = routing_graph
+                .automaton
+                .transition(automaton_state, next_edge);
+            let next_key = SearchStateKey {
+                edge_index: next_edge,
+                automaton_state: next_automaton_state,
+            };
+            if next_cost + f64::EPSILON < *dist.get(&next_key).unwrap_or(&f64::INFINITY) {
+                dist.insert(next_key, next_cost);
+                previous.insert(next_key, Some(key));
+                heap.push(State {
+                    edge_index: next_edge,
+                    automaton_state: next_automaton_state,
+                    cost: next_cost,
+                    score: next_cost,
+                });
+            }
+        }
+    }
+
+    let Some(mut cursor) = best_state else {
+        return Ok(best_path);
+    };
+    let mut edge_indexes = Vec::new();
+    loop {
+        edge_indexes.push(cursor.edge_index);
+        let previous_state = previous.get(&cursor).copied().flatten();
+        let Some(previous_state) = previous_state else {
+            break;
+        };
+        cursor = previous_state;
+    }
+    edge_indexes.reverse();
+    best_path = Some(RoutePath {
+        edge_indexes,
+        total_generalized_cost: best_cost,
+    });
+    Ok(best_path)
 }
 
 fn snap_cache_key(point: &SnappedPoint) -> (u32, u64, u64) {
@@ -7103,12 +7799,12 @@ fn haversine_meters(from_lon: f64, from_lat: f64, to_lon: f64, to_lat: f64) -> f
 #[cfg(test)]
 mod tests {
     use super::{
-        AnalysisDiagnosticCode, AnalysisKind, ConnectivityPolicy, DisconnectedNetworkMode,
-        EngineMode, FallbackPolicy, IllegalMovementPenaltyPolicy, OdPair, OdPairsDocument,
-        PointSetDocument, PreparedRoutingEngine, RouteRequest, ServiceAreaBandMode,
-        ServiceAreaBoundaryMode, ServiceAreaMultiOriginMode, ServiceAreaOutputMode,
-        ServiceAreaThreshold, ServiceAreaThresholdMetric, SnapOptions, analysis_failure,
-        build_routing_graph, execute_matrix, execute_od, execute_route,
+        AlternativeRouteOptions, AnalysisDiagnosticCode, AnalysisKind, ConnectivityPolicy,
+        DisconnectedNetworkMode, EngineMode, FallbackPolicy, IllegalMovementPenaltyPolicy, OdPair,
+        OdPairsDocument, PointSetDocument, PreparedRoutingEngine, RouteRequest,
+        ServiceAreaBandMode, ServiceAreaBoundaryMode, ServiceAreaMultiOriginMode,
+        ServiceAreaOutputMode, ServiceAreaThreshold, ServiceAreaThresholdMetric, SnapOptions,
+        analysis_failure, build_routing_graph, execute_matrix, execute_od, execute_route,
         execute_route_with_edge_names, execute_service_area, load_experiment, load_od_pairs,
         load_point_set, load_service_area_request,
     };
@@ -7179,6 +7875,7 @@ mod tests {
                 penalty_breakdown: false,
                 explain_cost_derivation: false,
             },
+            alternatives: Default::default(),
         };
 
         let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
@@ -7196,6 +7893,46 @@ mod tests {
                 .and_then(|value| value.distance_m),
             Some(300)
         );
+    }
+
+    #[test]
+    fn returns_opt_in_alternative_routes() {
+        let topology = test_topology();
+        let metrics = test_metrics();
+        let request = RouteRequest {
+            route_id: "route_alternatives".to_string(),
+            origin: super::LabeledPoint {
+                id: "a".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "c".to_string(),
+                lon: 6.002,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig {
+                geometry: ReturnGeometry::Full,
+                ..ReturnConfig::default()
+            },
+            alternatives: AlternativeRouteOptions {
+                max_routes: 2,
+                max_cost_ratio: 4.0,
+                ..AlternativeRouteOptions::default()
+            },
+        };
+
+        let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
+        assert_eq!(result.edge_path, vec![0, 1]);
+        assert_eq!(result.alternatives.len(), 1);
+        assert_eq!(result.alternatives[0].rank, 1);
+        assert_eq!(result.alternatives[0].edge_path, vec![2]);
+        assert_eq!(result.alternatives[0].summary.total_generalized_cost, 100.0);
     }
 
     #[test]
@@ -7226,6 +7963,7 @@ mod tests {
                 segment_rows: true,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let result = execute_route_with_edge_names(
@@ -7267,6 +8005,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let route = engine.execute_route(&request).expect("route succeeds");
@@ -7308,6 +8047,7 @@ mod tests {
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let route =
@@ -7342,6 +8082,7 @@ mod tests {
                 segment_rows: true,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let route =
@@ -7382,6 +8123,7 @@ mod tests {
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let error = execute_route(&test_topology(), &test_metrics(), &request)
@@ -7457,6 +8199,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let result = execute_od(&test_topology(), &test_metrics(), &document).expect("OD succeeds");
@@ -7496,6 +8239,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
         let destinations = PointSetDocument {
             points: vec![super::LabeledPoint {
@@ -7512,6 +8256,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let result = execute_matrix(&test_topology(), &test_metrics(), &origins, &destinations)
@@ -7552,6 +8297,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
         let destinations = PointSetDocument {
             points: vec![
@@ -7575,6 +8321,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let result = execute_matrix(&test_topology(), &test_metrics(), &origins, &destinations)
@@ -7621,6 +8368,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
         let destinations = PointSetDocument {
             points: vec![
@@ -7644,6 +8392,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let matrix =
@@ -7671,6 +8420,7 @@ mod tests {
                     connectivity: origins.connectivity.clone(),
                     fallback: origins.fallback.clone(),
                     returns: origins.returns.clone(),
+                    alternatives: origins.alternatives.clone(),
                 },
             )
             .expect("route succeeds");
@@ -7722,6 +8472,7 @@ mod tests {
                     geometry: ReturnGeometry::Full,
                     ..ReturnConfig::default()
                 },
+                alternatives: Default::default(),
             },
             RouteRequest {
                 route_id: "a_to_b".to_string(),
@@ -7741,6 +8492,7 @@ mod tests {
                 connectivity: Default::default(),
                 fallback: Default::default(),
                 returns: ReturnConfig::default(),
+                alternatives: Default::default(),
             },
         ];
 
@@ -7795,6 +8547,7 @@ mod tests {
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let route = engine
@@ -7834,6 +8587,7 @@ mod tests {
                 segment_rows: true,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let route = engine
@@ -7869,6 +8623,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
@@ -7924,6 +8679,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let without_penalty =
@@ -7965,6 +8721,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let without_penalty =
@@ -8005,6 +8762,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let without_penalty =
@@ -8053,6 +8811,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
@@ -8101,6 +8860,7 @@ mod tests {
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let exact = engine
@@ -9557,6 +10317,7 @@ scenarios:
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let error = execute_route(&topology, &metrics, &request).expect_err("route should fail");
@@ -9599,6 +10360,7 @@ scenarios:
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let result = execute_route(&topology, &metrics, &request).expect("route returns partial");
@@ -9666,6 +10428,7 @@ scenarios:
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let result = execute_od(&topology, &metrics, &document).expect("OD succeeds");
@@ -9809,6 +10572,7 @@ scenarios:
                 ..FallbackPolicy::default()
             },
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let result = execute_route(&topology, &metrics, &request).expect("degraded route succeeds");
@@ -9844,6 +10608,7 @@ scenarios:
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         assert!(execute_route(&topology, &metrics, &request).is_err());
@@ -9874,6 +10639,7 @@ scenarios:
                 ..FallbackPolicy::default()
             },
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let result = execute_route(&topology, &metrics, &request).expect("auto route succeeds");
@@ -9919,6 +10685,7 @@ scenarios:
                 ..FallbackPolicy::default()
             },
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let result =
@@ -9954,6 +10721,7 @@ scenarios:
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
         assert!(execute_route(&topology, &metrics, &strict_request).is_err());
 
@@ -10001,6 +10769,7 @@ scenarios:
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let degraded_request = RouteRequest {
@@ -10047,6 +10816,7 @@ scenarios:
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let error = execute_route(&topology, &metrics, &request).expect_err("route should fail");
@@ -10306,6 +11076,7 @@ scenarios:
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
 
         let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
@@ -10343,6 +11114,7 @@ scenarios:
             },
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
@@ -10383,6 +11155,7 @@ scenarios:
             },
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
@@ -10412,6 +11185,7 @@ scenarios:
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
         let hopped_request = RouteRequest {
             route_id: "hopped".to_string(),
@@ -10435,6 +11209,7 @@ scenarios:
             },
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let legal = execute_route(&topology, &metrics, &legal_request).expect("legal route");
@@ -10477,6 +11252,7 @@ scenarios:
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
 
         let result = execute_route(&topology, &metrics, &request).expect("route succeeds");

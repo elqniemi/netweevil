@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::Path;
@@ -150,6 +150,36 @@ pub struct TransitRouteRequest {
     pub modes: TransitModeOptions,
     #[serde(default)]
     pub returns: TransitReturnOptions,
+    #[serde(default)]
+    pub alternatives: TransitAlternativeOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitAlternativeOptions {
+    #[serde(default = "default_transit_alternative_max_routes")]
+    pub max_routes: usize,
+    #[serde(default = "default_transit_alternative_max_time_ratio")]
+    pub max_time_ratio: f64,
+    #[serde(default)]
+    pub max_extra_time_s: Option<u32>,
+}
+
+impl Default for TransitAlternativeOptions {
+    fn default() -> Self {
+        Self {
+            max_routes: default_transit_alternative_max_routes(),
+            max_time_ratio: default_transit_alternative_max_time_ratio(),
+            max_extra_time_s: None,
+        }
+    }
+}
+
+fn default_transit_alternative_max_routes() -> usize {
+    1
+}
+
+fn default_transit_alternative_max_time_ratio() -> f64 {
+    1.5
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -311,6 +341,20 @@ pub struct TransitRouteResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stop_segments: Vec<TransitRouteStopSegment>,
     pub diagnostics: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<TransitRouteAlternative>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitRouteAlternative {
+    pub alternative_index: u32,
+    pub rank: u32,
+    pub summary: TransitRouteSummary,
+    pub legs: Vec<TransitLeg>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stops: Vec<TransitRouteStop>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_segments: Vec<TransitRouteStopSegment>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -523,6 +567,7 @@ fn execute_transit_route_with_runtime(
                 "arrive_by transit searches are not implemented yet; use depart-after timing"
                     .to_string(),
             ],
+            alternatives: Vec::new(),
         });
     }
     if !request.modes.access.contains(&AccessMode::Walk)
@@ -538,6 +583,7 @@ fn execute_transit_route_with_runtime(
             diagnostics: vec![
                 "only pedestrian access and egress are implemented; bicycle and car access are reserved in the request schema".to_string(),
             ],
+            alternatives: Vec::new(),
         });
     }
 
@@ -569,6 +615,7 @@ fn execute_transit_route_with_runtime(
                 access.len(),
                 egress.len()
             )],
+            alternatives: Vec::new(),
         });
     }
 
@@ -606,6 +653,8 @@ fn execute_transit_route_with_runtime(
         .map(|candidate| (candidate.stop_index, candidate.distance_m))
         .collect::<HashMap<_, _>>();
     let mut best_final: Option<(u32, StateKey, u32)> = None;
+    let mut final_candidates = Vec::<(u32, StateKey, u32)>::new();
+    let collect_alternatives = request.alternatives.max_routes > 1;
 
     while let Some(entry) = heap.pop() {
         if best
@@ -614,8 +663,15 @@ fn execute_transit_route_with_runtime(
         {
             continue;
         }
-        if let Some((arrival_s, _, _)) = best_final {
-            if entry.time_s >= arrival_s {
+        if !collect_alternatives {
+            if let Some((arrival_s, _, _)) = best_final {
+                if entry.time_s >= arrival_s {
+                    continue;
+                }
+            }
+        } else if let Some((arrival_s, _, _)) = best_final {
+            let max_arrival_s = transit_alternative_arrival_limit(departure_s, arrival_s, request);
+            if entry.time_s > max_arrival_s {
                 continue;
             }
         }
@@ -626,6 +682,9 @@ fn execute_transit_route_with_runtime(
         if let Some(distance_m) = egress_by_stop.get(&entry.state.stop_index).copied() {
             let walk_s = seconds_for_distance(distance_m, request.modes.walk_speed_kph);
             let arrival_s = entry.time_s.saturating_add(walk_s);
+            if collect_alternatives {
+                final_candidates.push((arrival_s, entry.state, walk_s));
+            }
             if best_final
                 .as_ref()
                 .is_none_or(|(best_arrival_s, _, _)| arrival_s < *best_arrival_s)
@@ -726,6 +785,7 @@ fn execute_transit_route_with_runtime(
             stops: Vec::new(),
             stop_segments: Vec::new(),
             diagnostics: vec!["no scheduled journey found inside the search window".to_string()],
+            alternatives: Vec::new(),
         });
     };
 
@@ -750,6 +810,16 @@ fn execute_transit_route_with_runtime(
         .unwrap_or_default();
     coalesce_transit_legs(&mut legs);
     let summary = summarize_legs(departure_s, arrival_s, &legs);
+    let alternatives = build_transit_alternatives(
+        bundle,
+        &runtime,
+        request,
+        &prev,
+        departure_s,
+        &summary,
+        &legs,
+        final_candidates,
+    )?;
     Ok(TransitRouteResult {
         route_id: request.route_id.clone(),
         outcome: TransitOutcome::Scheduled,
@@ -758,7 +828,106 @@ fn execute_transit_route_with_runtime(
         stops,
         stop_segments,
         diagnostics: Vec::new(),
+        alternatives,
     })
+}
+
+fn transit_alternative_arrival_limit(
+    departure_s: u32,
+    best_arrival_s: u32,
+    request: &TransitRouteRequest,
+) -> u32 {
+    let best_duration = best_arrival_s.saturating_sub(departure_s).max(1);
+    let ratio_limit = departure_s
+        .saturating_add((best_duration as f64 * request.alternatives.max_time_ratio) as u32);
+    let extra_limit = request
+        .alternatives
+        .max_extra_time_s
+        .map(|extra| best_arrival_s.saturating_add(extra))
+        .unwrap_or(u32::MAX);
+    ratio_limit.min(extra_limit)
+}
+
+fn build_transit_alternatives(
+    bundle: &TransitBundle,
+    runtime: &TransitRuntime<'_>,
+    request: &TransitRouteRequest,
+    prev: &HashMap<StateKey, PrevStep>,
+    departure_s: u32,
+    best_summary: &TransitRouteSummary,
+    best_legs: &[TransitLeg],
+    mut final_candidates: Vec<(u32, StateKey, u32)>,
+) -> Result<Vec<TransitRouteAlternative>> {
+    if request.alternatives.max_routes <= 1 {
+        return Ok(Vec::new());
+    }
+    final_candidates.sort_by_key(|(arrival_s, state, _)| (*arrival_s, state.boardings));
+    let mut alternatives = Vec::new();
+    let mut signatures = HashSet::new();
+    signatures.insert(transit_leg_signature(best_legs));
+    let best_arrival_s = best_summary.arrival_s.unwrap_or(departure_s);
+    let arrival_limit = transit_alternative_arrival_limit(departure_s, best_arrival_s, request);
+
+    for (arrival_s, final_state, egress_walk_s) in final_candidates {
+        if alternatives.len() + 1 >= request.alternatives.max_routes {
+            break;
+        }
+        if arrival_s > arrival_limit {
+            continue;
+        }
+        let mut legs = reconstruct_legs(
+            bundle,
+            runtime,
+            request,
+            prev,
+            final_state,
+            arrival_s,
+            egress_walk_s,
+        )?;
+        coalesce_transit_legs(&mut legs);
+        let signature = transit_leg_signature(&legs);
+        if !signatures.insert(signature) {
+            continue;
+        }
+        let summary = summarize_legs(departure_s, arrival_s, &legs);
+        let stops = request
+            .returns
+            .include_stops
+            .then(|| build_transit_route_stops(&legs))
+            .unwrap_or_default();
+        let stop_segments = request
+            .returns
+            .include_stop_segments
+            .then(|| build_transit_route_stop_segments(&legs))
+            .unwrap_or_default();
+        let rank = alternatives.len() as u32 + 1;
+        alternatives.push(TransitRouteAlternative {
+            alternative_index: rank,
+            rank,
+            summary,
+            legs,
+            stops,
+            stop_segments,
+        });
+    }
+
+    Ok(alternatives)
+}
+
+fn transit_leg_signature(legs: &[TransitLeg]) -> String {
+    legs.iter()
+        .map(|leg| {
+            format!(
+                "{:?}:{}:{}:{}:{}",
+                leg.leg_type,
+                leg.from_id,
+                leg.to_id,
+                leg.route_id.as_deref().unwrap_or(""),
+                leg.trip_id.as_deref().unwrap_or("")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|")
 }
 
 fn hash_gtfs_source(path: &Path) -> Result<String> {
@@ -1824,6 +1993,7 @@ mod tests {
                 include_stop_segments: true,
                 ..TransitReturnOptions::default()
             },
+            alternatives: TransitAlternativeOptions::default(),
         };
         let result = execute_transit_route(&bundle, &request).expect("route executes");
         assert_eq!(result.outcome, TransitOutcome::Scheduled);
@@ -1883,6 +2053,7 @@ mod tests {
                 ..TransitModeOptions::default()
             },
             returns: TransitReturnOptions::default(),
+            alternatives: TransitAlternativeOptions::default(),
         };
 
         let result = router.execute_route(&request).expect("route executes");
@@ -1928,6 +2099,7 @@ mod tests {
                 ..TransitModeOptions::default()
             },
             returns: TransitReturnOptions::default(),
+            alternatives: TransitAlternativeOptions::default(),
         };
         let result = execute_transit_route(&bundle, &request).expect("route executes");
         assert_eq!(result.outcome, TransitOutcome::Unreachable);

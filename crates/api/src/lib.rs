@@ -30,7 +30,7 @@ use netweevil_query::{
 };
 use netweevil_report::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
 use netweevil_transit::{
-    PreparedTransitRouter, TransitFeedManifest, TransitLegType, TransitRouteRequest,
+    PreparedTransitRouter, TransitFeedManifest, TransitLeg, TransitLegType, TransitRouteRequest,
     TransitRouteResult, TransitWalkingGeometry, read_transit_bundle,
 };
 use serde::{Deserialize, Serialize};
@@ -782,7 +782,32 @@ fn replace_transit_walking_leg_geometries(
     pedestrian_engine: &PreparedRoutingEngine,
     pedestrian_profile_id: &str,
 ) {
-    for (index, leg) in result.legs.iter_mut().enumerate() {
+    replace_transit_walking_leg_geometries_for_legs(
+        &result.route_id,
+        &mut result.legs,
+        &mut result.diagnostics,
+        pedestrian_engine,
+        pedestrian_profile_id,
+    );
+    for alternative in &mut result.alternatives {
+        replace_transit_walking_leg_geometries_for_legs(
+            &format!("{}_alternative_{}", result.route_id, alternative.rank),
+            &mut alternative.legs,
+            &mut result.diagnostics,
+            pedestrian_engine,
+            pedestrian_profile_id,
+        );
+    }
+}
+
+fn replace_transit_walking_leg_geometries_for_legs(
+    route_id: &str,
+    legs: &mut [TransitLeg],
+    diagnostics: &mut Vec<String>,
+    pedestrian_engine: &PreparedRoutingEngine,
+    pedestrian_profile_id: &str,
+) {
+    for (index, leg) in legs.iter_mut().enumerate() {
         if !matches!(
             leg.leg_type,
             TransitLegType::Access | TransitLegType::Transfer | TransitLegType::Egress
@@ -792,14 +817,14 @@ fn replace_transit_walking_leg_geometries(
         let (Some(first), Some(last)) =
             (leg.geometry.first().copied(), leg.geometry.last().copied())
         else {
-            result.diagnostics.push(format!(
+            diagnostics.push(format!(
                 "network walking geometry skipped for leg {} because straight-line endpoints were not returned",
                 index + 1
             ));
             continue;
         };
         let route_request = RouteRequest {
-            route_id: format!("{}_walk_leg_{}", result.route_id, index + 1),
+            route_id: format!("{}_walk_leg_{}", route_id, index + 1),
             origin: LabeledPoint {
                 id: leg.from_id.clone(),
                 lon: first[0],
@@ -817,6 +842,7 @@ fn replace_transit_walking_leg_geometries(
                 geometry: ReturnGeometry::Full,
                 ..ReturnConfig::default()
             },
+            alternatives: Default::default(),
         };
         match pedestrian_engine.execute_route(&route_request) {
             Ok(route) => {
@@ -825,7 +851,7 @@ fn replace_transit_walking_leg_geometries(
                 }
             }
             Err(error) => {
-                result.diagnostics.push(format!(
+                diagnostics.push(format!(
                     "network walking geometry failed for leg {} using profile '{}': {}",
                     index + 1,
                     pedestrian_profile_id,
@@ -1175,54 +1201,115 @@ fn route_result_geojson(
             .map(|node| [node.lon, node.lat])
             .collect()
     };
-    json!({
-        "type": "FeatureCollection",
-        "features": [
-            {
+    let mut features = vec![json!({
+        "type": "Feature",
+        "geometry": {
+            "type": "LineString",
+            "coordinates": coordinates,
+        },
+        "properties": {
+            "dataset_id": execution.dataset_id,
+            "profile_id": execution.profile_id,
+            "profile_hash": execution.profile_hash,
+            "route_id": result.route_id,
+            "route_rank": 0,
+            "alternative_index": Value::Null,
+            "outcome": result.outcome,
+            "fallback_used": result.fallback_used,
+            "origin_id": result.origin.point_id,
+            "destination_id": result.destination.point_id,
+            "origin_component_id": result.origin.component_id,
+            "destination_component_id": result.destination.component_id,
+            "origin_snap_distance_m": result.origin.snap_distance_m,
+            "destination_snap_distance_m": result.destination.snap_distance_m,
+            "origin_hop_distance_m": result.origin_hop_distance_m,
+            "destination_hop_distance_m": result.destination_hop_distance_m,
+            "total_distance_m": result.summary.total_distance_m,
+            "total_travel_time_s": result.summary.total_travel_time_s,
+            "total_generalized_cost": result.summary.total_generalized_cost,
+            "illegal_movement_penalty_s": result.summary.illegal_movement_penalty_s,
+            "illegal_movement_penalty_cost": result.summary.illegal_movement_penalty_cost,
+            "violation_count": result.summary.violation_count,
+            "violation_types": result.summary.violation_types,
+            "violations": result.violations,
+            "segment_count": result.summary.segment_count,
+            "warnings": result.warnings,
+        }
+    })];
+    for alternative in &result.alternatives {
+        if let Some(geometry) = alternative.geometry.as_ref() {
+            features.push(json!({
                 "type": "Feature",
                 "geometry": {
                     "type": "LineString",
-                    "coordinates": coordinates,
+                    "coordinates": geometry,
                 },
                 "properties": {
                     "dataset_id": execution.dataset_id,
                     "profile_id": execution.profile_id,
                     "profile_hash": execution.profile_hash,
                     "route_id": result.route_id,
-                    "outcome": result.outcome,
-                    "fallback_used": result.fallback_used,
+                    "route_rank": alternative.rank,
+                    "alternative_index": alternative.alternative_index,
                     "origin_id": result.origin.point_id,
                     "destination_id": result.destination.point_id,
-                    "origin_component_id": result.origin.component_id,
-                    "destination_component_id": result.destination.component_id,
-                    "origin_snap_distance_m": result.origin.snap_distance_m,
-                    "destination_snap_distance_m": result.destination.snap_distance_m,
-                    "origin_hop_distance_m": result.origin_hop_distance_m,
-                    "destination_hop_distance_m": result.destination_hop_distance_m,
-                    "total_distance_m": result.summary.total_distance_m,
-                    "total_travel_time_s": result.summary.total_travel_time_s,
-                    "total_generalized_cost": result.summary.total_generalized_cost,
-                    "illegal_movement_penalty_s": result.summary.illegal_movement_penalty_s,
-                    "illegal_movement_penalty_cost": result.summary.illegal_movement_penalty_cost,
-                    "violation_count": result.summary.violation_count,
-                    "violation_types": result.summary.violation_types,
-                    "violations": result.violations,
-                    "segment_count": result.summary.segment_count,
-                    "warnings": result.warnings,
+                    "total_distance_m": alternative.summary.total_distance_m,
+                    "total_travel_time_s": alternative.summary.total_travel_time_s,
+                    "total_generalized_cost": alternative.summary.total_generalized_cost,
+                    "violation_count": alternative.summary.violation_count,
+                    "violation_types": alternative.summary.violation_types,
+                    "violations": alternative.violations,
+                    "segment_count": alternative.summary.segment_count,
+                    "warnings": alternative.warnings,
                 }
-            }
-        ]
+            }));
+        }
+    }
+    json!({
+        "type": "FeatureCollection",
+        "features": features
     })
 }
 
 fn od_result_geojson(execution: &ExecutionContext, result: &OdResult) -> Value {
-    let features = result
-        .pairs
-        .iter()
-        .map(|pair| {
-            json!({
+    let mut features = Vec::new();
+    for pair in &result.pairs {
+        features.push(json!({
+            "type": "Feature",
+            "geometry": pair.geometry.as_ref().map(|geometry| json!({
+                "type": "LineString",
+                "coordinates": geometry,
+            })).unwrap_or(Value::Null),
+            "properties": {
+                "dataset_id": execution.dataset_id,
+                "profile_id": execution.profile_id,
+                "profile_hash": execution.profile_hash,
+                "pair_id": pair.pair_id,
+                "origin_id": pair.origin_id,
+                "destination_id": pair.destination_id,
+                "status": pair.status,
+                "outcome": pair.outcome,
+                "fallback_used": pair.fallback_used,
+                "origin_component_id": pair.origin_component_id,
+                "destination_component_id": pair.destination_component_id,
+                "origin_hop_distance_m": pair.origin_hop_distance_m,
+                "destination_hop_distance_m": pair.destination_hop_distance_m,
+                "origin_snap_distance_m": pair.origin_snap_distance_m,
+                "destination_snap_distance_m": pair.destination_snap_distance_m,
+                "total_distance_m": pair.total_distance_m,
+                "total_travel_time_s": pair.total_travel_time_s,
+                "total_generalized_cost": pair.total_generalized_cost,
+                "illegal_movement_penalty_s": pair.illegal_movement_penalty_s,
+                "illegal_movement_penalty_cost": pair.illegal_movement_penalty_cost,
+                "violation_count": pair.violation_count,
+                "violation_types": pair.violation_types,
+                "error": pair.error,
+            }
+        }));
+        for alternative in &pair.alternatives {
+            features.push(json!({
                 "type": "Feature",
-                "geometry": pair.geometry.as_ref().map(|geometry| json!({
+                "geometry": alternative.geometry.as_ref().map(|geometry| json!({
                     "type": "LineString",
                     "coordinates": geometry,
                 })).unwrap_or(Value::Null),
@@ -1233,27 +1320,17 @@ fn od_result_geojson(execution: &ExecutionContext, result: &OdResult) -> Value {
                     "pair_id": pair.pair_id,
                     "origin_id": pair.origin_id,
                     "destination_id": pair.destination_id,
-                    "status": pair.status,
-                    "outcome": pair.outcome,
-                    "fallback_used": pair.fallback_used,
-                    "origin_component_id": pair.origin_component_id,
-                    "destination_component_id": pair.destination_component_id,
-                    "origin_hop_distance_m": pair.origin_hop_distance_m,
-                    "destination_hop_distance_m": pair.destination_hop_distance_m,
-                    "origin_snap_distance_m": pair.origin_snap_distance_m,
-                    "destination_snap_distance_m": pair.destination_snap_distance_m,
-                    "total_distance_m": pair.total_distance_m,
-                    "total_travel_time_s": pair.total_travel_time_s,
-                    "total_generalized_cost": pair.total_generalized_cost,
-                    "illegal_movement_penalty_s": pair.illegal_movement_penalty_s,
-                    "illegal_movement_penalty_cost": pair.illegal_movement_penalty_cost,
-                    "violation_count": pair.violation_count,
-                    "violation_types": pair.violation_types,
-                    "error": pair.error,
+                    "route_rank": alternative.rank,
+                    "alternative_index": alternative.alternative_index,
+                    "total_distance_m": alternative.total_distance_m,
+                    "total_travel_time_s": alternative.total_travel_time_s,
+                    "total_generalized_cost": alternative.total_generalized_cost,
+                    "violation_count": alternative.violation_count,
+                    "violation_types": alternative.violation_types,
                 }
-            })
-        })
-        .collect::<Vec<_>>();
+            }));
+        }
+    }
     json!({
         "type": "FeatureCollection",
         "features": features,
@@ -1270,13 +1347,43 @@ fn od_result_geojson(execution: &ExecutionContext, result: &OdResult) -> Value {
 }
 
 fn matrix_result_geojson(execution: &ExecutionContext, result: &MatrixResult) -> Value {
-    let features = result
-        .cells
-        .iter()
-        .map(|cell| {
-            json!({
+    let mut features = Vec::new();
+    for cell in &result.cells {
+        features.push(json!({
+            "type": "Feature",
+            "geometry": cell.geometry.as_ref().map(|geometry| json!({
+                "type": "LineString",
+                "coordinates": geometry,
+            })).unwrap_or(Value::Null),
+            "properties": {
+                "dataset_id": execution.dataset_id,
+                "profile_id": execution.profile_id,
+                "profile_hash": execution.profile_hash,
+                "origin_id": cell.origin_id,
+                "destination_id": cell.destination_id,
+                "status": cell.status,
+                "outcome": cell.outcome,
+                "fallback_used": cell.fallback_used,
+                "origin_component_id": cell.origin_component_id,
+                "destination_component_id": cell.destination_component_id,
+                "origin_hop_distance_m": cell.origin_hop_distance_m,
+                "destination_hop_distance_m": cell.destination_hop_distance_m,
+                "origin_snap_distance_m": cell.origin_snap_distance_m,
+                "destination_snap_distance_m": cell.destination_snap_distance_m,
+                "total_distance_m": cell.total_distance_m,
+                "total_travel_time_s": cell.total_travel_time_s,
+                "total_generalized_cost": cell.total_generalized_cost,
+                "illegal_movement_penalty_s": cell.illegal_movement_penalty_s,
+                "illegal_movement_penalty_cost": cell.illegal_movement_penalty_cost,
+                "violation_count": cell.violation_count,
+                "violation_types": cell.violation_types,
+                "error": cell.error,
+            }
+        }));
+        for alternative in &cell.alternatives {
+            features.push(json!({
                 "type": "Feature",
-                "geometry": cell.geometry.as_ref().map(|geometry| json!({
+                "geometry": alternative.geometry.as_ref().map(|geometry| json!({
                     "type": "LineString",
                     "coordinates": geometry,
                 })).unwrap_or(Value::Null),
@@ -1286,27 +1393,17 @@ fn matrix_result_geojson(execution: &ExecutionContext, result: &MatrixResult) ->
                     "profile_hash": execution.profile_hash,
                     "origin_id": cell.origin_id,
                     "destination_id": cell.destination_id,
-                    "status": cell.status,
-                    "outcome": cell.outcome,
-                    "fallback_used": cell.fallback_used,
-                    "origin_component_id": cell.origin_component_id,
-                    "destination_component_id": cell.destination_component_id,
-                    "origin_hop_distance_m": cell.origin_hop_distance_m,
-                    "destination_hop_distance_m": cell.destination_hop_distance_m,
-                    "origin_snap_distance_m": cell.origin_snap_distance_m,
-                    "destination_snap_distance_m": cell.destination_snap_distance_m,
-                    "total_distance_m": cell.total_distance_m,
-                    "total_travel_time_s": cell.total_travel_time_s,
-                    "total_generalized_cost": cell.total_generalized_cost,
-                    "illegal_movement_penalty_s": cell.illegal_movement_penalty_s,
-                    "illegal_movement_penalty_cost": cell.illegal_movement_penalty_cost,
-                    "violation_count": cell.violation_count,
-                    "violation_types": cell.violation_types,
-                    "error": cell.error,
+                    "route_rank": alternative.rank,
+                    "alternative_index": alternative.alternative_index,
+                    "total_distance_m": alternative.total_distance_m,
+                    "total_travel_time_s": alternative.total_travel_time_s,
+                    "total_generalized_cost": alternative.total_generalized_cost,
+                    "violation_count": alternative.violation_count,
+                    "violation_types": alternative.violation_types,
                 }
-            })
-        })
-        .collect::<Vec<_>>();
+            }));
+        }
+    }
     json!({
         "type": "FeatureCollection",
         "features": features,
@@ -1449,6 +1546,7 @@ mod tests {
                 geometry: Some(vec![[2.0, 48.0], [2.1, 48.1]]),
                 diagnostics: vec![],
                 error: None,
+                alternatives: vec![],
             }],
             diagnostics: vec![],
             warnings: vec!["ok".to_string()],
@@ -1499,6 +1597,7 @@ mod tests {
                 geometry: None,
                 diagnostics: vec![],
                 error: Some("no route".to_string()),
+                alternatives: vec![],
             }],
             diagnostics: vec![],
             warnings: vec![],

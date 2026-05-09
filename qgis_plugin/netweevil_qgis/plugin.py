@@ -8,7 +8,7 @@ import urllib.request
 from pathlib import Path
 
 from qgis.PyQt.QtCore import QSettings, Qt, QTimer
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtGui import QColor, QIcon
 from qgis.PyQt.QtWidgets import (
     QAction,
     QCheckBox,
@@ -51,6 +51,8 @@ from qgis.gui import QgsMapLayerComboBox, QgsMapToolEmitPoint, QgsVertexMarker
 
 PLUGIN_MENU = "&netweevil"
 SETTINGS_PREFIX = "netweevil_qgis"
+PLUGIN_DIR = Path(__file__).resolve().parent
+PLUGIN_ICON = PLUGIN_DIR / "logo.svg"
 
 
 class ResponseFormat:
@@ -107,7 +109,9 @@ class NetweevilPlugin:
         self.dock = None
 
     def initGui(self):
-        self.action = QAction("netweevil", self.iface.mainWindow())
+        self.action = QAction(
+            QIcon(str(PLUGIN_ICON)), "netweevil", self.iface.mainWindow()
+        )
         self.action.setCheckable(True)
         self.action.triggered.connect(self.toggle_dock)
         self.iface.addPluginToMenu(PLUGIN_MENU, self.action)
@@ -374,6 +378,31 @@ class NetweevilDock(QDockWidget):
         )
 
         if include_failure_modes:
+            alternatives_group = QGroupBox("Alternative routes")
+            alternatives_form = QFormLayout(alternatives_group)
+            alternative_count_edit = QLineEdit("1")
+            alternative_cost_ratio_edit = QLineEdit("1.35")
+            alternative_min_jaccard_edit = QLineEdit("0.2")
+            alternatives_form.addRow("Max routes", alternative_count_edit)
+            alternatives_form.addRow("Max cost ratio", alternative_cost_ratio_edit)
+            alternatives_form.addRow("Min edge-set distance", alternative_min_jaccard_edit)
+            layout.addWidget(alternatives_group)
+            setattr(
+                self,
+                "{}_alternative_count_edit".format(prefix),
+                alternative_count_edit,
+            )
+            setattr(
+                self,
+                "{}_alternative_cost_ratio_edit".format(prefix),
+                alternative_cost_ratio_edit,
+            )
+            setattr(
+                self,
+                "{}_alternative_min_jaccard_edit".format(prefix),
+                alternative_min_jaccard_edit,
+            )
+
             unsafe_note = QLabel(
                 "Unsafe failure modes are off by default. Enable them only for explicit degraded-routing analysis."
             )
@@ -902,6 +931,8 @@ class NetweevilDock(QDockWidget):
         self.transit_board_slack_edit = QLineEdit("30")
         self.transit_transfer_slack_edit = QLineEdit("120")
         self.transit_max_transfers_edit = QLineEdit("3")
+        self.transit_alternative_count_edit = QLineEdit("1")
+        self.transit_alternative_time_ratio_edit = QLineEdit("1.5")
         self.transit_include_geometry_check = QCheckBox("Load leg geometry")
         self.transit_include_geometry_check.setChecked(True)
         self.transit_network_walk_geometry_check = QCheckBox(
@@ -920,6 +951,8 @@ class NetweevilDock(QDockWidget):
         mode_form.addRow("Board slack s", self.transit_board_slack_edit)
         mode_form.addRow("Transfer slack s", self.transit_transfer_slack_edit)
         mode_form.addRow("Max transfers", self.transit_max_transfers_edit)
+        mode_form.addRow("Alternative max routes", self.transit_alternative_count_edit)
+        mode_form.addRow("Alternative max time ratio", self.transit_alternative_time_ratio_edit)
         mode_form.addRow("", self.transit_include_geometry_check)
         mode_form.addRow("", self.transit_network_walk_geometry_check)
         mode_form.addRow("", self.transit_include_stops_check)
@@ -1966,6 +1999,28 @@ class NetweevilDock(QDockWidget):
 
         return policy
 
+    def build_alternative_options(self, prefix):
+        max_routes = self.parse_optional_int(
+            getattr(self, "{}_alternative_count_edit".format(prefix)).text(),
+            "Alternative max routes",
+        )
+        if max_routes is None or max_routes <= 1:
+            return {"max_routes": 1}
+        options = {"max_routes": max_routes}
+        max_cost_ratio = self.parse_optional_float(
+            getattr(self, "{}_alternative_cost_ratio_edit".format(prefix)).text(),
+            "Alternative max cost ratio",
+        )
+        if max_cost_ratio is not None:
+            options["max_cost_ratio"] = max_cost_ratio
+        min_jaccard = self.parse_optional_float(
+            getattr(self, "{}_alternative_min_jaccard_edit".format(prefix)).text(),
+            "Alternative min edge-set distance",
+        )
+        if min_jaccard is not None:
+            options["min_jaccard_distance"] = min_jaccard
+        return options
+
     def has_unsafe_failure_modes(self, prefix):
         policy = self.build_fallback_policy(prefix)
         return any(
@@ -2106,6 +2161,7 @@ class NetweevilDock(QDockWidget):
             "connectivity": self.build_connectivity_policy("route"),
             "fallback": self.build_fallback_policy("route"),
             "returns": self.build_route_returns(),
+            "alternatives": self.build_alternative_options("route"),
         }
 
     def selected_transit_feed_id(self):
@@ -2122,6 +2178,19 @@ class NetweevilDock(QDockWidget):
         return modes
 
     def build_transit_request(self):
+        transit_alternatives = {
+            "max_routes": self.parse_optional_int(
+                self.transit_alternative_count_edit.text(),
+                "Transit alternative max routes",
+            )
+            or 1
+        }
+        max_time_ratio = self.parse_optional_float(
+            self.transit_alternative_time_ratio_edit.text(),
+            "Transit alternative max time ratio",
+        )
+        if max_time_ratio is not None:
+            transit_alternatives["max_time_ratio"] = max_time_ratio
         return {
             "route_id": self.transit_route_id_edit.text().strip() or "qgis_transit",
             "origin": {
@@ -2171,6 +2240,7 @@ class NetweevilDock(QDockWidget):
                 "include_stops": self.transit_include_stops_check.isChecked(),
                 "include_stop_segments": self.transit_include_stop_segments_check.isChecked(),
             },
+            "alternatives": transit_alternatives,
         }
 
     def write_route_request(self):
@@ -2282,6 +2352,7 @@ class NetweevilDock(QDockWidget):
             )
             document["connectivity"] = self.build_connectivity_policy("batch")
             document["fallback"] = self.build_fallback_policy("batch")
+            document["alternatives"] = self.build_alternative_options("batch")
         except Exception as exc:
             self.alert("Failed to load OD input: {}".format(exc))
             return
@@ -2329,13 +2400,16 @@ class NetweevilDock(QDockWidget):
             )
             connectivity = self.build_connectivity_policy("batch")
             fallback = self.build_fallback_policy("batch")
+            alternatives = self.build_alternative_options("batch")
         except Exception as exc:
             self.alert("Failed to load matrix input: {}".format(exc))
             return
         origins["connectivity"] = connectivity
         origins["fallback"] = fallback
+        origins["alternatives"] = alternatives
         destinations["connectivity"] = connectivity
         destinations["fallback"] = fallback
+        destinations["alternatives"] = alternatives
         try:
             allowed = self.confirm_unsafe_failure_modes("batch", "matrix")
         except ValueError as exc:
@@ -2975,64 +3049,70 @@ class NetweevilDock(QDockWidget):
     def route_summary_feature_collection(self, service, result):
         summary = result.get("summary") or {}
         geometry = result.get("geometry")
-        return {
-            "type": "FeatureCollection",
-            "features": [
+        features = [
+            {
+                "type": "Feature",
+                "geometry": self.item_geometry(geometry),
+                "properties": {
+                    "dataset_id": service.get("dataset_id"),
+                    "profile_id": service.get("profile_id"),
+                    "profile_hash": service.get("profile_hash"),
+                    "route_id": result.get("route_id"),
+                    "route_rank": 0,
+                    "alternative_index": None,
+                    "outcome": result.get("outcome"),
+                    "fallback_used": result.get("fallback_used"),
+                    "network_distance_m": summary.get("network_distance_m"),
+                    "network_travel_time_s": summary.get("network_travel_time_s"),
+                    "network_generalized_cost": summary.get("network_generalized_cost"),
+                    "illegal_movement_penalty_s": summary.get("illegal_movement_penalty_s"),
+                    "illegal_movement_penalty_cost": summary.get("illegal_movement_penalty_cost"),
+                    "violation_count": summary.get("violation_count"),
+                    "violation_types_json": self.json_text(summary.get("violation_types") or []),
+                    "total_distance_m": summary.get("total_distance_m"),
+                    "total_travel_time_s": summary.get("total_travel_time_s"),
+                    "total_generalized_cost": summary.get("total_generalized_cost"),
+                    "segment_count": summary.get("segment_count"),
+                    "origin_point_id": result.get("origin", {}).get("point_id"),
+                    "destination_point_id": result.get("destination", {}).get("point_id"),
+                    "origin_component_id": result.get("origin", {}).get("component_id"),
+                    "destination_component_id": result.get("destination", {}).get("component_id"),
+                    "origin_snap_distance_m": result.get("origin", {}).get("snap_distance_m"),
+                    "destination_snap_distance_m": result.get("destination", {}).get("snap_distance_m"),
+                    "origin_hop_distance_m": result.get("origin_hop_distance_m"),
+                    "destination_hop_distance_m": result.get("destination_hop_distance_m"),
+                    "warnings_json": self.json_text(result.get("warnings") or []),
+                },
+            }
+        ]
+        for alternative in result.get("alternatives") or []:
+            alt_summary = alternative.get("summary") or {}
+            features.append(
                 {
                     "type": "Feature",
-                    "geometry": self.item_geometry(geometry),
+                    "geometry": self.item_geometry(alternative.get("geometry")),
                     "properties": {
                         "dataset_id": service.get("dataset_id"),
                         "profile_id": service.get("profile_id"),
                         "profile_hash": service.get("profile_hash"),
                         "route_id": result.get("route_id"),
-                        "outcome": result.get("outcome"),
-                        "fallback_used": result.get("fallback_used"),
-                        "network_distance_m": summary.get("network_distance_m"),
-                        "network_travel_time_s": summary.get("network_travel_time_s"),
-                        "network_generalized_cost": summary.get(
-                            "network_generalized_cost"
-                        ),
-                        "illegal_movement_penalty_s": summary.get(
-                            "illegal_movement_penalty_s"
-                        ),
-                        "illegal_movement_penalty_cost": summary.get(
-                            "illegal_movement_penalty_cost"
-                        ),
-                        "violation_count": summary.get("violation_count"),
+                        "route_rank": alternative.get("rank"),
+                        "alternative_index": alternative.get("alternative_index"),
+                        "total_distance_m": alt_summary.get("total_distance_m"),
+                        "total_travel_time_s": alt_summary.get("total_travel_time_s"),
+                        "total_generalized_cost": alt_summary.get("total_generalized_cost"),
+                        "violation_count": alt_summary.get("violation_count"),
                         "violation_types_json": self.json_text(
-                            summary.get("violation_types") or []
+                            alt_summary.get("violation_types") or []
                         ),
-                        "total_distance_m": summary.get("total_distance_m"),
-                        "total_travel_time_s": summary.get("total_travel_time_s"),
-                        "total_generalized_cost": summary.get(
-                            "total_generalized_cost"
-                        ),
-                        "segment_count": summary.get("segment_count"),
-                        "origin_point_id": result.get("origin", {}).get("point_id"),
-                        "destination_point_id": result.get("destination", {}).get(
-                            "point_id"
-                        ),
-                        "origin_component_id": result.get("origin", {}).get(
-                            "component_id"
-                        ),
-                        "destination_component_id": result.get("destination", {}).get(
-                            "component_id"
-                        ),
-                        "origin_snap_distance_m": result.get("origin", {}).get(
-                            "snap_distance_m"
-                        ),
-                        "destination_snap_distance_m": result.get("destination", {}).get(
-                            "snap_distance_m"
-                        ),
-                        "origin_hop_distance_m": result.get("origin_hop_distance_m"),
-                        "destination_hop_distance_m": result.get(
-                            "destination_hop_distance_m"
-                        ),
-                        "warnings_json": self.json_text(result.get("warnings") or []),
+                        "segment_count": alt_summary.get("segment_count"),
+                        "warnings_json": self.json_text(alternative.get("warnings") or []),
                     },
                 }
-            ],
+            )
+        return {
+            "type": "FeatureCollection",
+            "features": features,
         }
 
     def route_distance_area(self):
@@ -3260,31 +3340,59 @@ class NetweevilDock(QDockWidget):
     def transit_summary_feature_collection(self, service, result):
         summary = result.get("summary") or {}
         coordinates = self.transit_route_coordinates(result)
-        return {
-            "type": "FeatureCollection",
-            "features": [
+        features = [
+            {
+                "type": "Feature",
+                "geometry": self.item_geometry(coordinates),
+                "properties": {
+                    "feed_id": service.get("feed_id"),
+                    "service_start_date": service.get("service_start_date"),
+                    "service_days": service.get("service_days"),
+                    "route_engine": service.get("route_engine"),
+                    "route_id": result.get("route_id"),
+                    "route_rank": 0,
+                    "alternative_index": None,
+                    "outcome": result.get("outcome"),
+                    "departure_s": summary.get("departure_s"),
+                    "arrival_s": summary.get("arrival_s"),
+                    "total_travel_time_s": summary.get("total_travel_time_s"),
+                    "transit_time_s": summary.get("transit_time_s"),
+                    "access_egress_time_s": summary.get("access_egress_time_s"),
+                    "transfer_time_s": summary.get("transfer_time_s"),
+                    "wait_time_s": summary.get("wait_time_s"),
+                    "boarding_count": summary.get("boarding_count"),
+                    "diagnostics_json": self.json_text(result.get("diagnostics") or []),
+                },
+            }
+        ]
+        for alternative in result.get("alternatives") or []:
+            alt_summary = alternative.get("summary") or {}
+            features.append(
                 {
                     "type": "Feature",
-                    "geometry": self.item_geometry(coordinates),
+                    "geometry": self.item_geometry(self.transit_route_coordinates(alternative)),
                     "properties": {
                         "feed_id": service.get("feed_id"),
                         "service_start_date": service.get("service_start_date"),
                         "service_days": service.get("service_days"),
                         "route_engine": service.get("route_engine"),
                         "route_id": result.get("route_id"),
-                        "outcome": result.get("outcome"),
-                        "departure_s": summary.get("departure_s"),
-                        "arrival_s": summary.get("arrival_s"),
-                        "total_travel_time_s": summary.get("total_travel_time_s"),
-                        "transit_time_s": summary.get("transit_time_s"),
-                        "access_egress_time_s": summary.get("access_egress_time_s"),
-                        "transfer_time_s": summary.get("transfer_time_s"),
-                        "wait_time_s": summary.get("wait_time_s"),
-                        "boarding_count": summary.get("boarding_count"),
-                        "diagnostics_json": self.json_text(result.get("diagnostics") or []),
+                        "route_rank": alternative.get("rank"),
+                        "alternative_index": alternative.get("alternative_index"),
+                        "departure_s": alt_summary.get("departure_s"),
+                        "arrival_s": alt_summary.get("arrival_s"),
+                        "total_travel_time_s": alt_summary.get("total_travel_time_s"),
+                        "transit_time_s": alt_summary.get("transit_time_s"),
+                        "access_egress_time_s": alt_summary.get("access_egress_time_s"),
+                        "transfer_time_s": alt_summary.get("transfer_time_s"),
+                        "wait_time_s": alt_summary.get("wait_time_s"),
+                        "boarding_count": alt_summary.get("boarding_count"),
                     },
                 }
-            ],
+            )
+        return {
+            "type": "FeatureCollection",
+            "features": features,
         }
 
     def transit_leg_feature_collection(self, service, result):
@@ -3319,6 +3427,39 @@ class NetweevilDock(QDockWidget):
                     },
                 }
             )
+        for alternative in result.get("alternatives") or []:
+            for index, leg in enumerate(alternative.get("legs") or [], start=1):
+                features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": self.item_geometry(leg.get("geometry")),
+                        "properties": {
+                            "feed_id": service.get("feed_id"),
+                            "route_id": result.get("route_id"),
+                            "route_rank": alternative.get("rank"),
+                            "alternative_index": alternative.get("alternative_index"),
+                            "leg_index": index,
+                            "leg_type": leg.get("leg_type"),
+                            "from_id": leg.get("from_id"),
+                            "to_id": leg.get("to_id"),
+                            "from_name": leg.get("from_name"),
+                            "to_name": leg.get("to_name"),
+                            "departure_s": leg.get("departure_s"),
+                            "arrival_s": leg.get("arrival_s"),
+                            "duration_s": (
+                                leg.get("arrival_s") - leg.get("departure_s")
+                                if leg.get("arrival_s") is not None
+                                and leg.get("departure_s") is not None
+                                else None
+                            ),
+                            "mode": leg.get("mode"),
+                            "gtfs_route_id": leg.get("route_id"),
+                            "route_short_name": leg.get("route_short_name"),
+                            "trip_id": leg.get("trip_id"),
+                            "headsign": leg.get("headsign"),
+                        },
+                    }
+                )
         return {"type": "FeatureCollection", "features": features}
 
     def transit_stop_feature_collection(self, service, result):
@@ -4146,6 +4287,15 @@ class NetweevilDock(QDockWidget):
                     "{}_max_illegal_turns".format(prefix): getattr(
                         self, "{}_max_illegal_turns_edit".format(prefix)
                     ).text().strip(),
+                    "{}_alternative_count".format(prefix): getattr(
+                        self, "{}_alternative_count_edit".format(prefix)
+                    ).text().strip(),
+                    "{}_alternative_cost_ratio".format(prefix): getattr(
+                        self, "{}_alternative_cost_ratio_edit".format(prefix)
+                    ).text().strip(),
+                    "{}_alternative_min_jaccard".format(prefix): getattr(
+                        self, "{}_alternative_min_jaccard_edit".format(prefix)
+                    ).text().strip(),
                 }
             )
         for key, value in values.items():
@@ -4199,6 +4349,15 @@ class NetweevilDock(QDockWidget):
             )
             getattr(self, "{}_max_illegal_turns_edit".format(prefix)).setText(
                 self.read_setting("{}_max_illegal_turns".format(prefix), "")
+            )
+            getattr(self, "{}_alternative_count_edit".format(prefix)).setText(
+                self.read_setting("{}_alternative_count".format(prefix), "1")
+            )
+            getattr(self, "{}_alternative_cost_ratio_edit".format(prefix)).setText(
+                self.read_setting("{}_alternative_cost_ratio".format(prefix), "1.35")
+            )
+            getattr(self, "{}_alternative_min_jaccard_edit".format(prefix)).setText(
+                self.read_setting("{}_alternative_min_jaccard".format(prefix), "0.2")
             )
             getattr(self, "{}_unsafe_toggle".format(prefix)).setChecked(
                 self.read_bool_setting("{}_unsafe_visible".format(prefix), False)
@@ -4256,6 +4415,8 @@ class NetweevilDock(QDockWidget):
             "transit_board_slack": self.transit_board_slack_edit.text().strip(),
             "transit_transfer_slack": self.transit_transfer_slack_edit.text().strip(),
             "transit_max_transfers": self.transit_max_transfers_edit.text().strip(),
+            "transit_alternative_count": self.transit_alternative_count_edit.text().strip(),
+            "transit_alternative_time_ratio": self.transit_alternative_time_ratio_edit.text().strip(),
             "transit_include_geometry": self.transit_include_geometry_check.isChecked(),
             "transit_network_walk_geometry": self.transit_network_walk_geometry_check.isChecked(),
             "transit_include_stops": self.transit_include_stops_check.isChecked(),
@@ -4453,6 +4614,15 @@ class NetweevilDock(QDockWidget):
         )
         self.transit_max_transfers_edit.setText(
             self.read_setting("transit_max_transfers", self.transit_max_transfers_edit.text())
+        )
+        self.transit_alternative_count_edit.setText(
+            self.read_setting("transit_alternative_count", self.transit_alternative_count_edit.text())
+        )
+        self.transit_alternative_time_ratio_edit.setText(
+            self.read_setting(
+                "transit_alternative_time_ratio",
+                self.transit_alternative_time_ratio_edit.text(),
+            )
         )
         self.transit_include_geometry_check.setChecked(
             self.read_bool_setting("transit_include_geometry", True)

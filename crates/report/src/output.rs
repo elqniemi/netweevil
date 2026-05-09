@@ -206,38 +206,66 @@ fn write_route_csv(path: &Path, request: &RouteRequest, result: &RouteResult) ->
 
 fn write_route_geojson(path: &Path, request: &RouteRequest, result: &RouteResult) -> Result<()> {
     let geometry = route_geometry_geojson(result)?;
-    let feature_collection = json!({
-        "type": "FeatureCollection",
-        "features": [
-            {
+    let mut features = vec![json!({
+        "type": "Feature",
+        "geometry": geometry,
+        "properties": {
+            "route_id": result.route_id,
+            "route_rank": 0,
+            "alternative_index": serde_json::Value::Null,
+            "origin_id": request.origin.id,
+            "destination_id": request.destination.id,
+            "outcome": outcome_name(result.outcome),
+            "fallback_used": result.fallback_used,
+            "origin_component_id": result.origin.component_id,
+            "destination_component_id": result.destination.component_id,
+            "origin_hop_distance_m": result.origin_hop_distance_m,
+            "destination_hop_distance_m": result.destination_hop_distance_m,
+            "origin_snap_distance_m": result.origin.snap_distance_m,
+            "destination_snap_distance_m": result.destination.snap_distance_m,
+            "total_distance_m": result.summary.total_distance_m,
+            "total_travel_time_s": result.summary.total_travel_time_s,
+            "total_generalized_cost": result.summary.total_generalized_cost,
+            "illegal_movement_penalty_s": result.summary.illegal_movement_penalty_s,
+            "illegal_movement_penalty_cost": result.summary.illegal_movement_penalty_cost,
+            "violation_count": result.summary.violation_count,
+            "violation_types": result.summary.violation_types,
+            "violations": result.violations,
+            "segment_count": result.summary.segment_count,
+            "diagnostics": result.diagnostics,
+            "warnings": result.warnings,
+        }
+    })];
+    for alternative in &result.alternatives {
+        if let Some(geometry) = alternative.geometry.as_ref() {
+            features.push(json!({
                 "type": "Feature",
-                "geometry": geometry,
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": geometry,
+                },
                 "properties": {
                     "route_id": result.route_id,
+                    "route_rank": alternative.rank,
+                    "alternative_index": alternative.alternative_index,
                     "origin_id": request.origin.id,
                     "destination_id": request.destination.id,
-                    "outcome": outcome_name(result.outcome),
-                    "fallback_used": result.fallback_used,
-                    "origin_component_id": result.origin.component_id,
-                    "destination_component_id": result.destination.component_id,
-                    "origin_hop_distance_m": result.origin_hop_distance_m,
-                    "destination_hop_distance_m": result.destination_hop_distance_m,
-                    "origin_snap_distance_m": result.origin.snap_distance_m,
-                    "destination_snap_distance_m": result.destination.snap_distance_m,
-                    "total_distance_m": result.summary.total_distance_m,
-                    "total_travel_time_s": result.summary.total_travel_time_s,
-                    "total_generalized_cost": result.summary.total_generalized_cost,
-                    "illegal_movement_penalty_s": result.summary.illegal_movement_penalty_s,
-                    "illegal_movement_penalty_cost": result.summary.illegal_movement_penalty_cost,
-                    "violation_count": result.summary.violation_count,
-                    "violation_types": result.summary.violation_types,
-                    "violations": result.violations,
-                    "segment_count": result.summary.segment_count,
-                    "diagnostics": result.diagnostics,
-                    "warnings": result.warnings,
+                    "total_distance_m": alternative.summary.total_distance_m,
+                    "total_travel_time_s": alternative.summary.total_travel_time_s,
+                    "total_generalized_cost": alternative.summary.total_generalized_cost,
+                    "violation_count": alternative.summary.violation_count,
+                    "violation_types": alternative.summary.violation_types,
+                    "violations": alternative.violations,
+                    "segment_count": alternative.summary.segment_count,
+                    "diagnostics": alternative.diagnostics,
+                    "warnings": alternative.warnings,
                 }
-            }
-        ]
+            }));
+        }
+    }
+    let feature_collection = json!({
+        "type": "FeatureCollection",
+        "features": features
     });
     write_json(path, &feature_collection)
 }
@@ -3501,6 +3529,7 @@ mod tests {
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
         let result = RouteResult {
             route_id: "route_1".to_string(),
@@ -3558,6 +3587,7 @@ mod tests {
             violations: vec![],
             diagnostics: vec![],
             warnings: vec![],
+            alternatives: vec![],
         };
 
         write_route_result(&path, &request, &result).expect("gpkg written");
@@ -3594,6 +3624,7 @@ mod tests {
                         connectivity: Default::default(),
                         fallback: Default::default(),
                         returns: ReturnConfig::default(),
+                        alternatives: Default::default(),
                     },
                 },
                 RouteBatchEntry {
@@ -3614,6 +3645,7 @@ mod tests {
                         connectivity: Default::default(),
                         fallback: Default::default(),
                         returns: ReturnConfig::default(),
+                        alternatives: Default::default(),
                     },
                 },
             ],
@@ -3734,6 +3766,7 @@ mod tests {
                         }],
                         diagnostics: vec![],
                         warnings: vec![],
+                        alternatives: vec![],
                     }),
                     error: None,
                 },
@@ -3810,6 +3843,7 @@ mod tests {
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig::default(),
+            alternatives: Default::default(),
         };
         let result = OdResult {
             pair_count: 1,
@@ -3839,6 +3873,7 @@ mod tests {
                 geometry: Some(vec![[6.0, 53.0], [6.1, 53.1], [6.2, 53.2]]),
                 diagnostics: vec![],
                 error: None,
+                alternatives: vec![],
             }],
             diagnostics: vec![],
             warnings: vec![],
