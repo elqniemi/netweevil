@@ -524,6 +524,11 @@ class NetweevilDock(QDockWidget):
         options_group = QGroupBox("Service-area options")
         options_form = QFormLayout(options_group)
         self.service_area_analysis_id_edit = QLineEdit("qgis_service_area_001")
+        self.service_area_mode_combo = QComboBox()
+        self.service_area_mode_combo.addItem("Road network", "road")
+        self.service_area_mode_combo.addItem("Transit feed", "transit")
+        self.service_area_transit_datetime_edit = QLineEdit("2026-05-11T08:30:00+02:00")
+        self.service_area_transit_max_time_edit = QLineEdit("3600")
         self.service_area_snap_distance_edit = QLineEdit("500")
         self.service_area_output_path_edit = QLineEdit(
             ".netweevil/runs/qgis-service-area.geojson"
@@ -538,6 +543,9 @@ class NetweevilDock(QDockWidget):
         self.service_area_band_mode_combo = QComboBox()
         self.service_area_band_mode_combo.addItem("Cumulative", "cumulative")
         self.service_area_band_mode_combo.addItem("Ring", "ring")
+        self.service_area_band_mode_combo.addItem("None (segments)", "none")
+        self.service_area_segments_check = QCheckBox("Return per-segment costs")
+        self.service_area_segments_check.setChecked(False)
         self.service_area_boundary_mode_combo = QComboBox()
         self.service_area_boundary_mode_combo.addItem("Overlap", "overlap")
         self.service_area_boundary_mode_combo.addItem("Cut At Boundary", "cut_at_boundary")
@@ -546,9 +554,13 @@ class NetweevilDock(QDockWidget):
         self.service_area_multi_origin_mode_combo.addItem("Overlap", "overlap")
         self.service_area_multi_origin_mode_combo.addItem("Cut", "cut")
         options_form.addRow("Analysis id", self.service_area_analysis_id_edit)
+        options_form.addRow("Mode", self.service_area_mode_combo)
+        options_form.addRow("Transit departure", self.service_area_transit_datetime_edit)
+        options_form.addRow("Transit max time s", self.service_area_transit_max_time_edit)
         options_form.addRow("Snap distance m", self.service_area_snap_distance_edit)
         options_form.addRow("Output mode", self.service_area_output_mode_combo)
         options_form.addRow("Band mode", self.service_area_band_mode_combo)
+        options_form.addRow("", self.service_area_segments_check)
         options_form.addRow("Boundary mode", self.service_area_boundary_mode_combo)
         options_form.addRow("Multi-origin mode", self.service_area_multi_origin_mode_combo)
         options_form.addRow(
@@ -2102,6 +2114,75 @@ class NetweevilDock(QDockWidget):
         return origins
 
     def build_service_area_request(self):
+        if self.service_area_mode_combo.currentData() == "transit":
+            transit_modes = []
+            for value, check in getattr(self, "transit_mode_checks", {}).items():
+                if check.isChecked():
+                    transit_modes.append(value)
+            if not transit_modes:
+                transit_modes = ["tram", "subway", "rail", "bus", "ferry", "coach"]
+            return {
+                "analysis_id": self.service_area_analysis_id_edit.text().strip()
+                or "qgis_transit_service_area",
+                "origins": self.build_service_area_origins(),
+                "time": {
+                    "datetime": self.service_area_transit_datetime_edit.text().strip(),
+                    "arrive_by": False,
+                    "search_window_s": int(
+                        float(getattr(self, "transit_search_window_edit").text().strip() or "3600")
+                    )
+                    if hasattr(self, "transit_search_window_edit")
+                    else 3600,
+                },
+                "modes": {
+                    "access": ["walk"],
+                    "egress": ["walk"],
+                    "transit": transit_modes,
+                    "walk_speed_kph": float(
+                        getattr(self, "transit_walk_speed_edit").text().strip() or "4.8"
+                    )
+                    if hasattr(self, "transit_walk_speed_edit")
+                    else 4.8,
+                    "max_access_distance_m": float(
+                        getattr(self, "transit_max_access_distance_edit").text().strip()
+                        or "1200"
+                    )
+                    if hasattr(self, "transit_max_access_distance_edit")
+                    else 1200.0,
+                    "max_transfer_distance_m": float(
+                        getattr(self, "transit_max_transfer_distance_edit").text().strip()
+                        or "500"
+                    )
+                    if hasattr(self, "transit_max_transfer_distance_edit")
+                    else 500.0,
+                    "board_slack_s": int(
+                        float(getattr(self, "transit_board_slack_edit").text().strip() or "30")
+                    )
+                    if hasattr(self, "transit_board_slack_edit")
+                    else 30,
+                    "transfer_slack_s": int(
+                        float(
+                            getattr(self, "transit_transfer_slack_edit").text().strip() or "120"
+                        )
+                    )
+                    if hasattr(self, "transit_transfer_slack_edit")
+                    else 120,
+                    "max_transfers": int(
+                        float(getattr(self, "transit_max_transfers_edit").text().strip() or "3")
+                    )
+                    if hasattr(self, "transit_max_transfers_edit")
+                    else 3,
+                },
+                "max_travel_time_s": int(
+                    float(self.service_area_transit_max_time_edit.text().strip() or "3600")
+                ),
+                "returns": {
+                    "include_stops": True,
+                    "include_stop_segments": True,
+                    "include_geometry": True,
+                },
+            }
+
         output_mode = self.service_area_output_mode_combo.currentData() or "both"
         request = {
             "analysis_id": self.service_area_analysis_id_edit.text().strip()
@@ -2133,6 +2214,8 @@ class NetweevilDock(QDockWidget):
                 "attributes": True,
                 "per_threshold_summary": True,
                 "diagnostics": True,
+                "segments": self.service_area_segments_check.isChecked()
+                or (self.service_area_band_mode_combo.currentData() == "none"),
             },
         }
         simplification_tolerance = self.parse_optional_float(
@@ -2457,15 +2540,24 @@ class NetweevilDock(QDockWidget):
             self.alert("Invalid service-area request values: {}".format(exc))
             return
 
+        endpoint = "/v1/service-area"
         payload = {"request": request}
-        profile_id = self.selected_profile_id()
-        if profile_id:
-            payload["profile_id"] = profile_id
+        if self.service_area_mode_combo.currentData() == "transit":
+            feed_id = self.transit_feed_combo.currentData() if hasattr(self, "transit_feed_combo") else None
+            if not feed_id:
+                self.alert("Select a loaded transit feed first.")
+                return
+            endpoint = "/v1/transit-service-area"
+            payload["feed_id"] = feed_id
+        else:
+            profile_id = self.selected_profile_id()
+            if profile_id:
+                payload["profile_id"] = profile_id
 
         self.remember_service_area_request(request)
         self.save_settings()
         self.execute_api_request(
-            endpoint="/v1/service-area",
+            endpoint=endpoint,
             payload=payload,
             output_path=self.service_area_output_path_edit.text(),
             layer_name=request["analysis_id"] or "netweevil_service_area",
@@ -3968,12 +4060,21 @@ class NetweevilDock(QDockWidget):
             categories = []
             for origin_index, origin_id in enumerate(multiple_origins):
                 color = base_colors[(threshold_index + origin_index) % len(base_colors)]
-                if geometry_type == "network":
+                if geometry_type in ("network", "segment"):
                     symbol = QgsLineSymbol.createSimple(
                         {
                             "line_color": color,
                             "line_width": "0.9",
                             "line_style": "dash" if ring_band else "solid",
+                        }
+                    )
+                elif geometry_type == "stop":
+                    symbol = QgsMarkerSymbol.createSimple(
+                        {
+                            "color": color,
+                            "outline_color": "#ffffff",
+                            "outline_width": "0.4",
+                            "size": "2.4",
                         }
                     )
                 else:
@@ -3989,12 +4090,21 @@ class NetweevilDock(QDockWidget):
             renderer = QgsCategorizedSymbolRenderer("origin_id", categories)
             layer.setRenderer(renderer)
         else:
-            if geometry_type == "network":
+            if geometry_type in ("network", "segment"):
                 symbol = QgsLineSymbol.createSimple(
                     {
                         "line_color": base_color,
                         "line_width": "1.1",
                         "line_style": "dash" if ring_band else "solid",
+                    }
+                )
+            elif geometry_type == "stop":
+                symbol = QgsMarkerSymbol.createSimple(
+                    {
+                        "color": base_color,
+                        "outline_color": "#ffffff",
+                        "outline_width": "0.4",
+                        "size": "2.4",
                     }
                 )
             else:
@@ -4433,11 +4543,15 @@ class NetweevilDock(QDockWidget):
             "matrix_destinations_id_field": self.matrix_destinations_id_field_combo.currentText().strip(),
             "matrix_destinations_selected_only": self.matrix_destinations_selected_only_check.isChecked(),
             "service_area_analysis_id": self.service_area_analysis_id_edit.text().strip(),
+            "service_area_mode": self.service_area_mode_combo.currentData(),
+            "service_area_transit_datetime": self.service_area_transit_datetime_edit.text().strip(),
+            "service_area_transit_max_time": self.service_area_transit_max_time_edit.text().strip(),
             "service_area_snap_distance": self.service_area_snap_distance_edit.text().strip(),
             "service_area_output_path": self.service_area_output_path_edit.text().strip(),
             "service_area_request_path": self.service_area_request_path_edit.text().strip(),
             "service_area_output_mode": self.service_area_output_mode_combo.currentData(),
             "service_area_band_mode": self.service_area_band_mode_combo.currentData(),
+            "service_area_segments": self.service_area_segments_check.isChecked(),
             "service_area_boundary_mode": self.service_area_boundary_mode_combo.currentData(),
             "service_area_multi_origin_mode": self.service_area_multi_origin_mode_combo.currentData(),
             "service_area_thresholds": self.service_area_thresholds_edit.text().strip(),
@@ -4659,6 +4773,18 @@ class NetweevilDock(QDockWidget):
                 "service_area_snap_distance", self.service_area_snap_distance_edit.text()
             )
         )
+        self.service_area_transit_datetime_edit.setText(
+            self.read_setting(
+                "service_area_transit_datetime",
+                self.service_area_transit_datetime_edit.text(),
+            )
+        )
+        self.service_area_transit_max_time_edit.setText(
+            self.read_setting(
+                "service_area_transit_max_time",
+                self.service_area_transit_max_time_edit.text(),
+            )
+        )
         self.service_area_output_path_edit.setText(
             self.read_setting(
                 "service_area_output_path", self.service_area_output_path_edit.text()
@@ -4717,6 +4843,13 @@ class NetweevilDock(QDockWidget):
         self.set_combo_by_data(
             self.service_area_band_mode_combo,
             self.read_setting("service_area_band_mode", "cumulative"),
+        )
+        self.set_combo_by_data(
+            self.service_area_mode_combo,
+            self.read_setting("service_area_mode", "road"),
+        )
+        self.service_area_segments_check.setChecked(
+            self.read_bool_setting("service_area_segments", False)
         )
         self.set_combo_by_data(
             self.service_area_boundary_mode_combo,

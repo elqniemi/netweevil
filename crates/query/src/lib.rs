@@ -407,6 +407,8 @@ pub enum ServiceAreaBandMode {
     #[default]
     Cumulative,
     Ring,
+    #[serde(rename = "none")]
+    Unbanded,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -457,6 +459,8 @@ pub struct ServiceAreaReturnOptions {
     pub per_threshold_summary: bool,
     #[serde(default = "default_true")]
     pub diagnostics: bool,
+    #[serde(default)]
+    pub segments: bool,
 }
 
 impl Default for ServiceAreaReturnOptions {
@@ -466,6 +470,7 @@ impl Default for ServiceAreaReturnOptions {
             attributes: true,
             per_threshold_summary: true,
             diagnostics: true,
+            segments: false,
         }
     }
 }
@@ -506,6 +511,7 @@ pub struct ServiceAreaRequest {
 pub enum ServiceAreaGeometryType {
     Network,
     Polygon,
+    Segment,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -529,6 +535,60 @@ pub struct ServiceAreaFeature {
     pub reachable_network_length_m: Option<f64>,
     #[serde(default)]
     pub reachable_edge_count: Option<u64>,
+    #[serde(default)]
+    pub edge_id: Option<u32>,
+    #[serde(default)]
+    pub edge_index: Option<u32>,
+    #[serde(default)]
+    pub source_way_id: Option<i64>,
+    #[serde(default)]
+    pub from_node_id: Option<u32>,
+    #[serde(default)]
+    pub to_node_id: Option<u32>,
+    #[serde(default)]
+    pub start_fraction: Option<f64>,
+    #[serde(default)]
+    pub end_fraction: Option<f64>,
+    #[serde(default)]
+    pub start_cost: Option<f64>,
+    #[serde(default)]
+    pub end_cost: Option<f64>,
+    #[serde(default)]
+    pub segment_distance_m: Option<f64>,
+    #[serde(default)]
+    pub segment_travel_time_s: Option<f64>,
+    #[serde(default)]
+    pub geometry: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAreaSegment {
+    #[serde(default)]
+    pub origin_id: Option<String>,
+    #[serde(default)]
+    pub band_start_limit: Option<f64>,
+    #[serde(default)]
+    pub threshold_id: Option<String>,
+    pub threshold_limit: f64,
+    pub threshold_metric: ServiceAreaThresholdMetric,
+    pub edge_id: u32,
+    pub edge_index: u32,
+    pub source_way_id: i64,
+    pub from_node_id: u32,
+    pub to_node_id: u32,
+    pub start_fraction: f64,
+    pub end_fraction: f64,
+    pub start_cost: f64,
+    pub end_cost: f64,
+    pub segment_distance_m: f64,
+    #[serde(default)]
+    pub segment_travel_time_s: Option<f64>,
+    #[serde(default)]
+    pub fallback_used: bool,
+    #[serde(default)]
+    pub origin_component_id: Option<u32>,
+    #[serde(default)]
+    pub origin_hop_distance_m: Option<f64>,
     #[serde(default)]
     pub geometry: Option<serde_json::Value>,
 }
@@ -580,6 +640,8 @@ pub struct ServiceAreaResult {
     pub features: Vec<ServiceAreaFeature>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub summaries: Vec<ServiceAreaThresholdSummary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub segments: Vec<ServiceAreaSegment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
@@ -1253,6 +1315,72 @@ pub struct MatrixResult {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessibilityCategoryRequest {
+    pub category_id: String,
+    pub destinations: PointSetDocument,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessibilityRequest {
+    pub origins: PointSetDocument,
+    #[serde(default)]
+    pub categories: Vec<AccessibilityCategoryRequest>,
+    #[serde(default)]
+    pub thresholds_s: Vec<f64>,
+    pub max_travel_time_s: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessibilityCategoryResult {
+    pub origin_id: String,
+    pub category_id: String,
+    pub status: BatchItemStatus,
+    #[serde(default)]
+    pub outcome: AnalysisOutcome,
+    #[serde(default)]
+    pub fallback_used: bool,
+    #[serde(default)]
+    pub origin_component_id: Option<u32>,
+    #[serde(default)]
+    pub origin_hop_distance_m: Option<f64>,
+    #[serde(default)]
+    pub origin_snap_distance_m: Option<f64>,
+    pub destination_count: usize,
+    pub snapped_destination_count: usize,
+    #[serde(default)]
+    pub nearest_destination_id: Option<String>,
+    #[serde(default)]
+    pub nearest_travel_time_s: Option<f64>,
+    #[serde(default)]
+    pub nearest_destination_snap_distance_m: Option<f64>,
+    #[serde(default)]
+    pub counts_within_threshold_s: BTreeMap<String, usize>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AnalysisDiagnostic>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessibilityResult {
+    pub origin_count: usize,
+    pub category_count: usize,
+    pub destination_count: usize,
+    pub max_travel_time_s: f64,
+    pub thresholds_s: Vec<f64>,
+    pub row_count: usize,
+    pub succeeded_count: usize,
+    pub failed_count: usize,
+    #[serde(default)]
+    pub skipped_origin_count: usize,
+    pub rows: Vec<AccessibilityCategoryResult>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<AnalysisDiagnostic>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
 pub struct PreparedRoutingEngine {
     topology: Arc<TopologyBundle>,
     metrics: Arc<CompiledProfileBundle>,
@@ -1431,6 +1559,41 @@ impl PreparedRoutingEngine {
             routing_graph,
             origins,
             destinations,
+        )
+    }
+
+    pub fn execute_accessibility(
+        &self,
+        request: &AccessibilityRequest,
+    ) -> Result<AccessibilityResult> {
+        self.execute_accessibility_with_mode(request, EngineMode::Auto)
+    }
+
+    pub fn execute_accessibility_with_mode(
+        &self,
+        request: &AccessibilityRequest,
+        mode: EngineMode,
+    ) -> Result<AccessibilityResult> {
+        if has_failure_modes(&request.origins.fallback) {
+            let (degraded_topology, degraded_metrics, degraded_routing_graph) =
+                build_failure_mode_bundle(
+                    self.topology.as_ref(),
+                    self.metrics.as_ref(),
+                    &request.origins.fallback,
+                )?;
+            return execute_accessibility_with_graph(
+                &degraded_topology,
+                &degraded_metrics,
+                &degraded_routing_graph,
+                request,
+            );
+        }
+        let (routing_graph, _) = self.routing_graph_for_mode(mode);
+        execute_accessibility_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            routing_graph,
+            request,
         )
     }
 
@@ -1842,6 +2005,362 @@ pub fn execute_service_area(
     execute_service_area_with_graph(topology, metrics, &routing_graph, request)
 }
 
+fn execute_accessibility_with_graph(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    request: &AccessibilityRequest,
+) -> Result<AccessibilityResult> {
+    validate_execution_inputs(topology, metrics)?;
+    if request.origins.points.is_empty() {
+        bail!("accessibility origins must contain at least one point");
+    }
+    if request.categories.is_empty() {
+        bail!("accessibility request must contain at least one destination category");
+    }
+    if request.max_travel_time_s <= 0.0 {
+        bail!("accessibility max_travel_time_s must be positive");
+    }
+
+    let mut thresholds = request.thresholds_s.clone();
+    thresholds.retain(|threshold| threshold.is_finite() && *threshold > 0.0);
+    thresholds.sort_by(|left, right| left.total_cmp(right));
+    thresholds.dedup_by(|left, right| (*left - *right).abs() <= f64::EPSILON);
+    if thresholds.is_empty() {
+        thresholds.push(request.max_travel_time_s);
+    }
+
+    let search_distance_m = request
+        .origins
+        .connectivity
+        .max_hop_distance_m
+        .unwrap_or(request.origins.snap.max_distance_m)
+        .max(request.origins.snap.max_distance_m);
+    let mut snap_cache = HashMap::new();
+    let origin_candidate_sets = request
+        .origins
+        .points
+        .iter()
+        .map(|origin| {
+            cached_snap_candidates(
+                &mut snap_cache,
+                topology,
+                routing_graph,
+                origin,
+                search_distance_m,
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    let (origin_refs, unique_origin_candidates) = intern_candidate_sets(origin_candidate_sets);
+
+    let destination_sets = request
+        .categories
+        .iter()
+        .map(|category| {
+            let snaps = presnap_point_set(
+                topology,
+                routing_graph,
+                &category.destinations.points,
+                category.destinations.snap.max_distance_m,
+                false,
+            );
+            let snapped_count = snaps.iter().filter(|snap| snap.is_ok()).count();
+            CategoryDestinationSnaps {
+                category_id: category.category_id.clone(),
+                points: category.destinations.points.clone(),
+                snaps,
+                snapped_count,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let mut expansion_cache =
+        HashMap::<usize, std::result::Result<ServiceAreaOriginExpansion, AnalysisFailure>>::new();
+    let mut rows = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut warnings = execution_warnings(metrics);
+    let mut skipped_origin_count = 0_usize;
+
+    for (origin, origin_ref) in request.origins.points.iter().zip(&origin_refs) {
+        let origin_set_id = match origin_ref {
+            Ok(origin_set_id) => *origin_set_id,
+            Err(error) => {
+                skipped_origin_count += 1;
+                diagnostics.extend(error.diagnostics.clone());
+                for category in &destination_sets {
+                    rows.push(failed_accessibility_row(
+                        origin,
+                        category,
+                        &thresholds,
+                        AnalysisOutcome::Unreachable,
+                        Some(error.message.clone()),
+                        error.diagnostics.clone(),
+                    ));
+                }
+                continue;
+            }
+        };
+
+        let expansion = expansion_cache
+            .entry(origin_set_id)
+            .or_insert_with(|| {
+                build_service_area_expansion(
+                    topology,
+                    metrics,
+                    routing_graph,
+                    origin,
+                    &unique_origin_candidates[origin_set_id],
+                    request.origins.snap.max_distance_m,
+                    &request.origins.connectivity,
+                    ServiceAreaMetricKind::TravelTimeS,
+                    request.max_travel_time_s,
+                )
+                .map_err(|error| {
+                    analysis_failure(&error).cloned().unwrap_or_else(|| {
+                        AnalysisFailure::new(
+                            error.to_string(),
+                            AnalysisOutcome::Unreachable,
+                            Vec::new(),
+                        )
+                    })
+                })
+            })
+            .clone();
+
+        let expansion = match expansion {
+            Ok(expansion) => expansion,
+            Err(error) => {
+                skipped_origin_count += 1;
+                diagnostics.extend(error.diagnostics.clone());
+                for category in &destination_sets {
+                    rows.push(failed_accessibility_row(
+                        origin,
+                        category,
+                        &thresholds,
+                        error.outcome,
+                        Some(error.message.clone()),
+                        error.diagnostics.clone(),
+                    ));
+                }
+                continue;
+            }
+        };
+
+        diagnostics.extend(expansion.diagnostics.clone());
+        warnings.extend(expansion.warnings.clone());
+
+        for category in &destination_sets {
+            rows.push(accessibility_row_for_category(
+                topology,
+                metrics,
+                routing_graph,
+                &expansion,
+                category,
+                &thresholds,
+                request.max_travel_time_s,
+            ));
+        }
+    }
+
+    let succeeded_count = rows
+        .iter()
+        .filter(|row| matches!(row.status, BatchItemStatus::Succeeded))
+        .count();
+    let failed_count = rows
+        .iter()
+        .filter(|row| matches!(row.status, BatchItemStatus::Failed))
+        .count();
+    let destination_count = destination_sets
+        .iter()
+        .map(|category| category.points.len())
+        .sum();
+
+    Ok(AccessibilityResult {
+        origin_count: request.origins.points.len(),
+        category_count: request.categories.len(),
+        destination_count,
+        max_travel_time_s: request.max_travel_time_s,
+        thresholds_s: thresholds,
+        row_count: rows.len(),
+        succeeded_count,
+        failed_count,
+        skipped_origin_count,
+        rows,
+        diagnostics,
+        warnings,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct CategoryDestinationSnaps {
+    category_id: String,
+    points: Vec<LabeledPoint>,
+    snaps: Vec<std::result::Result<Vec<SnappedPoint>, AnalysisFailure>>,
+    snapped_count: usize,
+}
+
+fn failed_accessibility_row(
+    origin: &LabeledPoint,
+    category: &CategoryDestinationSnaps,
+    thresholds: &[f64],
+    outcome: AnalysisOutcome,
+    error: Option<String>,
+    diagnostics: Vec<AnalysisDiagnostic>,
+) -> AccessibilityCategoryResult {
+    AccessibilityCategoryResult {
+        origin_id: origin.id.clone(),
+        category_id: category.category_id.clone(),
+        status: BatchItemStatus::Failed,
+        outcome,
+        fallback_used: false,
+        origin_component_id: None,
+        origin_hop_distance_m: None,
+        origin_snap_distance_m: None,
+        destination_count: category.points.len(),
+        snapped_destination_count: category.snapped_count,
+        nearest_destination_id: None,
+        nearest_travel_time_s: None,
+        nearest_destination_snap_distance_m: None,
+        counts_within_threshold_s: empty_accessibility_counts(thresholds),
+        diagnostics,
+        error,
+    }
+}
+
+fn accessibility_row_for_category(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    expansion: &ServiceAreaOriginExpansion,
+    category: &CategoryDestinationSnaps,
+    thresholds: &[f64],
+    max_travel_time_s: f64,
+) -> AccessibilityCategoryResult {
+    let mut counts = empty_accessibility_counts(thresholds);
+    let mut nearest_destination_id = None;
+    let mut nearest_travel_time_s = f64::INFINITY;
+    let mut nearest_snap_distance_m = None;
+
+    for (destination, snap_result) in category.points.iter().zip(&category.snaps) {
+        let Ok(candidates) = snap_result else {
+            continue;
+        };
+        let mut best_destination_time = f64::INFINITY;
+        let mut best_destination_snap_distance = None;
+        for candidate in candidates {
+            let Some(travel_time_s) =
+                travel_time_to_destination(topology, metrics, routing_graph, expansion, candidate)
+            else {
+                continue;
+            };
+            if travel_time_s + f64::EPSILON < best_destination_time {
+                best_destination_time = travel_time_s;
+                best_destination_snap_distance = Some(candidate.snap_distance_m);
+            }
+        }
+        if !best_destination_time.is_finite() || best_destination_time > max_travel_time_s {
+            continue;
+        }
+        for threshold in thresholds {
+            if best_destination_time <= *threshold + f64::EPSILON {
+                let key = accessibility_threshold_key(*threshold);
+                *counts.entry(key).or_insert(0) += 1;
+            }
+        }
+        if best_destination_time + f64::EPSILON < nearest_travel_time_s {
+            nearest_destination_id = Some(destination.id.clone());
+            nearest_travel_time_s = best_destination_time;
+            nearest_snap_distance_m = best_destination_snap_distance;
+        }
+    }
+
+    let found = nearest_destination_id.is_some();
+    AccessibilityCategoryResult {
+        origin_id: expansion.origin_id.clone(),
+        category_id: category.category_id.clone(),
+        status: if found {
+            BatchItemStatus::Succeeded
+        } else {
+            BatchItemStatus::Failed
+        },
+        outcome: if found {
+            AnalysisOutcome::Legal
+        } else {
+            AnalysisOutcome::Unreachable
+        },
+        fallback_used: expansion.fallback_used,
+        origin_component_id: expansion.representative_origin.component_id,
+        origin_hop_distance_m: expansion.origin_hop_distance_m,
+        origin_snap_distance_m: Some(expansion.representative_origin.snap_distance_m),
+        destination_count: category.points.len(),
+        snapped_destination_count: category.snapped_count,
+        nearest_destination_id,
+        nearest_travel_time_s: found.then_some(nearest_travel_time_s),
+        nearest_destination_snap_distance_m: nearest_snap_distance_m,
+        counts_within_threshold_s: counts,
+        diagnostics: Vec::new(),
+        error: (!found).then(|| {
+            format!(
+                "No '{}' destination was reachable within {:.0} seconds.",
+                category.category_id, max_travel_time_s
+            )
+        }),
+    }
+}
+
+fn empty_accessibility_counts(thresholds: &[f64]) -> BTreeMap<String, usize> {
+    thresholds
+        .iter()
+        .map(|threshold| (accessibility_threshold_key(*threshold), 0_usize))
+        .collect()
+}
+
+fn accessibility_threshold_key(threshold_s: f64) -> String {
+    if (threshold_s.fract()).abs() <= f64::EPSILON {
+        format!("{threshold_s:.0}")
+    } else {
+        threshold_s.to_string()
+    }
+}
+
+fn travel_time_to_destination(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    expansion: &ServiceAreaOriginExpansion,
+    destination: &SnappedPoint,
+) -> Option<f64> {
+    if let (Some(edge_id), Some(fraction)) = (
+        destination.snapped_edge_id,
+        destination.snapped_edge_fraction,
+    ) {
+        let edge_index = edge_id as usize;
+        let start_fraction = expansion.edge_start_fractions[edge_index];
+        if fraction + f64::EPSILON < start_fraction {
+            return None;
+        }
+        let before_cost = expansion.edge_before_costs[edge_index];
+        if !before_cost.is_finite() {
+            return None;
+        }
+        let edge_cost = service_area_edge_cost(
+            topology,
+            metrics,
+            edge_index,
+            ServiceAreaMetricKind::TravelTimeS,
+        )?;
+        return Some(before_cost + edge_cost * (fraction - start_fraction));
+    }
+
+    routing_graph
+        .incoming_edges(destination.snapped_node_id as usize)
+        .iter()
+        .filter_map(|edge_index| expansion.edge_end_costs.get(*edge_index as usize).copied())
+        .filter(|cost| cost.is_finite())
+        .min_by(|left, right| left.total_cmp(right))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum ServiceAreaMetricKind {
     DistanceM,
@@ -1862,6 +2381,8 @@ struct ReachableEdgeInterval {
     edge_index: usize,
     start_fraction: f64,
     end_fraction: f64,
+    start_cost: f64,
+    end_cost: f64,
     midpoint_cost: f64,
 }
 
@@ -2026,65 +2547,111 @@ fn execute_service_area_with_graph(
             diagnostics.extend(expansion.diagnostics.clone());
             warnings.extend(expansion.warnings.clone());
 
-            let mut previous_limit = None;
-            for threshold in thresholds {
-                let cumulative = service_area_intervals_for_threshold(
-                    topology,
-                    metrics,
-                    &expansion,
-                    *metric_kind,
-                    threshold.limit,
-                    request.boundary_mode,
-                );
-                let segments = if matches!(request.band_mode, ServiceAreaBandMode::Ring) {
-                    let previous = previous_limit.map(|limit| {
-                        service_area_intervals_for_threshold(
-                            topology,
-                            metrics,
-                            &expansion,
-                            *metric_kind,
-                            limit,
-                            request.boundary_mode,
-                        )
-                    });
-                    difference_service_area_intervals(cumulative, previous.unwrap_or_default())
-                } else {
-                    cumulative
-                };
+            if matches!(request.band_mode, ServiceAreaBandMode::Unbanded) {
+                if let Some(threshold) = thresholds.last() {
+                    let segments = service_area_intervals_for_threshold(
+                        topology,
+                        metrics,
+                        &expansion,
+                        *metric_kind,
+                        threshold.limit,
+                        request.boundary_mode,
+                    );
 
-                if request.returns.per_threshold_summary {
-                    let (reachable_network_length_m, reachable_edge_count) =
-                        summarize_service_area_segments(
-                            topology,
-                            &segments,
-                            request.returns.attributes,
-                        );
-                    threshold_summaries.push(ServiceAreaThresholdSummary {
-                        origin_id: Some(expansion.origin_id.clone()),
-                        band_start_limit: previous_limit,
-                        threshold_id: threshold.id.clone(),
+                    if request.returns.per_threshold_summary {
+                        let (reachable_network_length_m, reachable_edge_count) =
+                            summarize_service_area_segments(
+                                topology,
+                                &segments,
+                                request.returns.attributes,
+                            );
+                        threshold_summaries.push(ServiceAreaThresholdSummary {
+                            origin_id: Some(expansion.origin_id.clone()),
+                            band_start_limit: None,
+                            threshold_id: None,
+                            threshold_limit: threshold.limit,
+                            threshold_metric: threshold.metric,
+                            fallback_used: expansion.fallback_used,
+                            origin_component_id: expansion.representative_origin.component_id,
+                            origin_hop_distance_m: expansion.origin_hop_distance_m,
+                            reachable_network_length_m,
+                            reachable_edge_count,
+                        });
+                    }
+
+                    origin_bands.push(ServiceAreaOriginBand {
+                        origin_id: expansion.origin_id.clone(),
+                        origin_component_id: expansion.representative_origin.component_id,
+                        fallback_used: expansion.fallback_used,
+                        origin_hop_distance_m: expansion.origin_hop_distance_m,
+                        threshold_id: None,
+                        band_start_limit: None,
                         threshold_limit: threshold.limit,
                         threshold_metric: threshold.metric,
-                        fallback_used: expansion.fallback_used,
-                        origin_component_id: expansion.representative_origin.component_id,
-                        origin_hop_distance_m: expansion.origin_hop_distance_m,
-                        reachable_network_length_m,
-                        reachable_edge_count,
+                        segments,
                     });
                 }
+            } else {
+                let mut previous_limit = None;
+                for threshold in thresholds {
+                    let cumulative = service_area_intervals_for_threshold(
+                        topology,
+                        metrics,
+                        &expansion,
+                        *metric_kind,
+                        threshold.limit,
+                        request.boundary_mode,
+                    );
+                    let segments = if matches!(request.band_mode, ServiceAreaBandMode::Ring) {
+                        let previous = previous_limit.map(|limit| {
+                            service_area_intervals_for_threshold(
+                                topology,
+                                metrics,
+                                &expansion,
+                                *metric_kind,
+                                limit,
+                                request.boundary_mode,
+                            )
+                        });
+                        difference_service_area_intervals(cumulative, previous.unwrap_or_default())
+                    } else {
+                        cumulative
+                    };
 
-                origin_bands.push(ServiceAreaOriginBand {
-                    origin_id: expansion.origin_id.clone(),
-                    origin_component_id: expansion.representative_origin.component_id,
-                    fallback_used: expansion.fallback_used,
-                    origin_hop_distance_m: expansion.origin_hop_distance_m,
-                    threshold_id: threshold.id.clone(),
-                    band_start_limit: previous_limit,
-                    threshold_limit: threshold.limit,
-                    threshold_metric: threshold.metric,
-                    segments,
-                });
-                previous_limit = Some(threshold.limit);
+                    if request.returns.per_threshold_summary {
+                        let (reachable_network_length_m, reachable_edge_count) =
+                            summarize_service_area_segments(
+                                topology,
+                                &segments,
+                                request.returns.attributes,
+                            );
+                        threshold_summaries.push(ServiceAreaThresholdSummary {
+                            origin_id: Some(expansion.origin_id.clone()),
+                            band_start_limit: previous_limit,
+                            threshold_id: threshold.id.clone(),
+                            threshold_limit: threshold.limit,
+                            threshold_metric: threshold.metric,
+                            fallback_used: expansion.fallback_used,
+                            origin_component_id: expansion.representative_origin.component_id,
+                            origin_hop_distance_m: expansion.origin_hop_distance_m,
+                            reachable_network_length_m,
+                            reachable_edge_count,
+                        });
+                    }
+
+                    origin_bands.push(ServiceAreaOriginBand {
+                        origin_id: expansion.origin_id.clone(),
+                        origin_component_id: expansion.representative_origin.component_id,
+                        fallback_used: expansion.fallback_used,
+                        origin_hop_distance_m: expansion.origin_hop_distance_m,
+                        threshold_id: threshold.id.clone(),
+                        band_start_limit: previous_limit,
+                        threshold_limit: threshold.limit,
+                        threshold_metric: threshold.metric,
+                        segments,
+                    });
+                    previous_limit = Some(threshold.limit);
+                }
             }
         }
 
@@ -2101,8 +2668,15 @@ fn execute_service_area_with_graph(
         ServiceAreaMultiOriginMode::Cut => cut_service_area_bands(origin_bands),
     };
 
+    let segments =
+        if request.returns.segments || matches!(request.band_mode, ServiceAreaBandMode::Unbanded) {
+            build_service_area_segments(topology, metrics, request, &origin_bands)
+        } else {
+            Vec::new()
+        };
+
     let features = if request.returns.geometry || request.returns.attributes {
-        build_service_area_features(topology, request, origin_bands)
+        build_service_area_features(topology, metrics, request, &origin_bands)
     } else {
         Vec::new()
     };
@@ -2131,6 +2705,7 @@ fn execute_service_area_with_graph(
         threshold_count: request.thresholds.len(),
         features,
         summaries: threshold_summaries,
+        segments,
         diagnostics,
         warnings,
     })
@@ -2627,12 +3202,26 @@ fn service_area_intervals_for_threshold(
         };
         let full_edge_cost =
             service_area_edge_cost(topology, metrics, edge_index, metric_kind).unwrap_or_default();
+        let start_progress = if start_fraction >= 1.0 - f64::EPSILON {
+            1.0
+        } else {
+            ((start_fraction - start_fraction) / (1.0 - start_fraction)).clamp(0.0, 1.0)
+        };
+        let end_progress = if start_fraction >= 1.0 - f64::EPSILON {
+            1.0
+        } else {
+            ((end_fraction - start_fraction) / (1.0 - start_fraction)).clamp(0.0, 1.0)
+        };
+        let start_cost = before_cost + full_edge_cost * (1.0 - start_fraction) * start_progress;
+        let end_cost = before_cost + full_edge_cost * (1.0 - start_fraction) * end_progress;
         let midpoint_cost =
             before_cost + full_edge_cost * (1.0 - start_fraction) * midpoint_progress;
         segments.push(ReachableEdgeInterval {
             edge_index,
             start_fraction,
             end_fraction,
+            start_cost,
+            end_cost,
             midpoint_cost,
         });
     }
@@ -2654,17 +3243,20 @@ fn difference_service_area_intervals(
     let mut ring = Vec::new();
     for interval in current {
         let mut start = interval.start_fraction;
+        let mut start_cost = interval.start_cost;
         if let Some(previous_intervals) = previous_by_edge.get(&interval.edge_index) {
             for previous in previous_intervals {
                 if previous.end_fraction <= start + f64::EPSILON {
                     continue;
                 }
                 start = start.max(previous.end_fraction);
+                start_cost = start_cost.max(previous.end_cost);
             }
         }
         if interval.end_fraction > start + f64::EPSILON {
             ring.push(ReachableEdgeInterval {
                 start_fraction: start,
+                start_cost,
                 ..interval
             });
         }
@@ -2690,6 +3282,7 @@ fn normalize_service_area_segments(
                 && segment.start_fraction <= previous.end_fraction + 1e-9
             {
                 previous.end_fraction = previous.end_fraction.max(segment.end_fraction);
+                previous.end_cost = previous.end_cost.max(segment.end_cost);
                 previous.midpoint_cost = previous.midpoint_cost.min(segment.midpoint_cost);
                 continue;
             }
@@ -2853,11 +3446,26 @@ fn cut_service_area_bands(bands: Vec<ServiceAreaOriginBand>) -> Vec<ServiceAreaO
 
 fn build_service_area_features(
     topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
     request: &ServiceAreaRequest,
-    bands: Vec<ServiceAreaOriginBand>,
+    bands: &[ServiceAreaOriginBand],
 ) -> Vec<ServiceAreaFeature> {
     let mut features = Vec::new();
     for band in bands {
+        if matches!(request.band_mode, ServiceAreaBandMode::Unbanded) {
+            if matches!(
+                request.output_mode,
+                ServiceAreaOutputMode::Network | ServiceAreaOutputMode::Both
+            ) {
+                features.extend(
+                    service_area_segments_for_band(topology, metrics, request, band)
+                        .into_iter()
+                        .map(service_area_segment_feature),
+                );
+            }
+            continue;
+        }
+
         let (reachable_network_length_m, reachable_edge_count) =
             summarize_service_area_segments(topology, &band.segments, request.returns.attributes);
         let origin_id = (!band.origin_id.is_empty()).then_some(band.origin_id.clone());
@@ -2878,6 +3486,17 @@ fn build_service_area_features(
                 origin_hop_distance_m: band.origin_hop_distance_m,
                 reachable_network_length_m,
                 reachable_edge_count,
+                edge_id: None,
+                edge_index: None,
+                source_way_id: None,
+                from_node_id: None,
+                to_node_id: None,
+                start_fraction: None,
+                end_fraction: None,
+                start_cost: None,
+                end_cost: None,
+                segment_distance_m: None,
+                segment_travel_time_s: None,
                 geometry: request
                     .returns
                     .geometry
@@ -2892,7 +3511,7 @@ fn build_service_area_features(
             features.push(ServiceAreaFeature {
                 origin_id,
                 band_start_limit: band.band_start_limit,
-                threshold_id: band.threshold_id,
+                threshold_id: band.threshold_id.clone(),
                 threshold_limit: band.threshold_limit,
                 threshold_metric: band.threshold_metric,
                 geometry_type: ServiceAreaGeometryType::Polygon,
@@ -2901,6 +3520,17 @@ fn build_service_area_features(
                 origin_hop_distance_m: band.origin_hop_distance_m,
                 reachable_network_length_m,
                 reachable_edge_count,
+                edge_id: None,
+                edge_index: None,
+                source_way_id: None,
+                from_node_id: None,
+                to_node_id: None,
+                start_fraction: None,
+                end_fraction: None,
+                start_cost: None,
+                end_cost: None,
+                segment_distance_m: None,
+                segment_travel_time_s: None,
                 geometry: request.returns.geometry.then(|| {
                     service_area_polygon_geometry(topology, &band.segments, &request.polygon)
                 }),
@@ -2909,6 +3539,90 @@ fn build_service_area_features(
     }
 
     features
+}
+
+fn build_service_area_segments(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    request: &ServiceAreaRequest,
+    bands: &[ServiceAreaOriginBand],
+) -> Vec<ServiceAreaSegment> {
+    bands
+        .iter()
+        .flat_map(|band| service_area_segments_for_band(topology, metrics, request, band))
+        .collect()
+}
+
+fn service_area_segments_for_band(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    request: &ServiceAreaRequest,
+    band: &ServiceAreaOriginBand,
+) -> Vec<ServiceAreaSegment> {
+    band.segments
+        .iter()
+        .map(|segment| {
+            let edge = topology.routing_edge(segment.edge_index);
+            let full_distance_m = edge.length_m as f64;
+            let segment_distance_m =
+                full_distance_m * (segment.end_fraction - segment.start_fraction);
+            let segment_travel_time_s = metrics.edge_metrics[segment.edge_index]
+                .travel_time_s
+                .map(|time_s| time_s * (segment.end_fraction - segment.start_fraction));
+            ServiceAreaSegment {
+                origin_id: (!band.origin_id.is_empty()).then_some(band.origin_id.clone()),
+                band_start_limit: band.band_start_limit,
+                threshold_id: band.threshold_id.clone(),
+                threshold_limit: band.threshold_limit,
+                threshold_metric: band.threshold_metric,
+                edge_id: edge.edge_id.0,
+                edge_index: segment.edge_index as u32,
+                source_way_id: edge.source_way_id,
+                from_node_id: edge.from.0,
+                to_node_id: edge.to.0,
+                start_fraction: segment.start_fraction,
+                end_fraction: segment.end_fraction,
+                start_cost: segment.start_cost,
+                end_cost: segment.end_cost,
+                segment_distance_m,
+                segment_travel_time_s,
+                fallback_used: band.fallback_used,
+                origin_component_id: band.origin_component_id,
+                origin_hop_distance_m: band.origin_hop_distance_m,
+                geometry: request.returns.geometry.then(|| {
+                    service_area_network_geometry(topology, std::slice::from_ref(segment))
+                }),
+            }
+        })
+        .collect()
+}
+
+fn service_area_segment_feature(segment: ServiceAreaSegment) -> ServiceAreaFeature {
+    ServiceAreaFeature {
+        origin_id: segment.origin_id,
+        band_start_limit: segment.band_start_limit,
+        threshold_id: segment.threshold_id,
+        threshold_limit: segment.threshold_limit,
+        threshold_metric: segment.threshold_metric,
+        geometry_type: ServiceAreaGeometryType::Segment,
+        fallback_used: segment.fallback_used,
+        origin_component_id: segment.origin_component_id,
+        origin_hop_distance_m: segment.origin_hop_distance_m,
+        reachable_network_length_m: Some(segment.segment_distance_m),
+        reachable_edge_count: Some(1),
+        edge_id: Some(segment.edge_id),
+        edge_index: Some(segment.edge_index),
+        source_way_id: Some(segment.source_way_id),
+        from_node_id: Some(segment.from_node_id),
+        to_node_id: Some(segment.to_node_id),
+        start_fraction: Some(segment.start_fraction),
+        end_fraction: Some(segment.end_fraction),
+        start_cost: Some(segment.start_cost),
+        end_cost: Some(segment.end_cost),
+        segment_distance_m: Some(segment.segment_distance_m),
+        segment_travel_time_s: segment.segment_travel_time_s,
+        geometry: segment.geometry,
+    }
 }
 
 fn service_area_result_outcome(
@@ -3239,6 +3953,27 @@ pub fn execute_matrix(
     validate_execution_inputs(topology, metrics)?;
     let routing_graph = build_routing_graph(topology, metrics)?;
     execute_matrix_with_graph(topology, metrics, &routing_graph, origins, destinations)
+}
+
+pub fn execute_accessibility(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    request: &AccessibilityRequest,
+) -> Result<AccessibilityResult> {
+    if has_failure_modes(&request.origins.fallback) {
+        validate_execution_inputs(topology, metrics)?;
+        let (degraded_topology, degraded_metrics, degraded_routing_graph) =
+            build_failure_mode_bundle(topology, metrics, &request.origins.fallback)?;
+        return execute_accessibility_with_graph(
+            &degraded_topology,
+            &degraded_metrics,
+            &degraded_routing_graph,
+            request,
+        );
+    }
+    validate_execution_inputs(topology, metrics)?;
+    let routing_graph = build_routing_graph(topology, metrics)?;
+    execute_accessibility_with_graph(topology, metrics, &routing_graph, request)
 }
 
 fn validate_execution_inputs(
@@ -7803,10 +8538,11 @@ mod tests {
         DisconnectedNetworkMode, EngineMode, FallbackPolicy, IllegalMovementPenaltyPolicy, OdPair,
         OdPairsDocument, PointSetDocument, PreparedRoutingEngine, RouteRequest,
         ServiceAreaBandMode, ServiceAreaBoundaryMode, ServiceAreaMultiOriginMode,
-        ServiceAreaOutputMode, ServiceAreaThreshold, ServiceAreaThresholdMetric, SnapOptions,
-        analysis_failure, build_routing_graph, execute_matrix, execute_od, execute_route,
-        execute_route_with_edge_names, execute_service_area, load_experiment, load_od_pairs,
-        load_point_set, load_service_area_request,
+        ServiceAreaOutputMode, ServiceAreaReturnOptions, ServiceAreaThreshold,
+        ServiceAreaThresholdMetric, SnapOptions, analysis_failure, build_routing_graph,
+        execute_matrix, execute_od, execute_route, execute_route_with_edge_names,
+        execute_service_area, load_experiment, load_od_pairs, load_point_set,
+        load_service_area_request,
     };
     use netweevil_core::{
         AccessMask, CacheBundleId, CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle,
@@ -10905,6 +11641,60 @@ scenarios:
                 .and_then(|value| value.as_str()),
             Some("MultiLineString")
         );
+    }
+
+    #[test]
+    fn executes_unbanded_service_area_with_segment_costs() {
+        let request = super::ServiceAreaRequest {
+            analysis_id: "service-area-segments".to_string(),
+            origins: vec![super::LabeledPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            }],
+            thresholds: vec![ServiceAreaThreshold {
+                id: Some("fifteen_s".to_string()),
+                limit: 15.0,
+                metric: ServiceAreaThresholdMetric::TravelTimeS,
+            }],
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            output_mode: ServiceAreaOutputMode::Network,
+            band_mode: ServiceAreaBandMode::Unbanded,
+            boundary_mode: ServiceAreaBoundaryMode::CutAtBoundary,
+            multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+            polygon: Default::default(),
+            returns: ServiceAreaReturnOptions {
+                segments: true,
+                ..ServiceAreaReturnOptions::default()
+            },
+        };
+
+        let result = execute_service_area(
+            &service_area_linear_topology(),
+            &service_area_linear_metrics(),
+            &request,
+        )
+        .expect("service area succeeds");
+
+        assert_eq!(result.features.len(), 2);
+        assert_eq!(result.segments.len(), 2);
+        assert!(
+            result
+                .features
+                .iter()
+                .all(|feature| feature.geometry_type == super::ServiceAreaGeometryType::Segment)
+        );
+        assert_eq!(result.segments[0].edge_id, 0);
+        assert_eq!(result.segments[0].start_cost, 0.0);
+        assert_eq!(result.segments[0].end_cost, 10.0);
+        assert_eq!(result.segments[1].edge_id, 1);
+        assert_eq!(result.segments[1].end_fraction, 0.25);
+        assert_eq!(result.segments[1].end_cost, 15.0);
+        assert_eq!(result.segments[1].segment_distance_m, 50.0);
     }
 
     #[test]

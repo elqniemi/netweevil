@@ -2384,6 +2384,17 @@ fn write_service_area_csv(
                 optional_string(feature.origin_hop_distance_m),
                 optional_string(feature.reachable_network_length_m),
                 optional_string(feature.reachable_edge_count),
+                optional_string(feature.edge_id),
+                optional_string(feature.edge_index),
+                optional_string(feature.source_way_id),
+                optional_string(feature.from_node_id),
+                optional_string(feature.to_node_id),
+                optional_string(feature.start_fraction),
+                optional_string(feature.end_fraction),
+                optional_string(feature.start_cost),
+                optional_string(feature.end_cost),
+                optional_string(feature.segment_distance_m),
+                optional_string(feature.segment_travel_time_s),
                 feature
                     .geometry
                     .clone()
@@ -2408,6 +2419,17 @@ fn write_service_area_csv(
             "origin_hop_distance_m",
             "reachable_network_length_m",
             "reachable_edge_count",
+            "edge_id",
+            "edge_index",
+            "source_way_id",
+            "from_node_id",
+            "to_node_id",
+            "start_fraction",
+            "end_fraction",
+            "start_cost",
+            "end_cost",
+            "segment_distance_m",
+            "segment_travel_time_s",
             "geometry_json",
         ],
         rows,
@@ -2439,6 +2461,17 @@ fn write_service_area_geojson(
                     "origin_hop_distance_m": feature.origin_hop_distance_m,
                     "reachable_network_length_m": feature.reachable_network_length_m,
                     "reachable_edge_count": feature.reachable_edge_count,
+                    "edge_id": feature.edge_id,
+                    "edge_index": feature.edge_index,
+                    "source_way_id": feature.source_way_id,
+                    "from_node_id": feature.from_node_id,
+                    "to_node_id": feature.to_node_id,
+                    "start_fraction": feature.start_fraction,
+                    "end_fraction": feature.end_fraction,
+                    "start_cost": feature.start_cost,
+                    "end_cost": feature.end_cost,
+                    "segment_distance_m": feature.segment_distance_m,
+                    "segment_travel_time_s": feature.segment_travel_time_s,
                 }
             })
         })
@@ -2464,6 +2497,13 @@ fn write_service_area_gpkg(
         result,
         ServiceAreaGeometryType::Network,
         "service_area_network",
+        "MULTILINESTRING",
+    )?;
+    write_service_area_gpkg_table(
+        &mut gpkg,
+        result,
+        ServiceAreaGeometryType::Segment,
+        "service_area_segments",
         "MULTILINESTRING",
     )?;
     write_service_area_gpkg_table(
@@ -2520,6 +2560,17 @@ fn write_service_area_gpkg_table(
             ("origin_hop_distance_m", "REAL"),
             ("reachable_network_length_m", "REAL"),
             ("reachable_edge_count", "INTEGER"),
+            ("edge_id", "INTEGER"),
+            ("edge_index", "INTEGER"),
+            ("source_way_id", "INTEGER"),
+            ("from_node_id", "INTEGER"),
+            ("to_node_id", "INTEGER"),
+            ("start_fraction", "REAL"),
+            ("end_fraction", "REAL"),
+            ("start_cost", "REAL"),
+            ("end_cost", "REAL"),
+            ("segment_distance_m", "REAL"),
+            ("segment_travel_time_s", "REAL"),
         ],
         gpkg_geometry_type,
         Some(extent),
@@ -2576,6 +2627,41 @@ fn write_service_area_gpkg_table(
                     SqlValue::NullableInteger(
                         feature.reachable_edge_count.map(|value| value as i64),
                     ),
+                ),
+                (
+                    "edge_id",
+                    SqlValue::NullableInteger(feature.edge_id.map(i64::from)),
+                ),
+                (
+                    "edge_index",
+                    SqlValue::NullableInteger(feature.edge_index.map(i64::from)),
+                ),
+                (
+                    "source_way_id",
+                    SqlValue::NullableInteger(feature.source_way_id),
+                ),
+                (
+                    "from_node_id",
+                    SqlValue::NullableInteger(feature.from_node_id.map(i64::from)),
+                ),
+                (
+                    "to_node_id",
+                    SqlValue::NullableInteger(feature.to_node_id.map(i64::from)),
+                ),
+                (
+                    "start_fraction",
+                    SqlValue::NullableReal(feature.start_fraction),
+                ),
+                ("end_fraction", SqlValue::NullableReal(feature.end_fraction)),
+                ("start_cost", SqlValue::NullableReal(feature.start_cost)),
+                ("end_cost", SqlValue::NullableReal(feature.end_cost)),
+                (
+                    "segment_distance_m",
+                    SqlValue::NullableReal(feature.segment_distance_m),
+                ),
+                (
+                    "segment_travel_time_s",
+                    SqlValue::NullableReal(feature.segment_travel_time_s),
                 ),
             ],
             &wkb,
@@ -2892,6 +2978,7 @@ fn service_area_geometry_type_name(geometry_type: ServiceAreaGeometryType) -> &'
     match geometry_type {
         ServiceAreaGeometryType::Network => "network",
         ServiceAreaGeometryType::Polygon => "polygon",
+        ServiceAreaGeometryType::Segment => "segment",
     }
 }
 
@@ -2939,7 +3026,7 @@ fn service_area_geometry_wkb(
     geometry_type: ServiceAreaGeometryType,
 ) -> Option<Vec<u8>> {
     match geometry_type {
-        ServiceAreaGeometryType::Network => {
+        ServiceAreaGeometryType::Network | ServiceAreaGeometryType::Segment => {
             let lines = match geometry.get("type")?.as_str()? {
                 "LineString" => vec![
                     serde_json::from_value::<Vec<[f64; 2]>>(geometry.get("coordinates")?.clone())
@@ -3935,12 +4022,24 @@ mod tests {
                 origin_hop_distance_m: None,
                 reachable_network_length_m: Some(300.0),
                 reachable_edge_count: Some(2),
+                edge_id: None,
+                edge_index: None,
+                source_way_id: None,
+                from_node_id: None,
+                to_node_id: None,
+                start_fraction: None,
+                end_fraction: None,
+                start_cost: None,
+                end_cost: None,
+                segment_distance_m: None,
+                segment_travel_time_s: None,
                 geometry: Some(serde_json::json!({
                     "type": "MultiLineString",
                     "coordinates": [[[6.0, 53.0], [6.1, 53.1]]],
                 })),
             }],
             summaries: vec![],
+            segments: vec![],
             diagnostics: vec![],
             warnings: vec![],
         };

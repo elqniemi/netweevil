@@ -25,7 +25,8 @@ use netweevil_profile::{
     compile_profile_bundle_with_acceleration_with_progress, load_profile,
 };
 use netweevil_query::{
-    AnalysisKind, MatrixResult, OdResult, PreparedRoutingEngine, RouteBatchResult, RouteResult,
+    AccessibilityCategoryRequest, AccessibilityRequest, AccessibilityResult, AnalysisKind,
+    MatrixResult, OdResult, PreparedRoutingEngine, RouteBatchResult, RouteResult,
     ServiceAreaResult, analysis_failure, load_experiment, load_od_pairs, load_point_set,
     load_route_batch, load_route_request, load_service_area_request,
 };
@@ -35,10 +36,11 @@ use netweevil_report::{
     write_route_batch_result, write_route_result, write_service_area_result,
 };
 use netweevil_transit::{
-    OPENOV_GTFS_URL, PreparedTransitRouter, TransitFeedManifest, TransitImportOptions, import_gtfs,
-    load_transit_request, read_transit_bundle, transit_import_summary, write_transit_bundle,
+    OPENOV_GTFS_URL, PreparedTransitRouter, TransitFeedManifest, TransitImportOptions,
+    TransitRouteRequest, TransitRouteResult, import_gtfs, load_transit_request,
+    read_transit_bundle, transit_import_summary, write_transit_bundle,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug)]
@@ -123,8 +125,10 @@ fn main() -> Result<()> {
             AnalyzeCommand::RouteBatch(args) => analyze_route_batch(&paths, args),
             AnalyzeCommand::Od(args) => analyze_od(&paths, args),
             AnalyzeCommand::Matrix(args) => analyze_matrix(&paths, args),
+            AnalyzeCommand::Accessibility(args) => analyze_accessibility(&paths, args),
             AnalyzeCommand::ServiceArea(args) => analyze_service_area(&paths, args),
             AnalyzeCommand::TransitRoute(args) => analyze_transit_route(&paths, args),
+            AnalyzeCommand::TransitBatch(args) => analyze_transit_batch(&paths, args),
         },
         Command::Experiment {
             command: experiment,
@@ -264,8 +268,10 @@ enum AnalyzeCommand {
     RouteBatch(RouteBatchArgs),
     Od(OdArgs),
     Matrix(MatrixArgs),
+    Accessibility(AccessibilityArgs),
     ServiceArea(ServiceAreaArgs),
     TransitRoute(TransitRouteArgs),
+    TransitBatch(TransitBatchArgs),
 }
 
 #[derive(Subcommand, Debug)]
@@ -357,6 +363,24 @@ struct MatrixArgs {
 }
 
 #[derive(Args, Debug)]
+struct AccessibilityArgs {
+    #[arg(long)]
+    dataset: String,
+    #[arg(long)]
+    profile: PathBuf,
+    #[arg(long)]
+    origins: PathBuf,
+    #[arg(long = "destination")]
+    destinations: Vec<String>,
+    #[arg(long, value_delimiter = ',', default_values_t = [300.0, 600.0, 900.0, 1200.0])]
+    thresholds_s: Vec<f64>,
+    #[arg(long, default_value_t = 1200.0)]
+    max_travel_time_s: f64,
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 struct ServiceAreaArgs {
     #[arg(long)]
     dataset: String,
@@ -376,6 +400,47 @@ struct TransitRouteArgs {
     request: PathBuf,
     #[arg(long)]
     out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+struct TransitBatchArgs {
+    #[arg(long)]
+    feed: String,
+    #[arg(long)]
+    requests: PathBuf,
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TransitBatchDocument {
+    #[serde(default)]
+    requests: Vec<TransitRouteRequest>,
+}
+
+#[derive(Debug, Serialize)]
+struct TransitBatchItemResult {
+    request_index: usize,
+    route_id: String,
+    result: TransitRouteResult,
+}
+
+#[derive(Debug, Serialize)]
+struct TransitBatchResult {
+    route_count: usize,
+    scheduled_count: usize,
+    unreachable_count: usize,
+    not_implemented_count: usize,
+    failed_count: usize,
+    items: Vec<TransitBatchItemResult>,
+    failures: Vec<TransitBatchFailure>,
+}
+
+#[derive(Debug, Serialize)]
+struct TransitBatchFailure {
+    request_index: usize,
+    route_id: String,
+    error: String,
 }
 
 fn dataset_import(paths: &WorkspacePaths, args: DatasetImportArgs) -> Result<()> {
@@ -817,6 +882,39 @@ fn analyze_matrix(paths: &WorkspacePaths, args: MatrixArgs) -> Result<()> {
     Ok(())
 }
 
+fn analyze_accessibility(paths: &WorkspacePaths, args: AccessibilityArgs) -> Result<()> {
+    let profile = load_profile(&args.profile)?;
+    profile.validate()?;
+    let origins = load_point_set(&args.origins)?;
+    let categories = load_accessibility_categories(&args.destinations)?;
+    let request = AccessibilityRequest {
+        origins,
+        categories,
+        thresholds_s: args.thresholds_s,
+        max_travel_time_s: args.max_travel_time_s,
+    };
+    let stored = match run_accessibility_analysis(
+        paths,
+        &args.dataset,
+        &profile,
+        &args.origins,
+        &request,
+        args.out,
+    ) {
+        Ok(stored) => stored,
+        Err(error) => {
+            emit_structured_failure_diagnostics(&error);
+            return Err(error);
+        }
+    };
+    println!(
+        "accessibility result written to {}",
+        stored.result_path.display()
+    );
+    println!("run manifest written to {}", stored.manifest_path.display());
+    Ok(())
+}
+
 fn analyze_service_area(paths: &WorkspacePaths, args: ServiceAreaArgs) -> Result<()> {
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
@@ -857,6 +955,72 @@ fn analyze_transit_route(paths: &WorkspacePaths, args: TransitRouteArgs) -> Resu
     write_json(&result_path, &result)?;
     println!("transit route result written to {}", result_path.display());
     Ok(())
+}
+
+fn analyze_transit_batch(paths: &WorkspacePaths, args: TransitBatchArgs) -> Result<()> {
+    let manifest = read_transit_manifest(paths, &args.feed)?;
+    let bundle = read_transit_bundle(&manifest.bundle_path)
+        .with_context(|| format!("reading transit bundle {}", manifest.bundle_path))?;
+    let document = load_transit_batch(&args.requests)?;
+    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    let mut items = Vec::new();
+    let mut failures = Vec::new();
+    let mut scheduled_count = 0_usize;
+    let mut unreachable_count = 0_usize;
+    let mut not_implemented_count = 0_usize;
+
+    for (index, request) in document.requests.iter().enumerate() {
+        match router.execute_route(request) {
+            Ok(result) => {
+                match result.outcome {
+                    netweevil_transit::TransitOutcome::Scheduled => scheduled_count += 1,
+                    netweevil_transit::TransitOutcome::Unreachable => unreachable_count += 1,
+                    netweevil_transit::TransitOutcome::NotImplemented => not_implemented_count += 1,
+                }
+                items.push(TransitBatchItemResult {
+                    request_index: index + 1,
+                    route_id: request.route_id.clone(),
+                    result,
+                });
+            }
+            Err(error) => failures.push(TransitBatchFailure {
+                request_index: index + 1,
+                route_id: request.route_id.clone(),
+                error: error.to_string(),
+            }),
+        }
+    }
+
+    let result = TransitBatchResult {
+        route_count: document.requests.len(),
+        scheduled_count,
+        unreachable_count,
+        not_implemented_count,
+        failed_count: failures.len(),
+        items,
+        failures,
+    };
+    let result_path = args.out.unwrap_or_else(|| {
+        paths
+            .runs_dir
+            .join(format!("transit-batch-{}.json", args.feed))
+    });
+    write_json(&result_path, &result)?;
+    println!("transit batch result written to {}", result_path.display());
+    println!(
+        "transit batch completed with {} scheduled, {} unreachable, {} not implemented, and {} failed routes",
+        result.scheduled_count,
+        result.unreachable_count,
+        result.not_implemented_count,
+        result.failed_count
+    );
+    Ok(())
+}
+
+fn load_transit_batch(path: &Path) -> Result<TransitBatchDocument> {
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("reading transit batch {}", path.display()))?;
+    serde_json::from_str(&raw).with_context(|| format!("parsing transit batch {}", path.display()))
 }
 
 fn run_route_analysis(
@@ -1099,6 +1263,67 @@ fn run_matrix_analysis(
         destinations_path,
         &origins,
         &destinations,
+        &result,
+        &compiled_manifest,
+        engine,
+        out,
+    )
+}
+
+fn load_accessibility_categories(specs: &[String]) -> Result<Vec<AccessibilityCategoryRequest>> {
+    if specs.is_empty() {
+        anyhow::bail!(
+            "at least one --destination category=path argument is required for accessibility analysis"
+        );
+    }
+    specs
+        .iter()
+        .map(|spec| {
+            let (category_id, path) = spec.split_once('=').with_context(|| {
+                format!("destination spec '{spec}' must use category=path syntax")
+            })?;
+            let category_id = category_id.trim();
+            if category_id.is_empty() {
+                anyhow::bail!("destination spec '{spec}' has an empty category");
+            }
+            let path = PathBuf::from(path.trim());
+            let destinations = load_point_set(&path).with_context(|| {
+                format!("loading accessibility destinations {}", path.display())
+            })?;
+            Ok(AccessibilityCategoryRequest {
+                category_id: category_id.to_string(),
+                destinations,
+            })
+        })
+        .collect()
+}
+
+fn run_accessibility_analysis(
+    paths: &WorkspacePaths,
+    dataset_id: &str,
+    profile: &ProfileDocument,
+    origins_path: &Path,
+    request: &AccessibilityRequest,
+    out: Option<PathBuf>,
+) -> Result<StoredRun> {
+    let (topology, acceleration, compiled_manifest, compiled_bundle) =
+        load_route_execution_inputs(paths, dataset_id, profile)?;
+    let engine = engine_description(&topology);
+    let prepared = PreparedRoutingEngine::new(
+        Arc::new(topology),
+        Arc::new(compiled_bundle),
+        acceleration.map(Arc::new),
+    )
+    .context("preparing routing engine")?;
+    let result = prepared
+        .execute_accessibility(request)
+        .with_context(|| format!("executing accessibility from '{}'", origins_path.display()))?;
+    store_accessibility_run(
+        paths,
+        dataset_id,
+        profile,
+        origins_path,
+        request,
         &result,
         &compiled_manifest,
         engine,
@@ -1370,6 +1595,71 @@ fn store_matrix_run(
             "succeeded_count": result.succeeded_count,
             "ignored_count": result.ignored_count,
             "failed_count": result.failed_count,
+        })),
+    })
+}
+
+fn store_accessibility_run(
+    paths: &WorkspacePaths,
+    dataset_id: &str,
+    profile: &ProfileDocument,
+    origins_path: &Path,
+    request: &AccessibilityRequest,
+    result: &AccessibilityResult,
+    compiled_manifest: &CompiledProfileManifest,
+    engine: EngineDescription,
+    out: Option<PathBuf>,
+) -> Result<StoredRun> {
+    let category_list = request
+        .categories
+        .iter()
+        .map(|category| category.category_id.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut manifest = new_run_manifest(
+        RunKind::Accessibility,
+        dataset_id.to_string(),
+        profile,
+        format!("{} | {}", origins_path.display(), category_list),
+        RunStatus::Succeeded,
+        format!(
+            "Accessibility reduction completed with {} succeeded origin-category rows and {} failed rows across {} origin(s), {} category/categories, and {} destination(s).",
+            result.succeeded_count,
+            result.failed_count,
+            result.origin_count,
+            result.category_count,
+            result.destination_count
+        ),
+        software_info(),
+        Some(compiled_manifest.bundle.bundle_id.0.clone()),
+    )?;
+    manifest.algorithm.engine = "bounded_single_origin_accessibility".to_string();
+    manifest.algorithm.acceleration = engine.acceleration.to_string();
+    manifest.methods_summary.plain_language = format!(
+        "{} Accessibility execution performs one exact bounded legal-network expansion per unique snapped origin up to {:.0}s, snaps all destinations once, and reduces each category to nearest destination and threshold counts without materializing all OD cells.",
+        engine.batch_summary, result.max_travel_time_s
+    );
+    manifest.connectivity_policy = Some(request.origins.connectivity.clone());
+    manifest.fallback_policy = Some(request.origins.fallback.clone());
+    let result_path = out.unwrap_or_else(|| {
+        paths
+            .runs_dir
+            .join(format!("{}-result.json", manifest.run_id))
+    });
+    write_accessibility_result(&result_path, result)?;
+    manifest.result_path = Some(result_path.display().to_string());
+    let manifest_path = write_run_manifest(paths, &manifest)?;
+    Ok(StoredRun {
+        result_path,
+        manifest_path,
+        summary: Some(serde_json::json!({
+            "origin_count": result.origin_count,
+            "category_count": result.category_count,
+            "destination_count": result.destination_count,
+            "row_count": result.row_count,
+            "succeeded_count": result.succeeded_count,
+            "failed_count": result.failed_count,
+            "skipped_origin_count": result.skipped_origin_count,
         })),
     })
 }
@@ -1748,6 +2038,128 @@ fn output_needs_geometry(path: &Path) -> bool {
                 || ext.eq_ignore_ascii_case("gpq")
         })
         .unwrap_or(false)
+}
+
+fn write_accessibility_result(path: &Path, result: &AccessibilityResult) -> Result<()> {
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) if ext.eq_ignore_ascii_case("json") => write_json(path, result),
+        Some(ext) if ext.eq_ignore_ascii_case("csv") => write_accessibility_csv(path, result),
+        other => anyhow::bail!(
+            "accessibility output extension {:?} is unsupported; use .json or .csv",
+            other
+        ),
+    }
+}
+
+fn write_accessibility_csv(path: &Path, result: &AccessibilityResult) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let threshold_keys = result
+        .thresholds_s
+        .iter()
+        .map(|threshold| accessibility_threshold_key(*threshold))
+        .collect::<Vec<_>>();
+    let mut output = String::new();
+    let mut header = vec![
+        "origin_id".to_string(),
+        "category_id".to_string(),
+        "status".to_string(),
+        "outcome".to_string(),
+        "fallback_used".to_string(),
+        "origin_component_id".to_string(),
+        "origin_hop_distance_m".to_string(),
+        "origin_snap_distance_m".to_string(),
+        "destination_count".to_string(),
+        "snapped_destination_count".to_string(),
+        "nearest_destination_id".to_string(),
+        "nearest_travel_time_s".to_string(),
+        "nearest_destination_snap_distance_m".to_string(),
+    ];
+    header.extend(
+        threshold_keys
+            .iter()
+            .map(|threshold| format!("count_within_{threshold}s")),
+    );
+    header.push("error".to_string());
+    push_csv_line(&mut output, &header);
+
+    for row in &result.rows {
+        let mut values = vec![
+            row.origin_id.clone(),
+            row.category_id.clone(),
+            batch_status_name(row.status).to_string(),
+            outcome_name(row.outcome).to_string(),
+            row.fallback_used.to_string(),
+            optional_csv(row.origin_component_id),
+            optional_csv(row.origin_hop_distance_m),
+            optional_csv(row.origin_snap_distance_m),
+            row.destination_count.to_string(),
+            row.snapped_destination_count.to_string(),
+            row.nearest_destination_id.clone().unwrap_or_default(),
+            optional_csv(row.nearest_travel_time_s),
+            optional_csv(row.nearest_destination_snap_distance_m),
+        ];
+        values.extend(threshold_keys.iter().map(|threshold| {
+            row.counts_within_threshold_s
+                .get(threshold)
+                .copied()
+                .unwrap_or_default()
+                .to_string()
+        }));
+        values.push(row.error.clone().unwrap_or_default());
+        push_csv_line(&mut output, &values);
+    }
+    fs::write(path, output).with_context(|| format!("writing {}", path.display()))
+}
+
+fn accessibility_threshold_key(threshold_s: f64) -> String {
+    if (threshold_s.fract()).abs() <= f64::EPSILON {
+        format!("{threshold_s:.0}")
+    } else {
+        threshold_s.to_string()
+    }
+}
+
+fn batch_status_name(status: netweevil_query::BatchItemStatus) -> &'static str {
+    match status {
+        netweevil_query::BatchItemStatus::Succeeded => "succeeded",
+        netweevil_query::BatchItemStatus::Ignored => "ignored",
+        netweevil_query::BatchItemStatus::Failed => "failed",
+    }
+}
+
+fn outcome_name(outcome: netweevil_query::AnalysisOutcome) -> &'static str {
+    match outcome {
+        netweevil_query::AnalysisOutcome::Legal => "legal",
+        netweevil_query::AnalysisOutcome::Degraded => "degraded",
+        netweevil_query::AnalysisOutcome::Partial => "partial",
+        netweevil_query::AnalysisOutcome::Unreachable => "unreachable",
+        netweevil_query::AnalysisOutcome::NotImplemented => "not_implemented",
+    }
+}
+
+fn optional_csv<T: ToString>(value: Option<T>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+fn push_csv_line(output: &mut String, values: &[String]) {
+    output.push_str(
+        &values
+            .iter()
+            .map(|value| csv_escape(value))
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    output.push('\n');
+}
+
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') || value.contains('\r') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
 }
 
 fn run_experiment_scenario(

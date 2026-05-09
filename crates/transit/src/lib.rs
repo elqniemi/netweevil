@@ -62,6 +62,7 @@ pub struct TransitBundle {
     pub stops: Vec<TransitStop>,
     pub routes: Vec<TransitRoute>,
     pub trips: Vec<TransitTrip>,
+    pub shapes: Vec<TransitShape>,
     pub connections: Vec<TransitConnection>,
 }
 
@@ -86,6 +87,13 @@ pub struct TransitTrip {
     pub trip_id: String,
     pub route_index: u32,
     pub headsign: String,
+    pub shape_index: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitShape {
+    pub shape_id: String,
+    pub points: Vec<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -152,6 +160,48 @@ pub struct TransitRouteRequest {
     pub returns: TransitReturnOptions,
     #[serde(default)]
     pub alternatives: TransitAlternativeOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitServiceAreaRequest {
+    pub analysis_id: String,
+    #[serde(default)]
+    pub origins: Vec<TransitPoint>,
+    pub time: TransitQueryTime,
+    #[serde(default)]
+    pub modes: TransitModeOptions,
+    #[serde(default = "default_transit_service_area_max_travel_time_s")]
+    pub max_travel_time_s: u32,
+    #[serde(default)]
+    pub returns: TransitServiceAreaReturnOptions,
+}
+
+fn default_transit_service_area_max_travel_time_s() -> u32 {
+    60 * 60
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitServiceAreaReturnOptions {
+    #[serde(default = "default_true")]
+    pub include_stops: bool,
+    #[serde(default = "default_true")]
+    pub include_stop_segments: bool,
+    #[serde(default = "default_true")]
+    pub include_geometry: bool,
+}
+
+impl Default for TransitServiceAreaReturnOptions {
+    fn default() -> Self {
+        Self {
+            include_stops: true,
+            include_stop_segments: true,
+            include_geometry: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -343,6 +393,58 @@ pub struct TransitRouteResult {
     pub diagnostics: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternatives: Vec<TransitRouteAlternative>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitServiceAreaResult {
+    pub analysis_id: String,
+    pub outcome: TransitOutcome,
+    pub origin_count: usize,
+    pub processed_origin_count: usize,
+    pub skipped_origin_count: usize,
+    pub max_travel_time_s: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stops: Vec<TransitServiceAreaStop>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_segments: Vec<TransitServiceAreaSegment>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitServiceAreaStop {
+    pub origin_id: String,
+    pub stop_id: String,
+    pub stop_name: String,
+    pub lon: f64,
+    pub lat: f64,
+    pub arrival_s: u32,
+    pub travel_time_s: u32,
+    pub boarding_count: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitServiceAreaSegment {
+    pub origin_id: String,
+    pub from_stop_id: String,
+    pub to_stop_id: String,
+    pub from_stop_name: String,
+    pub to_stop_name: String,
+    pub departure_s: u32,
+    pub arrival_s: u32,
+    pub duration_s: u32,
+    pub travel_time_s: u32,
+    pub boarding_count: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<TransitMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_short_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trip_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub geometry: Vec<[f64; 2]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -538,6 +640,19 @@ impl PreparedTransitRouter {
         );
         execute_transit_route_with_runtime(&runtime, request)
     }
+
+    pub fn execute_service_area(
+        &self,
+        request: &TransitServiceAreaRequest,
+    ) -> Result<TransitServiceAreaResult> {
+        let runtime = TransitRuntime::new(
+            self.bundle.as_ref(),
+            &self.departures_by_stop,
+            &self.stop_index,
+            &request.modes,
+        );
+        execute_transit_service_area_with_runtime(&runtime, request)
+    }
 }
 
 pub fn execute_transit_route(
@@ -548,6 +663,304 @@ pub fn execute_transit_route(
     let stop_index = StopSpatialIndex::new(&bundle.stops);
     let runtime = TransitRuntime::new(bundle, &departures_by_stop, &stop_index, &request.modes);
     execute_transit_route_with_runtime(&runtime, request)
+}
+
+pub fn execute_transit_service_area(
+    bundle: &TransitBundle,
+    request: &TransitServiceAreaRequest,
+) -> Result<TransitServiceAreaResult> {
+    let departures_by_stop = build_departures_by_stop(bundle);
+    let stop_index = StopSpatialIndex::new(&bundle.stops);
+    let runtime = TransitRuntime::new(bundle, &departures_by_stop, &stop_index, &request.modes);
+    execute_transit_service_area_with_runtime(&runtime, request)
+}
+
+fn execute_transit_service_area_with_runtime(
+    runtime: &TransitRuntime<'_>,
+    request: &TransitServiceAreaRequest,
+) -> Result<TransitServiceAreaResult> {
+    if request.time.arrive_by {
+        return Ok(TransitServiceAreaResult {
+            analysis_id: request.analysis_id.clone(),
+            outcome: TransitOutcome::NotImplemented,
+            origin_count: request.origins.len(),
+            processed_origin_count: 0,
+            skipped_origin_count: request.origins.len(),
+            max_travel_time_s: request.max_travel_time_s,
+            stops: Vec::new(),
+            stop_segments: Vec::new(),
+            diagnostics: vec![
+                "arrive_by transit service-area searches are not implemented yet; use depart-after timing"
+                    .to_string(),
+            ],
+        });
+    }
+    if !request.modes.access.contains(&AccessMode::Walk) {
+        return Ok(TransitServiceAreaResult {
+            analysis_id: request.analysis_id.clone(),
+            outcome: TransitOutcome::NotImplemented,
+            origin_count: request.origins.len(),
+            processed_origin_count: 0,
+            skipped_origin_count: request.origins.len(),
+            max_travel_time_s: request.max_travel_time_s,
+            stops: Vec::new(),
+            stop_segments: Vec::new(),
+            diagnostics: vec![
+                "only pedestrian access is implemented for transit service areas".to_string(),
+            ],
+        });
+    }
+
+    let departure_s = runtime.request_departure_seconds(&request.time.datetime)?;
+    let search_end_s = departure_s.saturating_add(request.time.search_window_s);
+    let time_limit_s = departure_s.saturating_add(request.max_travel_time_s);
+    let mut all_stops = Vec::new();
+    let mut all_segments = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut processed_origin_count = 0_usize;
+    let mut skipped_origin_count = 0_usize;
+
+    for origin in &request.origins {
+        let access =
+            runtime.nearby_stops(origin.lon, origin.lat, request.modes.max_access_distance_m);
+        if access.is_empty() {
+            skipped_origin_count += 1;
+            diagnostics.push(format!(
+                "origin '{}' had no transit stop within {:.0} m",
+                origin.id, request.modes.max_access_distance_m
+            ));
+            continue;
+        }
+
+        processed_origin_count += 1;
+        let mut heap = BinaryHeap::new();
+        let mut best = HashMap::<StateKey, u32>::new();
+        let mut prev = HashMap::<StateKey, PrevStep>::new();
+
+        for candidate in access {
+            let access_time_s =
+                seconds_for_distance(candidate.distance_m, request.modes.walk_speed_kph);
+            let arrival_s = departure_s.saturating_add(access_time_s);
+            if arrival_s > time_limit_s {
+                continue;
+            }
+            let state = StateKey {
+                stop_index: candidate.stop_index,
+                boardings: 0,
+                trip_index: u32::MAX,
+            };
+            relax_state(
+                &mut heap,
+                &mut best,
+                &mut prev,
+                state,
+                arrival_s,
+                PrevStep::Access {
+                    from_id: origin.id.clone(),
+                    from_name: origin.id.clone(),
+                    from_lon: origin.lon,
+                    from_lat: origin.lat,
+                    distance_m: candidate.distance_m,
+                    departure_s,
+                },
+            );
+        }
+
+        while let Some(entry) = heap.pop() {
+            if best
+                .get(&entry.state)
+                .is_some_and(|known| *known < entry.time_s)
+            {
+                continue;
+            }
+            if entry.time_s > time_limit_s {
+                continue;
+            }
+
+            let transfer_departure_s = if entry.state.trip_index == u32::MAX {
+                entry.time_s
+            } else {
+                entry.time_s.saturating_add(request.modes.transfer_slack_s)
+            };
+            for transfer in runtime.nearby_stop_indexes(
+                entry.state.stop_index,
+                request.modes.max_transfer_distance_m,
+            ) {
+                if transfer.stop_index == entry.state.stop_index {
+                    continue;
+                }
+                let walk_s =
+                    seconds_for_distance(transfer.distance_m, request.modes.walk_speed_kph);
+                let arrival_s = transfer_departure_s.saturating_add(walk_s);
+                if arrival_s > time_limit_s {
+                    continue;
+                }
+                let next_state = StateKey {
+                    stop_index: transfer.stop_index,
+                    boardings: entry.state.boardings,
+                    trip_index: u32::MAX,
+                };
+                relax_state(
+                    &mut heap,
+                    &mut best,
+                    &mut prev,
+                    next_state,
+                    arrival_s,
+                    PrevStep::Transfer {
+                        previous: entry.state,
+                        distance_m: transfer.distance_m,
+                        departure_s: transfer_departure_s,
+                    },
+                );
+            }
+
+            if let Some(departures) = runtime
+                .departures_by_stop
+                .get(entry.state.stop_index as usize)
+            {
+                let start = departures.partition_point(|connection| {
+                    let slack = if entry.state.trip_index == connection.trip_index {
+                        0
+                    } else {
+                        request.modes.board_slack_s
+                    };
+                    connection.departure_s < entry.time_s.saturating_add(slack)
+                });
+                for connection in departures[start..].iter() {
+                    if connection.departure_s > search_end_s
+                        || connection.departure_s > time_limit_s
+                    {
+                        break;
+                    }
+                    if connection.arrival_s > time_limit_s {
+                        continue;
+                    }
+                    if !runtime.allowed_routes[connection.route_index as usize] {
+                        continue;
+                    }
+                    let same_trip = entry.state.trip_index == connection.trip_index;
+                    let next_boardings = if same_trip {
+                        entry.state.boardings
+                    } else {
+                        entry.state.boardings.saturating_add(1)
+                    };
+                    if next_boardings > request.modes.max_transfers.saturating_add(1) {
+                        continue;
+                    }
+                    let next_state = StateKey {
+                        stop_index: connection.to_stop_index,
+                        boardings: next_boardings,
+                        trip_index: connection.trip_index,
+                    };
+                    if best
+                        .get(&next_state)
+                        .is_some_and(|known| connection.arrival_s >= *known)
+                    {
+                        continue;
+                    }
+                    relax_state(
+                        &mut heap,
+                        &mut best,
+                        &mut prev,
+                        next_state,
+                        connection.arrival_s,
+                        PrevStep::Transit {
+                            previous: entry.state,
+                            connection: *connection,
+                        },
+                    );
+                    if request.returns.include_stop_segments {
+                        all_segments.push(transit_service_area_segment(
+                            runtime.bundle,
+                            origin,
+                            departure_s,
+                            next_boardings,
+                            *connection,
+                            request.returns.include_geometry,
+                        ));
+                    }
+                }
+            }
+        }
+
+        if request.returns.include_stops {
+            let mut stop_best = BTreeMap::<u32, (u32, u8)>::new();
+            for (state, arrival_s) in best {
+                if arrival_s > time_limit_s {
+                    continue;
+                }
+                let entry = stop_best
+                    .entry(state.stop_index)
+                    .or_insert((arrival_s, state.boardings));
+                if arrival_s < entry.0 || (arrival_s == entry.0 && state.boardings < entry.1) {
+                    *entry = (arrival_s, state.boardings);
+                }
+            }
+            for (stop_index, (arrival_s, boardings)) in stop_best {
+                let stop = &runtime.bundle.stops[stop_index as usize];
+                all_stops.push(TransitServiceAreaStop {
+                    origin_id: origin.id.clone(),
+                    stop_id: stop.stop_id.clone(),
+                    stop_name: stop.name.clone(),
+                    lon: stop.lon,
+                    lat: stop.lat,
+                    arrival_s,
+                    travel_time_s: arrival_s.saturating_sub(departure_s),
+                    boarding_count: boardings,
+                });
+            }
+        }
+    }
+
+    let outcome = if processed_origin_count == 0 {
+        TransitOutcome::Unreachable
+    } else {
+        TransitOutcome::Scheduled
+    };
+    Ok(TransitServiceAreaResult {
+        analysis_id: request.analysis_id.clone(),
+        outcome,
+        origin_count: request.origins.len(),
+        processed_origin_count,
+        skipped_origin_count,
+        max_travel_time_s: request.max_travel_time_s,
+        stops: all_stops,
+        stop_segments: all_segments,
+        diagnostics,
+    })
+}
+
+fn transit_service_area_segment(
+    bundle: &TransitBundle,
+    origin: &TransitPoint,
+    departure_s: u32,
+    boarding_count: u8,
+    connection: TransitConnection,
+    include_geometry: bool,
+) -> TransitServiceAreaSegment {
+    let from_stop = &bundle.stops[connection.from_stop_index as usize];
+    let to_stop = &bundle.stops[connection.to_stop_index as usize];
+    let route = &bundle.routes[connection.route_index as usize];
+    let trip = &bundle.trips[connection.trip_index as usize];
+    TransitServiceAreaSegment {
+        origin_id: origin.id.clone(),
+        from_stop_id: from_stop.stop_id.clone(),
+        to_stop_id: to_stop.stop_id.clone(),
+        from_stop_name: from_stop.name.clone(),
+        to_stop_name: to_stop.name.clone(),
+        departure_s: connection.departure_s,
+        arrival_s: connection.arrival_s,
+        duration_s: connection.arrival_s.saturating_sub(connection.departure_s),
+        travel_time_s: connection.arrival_s.saturating_sub(departure_s),
+        boarding_count,
+        mode: Some(route.mode),
+        route_id: Some(route.route_id.clone()),
+        route_short_name: Some(route.short_name.clone()),
+        trip_id: Some(trip.trip_id.clone()),
+        geometry: include_geometry
+            .then(|| transit_connection_geometry(bundle, connection))
+            .unwrap_or_default(),
+    }
 }
 
 fn execute_transit_route_with_runtime(
@@ -1002,13 +1415,15 @@ struct GtfsFiles {
 }
 
 impl GtfsFiles {
-    fn names() -> [&'static str; 7] {
+    fn names() -> [&'static str; 9] {
         [
             "agency.txt",
             "stops.txt",
             "routes.txt",
             "trips.txt",
             "stop_times.txt",
+            "frequencies.txt",
+            "shapes.txt",
             "calendar.txt",
             "calendar_dates.txt",
         ]
@@ -1040,13 +1455,20 @@ fn build_bundle_from_files(
     let active_services = active_services_by_date(&files, &service_dates)?;
     let (stops, stop_by_id) = parse_stops(files.get("stops.txt").unwrap())?;
     let (routes, route_by_id) = parse_routes(files.get("routes.txt").unwrap())?;
+    let (shapes, shape_by_id) = files
+        .get("shapes.txt")
+        .map(parse_shapes)
+        .transpose()?
+        .unwrap_or_default();
     let (trips, trip_by_id, retained_gtfs_trips) = parse_trips(
         files.get("trips.txt").unwrap(),
         &route_by_id,
+        &shape_by_id,
         &active_services,
     )?;
     let connections = parse_connections(
         files.get("stop_times.txt").unwrap(),
+        files.get("frequencies.txt"),
         &stop_by_id,
         &trip_by_id,
         &trips,
@@ -1055,7 +1477,7 @@ fn build_bundle_from_files(
     )?;
 
     Ok(TransitBundle {
-        schema_version: 1,
+        schema_version: 2,
         feed_id: options.name,
         source_label: options.source_label,
         source_sha256,
@@ -1066,6 +1488,7 @@ fn build_bundle_from_files(
         stops,
         routes,
         trips,
+        shapes,
         connections,
     })
 }
@@ -1142,9 +1565,51 @@ fn parse_routes(raw: &str) -> Result<(Vec<TransitRoute>, HashMap<String, u32>)> 
     Ok((routes, route_by_id))
 }
 
+fn parse_shapes(raw: &str) -> Result<(Vec<TransitShape>, HashMap<String, u32>)> {
+    let mut reader = csv::Reader::from_reader(raw.as_bytes());
+    let headers = reader.headers()?.clone();
+    let shape_id = header_index(&headers, "shape_id")?;
+    let lat = header_index(&headers, "shape_pt_lat")?;
+    let lon = header_index(&headers, "shape_pt_lon")?;
+    let sequence = header_index(&headers, "shape_pt_sequence")?;
+    let mut rows_by_shape = BTreeMap::<String, Vec<(u32, [f64; 2])>>::new();
+    for record in reader.records() {
+        let record = record?;
+        let id = record.get(shape_id).unwrap_or_default();
+        if id.is_empty() {
+            continue;
+        }
+        let lon = record.get(lon).unwrap_or_default().parse::<f64>()?;
+        let lat = record.get(lat).unwrap_or_default().parse::<f64>()?;
+        let sequence = record
+            .get(sequence)
+            .unwrap_or_default()
+            .parse::<u32>()
+            .unwrap_or_default();
+        rows_by_shape
+            .entry(id.to_string())
+            .or_default()
+            .push((sequence, [lon, lat]));
+    }
+
+    let mut shapes = Vec::new();
+    let mut shape_by_id = HashMap::new();
+    for (shape_id, mut rows) in rows_by_shape {
+        rows.sort_by_key(|(sequence, _)| *sequence);
+        let points = rows.into_iter().map(|(_, point)| point).collect::<Vec<_>>();
+        if points.len() < 2 {
+            continue;
+        }
+        shape_by_id.insert(shape_id.clone(), shapes.len() as u32);
+        shapes.push(TransitShape { shape_id, points });
+    }
+    Ok((shapes, shape_by_id))
+}
+
 fn parse_trips(
     raw: &str,
     route_by_id: &HashMap<String, u32>,
+    shape_by_id: &HashMap<String, u32>,
     active_services: &HashMap<String, Vec<u32>>,
 ) -> Result<(
     Vec<TransitTrip>,
@@ -1157,6 +1622,7 @@ fn parse_trips(
     let service_id = header_index(&headers, "service_id")?;
     let trip_id = header_index(&headers, "trip_id")?;
     let headsign = optional_header_index(&headers, "trip_headsign");
+    let shape_id = optional_header_index(&headers, "shape_id");
     let mut trips = Vec::new();
     let mut trip_by_id = HashMap::new();
     let mut retained = HashMap::new();
@@ -1180,6 +1646,10 @@ fn parse_trips(
                 .and_then(|index| record.get(index))
                 .unwrap_or_default()
                 .to_string(),
+            shape_index: shape_id
+                .and_then(|index| record.get(index))
+                .and_then(|id| shape_by_id.get(id))
+                .copied(),
         };
         trip_by_id.insert(gtfs_trip_id.clone(), trips.len() as u32);
         retained.insert(gtfs_trip_id, service_dates.clone());
@@ -1190,6 +1660,7 @@ fn parse_trips(
 
 fn parse_connections(
     raw: &str,
+    frequencies_raw: Option<&str>,
     stop_by_id: &HashMap<String, u32>,
     trip_by_id: &HashMap<String, u32>,
     trips: &[TransitTrip],
@@ -1226,6 +1697,10 @@ fn parse_connections(
         };
         stop_times_by_trip.entry(trip_index).or_default().push(row);
     }
+    let frequency_windows = match frequencies_raw {
+        Some(raw) => parse_frequencies(raw, trip_by_id)?,
+        None => HashMap::new(),
+    };
     let mut connections = Vec::new();
     for (trip_index, mut rows) in stop_times_by_trip {
         rows.sort_by_key(|row| row.sequence);
@@ -1234,6 +1709,8 @@ fn parse_connections(
             .get(&trip.trip_id)
             .cloned()
             .unwrap_or_default();
+        let anchor_departure_s = rows.first().map(|row| row.departure_s).unwrap_or_default();
+        let windows = frequency_windows.get(&trip_index);
         for pair in rows.windows(2) {
             let from = pair[0];
             let to = pair[1];
@@ -1242,14 +1719,37 @@ fn parse_connections(
             }
             for date_offset in &date_offsets {
                 let base = date_offset.saturating_mul(86_400);
-                connections.push(TransitConnection {
-                    trip_index,
-                    route_index: trip.route_index,
-                    from_stop_index: from.stop_index,
-                    to_stop_index: to.stop_index,
-                    departure_s: base.saturating_add(from.departure_s),
-                    arrival_s: base.saturating_add(to.arrival_s),
-                });
+                if let Some(windows) = windows {
+                    let from_offset_s = from.departure_s.saturating_sub(anchor_departure_s);
+                    let to_offset_s = to.arrival_s.saturating_sub(anchor_departure_s);
+                    for window in windows {
+                        let mut trip_start_s = window.start_s;
+                        while trip_start_s < window.end_s {
+                            connections.push(TransitConnection {
+                                trip_index,
+                                route_index: trip.route_index,
+                                from_stop_index: from.stop_index,
+                                to_stop_index: to.stop_index,
+                                departure_s: base
+                                    .saturating_add(trip_start_s)
+                                    .saturating_add(from_offset_s),
+                                arrival_s: base
+                                    .saturating_add(trip_start_s)
+                                    .saturating_add(to_offset_s),
+                            });
+                            trip_start_s = trip_start_s.saturating_add(window.headway_s);
+                        }
+                    }
+                } else {
+                    connections.push(TransitConnection {
+                        trip_index,
+                        route_index: trip.route_index,
+                        from_stop_index: from.stop_index,
+                        to_stop_index: to.stop_index,
+                        departure_s: base.saturating_add(from.departure_s),
+                        arrival_s: base.saturating_add(to.arrival_s),
+                    });
+                }
             }
         }
     }
@@ -1263,6 +1763,54 @@ struct StopTimeRow {
     sequence: u32,
     arrival_s: u32,
     departure_s: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FrequencyWindow {
+    start_s: u32,
+    end_s: u32,
+    headway_s: u32,
+}
+
+fn parse_frequencies(
+    raw: &str,
+    trip_by_id: &HashMap<String, u32>,
+) -> Result<HashMap<u32, Vec<FrequencyWindow>>> {
+    let mut reader = csv::Reader::from_reader(raw.as_bytes());
+    let headers = reader.headers()?.clone();
+    let trip_id = header_index(&headers, "trip_id")?;
+    let start_time = header_index(&headers, "start_time")?;
+    let end_time = header_index(&headers, "end_time")?;
+    let headway_secs = header_index(&headers, "headway_secs")?;
+    let mut windows = HashMap::<u32, Vec<FrequencyWindow>>::new();
+    for record in reader.records() {
+        let record = record?;
+        let Some(&trip_index) = trip_by_id.get(record.get(trip_id).unwrap_or_default()) else {
+            continue;
+        };
+        let headway_s = record
+            .get(headway_secs)
+            .unwrap_or_default()
+            .parse::<u32>()
+            .unwrap_or_default();
+        if headway_s == 0 {
+            continue;
+        }
+        let start_s = parse_gtfs_time(record.get(start_time).unwrap_or_default())?;
+        let end_s = parse_gtfs_time(record.get(end_time).unwrap_or_default())?;
+        if end_s <= start_s {
+            continue;
+        }
+        windows
+            .entry(trip_index)
+            .or_default()
+            .push(FrequencyWindow {
+                start_s,
+                end_s,
+                headway_s,
+            });
+    }
+    Ok(windows)
 }
 
 fn active_services_by_date(
@@ -1776,10 +2324,10 @@ fn reconstruct_legs(
                     route_short_name: Some(route.short_name.clone()),
                     trip_id: Some(trip.trip_id.clone()),
                     headsign: Some(trip.headsign.clone()),
-                    geometry: geometry_if_requested(
+                    geometry: transit_connection_geometry_if_requested(
                         request,
-                        [from.lon, from.lat],
-                        [to.lon, to.lat],
+                        bundle,
+                        *connection,
                     ),
                 });
                 cursor = *previous;
@@ -1920,13 +2468,102 @@ fn geometry_if_requested(
     from: [f64; 2],
     to: [f64; 2],
 ) -> Vec<[f64; 2]> {
-    if request.returns.include_geometry
-        || request.returns.include_stops
-        || request.returns.include_stop_segments
-    {
+    if transit_geometry_requested(request) {
         vec![from, to]
     } else {
         Vec::new()
+    }
+}
+
+fn transit_connection_geometry_if_requested(
+    request: &TransitRouteRequest,
+    bundle: &TransitBundle,
+    connection: TransitConnection,
+) -> Vec<[f64; 2]> {
+    if transit_geometry_requested(request) {
+        transit_connection_geometry(bundle, connection)
+    } else {
+        Vec::new()
+    }
+}
+
+fn transit_geometry_requested(request: &TransitRouteRequest) -> bool {
+    request.returns.include_geometry
+        || request.returns.include_stops
+        || request.returns.include_stop_segments
+}
+
+fn transit_connection_geometry(
+    bundle: &TransitBundle,
+    connection: TransitConnection,
+) -> Vec<[f64; 2]> {
+    let from = &bundle.stops[connection.from_stop_index as usize];
+    let to = &bundle.stops[connection.to_stop_index as usize];
+    let from_point = [from.lon, from.lat];
+    let to_point = [to.lon, to.lat];
+    let Some(shape_index) = bundle.trips[connection.trip_index as usize].shape_index else {
+        return vec![from_point, to_point];
+    };
+    let Some(shape) = bundle.shapes.get(shape_index as usize) else {
+        return vec![from_point, to_point];
+    };
+    shape_geometry_between_stops(shape, from_point, to_point)
+}
+
+fn shape_geometry_between_stops(
+    shape: &TransitShape,
+    from: [f64; 2],
+    to: [f64; 2],
+) -> Vec<[f64; 2]> {
+    if shape.points.len() < 2 {
+        return vec![from, to];
+    }
+    let from_index = nearest_shape_point_index(&shape.points, from);
+    let to_index = nearest_shape_point_index(&shape.points, to);
+    let mut geometry = Vec::new();
+    push_unique_point(&mut geometry, from);
+    if from_index <= to_index {
+        for point in &shape.points[from_index..=to_index] {
+            push_unique_point(&mut geometry, *point);
+        }
+    } else {
+        for point in shape.points[to_index..=from_index].iter().rev() {
+            push_unique_point(&mut geometry, *point);
+        }
+    }
+    push_unique_point(&mut geometry, to);
+    if geometry.len() < 2 {
+        vec![from, to]
+    } else {
+        geometry
+    }
+}
+
+fn nearest_shape_point_index(points: &[[f64; 2]], target: [f64; 2]) -> usize {
+    points
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| {
+            point_distance_key(**left, target).total_cmp(&point_distance_key(**right, target))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or_default()
+}
+
+fn point_distance_key(left: [f64; 2], right: [f64; 2]) -> f64 {
+    let mean_lat = ((left[1] + right[1]) * 0.5).to_radians();
+    let lon_scale = mean_lat.cos().max(0.01);
+    let dx = (left[0] - right[0]) * lon_scale;
+    let dy = left[1] - right[1];
+    dx.mul_add(dx, dy * dy)
+}
+
+fn push_unique_point(points: &mut Vec<[f64; 2]>, point: [f64; 2]) {
+    if points
+        .last()
+        .is_none_or(|last| (last[0] - point[0]).abs() > 1e-10 || (last[1] - point[1]).abs() > 1e-10)
+    {
+        points.push(point);
     }
 }
 
@@ -2012,6 +2649,59 @@ mod tests {
         assert_eq!(result.stops[2].stop_id, "C");
         assert_eq!(result.stop_segments[0].from_stop_id, "A");
         assert_eq!(result.stop_segments[1].to_stop_id, "C");
+    }
+
+    #[test]
+    fn executes_transit_service_area_to_reachable_stops_and_segments() {
+        let bundle = build_bundle_from_files(
+            fixture_files(),
+            "abc".to_string(),
+            TransitImportOptions {
+                name: "fixture".to_string(),
+                source_label: "fixture".to_string(),
+                service_start_date: "2026-05-11".to_string(),
+                service_days: 7,
+            },
+        )
+        .expect("fixture imports");
+        let request = TransitServiceAreaRequest {
+            analysis_id: "sa1".to_string(),
+            origins: vec![TransitPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            }],
+            time: TransitQueryTime {
+                datetime: "2026-05-11T08:00:00+02:00".to_string(),
+                arrive_by: false,
+                search_window_s: 3600,
+            },
+            modes: TransitModeOptions {
+                max_access_distance_m: 100.0,
+                max_transfer_distance_m: 100.0,
+                ..TransitModeOptions::default()
+            },
+            max_travel_time_s: 1800,
+            returns: TransitServiceAreaReturnOptions::default(),
+        };
+
+        let result = execute_transit_service_area(&bundle, &request).expect("service area");
+
+        assert_eq!(result.outcome, TransitOutcome::Scheduled);
+        assert_eq!(result.processed_origin_count, 1);
+        assert!(result.stops.iter().any(|stop| stop.stop_id == "C"));
+        assert!(
+            result
+                .stop_segments
+                .iter()
+                .any(|segment| segment.from_stop_id == "B" && segment.to_stop_id == "C")
+        );
+        assert!(
+            result
+                .stops
+                .iter()
+                .all(|stop| stop.travel_time_s <= request.max_travel_time_s)
+        );
     }
 
     #[test]
@@ -2105,6 +2795,120 @@ mod tests {
         assert_eq!(result.outcome, TransitOutcome::Unreachable);
     }
 
+    #[test]
+    fn expands_frequency_based_trips() {
+        let bundle = build_bundle_from_files(
+            frequency_fixture_files(),
+            "abc".to_string(),
+            TransitImportOptions {
+                name: "fixture".to_string(),
+                source_label: "fixture".to_string(),
+                service_start_date: "2026-05-11".to_string(),
+                service_days: 1,
+            },
+        )
+        .expect("fixture imports");
+        assert_eq!(bundle.connections.len(), 8);
+
+        let request = TransitRouteRequest {
+            route_id: "freq".to_string(),
+            origin: TransitPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: TransitPoint {
+                id: "dest".to_string(),
+                lon: 6.02,
+                lat: 53.0,
+            },
+            time: TransitQueryTime {
+                datetime: "2026-05-11T08:05:00+02:00".to_string(),
+                arrive_by: false,
+                search_window_s: 1800,
+            },
+            modes: TransitModeOptions {
+                transit: vec![TransitMode::Subway],
+                max_access_distance_m: 100.0,
+                max_egress_distance_m: 100.0,
+                ..TransitModeOptions::default()
+            },
+            returns: TransitReturnOptions::default(),
+            alternatives: TransitAlternativeOptions::default(),
+        };
+
+        let result = execute_transit_route(&bundle, &request).expect("route executes");
+        assert_eq!(result.outcome, TransitOutcome::Scheduled);
+        assert_eq!(result.summary.boarding_count, 1);
+        assert!(
+            result
+                .legs
+                .iter()
+                .any(|leg| leg.leg_type == TransitLegType::Transit
+                    && leg.route_short_name.as_deref() == Some("MTR"))
+        );
+    }
+
+    #[test]
+    fn uses_gtfs_shapes_for_transit_geometry() {
+        let bundle = build_bundle_from_files(
+            shape_fixture_files(),
+            "abc".to_string(),
+            TransitImportOptions {
+                name: "fixture".to_string(),
+                source_label: "fixture".to_string(),
+                service_start_date: "2026-05-11".to_string(),
+                service_days: 1,
+            },
+        )
+        .expect("fixture imports");
+
+        let request = TransitRouteRequest {
+            route_id: "shape".to_string(),
+            origin: TransitPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: TransitPoint {
+                id: "dest".to_string(),
+                lon: 6.02,
+                lat: 53.0,
+            },
+            time: TransitQueryTime {
+                datetime: "2026-05-11T08:00:00+02:00".to_string(),
+                arrive_by: false,
+                search_window_s: 3600,
+            },
+            modes: TransitModeOptions {
+                max_access_distance_m: 100.0,
+                max_egress_distance_m: 100.0,
+                ..TransitModeOptions::default()
+            },
+            returns: TransitReturnOptions {
+                include_geometry: true,
+                include_stops: true,
+                include_stop_segments: true,
+                ..TransitReturnOptions::default()
+            },
+            alternatives: TransitAlternativeOptions::default(),
+        };
+
+        let result = execute_transit_route(&bundle, &request).expect("route executes");
+        let transit_leg = result
+            .legs
+            .iter()
+            .find(|leg| leg.leg_type == TransitLegType::Transit)
+            .expect("transit leg");
+        assert!(transit_leg.geometry.len() > 3);
+        assert!(
+            result
+                .stop_segments
+                .iter()
+                .any(|segment| segment.geometry.len() > 2)
+        );
+    }
+
     fn fixture_files() -> GtfsFiles {
         let mut files = GtfsFiles::default();
         files.insert(
@@ -2131,6 +2935,53 @@ mod tests {
         files.insert(
             "stop_times.txt",
             "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,08:10:00,08:10:30,A,1\nT1,08:15:00,08:15:30,B,2\nT1,08:20:00,08:20:00,C,3\n".to_string(),
+        );
+        files
+    }
+
+    fn frequency_fixture_files() -> GtfsFiles {
+        let mut files = GtfsFiles::default();
+        files.insert(
+            "stops.txt",
+            "stop_id,stop_name,stop_lat,stop_lon\nA,A,53.0,6.0\nB,B,53.0,6.01\nC,C,53.0,6.02\n"
+                .to_string(),
+        );
+        files.insert(
+            "routes.txt",
+            "route_id,route_short_name,route_long_name,route_type\nM,MTR,Metro,1\n".to_string(),
+        );
+        files.insert(
+            "trips.txt",
+            "route_id,service_id,trip_id,trip_headsign\nM,WEEK,T1,C\n".to_string(),
+        );
+        files.insert(
+            "calendar.txt",
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nWEEK,1,1,1,1,1,1,1,20260501,20260531\n".to_string(),
+        );
+        files.insert(
+            "calendar_dates.txt",
+            "service_id,date,exception_type\n".to_string(),
+        );
+        files.insert(
+            "stop_times.txt",
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,00:00:00,00:00:00,A,1\nT1,00:05:00,00:05:00,B,2\nT1,00:10:00,00:10:00,C,3\n".to_string(),
+        );
+        files.insert(
+            "frequencies.txt",
+            "trip_id,start_time,end_time,headway_secs\nT1,08:00:00,08:31:00,600\n".to_string(),
+        );
+        files
+    }
+
+    fn shape_fixture_files() -> GtfsFiles {
+        let mut files = fixture_files();
+        files.insert(
+            "trips.txt",
+            "route_id,service_id,trip_id,trip_headsign,shape_id\nR,WEEK,T1,C,S1\n".to_string(),
+        );
+        files.insert(
+            "shapes.txt",
+            "shape_id,shape_pt_lat,shape_pt_lon,shape_pt_sequence\nS1,53.0,6.0,1\nS1,53.001,6.005,2\nS1,53.0,6.01,3\nS1,52.999,6.015,4\nS1,53.0,6.02,5\n".to_string(),
         );
         files
     }

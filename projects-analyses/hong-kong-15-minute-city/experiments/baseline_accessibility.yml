@@ -1,0 +1,80 @@
+experiment:
+  id: hong_kong_15m_baseline_accessibility
+  label: Hong Kong 15-minute city baseline accessibility
+  dataset: hong_kong_2026_05_08
+
+scenarios:
+  - id: walking_food_retail
+    profile: ../profiles/pedestrian_15min_hong_kong_v1.yml
+    analysis: matrix
+    origins: ../requests/origins/residential_h3_r9_points.csv
+    destinations: ../requests/destinations/food_retail.csv
+    out: ../outputs/raw/walking_food_retail_matrix.csv
+  - id: walking_education
+    profile: ../profiles/pedestrian_15min_hong_kong_v1.yml
+    analysis: matrix
+    origins: ../requests/origins/residential_h3_r9_points.csv
+    destinations: ../requests/destinations/education.csv
+    out: ../outputs/raw/walking_education_matrix.csv
+  - id: walking_healthcare
+    profile: ../profiles/pedestrian_15min_hong_kong_v1.yml
+    analysis: matrix
+    origins: ../requests/origins/residential_h3_r9_points.csv
+    destinations: ../requests/destinations/healthcare.csv
+    out: ../outputs/raw/walking_healthcare_matrix.csv
+  - id: walking_public_services
+    profile: ../profiles/pedestrian_15min_hong_kong_v1.yml
+    analysis: matrix
+    origins: ../requests/origins/residential_h3_r9_points.csv
+    destinations: ../requests/destinations/public_services.csv
+    out: ../outputs/raw/walking_public_services_matrix.csv
+  - id: walking_parks_recreation
+    profile: ../profiles/pedestrian_15min_hong_kong_v1.yml
+    analysis: matrix
+    origins: ../requests/origins/residential_h3_r9_points.csv
+    destinations: ../requests/destinations/parks_recreation.csv
+    out: ../outputs/raw/walking_parks_recreation_matrix.csv
+  - id: walking_transit_stops
+    profile: ../profiles/pedestrian_15min_hong_kong_v1.yml
+    analysis: matrix
+    origins: ../requests/origins/residential_h3_r9_points.csv
+    destinations: ../requests/destinations/transit_stops.csv
+    out: ../outputs/raw/walking_transit_stops_matrix.csv
+
+  - id: car_food_retail
+    profile: ../profiles/car_15min_hong_kong_v1.yml
+    analysis: matrix
+    origins: ../requests/origins/residential_h3_r9_points.csv
+    destinations: ../requests/destinations/food_retail.csv
+    out: ../outputs/raw/car_food_retail_matrix.csv
+  - id: car_education
+    profile: ../profiles/car_15min_hong_kong_v1.yml
+    analysis: matrix
+    origins: ../requests/origins/residential_h3_r9_points.csv
+    destinations: ../requests/destinations/education.csv
+    out: ../outputs/raw/car_education_matrix.csv
+  - id: car_healthcare
+    profile: ../profiles/car_15min_hong_kong_v1.yml
+    analysis: matrix
+    origins: ../requests/origins/residential_h3_r9_points.csv
+    destinations: ../requests/destinations/healthcare.csv
+    out: ../outputs/raw/car_healthcare_matrix.csv
+  - id: car_public_services
+    profile: ../profiles/car_15min_hong_kong_v1.yml
+    analysis: matrix
+    origins: ../requests/origins/residential_h3_r9_points.csv
+    destinations: ../requests/destinations/public_services.csv
+    out: ../outputs/raw/car_public_services_matrix.csv
+  - id: car_parks_recreation
+    profile: ../profiles/car_15min_hong_kong_v1.yml
+    analysis: matrix
+    origins: ../requests/origins/residential_h3_r9_points.csv
+    destinations: ../requests/destinations/parks_recreation.csv
+    out: ../outputs/raw/car_parks_recreation_matrix.csv
+  - id: car_transit_stops
+    profile: ../profiles/car_15min_hong_kong_v1.yml
+    analysis: matrix
+    origins: ../requests/origins/residential_h3_r9_points.csv
+    destinations: ../requests/destinations/transit_stops.csv
+    out: ../outputs/raw/car_transit_stops_matrix.csv
+

@@ -31,7 +31,8 @@ use netweevil_query::{
 use netweevil_report::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
 use netweevil_transit::{
     PreparedTransitRouter, TransitFeedManifest, TransitLeg, TransitLegType, TransitRouteRequest,
-    TransitRouteResult, TransitWalkingGeometry, read_transit_bundle,
+    TransitRouteResult, TransitServiceAreaRequest, TransitServiceAreaResult,
+    TransitWalkingGeometry, read_transit_bundle,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -199,6 +200,12 @@ pub struct TransitRouteExecutionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct TransitServiceAreaExecutionRequest {
+    pub feed_id: String,
+    pub request: TransitServiceAreaRequest,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct MatrixRequest {
     pub origins: PointSetDocument,
     pub destinations: PointSetDocument,
@@ -232,6 +239,12 @@ pub struct ServiceAreaExecutionResponse {
 pub struct TransitRouteExecutionResponse {
     service: TransitExecutionContext,
     result: TransitRouteResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransitServiceAreaExecutionResponse {
+    service: TransitExecutionContext,
+    result: TransitServiceAreaResult,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -355,6 +368,10 @@ fn router(state: ApiState) -> Router {
         .route("/v1/profiles/{profile_id}", get(get_profile))
         .route("/v1/route", post(route_handler))
         .route("/v1/transit-route", post(transit_route_handler))
+        .route(
+            "/v1/transit-service-area",
+            post(transit_service_area_handler),
+        )
         .route("/v1/od", post(od_handler))
         .route("/v1/matrix", post(matrix_handler))
         .route("/v1/service-area", post(service_area_handler))
@@ -486,7 +503,14 @@ fn load_service_runtime(
         profiles: loaded_profiles,
         transit_feeds: loaded_transit_feeds,
         capabilities: ServiceCapabilities {
-            analyses: vec!["route", "od", "matrix", "service_area", "transit_route"],
+            analyses: vec![
+                "route",
+                "od",
+                "matrix",
+                "service_area",
+                "transit_route",
+                "transit_service_area",
+            ],
             geometry: vec!["none", "full", "segments"],
             breakdown_metrics: vec!["time_s", "distance_m"],
             connectivity_policies: vec![
@@ -749,6 +773,58 @@ async fn transit_route_handler(
         },
         result,
     }))
+}
+
+async fn transit_service_area_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<ResponseFormatQuery>,
+    Json(payload): Json<TransitServiceAreaExecutionRequest>,
+) -> Result<Response, ApiError> {
+    let feed = state
+        .service
+        .transit_feeds
+        .get(&payload.feed_id)
+        .ok_or_else(|| {
+            ApiError::not_found(format!("unknown transit feed '{}'", payload.feed_id))
+        })?;
+    info!(
+        endpoint = "transit_service_area",
+        feed_id = %payload.feed_id,
+        analysis_id = %payload.request.analysis_id,
+        origins = payload.request.origins.len(),
+        max_travel_time_s = payload.request.max_travel_time_s,
+        format = query.format.as_deref().unwrap_or("json"),
+        "request"
+    );
+    let manifest = feed.manifest.clone();
+    let router = Arc::clone(&feed.router);
+    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+        router.execute_service_area(&payload.request)
+    })
+    .await
+    .map_err(|error| {
+        warn!(endpoint = "transit_service_area", %error, "request failed");
+        ApiError::from_execution_error(error)
+    })?;
+    let service = TransitExecutionContext {
+        feed_id: manifest.feed_id,
+        service_start_date: manifest.service_start_date,
+        service_days: manifest.service_days,
+        route_engine: "scheduled_connection_scan_transit_service_area".to_string(),
+        walking_geometry: "straight_line".to_string(),
+        pedestrian_profile_id: None,
+    };
+    info!(
+        endpoint = "transit_service_area",
+        analysis_id = %result.analysis_id,
+        stops = result.stops.len(),
+        stop_segments = result.stop_segments.len(),
+        "response"
+    );
+    if wants_geojson(&query) {
+        return geojson_response(transit_service_area_result_geojson(&service, &result));
+    }
+    Ok(Json(TransitServiceAreaExecutionResponse { service, result }).into_response())
 }
 
 fn resolve_transit_pedestrian_profile<'a>(
@@ -1445,6 +1521,17 @@ fn service_area_result_geojson(execution: &ExecutionContext, result: &ServiceAre
                     "origin_hop_distance_m": feature.origin_hop_distance_m,
                     "reachable_network_length_m": feature.reachable_network_length_m,
                     "reachable_edge_count": feature.reachable_edge_count,
+                    "edge_id": feature.edge_id,
+                    "edge_index": feature.edge_index,
+                    "source_way_id": feature.source_way_id,
+                    "from_node_id": feature.from_node_id,
+                    "to_node_id": feature.to_node_id,
+                    "start_fraction": feature.start_fraction,
+                    "end_fraction": feature.end_fraction,
+                    "start_cost": feature.start_cost,
+                    "end_cost": feature.end_cost,
+                    "segment_distance_m": feature.segment_distance_m,
+                    "segment_travel_time_s": feature.segment_travel_time_s,
                 }
             })
         })
@@ -1463,7 +1550,85 @@ fn service_area_result_geojson(execution: &ExecutionContext, result: &ServiceAre
             "skipped_origin_count": result.skipped_origin_count,
             "fallback_origin_count": result.fallback_origin_count,
             "threshold_count": result.threshold_count,
+            "segment_count": result.segments.len(),
             "warnings": result.warnings,
+        }
+    })
+}
+
+fn transit_service_area_result_geojson(
+    execution: &TransitExecutionContext,
+    result: &TransitServiceAreaResult,
+) -> Value {
+    let mut features = Vec::new();
+    for stop in &result.stops {
+        features.push(json!({
+            "type": "Feature",
+            "geometry": {
+                "type": "Point",
+                "coordinates": [stop.lon, stop.lat],
+            },
+            "properties": {
+                "feed_id": execution.feed_id,
+                "analysis_id": result.analysis_id,
+                "geometry_type": "stop",
+                "origin_id": stop.origin_id,
+                "stop_id": stop.stop_id,
+                "stop_name": stop.stop_name,
+                "arrival_s": stop.arrival_s,
+                "travel_time_s": stop.travel_time_s,
+                "boarding_count": stop.boarding_count,
+            }
+        }));
+    }
+    for segment in &result.stop_segments {
+        features.push(json!({
+            "type": "Feature",
+            "geometry": if segment.geometry.is_empty() {
+                Value::Null
+            } else {
+                json!({
+                    "type": "LineString",
+                    "coordinates": segment.geometry,
+                })
+            },
+            "properties": {
+                "feed_id": execution.feed_id,
+                "analysis_id": result.analysis_id,
+                "geometry_type": "stop_segment",
+                "origin_id": segment.origin_id,
+                "from_stop_id": segment.from_stop_id,
+                "to_stop_id": segment.to_stop_id,
+                "from_stop_name": segment.from_stop_name,
+                "to_stop_name": segment.to_stop_name,
+                "departure_s": segment.departure_s,
+                "arrival_s": segment.arrival_s,
+                "duration_s": segment.duration_s,
+                "travel_time_s": segment.travel_time_s,
+                "boarding_count": segment.boarding_count,
+                "mode": segment.mode,
+                "route_id": segment.route_id,
+                "route_short_name": segment.route_short_name,
+                "trip_id": segment.trip_id,
+            }
+        }));
+    }
+    json!({
+        "type": "FeatureCollection",
+        "features": features,
+        "metadata": {
+            "feed_id": execution.feed_id,
+            "service_start_date": execution.service_start_date,
+            "service_days": execution.service_days,
+            "analysis_id": result.analysis_id,
+            "outcome": result.outcome,
+            "origin_count": result.origin_count,
+            "processed_origin_count": result.processed_origin_count,
+            "skipped_origin_count": result.skipped_origin_count,
+            "max_travel_time_s": result.max_travel_time_s,
+            "stop_count": result.stops.len(),
+            "stop_segment_count": result.stop_segments.len(),
+            "diagnostics": result.diagnostics,
         }
     })
 }

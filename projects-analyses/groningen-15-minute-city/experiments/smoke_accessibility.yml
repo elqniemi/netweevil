@@ -1,0 +1,32 @@
+experiment:
+  id: groningen_15m_smoke_accessibility
+  label: Groningen 15-minute city smoke accessibility
+  dataset: groningen_2026_05_08
+
+scenarios:
+  - id: cycling_food_retail_smoke
+    profile: ../profiles/cycling_15min_groningen_v1.yml
+    analysis: matrix
+    origins: ../requests/samples/residential_h3_r9_points_smoke.csv
+    destinations: ../requests/samples/food_retail_smoke.csv
+    out: ../outputs/raw/smoke/cycling_food_retail_matrix.csv
+
+  - id: walking_food_retail_smoke
+    profile: ../../../examples/profiles/pedestrian_research_v1.yml
+    analysis: matrix
+    origins: ../requests/samples/residential_h3_r9_points_smoke.csv
+    destinations: ../requests/samples/food_retail_smoke.csv
+    out: ../outputs/raw/smoke/walking_food_retail_matrix.csv
+
+  - id: car_food_retail_smoke
+    profile: ../../../examples/profiles/car_research_v3.yml
+    analysis: matrix
+    origins: ../requests/samples/residential_h3_r9_points_smoke.csv
+    destinations: ../requests/samples/food_retail_smoke.csv
+    out: ../outputs/raw/smoke/car_food_retail_matrix.csv
+
+  - id: cycling_neighbourhood_service_areas_smoke
+    profile: ../profiles/cycling_15min_groningen_v1.yml
+    analysis: service_area
+    request: ../requests/service_areas/cycling_neighbourhood_centres_5_10_15_20.json
+    out: ../outputs/raw/smoke/cycling_neighbourhood_service_areas.geojson

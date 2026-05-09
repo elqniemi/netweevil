@@ -10,9 +10,9 @@ use netweevil_core::{
 };
 use netweevil_profile::ProfileDocument;
 use netweevil_query::{
-    AnalysisOutcome, ConnectivityPolicy, FallbackPolicy, MatrixResult, OdResult, RouteBatchResult,
-    RouteResult, ServiceAreaBandMode, ServiceAreaMultiOriginMode, ServiceAreaOutputMode,
-    ServiceAreaResult,
+    AccessibilityResult, AnalysisOutcome, ConnectivityPolicy, FallbackPolicy, MatrixResult,
+    OdResult, RouteBatchResult, RouteResult, ServiceAreaBandMode, ServiceAreaMultiOriginMode,
+    ServiceAreaOutputMode, ServiceAreaResult,
 };
 use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -100,6 +100,7 @@ pub enum RunKind {
     RouteBatch,
     Od,
     Matrix,
+    Accessibility,
     ServiceArea,
     Experiment,
 }
@@ -329,6 +330,29 @@ pub fn load_run_result_summary(manifest: &RunManifest) -> Result<Option<RunResul
                 unreachable_count: tally.unreachable_count,
                 diagnostics_count: tally.diagnostics_count,
                 warnings: matrix.warnings,
+            })
+        }
+        RunKind::Accessibility => {
+            let accessibility: AccessibilityResult =
+                serde_json::from_str(&raw).context("parsing accessibility result JSON")?;
+            let tally = tally_outcomes(
+                accessibility
+                    .rows
+                    .iter()
+                    .map(|row| (row.outcome, row.diagnostics.len())),
+            );
+            RunResultSummary::Batch(BatchSummary {
+                label: "accessibility category rows",
+                item_count: accessibility.row_count,
+                succeeded_count: accessibility.succeeded_count,
+                failed_count: accessibility.failed_count,
+                ignored_count: 0,
+                legal_count: tally.legal_count,
+                degraded_count: tally.degraded_count,
+                partial_count: tally.partial_count,
+                unreachable_count: tally.unreachable_count,
+                diagnostics_count: tally.diagnostics_count,
+                warnings: accessibility.warnings,
             })
         }
         RunKind::ServiceArea => {
@@ -868,6 +892,7 @@ fn service_area_band_mode_name(mode: ServiceAreaBandMode) -> &'static str {
     match mode {
         ServiceAreaBandMode::Cumulative => "cumulative",
         ServiceAreaBandMode::Ring => "ring",
+        ServiceAreaBandMode::Unbanded => "none",
     }
 }
 
