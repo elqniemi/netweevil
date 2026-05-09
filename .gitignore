@@ -8,12 +8,16 @@
 /.netweevil/
 
 # Local dataset/extracts
+/datasets/*
+!/datasets/.gitkeep
+!/datasets/README.md
 *.osm
 *.osm.bz2
 *.osm.pbf
 *.osm.gz
 *.osm.zip
 *.osm.xml
+*.gtfs.zip
 
 # Generated analysis outputs and report artifacts
 *.geojson
