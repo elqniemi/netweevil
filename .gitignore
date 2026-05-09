@@ -25,11 +25,27 @@
 run-manifest.json
 index.html
 
-# Keep committed fixtures and documented examples available to users.
-!examples/**/*.json
-!examples/**/*.geojson
-!examples/**/*.jsonl
-!examples/**/*.ndjson
+# Keep hand-authored fixtures and documented examples available to users.
+!examples/requests/**/*.json
+!examples/requests/**/*.geojson
+!examples/requests/**/*.jsonl
+!examples/requests/**/*.ndjson
+!examples/profiles/**/*.json
+!examples/profiles/**/*.geojson
+!examples/profiles/**/*.jsonl
+!examples/profiles/**/*.ndjson
+!examples/experiments/**/*.json
+!examples/experiments/**/*.geojson
+!examples/experiments/**/*.jsonl
+!examples/experiments/**/*.ndjson
+
+# Generated API examples and benchmark outputs are reproducible local artifacts.
+examples/api/groningen_*.json
+examples/api/groningen_*.geojson
+examples/api/*_result*.json
+examples/api/*_results*.json
+examples/api/*_output*.json
+examples/api/*.jsonl
 
 # QGIS plugin + Python cache
 __pycache__/

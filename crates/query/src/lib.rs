@@ -1430,6 +1430,11 @@ fn execute_od_with_graph(
     let (origin_refs, unique_origin_candidates) = intern_candidate_sets(origin_snaps);
     let (destination_refs, unique_destination_candidates) =
         intern_candidate_sets(destination_snaps);
+    let batch_strategy = choose_batch_route_strategy(
+        routing_graph,
+        unique_origin_candidates.len(),
+        count_unique_ok_pairs(&origin_refs, &destination_refs),
+    );
     let mut route_cache = HashMap::new();
     let mut origin_tree_cache = HashMap::new();
     let mut pairs = Vec::with_capacity(document.pairs.len());
@@ -1449,6 +1454,7 @@ fn execute_od_with_graph(
                 topology,
                 metrics,
                 routing_graph,
+                batch_strategy,
                 "",
                 document.snap.max_distance_m,
                 &document.connectivity,
@@ -1584,6 +1590,11 @@ fn execute_matrix_with_graph(
     );
     let (destination_refs, unique_destination_candidates) =
         intern_candidate_sets(destination_snaps);
+    let batch_strategy = choose_batch_route_strategy(
+        routing_graph,
+        unique_origin_candidates.len(),
+        unique_origin_candidates.len() * unique_destination_candidates.len(),
+    );
     let mut route_cache = HashMap::new();
     let mut origin_tree_cache = HashMap::new();
     let mut cells = Vec::with_capacity(origins.points.len() * destinations.points.len());
@@ -1599,6 +1610,7 @@ fn execute_matrix_with_graph(
                     topology,
                     metrics,
                     routing_graph,
+                    batch_strategy,
                     "",
                     snap_max_distance_m,
                     &connectivity,
@@ -1839,6 +1851,10 @@ fn execute_service_area_with_graph(
         let mut origin_skipped = false;
 
         for (metric_kind, thresholds) in &thresholds_by_metric {
+            let max_threshold = thresholds
+                .last()
+                .map(|threshold| threshold.limit)
+                .unwrap_or_default();
             let expansion = expansion_cache
                 .entry((origin_set_id, *metric_kind))
                 .or_insert_with(|| {
@@ -1851,6 +1867,7 @@ fn execute_service_area_with_graph(
                         request.snap.max_distance_m,
                         &request.connectivity,
                         *metric_kind,
+                        max_threshold,
                     )
                     .map_err(|error| {
                         analysis_failure(&error).cloned().unwrap_or_else(|| {
@@ -2038,6 +2055,7 @@ fn build_service_area_expansion(
     snap_max_distance_m: f64,
     connectivity: &ConnectivityPolicy,
     metric_kind: ServiceAreaMetricKind,
+    max_cost: f64,
 ) -> Result<ServiceAreaOriginExpansion> {
     let resolution =
         resolve_service_area_origin(point, candidates, snap_max_distance_m, connectivity)?;
@@ -2058,6 +2076,9 @@ fn build_service_area_expansion(
                     edge_index: seed.edge_index,
                     automaton_state,
                 };
+                if seed.before_cost > max_cost {
+                    continue;
+                }
                 let previous = dist.get(&key).copied().unwrap_or(f64::INFINITY);
                 if seed.end_cost + f64::EPSILON >= previous {
                     continue;
@@ -2072,12 +2093,14 @@ fn build_service_area_expansion(
                     seed.end_cost,
                     seed.start_fraction,
                 );
-                heap.push(State {
-                    edge_index: seed.edge_index,
-                    automaton_state,
-                    cost: seed.end_cost,
-                    score: seed.end_cost,
-                });
+                if seed.end_cost <= max_cost {
+                    heap.push(State {
+                        edge_index: seed.edge_index,
+                        automaton_state,
+                        cost: seed.end_cost,
+                        score: seed.end_cost,
+                    });
+                }
             }
         }
 
@@ -2093,6 +2116,9 @@ fn build_service_area_expansion(
                 automaton_state,
             };
             if cost > dist.get(&key).copied().unwrap_or(f64::INFINITY) {
+                continue;
+            }
+            if cost > max_cost {
                 continue;
             }
 
@@ -2111,6 +2137,9 @@ fn build_service_area_expansion(
                 };
                 let next_before = cost
                     + service_area_turn_cost(topology, metrics, edge_index, next_edge, metric_kind);
+                if next_before > max_cost {
+                    continue;
+                }
                 let next_end = next_before + edge_cost;
                 let next_state = routing_graph
                     .automaton
@@ -2133,12 +2162,14 @@ fn build_service_area_expansion(
                     next_end,
                     0.0,
                 );
-                heap.push(State {
-                    edge_index: next_edge,
-                    automaton_state: next_state,
-                    cost: next_end,
-                    score: next_end,
-                });
+                if next_end <= max_cost {
+                    heap.push(State {
+                        edge_index: next_edge,
+                        automaton_state: next_state,
+                        cost: next_end,
+                        score: next_end,
+                    });
+                }
             }
         }
     } else {
@@ -2153,6 +2184,9 @@ fn build_service_area_expansion(
                     candidate,
                     metric_kind,
                 ) {
+                    if seed.before_cost > max_cost {
+                        continue;
+                    }
                     if !scratch.update(seed.edge_index, seed.end_cost, NO_PREVIOUS_EDGE) {
                         continue;
                     }
@@ -2165,12 +2199,14 @@ fn build_service_area_expansion(
                         seed.end_cost,
                         seed.start_fraction,
                     );
-                    scratch.heap.push(State {
-                        edge_index: seed.edge_index,
-                        automaton_state: 0,
-                        cost: seed.end_cost,
-                        score: seed.end_cost,
-                    });
+                    if seed.end_cost <= max_cost {
+                        scratch.heap.push(State {
+                            edge_index: seed.edge_index,
+                            automaton_state: 0,
+                            cost: seed.end_cost,
+                            score: seed.end_cost,
+                        });
+                    }
                 }
             }
 
@@ -2182,6 +2218,9 @@ fn build_service_area_expansion(
             }) = scratch.heap.pop()
             {
                 if cost > scratch.dist[edge_index] {
+                    continue;
+                }
+                if cost > max_cost {
                     continue;
                 }
 
@@ -2200,6 +2239,9 @@ fn build_service_area_expansion(
                             next_edge,
                             metric_kind,
                         );
+                    if next_before > max_cost {
+                        continue;
+                    }
                     let next_end = next_before + edge_cost;
                     if !scratch.update(next_edge, next_end, edge_index as u32) {
                         continue;
@@ -2213,12 +2255,14 @@ fn build_service_area_expansion(
                         next_end,
                         0.0,
                     );
-                    scratch.heap.push(State {
-                        edge_index: next_edge,
-                        automaton_state: 0,
-                        cost: next_end,
-                        score: next_end,
-                    });
+                    if next_end <= max_cost {
+                        scratch.heap.push(State {
+                            edge_index: next_edge,
+                            automaton_state: 0,
+                            cost: next_end,
+                            score: next_end,
+                        });
+                    }
                 }
             }
         });
@@ -4235,6 +4279,7 @@ fn cached_batch_route_result(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     routing_graph: &RoutingGraph,
+    strategy: BatchRouteStrategy,
     route_id: &str,
     snap_max_distance_m: f64,
     connectivity: &ConnectivityPolicy,
@@ -4252,6 +4297,7 @@ fn cached_batch_route_result(
             topology,
             metrics,
             routing_graph,
+            strategy,
             route_id,
             snap_max_distance_m,
             connectivity,
@@ -4274,6 +4320,7 @@ fn execute_batched_route_with_candidates(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     routing_graph: &RoutingGraph,
+    strategy: BatchRouteStrategy,
     route_id: &str,
     snap_max_distance_m: f64,
     connectivity: &ConnectivityPolicy,
@@ -4282,7 +4329,8 @@ fn execute_batched_route_with_candidates(
     origin_candidates: &[SnappedPoint],
     destination_candidates: &[SnappedPoint],
 ) -> Result<RouteResult> {
-    if routing_graph.has_restriction_sequences()
+    if !matches!(strategy, BatchRouteStrategy::SingleSource)
+        || routing_graph.has_restriction_sequences()
         || has_failure_modes(fallback)
         || auto_relaxation_requested(fallback)
     {
@@ -4425,18 +4473,62 @@ fn execute_batched_route_with_candidates(
     Err(failure.into())
 }
 
-fn cached_single_source_edge_tree(
-    cache: &mut HashMap<(u32, u64, u64), Result<SingleSourceEdgeTree, String>>,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BatchRouteStrategy {
+    Pairwise,
+    SingleSource,
+}
+
+fn choose_batch_route_strategy(
+    routing_graph: &RoutingGraph,
+    unique_origin_count: usize,
+    unique_pair_count: usize,
+) -> BatchRouteStrategy {
+    if routing_graph.has_restriction_sequences()
+        || routing_graph.acceleration.is_some()
+        || unique_origin_count == 0
+    {
+        return BatchRouteStrategy::Pairwise;
+    }
+
+    let average_destination_count =
+        unique_pair_count.saturating_add(unique_origin_count - 1) / unique_origin_count;
+    let single_source_threshold = 8;
+    if average_destination_count >= single_source_threshold {
+        BatchRouteStrategy::SingleSource
+    } else {
+        BatchRouteStrategy::Pairwise
+    }
+}
+
+fn count_unique_ok_pairs(
+    origin_refs: &[std::result::Result<usize, AnalysisFailure>],
+    destination_refs: &[std::result::Result<usize, AnalysisFailure>],
+) -> usize {
+    let mut unique = HashMap::<(usize, usize), ()>::new();
+    for (origin_ref, destination_ref) in origin_refs.iter().zip(destination_refs) {
+        if let (Ok(origin_set_id), Ok(destination_set_id)) = (origin_ref, destination_ref) {
+            unique.insert((*origin_set_id, *destination_set_id), ());
+        }
+    }
+    unique.len()
+}
+
+fn cached_single_source_edge_tree<'a>(
+    cache: &'a mut HashMap<(u32, u64, u64), Result<SingleSourceEdgeTree, String>>,
     topology: &TopologyBundle,
     routing_graph: &RoutingGraph,
     origin: &SnappedPoint,
-) -> Result<SingleSourceEdgeTree> {
+) -> Result<&'a SingleSourceEdgeTree> {
     let key = snap_cache_key(origin);
     let value = cache.entry(key).or_insert_with(|| {
         build_single_source_edge_tree(topology, routing_graph, origin)
             .map_err(|error| error.to_string())
     });
-    value.clone().map_err(anyhow::Error::msg)
+    match value {
+        Ok(tree) => Ok(tree),
+        Err(error) => Err(anyhow::Error::msg(error.clone())),
+    }
 }
 
 fn build_single_source_edge_tree(

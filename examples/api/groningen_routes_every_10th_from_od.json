@@ -1,6 +1,5 @@
 {
   "source": "every_10th_pair_from_examples/api/groningen_od_1000.json",
-  "count": 100,
   "requests": [
     {
       "profile_id": "car_research_v3",
@@ -8,16 +7,13 @@
         "route_id": "groningen_route_0001",
         "origin": {
           "id": "groningen_o_0001",
-          "lon": 7.083121,
-          "lat": 52.838689
+          "lon": 6.584725,
+          "lat": 53.211452
         },
         "destination": {
           "id": "groningen_d_0001",
-          "lon": 6.600146,
-          "lat": 53.201353
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.683004,
+          "lat": 53.22298
         },
         "returns": {
           "geometry": "full",
@@ -41,16 +37,13 @@
         "route_id": "groningen_route_0011",
         "origin": {
           "id": "groningen_o_0011",
-          "lon": 7.07398,
-          "lat": 52.87196
+          "lon": 7.03529,
+          "lat": 53.0288
         },
         "destination": {
           "id": "groningen_d_0011",
-          "lon": 6.599906,
-          "lat": 53.23754
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.54672,
+          "lat": 53.233721
         },
         "returns": {
           "geometry": "full",
@@ -74,16 +67,13 @@
         "route_id": "groningen_route_0021",
         "origin": {
           "id": "groningen_o_0021",
-          "lon": 7.057701,
-          "lat": 52.879822
+          "lon": 6.68641,
+          "lat": 53.38859
         },
         "destination": {
           "id": "groningen_d_0021",
-          "lon": 6.908994,
-          "lat": 53.324598
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.865837,
+          "lat": 53.36122
         },
         "returns": {
           "geometry": "full",
@@ -107,16 +97,13 @@
         "route_id": "groningen_route_0031",
         "origin": {
           "id": "groningen_o_0031",
-          "lon": 7.070954,
-          "lat": 52.890407
+          "lon": 6.713365,
+          "lat": 53.236465
         },
         "destination": {
           "id": "groningen_d_0031",
-          "lon": 6.561213,
-          "lat": 53.211479
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.070399,
+          "lat": 53.112217
         },
         "returns": {
           "geometry": "full",
@@ -140,16 +127,13 @@
         "route_id": "groningen_route_0041",
         "origin": {
           "id": "groningen_o_0041",
-          "lon": 7.106987,
-          "lat": 52.924418
+          "lon": 7.173595,
+          "lat": 53.147273
         },
         "destination": {
           "id": "groningen_d_0041",
-          "lon": 6.546402,
-          "lat": 53.252917
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.076981,
+          "lat": 53.18208
         },
         "returns": {
           "geometry": "full",
@@ -173,16 +157,13 @@
         "route_id": "groningen_route_0051",
         "origin": {
           "id": "groningen_o_0051",
-          "lon": 7.017099,
-          "lat": 52.933316
+          "lon": 6.631952,
+          "lat": 53.131906
         },
         "destination": {
           "id": "groningen_d_0051",
-          "lon": 6.639286,
-          "lat": 53.347213
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.467149,
+          "lat": 53.204467
         },
         "returns": {
           "geometry": "full",
@@ -206,16 +187,13 @@
         "route_id": "groningen_route_0061",
         "origin": {
           "id": "groningen_o_0061",
-          "lon": 7.130326,
-          "lat": 52.946503
+          "lon": 6.294763,
+          "lat": 53.150569
         },
         "destination": {
           "id": "groningen_d_0061",
-          "lon": 6.560934,
-          "lat": 53.220664
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.872516,
+          "lat": 53.097865
         },
         "returns": {
           "geometry": "full",
@@ -239,16 +217,13 @@
         "route_id": "groningen_route_0071",
         "origin": {
           "id": "groningen_o_0071",
-          "lon": 6.977847,
-          "lat": 52.96099
+          "lon": 6.859194,
+          "lat": 53.096475
         },
         "destination": {
           "id": "groningen_d_0071",
-          "lon": 6.53316,
-          "lat": 53.292655
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.987977,
+          "lat": 53.283887
         },
         "returns": {
           "geometry": "full",
@@ -272,16 +247,13 @@
         "route_id": "groningen_route_0081",
         "origin": {
           "id": "groningen_o_0081",
-          "lon": 7.151307,
-          "lat": 52.976602
+          "lon": 6.570271,
+          "lat": 53.197444
         },
         "destination": {
           "id": "groningen_d_0081",
-          "lon": 6.556437,
-          "lat": 53.198051
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.631882,
+          "lat": 53.206091
         },
         "returns": {
           "geometry": "full",
@@ -305,16 +277,13 @@
         "route_id": "groningen_route_0091",
         "origin": {
           "id": "groningen_o_0091",
-          "lon": 6.967341,
-          "lat": 52.98397
+          "lon": 6.608401,
+          "lat": 53.30336
         },
         "destination": {
           "id": "groningen_d_0091",
-          "lon": 6.541112,
-          "lat": 53.233513
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.316421,
+          "lat": 53.261937
         },
         "returns": {
           "geometry": "full",
@@ -338,16 +307,13 @@
         "route_id": "groningen_route_0101",
         "origin": {
           "id": "groningen_o_0101",
-          "lon": 6.977889,
-          "lat": 52.987689
+          "lon": 6.774775,
+          "lat": 53.366623
         },
         "destination": {
           "id": "groningen_d_0101",
-          "lon": 6.842323,
-          "lat": 53.318452
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.033438,
+          "lat": 53.146683
         },
         "returns": {
           "geometry": "full",
@@ -371,16 +337,13 @@
         "route_id": "groningen_route_0111",
         "origin": {
           "id": "groningen_o_0111",
-          "lon": 6.950239,
-          "lat": 52.991718
+          "lon": 6.767781,
+          "lat": 53.38325
         },
         "destination": {
           "id": "groningen_d_0111",
-          "lon": 6.646569,
-          "lat": 53.20806
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.934335,
+          "lat": 53.003379
         },
         "returns": {
           "geometry": "full",
@@ -404,16 +367,13 @@
         "route_id": "groningen_route_0121",
         "origin": {
           "id": "groningen_o_0121",
-          "lon": 6.940618,
-          "lat": 52.996256
+          "lon": 6.944475,
+          "lat": 52.989461
         },
         "destination": {
           "id": "groningen_d_0121",
-          "lon": 6.96441,
-          "lat": 53.246871
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.263552,
+          "lat": 53.250616
         },
         "returns": {
           "geometry": "full",
@@ -437,16 +397,13 @@
         "route_id": "groningen_route_0131",
         "origin": {
           "id": "groningen_o_0131",
-          "lon": 7.200271,
-          "lat": 53.001906
+          "lon": 6.571825,
+          "lat": 53.215473
         },
         "destination": {
           "id": "groningen_d_0131",
-          "lon": 6.568817,
-          "lat": 53.336694
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.558677,
+          "lat": 53.191651
         },
         "returns": {
           "geometry": "full",
@@ -470,16 +427,13 @@
         "route_id": "groningen_route_0141",
         "origin": {
           "id": "groningen_o_0141",
-          "lon": 6.97513,
-          "lat": 53.008557
+          "lon": 6.305163,
+          "lat": 53.189939
         },
         "destination": {
           "id": "groningen_d_0141",
-          "lon": 6.27124,
-          "lat": 53.216402
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.050418,
+          "lat": 53.128503
         },
         "returns": {
           "geometry": "full",
@@ -503,16 +457,13 @@
         "route_id": "groningen_route_0151",
         "origin": {
           "id": "groningen_o_0151",
-          "lon": 7.157157,
-          "lat": 53.019453
+          "lon": 6.250456,
+          "lat": 53.128385
         },
         "destination": {
           "id": "groningen_d_0151",
-          "lon": 6.784074,
-          "lat": 53.274924
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.082613,
+          "lat": 53.186966
         },
         "returns": {
           "geometry": "full",
@@ -536,16 +487,13 @@
         "route_id": "groningen_route_0161",
         "origin": {
           "id": "groningen_o_0161",
-          "lon": 7.114541,
-          "lat": 53.028938
+          "lon": 6.585647,
+          "lat": 53.211726
         },
         "destination": {
           "id": "groningen_d_0161",
-          "lon": 6.550146,
-          "lat": 53.194178
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.591264,
+          "lat": 53.247722
         },
         "returns": {
           "geometry": "full",
@@ -569,16 +517,13 @@
         "route_id": "groningen_route_0171",
         "origin": {
           "id": "groningen_o_0171",
-          "lon": 7.045183,
-          "lat": 53.03589
+          "lon": 6.574254,
+          "lat": 53.243934
         },
         "destination": {
           "id": "groningen_d_0171",
-          "lon": 6.358819,
-          "lat": 53.228884
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.699891,
+          "lat": 53.411445
         },
         "returns": {
           "geometry": "full",
@@ -602,16 +547,13 @@
         "route_id": "groningen_route_0181",
         "origin": {
           "id": "groningen_o_0181",
-          "lon": 7.029159,
-          "lat": 53.044483
+          "lon": 6.786779,
+          "lat": 53.164165
         },
         "destination": {
           "id": "groningen_d_0181",
-          "lon": 6.44205,
-          "lat": 53.309192
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.057626,
+          "lat": 53.156777
         },
         "returns": {
           "geometry": "full",
@@ -635,16 +577,13 @@
         "route_id": "groningen_route_0191",
         "origin": {
           "id": "groningen_o_0191",
-          "lon": 6.847309,
-          "lat": 53.054175
+          "lon": 6.317752,
+          "lat": 53.272679
         },
         "destination": {
           "id": "groningen_d_0191",
-          "lon": 7.044684,
-          "lat": 53.204203
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.619553,
+          "lat": 53.163362
         },
         "returns": {
           "geometry": "full",
@@ -668,16 +607,13 @@
         "route_id": "groningen_route_0201",
         "origin": {
           "id": "groningen_o_0201",
-          "lon": 6.94476,
-          "lat": 53.06558
+          "lon": 7.135402,
+          "lat": 53.103327
         },
         "destination": {
           "id": "groningen_d_0201",
-          "lon": 6.587908,
-          "lat": 53.242314
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.615384,
+          "lat": 53.420984
         },
         "returns": {
           "geometry": "full",
@@ -701,16 +637,13 @@
         "route_id": "groningen_route_0211",
         "origin": {
           "id": "groningen_o_0211",
-          "lon": 6.929754,
-          "lat": 53.07322
+          "lon": 6.836193,
+          "lat": 53.442657
         },
         "destination": {
           "id": "groningen_d_0211",
-          "lon": 6.907712,
-          "lat": 53.330058
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.196454,
+          "lat": 53.409902
         },
         "returns": {
           "geometry": "full",
@@ -734,16 +667,13 @@
         "route_id": "groningen_route_0221",
         "origin": {
           "id": "groningen_o_0221",
-          "lon": 6.961841,
-          "lat": 53.078795
+          "lon": 6.611575,
+          "lat": 53.168334
         },
         "destination": {
           "id": "groningen_d_0221",
-          "lon": 6.587308,
-          "lat": 53.21366
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.473723,
+          "lat": 53.230258
         },
         "returns": {
           "geometry": "full",
@@ -767,16 +697,13 @@
         "route_id": "groningen_route_0231",
         "origin": {
           "id": "groningen_o_0231",
-          "lon": 6.863251,
-          "lat": 53.084206
+          "lon": 6.512167,
+          "lat": 53.361209
         },
         "destination": {
           "id": "groningen_d_0231",
-          "lon": 6.309819,
-          "lat": 53.262151
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.026834,
+          "lat": 53.152539
         },
         "returns": {
           "geometry": "full",
@@ -800,16 +727,13 @@
         "route_id": "groningen_route_0241",
         "origin": {
           "id": "groningen_o_0241",
-          "lon": 6.895816,
-          "lat": 53.087881
+          "lon": 6.87899,
+          "lat": 53.134423
         },
         "destination": {
           "id": "groningen_d_0241",
-          "lon": 6.331887,
-          "lat": 53.358978
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.17671,
+          "lat": 53.192657
         },
         "returns": {
           "geometry": "full",
@@ -833,16 +757,13 @@
         "route_id": "groningen_route_0251",
         "origin": {
           "id": "groningen_o_0251",
-          "lon": 6.858402,
-          "lat": 53.091848
+          "lon": 6.620488,
+          "lat": 53.407182
         },
         "destination": {
           "id": "groningen_d_0251",
-          "lon": 6.57325,
-          "lat": 53.224096
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.591331,
+          "lat": 53.166348
         },
         "returns": {
           "geometry": "full",
@@ -866,16 +787,13 @@
         "route_id": "groningen_route_0261",
         "origin": {
           "id": "groningen_o_0261",
-          "lon": 7.007404,
-          "lat": 53.095446
+          "lon": 6.605122,
+          "lat": 53.190425
         },
         "destination": {
           "id": "groningen_d_0261",
-          "lon": 7.034284,
-          "lat": 53.300658
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.975928,
+          "lat": 53.242747
         },
         "returns": {
           "geometry": "full",
@@ -899,16 +817,13 @@
         "route_id": "groningen_route_0271",
         "origin": {
           "id": "groningen_o_0271",
-          "lon": 7.186097,
-          "lat": 53.098271
+          "lon": 7.079358,
+          "lat": 53.232033
         },
         "destination": {
           "id": "groningen_d_0271",
-          "lon": 7.030697,
-          "lat": 53.20049
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.041698,
+          "lat": 53.165294
         },
         "returns": {
           "geometry": "full",
@@ -932,16 +847,13 @@
         "route_id": "groningen_route_0281",
         "origin": {
           "id": "groningen_o_0281",
-          "lon": 7.145157,
-          "lat": 53.100819
+          "lon": 7.061927,
+          "lat": 53.168732
         },
         "destination": {
           "id": "groningen_d_0281",
-          "lon": 6.595351,
-          "lat": 53.236494
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.360268,
+          "lat": 53.156979
         },
         "returns": {
           "geometry": "full",
@@ -965,16 +877,13 @@
         "route_id": "groningen_route_0291",
         "origin": {
           "id": "groningen_o_0291",
-          "lon": 6.312432,
-          "lat": 53.103024
+          "lon": 6.694255,
+          "lat": 53.170315
         },
         "destination": {
           "id": "groningen_d_0291",
-          "lon": 6.8599,
-          "lat": 53.322934
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.703697,
+          "lat": 53.411482
         },
         "returns": {
           "geometry": "full",
@@ -998,16 +907,13 @@
         "route_id": "groningen_route_0301",
         "origin": {
           "id": "groningen_o_0301",
-          "lon": 7.000905,
-          "lat": 53.10516
+          "lon": 6.60018,
+          "lat": 53.164165
         },
         "destination": {
           "id": "groningen_d_0301",
-          "lon": 6.798674,
-          "lat": 53.210671
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.617341,
+          "lat": 53.214374
         },
         "returns": {
           "geometry": "full",
@@ -1031,16 +937,13 @@
         "route_id": "groningen_route_0311",
         "origin": {
           "id": "groningen_o_0311",
-          "lon": 6.871298,
-          "lat": 53.10682
+          "lon": 6.260501,
+          "lat": 53.268203
         },
         "destination": {
           "id": "groningen_d_0311",
-          "lon": 6.406527,
-          "lat": 53.250624
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.575541,
+          "lat": 53.233314
         },
         "returns": {
           "geometry": "full",
@@ -1064,16 +967,13 @@
         "route_id": "groningen_route_0321",
         "origin": {
           "id": "groningen_o_0321",
-          "lon": 6.826313,
-          "lat": 53.108624
+          "lon": 7.029612,
+          "lat": 52.942245
         },
         "destination": {
           "id": "groningen_d_0321",
-          "lon": 6.906164,
-          "lat": 53.344042
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.850193,
+          "lat": 53.407269
         },
         "returns": {
           "geometry": "full",
@@ -1097,16 +997,13 @@
         "route_id": "groningen_route_0331",
         "origin": {
           "id": "groningen_o_0331",
-          "lon": 6.994322,
-          "lat": 53.111148
+          "lon": 6.639466,
+          "lat": 53.347031
         },
         "destination": {
           "id": "groningen_d_0331",
-          "lon": 6.539586,
-          "lat": 53.219405
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.03653,
+          "lat": 53.151074
         },
         "returns": {
           "geometry": "full",
@@ -1130,16 +1027,13 @@
         "route_id": "groningen_route_0341",
         "origin": {
           "id": "groningen_o_0341",
-          "lon": 6.29364,
-          "lat": 53.11382
+          "lon": 6.379932,
+          "lat": 53.164797
         },
         "destination": {
           "id": "groningen_d_0341",
-          "lon": 6.9731,
-          "lat": 53.287248
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.255807,
+          "lat": 53.1437
         },
         "returns": {
           "geometry": "full",
@@ -1163,16 +1057,13 @@
         "route_id": "groningen_route_0351",
         "origin": {
           "id": "groningen_o_0351",
-          "lon": 7.055804,
-          "lat": 53.116318
+          "lon": 6.372115,
+          "lat": 53.173099
         },
         "destination": {
           "id": "groningen_d_0351",
-          "lon": 6.569993,
-          "lat": 53.19731
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.305693,
+          "lat": 53.34891
         },
         "returns": {
           "geometry": "full",
@@ -1196,16 +1087,13 @@
         "route_id": "groningen_route_0361",
         "origin": {
           "id": "groningen_o_0361",
-          "lon": 6.671739,
-          "lat": 53.119928
+          "lon": 6.723128,
+          "lat": 53.152061
         },
         "destination": {
           "id": "groningen_d_0361",
-          "lon": 6.651878,
-          "lat": 53.232356
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.044944,
+          "lat": 53.295781
         },
         "returns": {
           "geometry": "full",
@@ -1229,16 +1117,13 @@
         "route_id": "groningen_route_0371",
         "origin": {
           "id": "groningen_o_0371",
-          "lon": 6.243348,
-          "lat": 53.123528
+          "lon": 6.57165,
+          "lat": 53.233205
         },
         "destination": {
           "id": "groningen_d_0371",
-          "lon": 6.851096,
-          "lat": 53.316737
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.176798,
+          "lat": 53.092236
         },
         "returns": {
           "geometry": "full",
@@ -1262,16 +1147,13 @@
         "route_id": "groningen_route_0381",
         "origin": {
           "id": "groningen_o_0381",
-          "lon": 6.288466,
-          "lat": 53.127472
+          "lon": 6.978433,
+          "lat": 53.085759
         },
         "destination": {
           "id": "groningen_d_0381",
-          "lon": 6.567592,
-          "lat": 53.207197
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.526736,
+          "lat": 53.234398
         },
         "returns": {
           "geometry": "full",
@@ -1295,16 +1177,13 @@
         "route_id": "groningen_route_0391",
         "origin": {
           "id": "groningen_o_0391",
-          "lon": 6.91155,
-          "lat": 53.131321
+          "lon": 6.421729,
+          "lat": 53.297092
         },
         "destination": {
           "id": "groningen_d_0391",
-          "lon": 6.97718,
-          "lat": 53.245867
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.780735,
+          "lat": 53.194949
         },
         "returns": {
           "geometry": "full",
@@ -1328,16 +1207,13 @@
         "route_id": "groningen_route_0401",
         "origin": {
           "id": "groningen_o_0401",
-          "lon": 6.274392,
-          "lat": 53.133402
+          "lon": 6.345141,
+          "lat": 53.12575
         },
         "destination": {
           "id": "groningen_d_0401",
-          "lon": 6.844847,
-          "lat": 53.335004
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.502182,
+          "lat": 53.342282
         },
         "returns": {
           "geometry": "full",
@@ -1361,16 +1237,13 @@
         "route_id": "groningen_route_0411",
         "origin": {
           "id": "groningen_o_0411",
-          "lon": 6.898853,
-          "lat": 53.134683
+          "lon": 6.752868,
+          "lat": 53.15431
         },
         "destination": {
           "id": "groningen_d_0411",
-          "lon": 6.498923,
-          "lat": 53.215677
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.384027,
+          "lat": 53.161014
         },
         "returns": {
           "geometry": "full",
@@ -1394,16 +1267,13 @@
         "route_id": "groningen_route_0421",
         "origin": {
           "id": "groningen_o_0421",
-          "lon": 7.025019,
-          "lat": 53.135854
+          "lon": 7.005051,
+          "lat": 53.156678
         },
         "destination": {
           "id": "groningen_d_0421",
-          "lon": 6.459811,
-          "lat": 53.271607
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.808823,
+          "lat": 53.092249
         },
         "returns": {
           "geometry": "full",
@@ -1427,16 +1297,13 @@
         "route_id": "groningen_route_0431",
         "origin": {
           "id": "groningen_o_0431",
-          "lon": 6.72402,
-          "lat": 53.137264
+          "lon": 6.547598,
+          "lat": 53.224135
         },
         "destination": {
           "id": "groningen_d_0431",
-          "lon": 6.850542,
-          "lat": 53.193277
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.133086,
+          "lat": 53.151953
         },
         "returns": {
           "geometry": "full",
@@ -1460,16 +1327,13 @@
         "route_id": "groningen_route_0441",
         "origin": {
           "id": "groningen_o_0441",
-          "lon": 6.267319,
-          "lat": 53.138702
+          "lon": 6.59555,
+          "lat": 53.169479
         },
         "destination": {
           "id": "groningen_d_0441",
-          "lon": 6.958588,
-          "lat": 53.227679
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.975785,
+          "lat": 53.168464
         },
         "returns": {
           "geometry": "full",
@@ -1493,16 +1357,13 @@
         "route_id": "groningen_route_0451",
         "origin": {
           "id": "groningen_o_0451",
-          "lon": 7.015558,
-          "lat": 53.139922
+          "lon": 6.520795,
+          "lat": 53.237222
         },
         "destination": {
           "id": "groningen_d_0451",
-          "lon": 6.594364,
-          "lat": 53.306359
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.629337,
+          "lat": 53.171801
         },
         "returns": {
           "geometry": "full",
@@ -1526,16 +1387,13 @@
         "route_id": "groningen_route_0461",
         "origin": {
           "id": "groningen_o_0461",
-          "lon": 7.053003,
-          "lat": 53.14106
+          "lon": 6.87005,
+          "lat": 53.106185
         },
         "destination": {
           "id": "groningen_d_0461",
-          "lon": 6.54916,
-          "lat": 53.203385
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.183799,
+          "lat": 53.226967
         },
         "returns": {
           "geometry": "full",
@@ -1559,16 +1417,13 @@
         "route_id": "groningen_route_0471",
         "origin": {
           "id": "groningen_o_0471",
-          "lon": 6.236667,
-          "lat": 53.142187
+          "lon": 6.442882,
+          "lat": 53.309941
         },
         "destination": {
           "id": "groningen_d_0471",
-          "lon": 6.406691,
-          "lat": 53.241
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.894875,
+          "lat": 53.163311
         },
         "returns": {
           "geometry": "full",
@@ -1592,16 +1447,13 @@
         "route_id": "groningen_route_0481",
         "origin": {
           "id": "groningen_o_0481",
-          "lon": 7.021516,
-          "lat": 53.143301
+          "lon": 6.273595,
+          "lat": 53.213172
         },
         "destination": {
           "id": "groningen_d_0481",
-          "lon": 6.920655,
-          "lat": 53.327884
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.72377,
+          "lat": 53.414949
         },
         "returns": {
           "geometry": "full",
@@ -1625,16 +1477,13 @@
         "route_id": "groningen_route_0491",
         "origin": {
           "id": "groningen_o_0491",
-          "lon": 6.374132,
-          "lat": 53.144258
+          "lon": 6.89705,
+          "lat": 53.13609
         },
         "destination": {
           "id": "groningen_d_0491",
-          "lon": 6.567739,
-          "lat": 53.212968
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.569118,
+          "lat": 53.229977
         },
         "returns": {
           "geometry": "full",
@@ -1658,16 +1507,13 @@
         "route_id": "groningen_route_0501",
         "origin": {
           "id": "groningen_o_0501",
-          "lon": 6.26504,
-          "lat": 53.14521
+          "lon": 6.539188,
+          "lat": 53.350631
         },
         "destination": {
           "id": "groningen_d_0501",
-          "lon": 6.305188,
-          "lat": 53.259224
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.94532,
+          "lat": 52.987534
         },
         "returns": {
           "geometry": "full",
@@ -1691,16 +1537,13 @@
         "route_id": "groningen_route_0511",
         "origin": {
           "id": "groningen_o_0511",
-          "lon": 7.018425,
-          "lat": 53.146292
+          "lon": 6.392665,
+          "lat": 53.387514
         },
         "destination": {
           "id": "groningen_d_0511",
-          "lon": 6.515774,
-          "lat": 53.3561
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.886086,
+          "lat": 53.104189
         },
         "returns": {
           "geometry": "full",
@@ -1724,16 +1567,13 @@
         "route_id": "groningen_route_0521",
         "origin": {
           "id": "groningen_o_0521",
-          "lon": 7.042251,
-          "lat": 53.147125
+          "lon": 6.845331,
+          "lat": 53.321423
         },
         "destination": {
           "id": "groningen_d_0521",
-          "lon": 6.58859,
-          "lat": 53.222915
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.983853,
+          "lat": 53.172314
         },
         "returns": {
           "geometry": "full",
@@ -1757,16 +1597,13 @@
         "route_id": "groningen_route_0531",
         "origin": {
           "id": "groningen_o_0531",
-          "lon": 7.051856,
-          "lat": 53.14802
+          "lon": 6.382377,
+          "lat": 53.361244
         },
         "destination": {
           "id": "groningen_d_0531",
-          "lon": 6.662917,
-          "lat": 53.298564
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.57411,
+          "lat": 53.199747
         },
         "returns": {
           "geometry": "full",
@@ -1790,16 +1627,13 @@
         "route_id": "groningen_route_0541",
         "origin": {
           "id": "groningen_o_0541",
-          "lon": 6.991555,
-          "lat": 53.148899
+          "lon": 6.516369,
+          "lat": 53.367258
         },
         "destination": {
           "id": "groningen_d_0541",
-          "lon": 6.574658,
-          "lat": 53.199712
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.16559,
+          "lat": 52.952812
         },
         "returns": {
           "geometry": "full",
@@ -1823,16 +1657,13 @@
         "route_id": "groningen_route_0551",
         "origin": {
           "id": "groningen_o_0551",
-          "lon": 6.753611,
-          "lat": 53.149729
+          "lon": 7.005655,
+          "lat": 53.157389
         },
         "destination": {
           "id": "groningen_d_0551",
-          "lon": 6.4113,
-          "lat": 53.23547
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.595065,
+          "lat": 53.168243
         },
         "returns": {
           "geometry": "full",
@@ -1856,16 +1687,13 @@
         "route_id": "groningen_route_0561",
         "origin": {
           "id": "groningen_o_0561",
-          "lon": 7.049005,
-          "lat": 53.150603
+          "lon": 7.050085,
+          "lat": 53.13729
         },
         "destination": {
           "id": "groningen_d_0561",
-          "lon": 6.844073,
-          "lat": 53.321331
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.954272,
+          "lat": 52.993629
         },
         "returns": {
           "geometry": "full",
@@ -1889,16 +1717,13 @@
         "route_id": "groningen_route_0571",
         "origin": {
           "id": "groningen_o_0571",
-          "lon": 6.738423,
-          "lat": 53.151375
+          "lon": 6.986865,
+          "lat": 53.170927
         },
         "destination": {
           "id": "groningen_d_0571",
-          "lon": 6.543878,
-          "lat": 53.209834
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.585199,
+          "lat": 53.224361
         },
         "returns": {
           "geometry": "full",
@@ -1922,16 +1747,13 @@
         "route_id": "groningen_route_0581",
         "origin": {
           "id": "groningen_o_0581",
-          "lon": 7.05303,
-          "lat": 53.152139
+          "lon": 6.756147,
+          "lat": 53.17114
         },
         "destination": {
           "id": "groningen_d_0581",
-          "lon": 6.573316,
-          "lat": 53.249087
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.772418,
+          "lat": 53.195505
         },
         "returns": {
           "geometry": "full",
@@ -1955,16 +1777,13 @@
         "route_id": "groningen_route_0591",
         "origin": {
           "id": "groningen_o_0591",
-          "lon": 6.271286,
-          "lat": 53.152958
+          "lon": 7.045314,
+          "lat": 53.136771
         },
         "destination": {
           "id": "groningen_d_0591",
-          "lon": 6.403909,
-          "lat": 53.341054
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.474606,
+          "lat": 53.233044
         },
         "returns": {
           "geometry": "full",
@@ -1988,16 +1807,13 @@
         "route_id": "groningen_route_0601",
         "origin": {
           "id": "groningen_o_0601",
-          "lon": 7.058826,
-          "lat": 53.153931
+          "lon": 6.34809,
+          "lat": 53.12407
         },
         "destination": {
           "id": "groningen_d_0601",
-          "lon": 6.581847,
-          "lat": 53.218311
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.618056,
+          "lat": 53.203781
         },
         "returns": {
           "geometry": "full",
@@ -2021,16 +1837,13 @@
         "route_id": "groningen_route_0611",
         "origin": {
           "id": "groningen_o_0611",
-          "lon": 6.373316,
-          "lat": 53.154673
+          "lon": 6.532204,
+          "lat": 53.293867
         },
         "destination": {
           "id": "groningen_d_0611",
-          "lon": 6.708678,
-          "lat": 53.282093
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.0565,
+          "lat": 53.193961
         },
         "returns": {
           "geometry": "full",
@@ -2054,16 +1867,13 @@
         "route_id": "groningen_route_0621",
         "origin": {
           "id": "groningen_o_0621",
-          "lon": 6.887246,
-          "lat": 53.155486
+          "lon": 6.611398,
+          "lat": 53.232242
         },
         "destination": {
           "id": "groningen_d_0621",
-          "lon": 7.084424,
-          "lat": 53.196338
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.063337,
+          "lat": 52.986173
         },
         "returns": {
           "geometry": "full",
@@ -2087,16 +1897,13 @@
         "route_id": "groningen_route_0631",
         "origin": {
           "id": "groningen_o_0631",
-          "lon": 6.748343,
-          "lat": 53.156202
+          "lon": 6.691592,
+          "lat": 53.321268
         },
         "destination": {
           "id": "groningen_d_0631",
-          "lon": 6.531336,
-          "lat": 53.231065
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.60047,
+          "lat": 53.346424
         },
         "returns": {
           "geometry": "full",
@@ -2120,16 +1927,13 @@
         "route_id": "groningen_route_0641",
         "origin": {
           "id": "groningen_o_0641",
-          "lon": 6.643859,
-          "lat": 53.156882
+          "lon": 6.945276,
+          "lat": 52.987521
         },
         "destination": {
           "id": "groningen_d_0641",
-          "lon": 6.867557,
-          "lat": 53.314097
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.755668,
+          "lat": 53.168075
         },
         "returns": {
           "geometry": "full",
@@ -2153,16 +1957,13 @@
         "route_id": "groningen_route_0651",
         "origin": {
           "id": "groningen_o_0651",
-          "lon": 6.773438,
-          "lat": 53.157859
+          "lon": 6.857029,
+          "lat": 53.304289
         },
         "destination": {
           "id": "groningen_d_0651",
-          "lon": 7.180263,
-          "lat": 53.206118
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.39948,
+          "lat": 53.3631
         },
         "returns": {
           "geometry": "full",
@@ -2186,16 +1987,13 @@
         "route_id": "groningen_route_0661",
         "origin": {
           "id": "groningen_o_0661",
-          "lon": 7.035203,
-          "lat": 53.158927
+          "lon": 7.065733,
+          "lat": 53.183776
         },
         "destination": {
           "id": "groningen_d_0661",
-          "lon": 6.596255,
-          "lat": 53.244746
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.021066,
+          "lat": 53.192998
         },
         "returns": {
           "geometry": "full",
@@ -2219,16 +2017,13 @@
         "route_id": "groningen_route_0671",
         "origin": {
           "id": "groningen_o_0671",
-          "lon": 6.326883,
-          "lat": 53.15983
+          "lon": 6.624916,
+          "lat": 53.234897
         },
         "destination": {
           "id": "groningen_d_0671",
-          "lon": 6.513917,
-          "lat": 53.333218
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.134572,
+          "lat": 52.939515
         },
         "returns": {
           "geometry": "full",
@@ -2252,16 +2047,13 @@
         "route_id": "groningen_route_0681",
         "origin": {
           "id": "groningen_o_0681",
-          "lon": 6.739565,
-          "lat": 53.16079
+          "lon": 6.981226,
+          "lat": 53.303458
         },
         "destination": {
           "id": "groningen_d_0681",
-          "lon": 6.585848,
-          "lat": 53.214982
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.011252,
+          "lat": 53.021395
         },
         "returns": {
           "geometry": "full",
@@ -2285,16 +2077,13 @@
         "route_id": "groningen_route_0691",
         "origin": {
           "id": "groningen_o_0691",
-          "lon": 6.37927,
-          "lat": 53.16173
+          "lon": 7.005878,
+          "lat": 53.095101
         },
         "destination": {
           "id": "groningen_d_0691",
-          "lon": 6.837033,
-          "lat": 53.267579
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.358233,
+          "lat": 53.312429
         },
         "returns": {
           "geometry": "full",
@@ -2318,16 +2107,13 @@
         "route_id": "groningen_route_0701",
         "origin": {
           "id": "groningen_o_0701",
-          "lon": 6.781481,
-          "lat": 53.162784
+          "lon": 6.447912,
+          "lat": 53.300134
         },
         "destination": {
           "id": "groningen_d_0701",
-          "lon": 6.626485,
-          "lat": 53.192405
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.632307,
+          "lat": 53.205744
         },
         "returns": {
           "geometry": "full",
@@ -2351,16 +2137,13 @@
         "route_id": "groningen_route_0711",
         "origin": {
           "id": "groningen_o_0711",
-          "lon": 6.742446,
-          "lat": 53.163608
+          "lon": 7.058349,
+          "lat": 52.878196
         },
         "destination": {
           "id": "groningen_d_0711",
-          "lon": 6.638836,
-          "lat": 53.226483
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.058671,
+          "lat": 53.14094
         },
         "returns": {
           "geometry": "full",
@@ -2384,16 +2167,13 @@
         "route_id": "groningen_route_0721",
         "origin": {
           "id": "groningen_o_0721",
-          "lon": 6.871323,
-          "lat": 53.164361
+          "lon": 6.615342,
+          "lat": 53.210884
         },
         "destination": {
           "id": "groningen_d_0721",
-          "lon": 6.973196,
-          "lat": 53.304287
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.559472,
+          "lat": 53.200412
         },
         "returns": {
           "geometry": "full",
@@ -2417,16 +2197,13 @@
         "route_id": "groningen_route_0731",
         "origin": {
           "id": "groningen_o_0731",
-          "lon": 6.613934,
-          "lat": 53.165225
+          "lon": 6.648297,
+          "lat": 53.229033
         },
         "destination": {
           "id": "groningen_d_0731",
-          "lon": 6.523758,
-          "lat": 53.202348
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.605761,
+          "lat": 53.252854
         },
         "returns": {
           "geometry": "full",
@@ -2450,16 +2227,13 @@
         "route_id": "groningen_route_0741",
         "origin": {
           "id": "groningen_o_0741",
-          "lon": 6.761534,
-          "lat": 53.166005
+          "lon": 6.878234,
+          "lat": 53.285899
         },
         "destination": {
           "id": "groningen_d_0741",
-          "lon": 6.589641,
-          "lat": 53.239034
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.085795,
+          "lat": 53.199209
         },
         "returns": {
           "geometry": "full",
@@ -2483,16 +2257,13 @@
         "route_id": "groningen_route_0751",
         "origin": {
           "id": "groningen_o_0751",
-          "lon": 6.993329,
-          "lat": 53.166829
+          "lon": 7.125482,
+          "lat": 53.055894
         },
         "destination": {
           "id": "groningen_d_0751",
-          "lon": 6.521169,
-          "lat": 53.326229
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.626444,
+          "lat": 53.193768
         },
         "returns": {
           "geometry": "full",
@@ -2516,16 +2287,13 @@
         "route_id": "groningen_route_0761",
         "origin": {
           "id": "groningen_o_0761",
-          "lon": 6.589784,
-          "lat": 53.167683
+          "lon": 6.968677,
+          "lat": 53.078681
         },
         "destination": {
           "id": "groningen_d_0761",
-          "lon": 6.560172,
-          "lat": 53.212218
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.379101,
+          "lat": 53.148164
         },
         "returns": {
           "geometry": "full",
@@ -2549,16 +2317,13 @@
         "route_id": "groningen_route_0771",
         "origin": {
           "id": "groningen_o_0771",
-          "lon": 6.723832,
-          "lat": 53.168534
+          "lon": 7.039144,
+          "lat": 52.881286
         },
         "destination": {
           "id": "groningen_d_0771",
-          "lon": 6.939517,
-          "lat": 53.256017
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.575684,
+          "lat": 53.248307
         },
         "returns": {
           "geometry": "full",
@@ -2582,16 +2347,13 @@
         "route_id": "groningen_route_0781",
         "origin": {
           "id": "groningen_o_0781",
-          "lon": 6.188376,
-          "lat": 53.169371
+          "lon": 6.550799,
+          "lat": 53.195776
         },
         "destination": {
           "id": "groningen_d_0781",
-          "lon": 6.453428,
-          "lat": 53.35129
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.554293,
+          "lat": 53.233118
         },
         "returns": {
           "geometry": "full",
@@ -2615,16 +2377,13 @@
         "route_id": "groningen_route_0791",
         "origin": {
           "id": "groningen_o_0791",
-          "lon": 6.963698,
-          "lat": 53.170011
+          "lon": 6.58972,
+          "lat": 53.247899
         },
         "destination": {
           "id": "groningen_d_0791",
-          "lon": 6.552172,
-          "lat": 53.221752
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.678781,
+          "lat": 53.408415
         },
         "returns": {
           "geometry": "full",
@@ -2648,16 +2407,13 @@
         "route_id": "groningen_route_0801",
         "origin": {
           "id": "groningen_o_0801",
-          "lon": 6.631316,
-          "lat": 53.170749
+          "lon": 7.035693,
+          "lat": 53.033774
         },
         "destination": {
           "id": "groningen_d_0801",
-          "lon": 6.599256,
-          "lat": 53.295626
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.003973,
+          "lat": 52.937949
         },
         "returns": {
           "geometry": "full",
@@ -2681,16 +2437,13 @@
         "route_id": "groningen_route_0811",
         "origin": {
           "id": "groningen_o_0811",
-          "lon": 7.05645,
-          "lat": 53.171431
+          "lon": 6.376499,
+          "lat": 53.289963
         },
         "destination": {
           "id": "groningen_d_0811",
-          "lon": 6.455568,
-          "lat": 53.198847
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.588477,
+          "lat": 53.195346
         },
         "returns": {
           "geometry": "full",
@@ -2714,16 +2467,13 @@
         "route_id": "groningen_route_0821",
         "origin": {
           "id": "groningen_o_0821",
-          "lon": 6.97437,
-          "lat": 53.172176
+          "lon": 6.900868,
+          "lat": 53.327047
         },
         "destination": {
           "id": "groningen_d_0821",
-          "lon": 6.621021,
-          "lat": 53.234578
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.734469,
+          "lat": 53.33036
         },
         "returns": {
           "geometry": "full",
@@ -2747,16 +2497,13 @@
         "route_id": "groningen_route_0831",
         "origin": {
           "id": "groningen_o_0831",
-          "lon": 6.974343,
-          "lat": 53.172978
+          "lon": 6.864385,
+          "lat": 53.147322
         },
         "destination": {
           "id": "groningen_d_0831",
-          "lon": 6.909624,
-          "lat": 53.319873
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.904656,
+          "lat": 53.342226
         },
         "returns": {
           "geometry": "full",
@@ -2780,16 +2527,13 @@
         "route_id": "groningen_route_0841",
         "origin": {
           "id": "groningen_o_0841",
-          "lon": 7.097072,
-          "lat": 53.173877
+          "lon": 6.954535,
+          "lat": 53.000976
         },
         "destination": {
           "id": "groningen_d_0841",
-          "lon": 6.26504,
-          "lat": 53.208974
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.894051,
+          "lat": 53.067335
         },
         "returns": {
           "geometry": "full",
@@ -2813,16 +2557,13 @@
         "route_id": "groningen_route_0851",
         "origin": {
           "id": "groningen_o_0851",
-          "lon": 7.089366,
-          "lat": 53.174655
+          "lon": 7.018653,
+          "lat": 53.1406
         },
         "destination": {
           "id": "groningen_d_0851",
-          "lon": 6.384347,
-          "lat": 53.248012
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.557406,
+          "lat": 53.224796
         },
         "returns": {
           "geometry": "full",
@@ -2846,16 +2587,13 @@
         "route_id": "groningen_route_0861",
         "origin": {
           "id": "groningen_o_0861",
-          "lon": 6.34811,
-          "lat": 53.1754
+          "lon": 6.94093,
+          "lat": 53.216115
         },
         "destination": {
           "id": "groningen_d_0861",
-          "lon": 6.867057,
-          "lat": 53.338515
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.601596,
+          "lat": 53.16826
         },
         "returns": {
           "geometry": "full",
@@ -2879,16 +2617,13 @@
         "route_id": "groningen_route_0871",
         "origin": {
           "id": "groningen_o_0871",
-          "lon": 6.688028,
-          "lat": 53.176273
+          "lon": 6.601664,
+          "lat": 53.207916
         },
         "destination": {
           "id": "groningen_d_0871",
-          "lon": 6.879931,
-          "lat": 53.217304
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.937663,
+          "lat": 53.036274
         },
         "returns": {
           "geometry": "full",
@@ -2912,16 +2647,13 @@
         "route_id": "groningen_route_0881",
         "origin": {
           "id": "groningen_o_0881",
-          "lon": 6.599982,
-          "lat": 53.177159
+          "lon": 6.798716,
+          "lat": 53.452677
         },
         "destination": {
           "id": "groningen_d_0881",
-          "lon": 6.601227,
-          "lat": 53.278145
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.934242,
+          "lat": 53.31541
         },
         "returns": {
           "geometry": "full",
@@ -2945,16 +2677,13 @@
         "route_id": "groningen_route_0891",
         "origin": {
           "id": "groningen_o_0891",
-          "lon": 6.976597,
-          "lat": 53.178019
+          "lon": 6.501718,
+          "lat": 53.23052
         },
         "destination": {
           "id": "groningen_d_0891",
-          "lon": 7.005724,
-          "lat": 53.195164
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.364496,
+          "lat": 53.171441
         },
         "returns": {
           "geometry": "full",
@@ -2978,16 +2707,13 @@
         "route_id": "groningen_route_0901",
         "origin": {
           "id": "groningen_o_0901",
-          "lon": 6.871079,
-          "lat": 53.178921
+          "lon": 6.488748,
+          "lat": 53.203217
         },
         "destination": {
           "id": "groningen_d_0901",
-          "lon": 6.668942,
-          "lat": 53.22999
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.969075,
+          "lat": 53.297216
         },
         "returns": {
           "geometry": "full",
@@ -3011,16 +2737,13 @@
         "route_id": "groningen_route_0911",
         "origin": {
           "id": "groningen_o_0911",
-          "lon": 6.929786,
-          "lat": 53.180174
+          "lon": 6.271507,
+          "lat": 53.209463
         },
         "destination": {
           "id": "groningen_d_0911",
-          "lon": 6.337939,
-          "lat": 53.311488
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.643985,
+          "lat": 53.149676
         },
         "returns": {
           "geometry": "full",
@@ -3044,16 +2767,13 @@
         "route_id": "groningen_route_0921",
         "origin": {
           "id": "groningen_o_0921",
-          "lon": 7.127862,
-          "lat": 53.181351
+          "lon": 6.811907,
+          "lat": 53.433445
         },
         "destination": {
           "id": "groningen_d_0921",
-          "lon": 6.511386,
-          "lat": 53.20516
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.044122,
+          "lat": 53.151487
         },
         "returns": {
           "geometry": "full",
@@ -3077,16 +2797,13 @@
         "route_id": "groningen_route_0931",
         "origin": {
           "id": "groningen_o_0931",
-          "lon": 6.600207,
-          "lat": 53.182589
+          "lon": 6.934704,
+          "lat": 53.182674
         },
         "destination": {
           "id": "groningen_d_0931",
-          "lon": 6.597773,
-          "lat": 53.243492
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.016228,
+          "lat": 53.157337
         },
         "returns": {
           "geometry": "full",
@@ -3110,16 +2827,13 @@
         "route_id": "groningen_route_0941",
         "origin": {
           "id": "groningen_o_0941",
-          "lon": 7.207009,
-          "lat": 53.183573
+          "lon": 6.943999,
+          "lat": 53.316601
         },
         "destination": {
           "id": "groningen_d_0941",
-          "lon": 6.908981,
-          "lat": 53.331777
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.851726,
+          "lat": 53.320587
         },
         "returns": {
           "geometry": "full",
@@ -3143,16 +2857,13 @@
         "route_id": "groningen_route_0951",
         "origin": {
           "id": "groningen_o_0951",
-          "lon": 6.974877,
-          "lat": 53.184792
+          "lon": 6.872504,
+          "lat": 53.361799
         },
         "destination": {
           "id": "groningen_d_0951",
-          "lon": 6.500814,
-          "lat": 53.214355
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.783968,
+          "lat": 53.168837
         },
         "returns": {
           "geometry": "full",
@@ -3176,16 +2887,13 @@
         "route_id": "groningen_route_0961",
         "origin": {
           "id": "groningen_o_0961",
-          "lon": 6.667734,
-          "lat": 53.185934
+          "lon": 6.455517,
+          "lat": 53.256562
         },
         "destination": {
           "id": "groningen_d_0961",
-          "lon": 6.984603,
-          "lat": 53.264713
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.594034,
+          "lat": 53.208868
         },
         "returns": {
           "geometry": "full",
@@ -3209,16 +2917,13 @@
         "route_id": "groningen_route_0971",
         "origin": {
           "id": "groningen_o_0971",
-          "lon": 6.585308,
-          "lat": 53.187398
+          "lon": 7.164306,
+          "lat": 52.944649
         },
         "destination": {
           "id": "groningen_d_0971",
-          "lon": 6.570913,
-          "lat": 53.191267
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.365984,
+          "lat": 53.16641
         },
         "returns": {
           "geometry": "full",
@@ -3242,16 +2947,13 @@
         "route_id": "groningen_route_0981",
         "origin": {
           "id": "groningen_o_0981",
-          "lon": 6.548272,
-          "lat": 53.188617
+          "lon": 6.744681,
+          "lat": 53.42552
         },
         "destination": {
           "id": "groningen_d_0981",
-          "lon": 6.614132,
-          "lat": 53.225431
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 7.063411,
+          "lat": 52.912928
         },
         "returns": {
           "geometry": "full",
@@ -3275,16 +2977,13 @@
         "route_id": "groningen_route_0991",
         "origin": {
           "id": "groningen_o_0991",
-          "lon": 6.617918,
-          "lat": 53.189801
+          "lon": 6.954326,
+          "lat": 52.988472
         },
         "destination": {
           "id": "groningen_d_0991",
-          "lon": 6.585736,
-          "lat": 53.302417
-        },
-        "snap": {
-          "max_distance_m": 500.0
+          "lon": 6.921763,
+          "lat": 53.006486
         },
         "returns": {
           "geometry": "full",

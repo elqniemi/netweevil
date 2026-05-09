@@ -718,8 +718,8 @@ fn run_route_analysis(
         load_route_execution_inputs(paths, dataset_id, profile)?;
     let engine = engine_description(&topology);
     let prepared = PreparedRoutingEngine::new(
-        Arc::new(topology.clone()),
-        Arc::new(compiled_bundle.clone()),
+        Arc::new(topology),
+        Arc::new(compiled_bundle),
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
@@ -759,8 +759,8 @@ fn run_route_batch_analysis(
         load_route_execution_inputs(paths, dataset_id, profile)?;
     let engine = engine_description(&topology);
     let prepared = PreparedRoutingEngine::new(
-        Arc::new(topology.clone()),
-        Arc::new(compiled_bundle.clone()),
+        Arc::new(topology),
+        Arc::new(compiled_bundle),
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
@@ -876,8 +876,8 @@ fn run_od_analysis(
         load_route_execution_inputs(paths, dataset_id, profile)?;
     let engine = engine_description(&topology);
     let prepared = PreparedRoutingEngine::new(
-        Arc::new(topology.clone()),
-        Arc::new(compiled_bundle.clone()),
+        Arc::new(topology),
+        Arc::new(compiled_bundle),
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
@@ -919,8 +919,8 @@ fn run_matrix_analysis(
         load_route_execution_inputs(paths, dataset_id, profile)?;
     let engine = engine_description(&topology);
     let prepared = PreparedRoutingEngine::new(
-        Arc::new(topology.clone()),
-        Arc::new(compiled_bundle.clone()),
+        Arc::new(topology),
+        Arc::new(compiled_bundle),
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
@@ -960,8 +960,8 @@ fn run_service_area_analysis(
         load_route_execution_inputs(paths, dataset_id, profile)?;
     let engine = engine_description(&topology);
     let prepared = PreparedRoutingEngine::new(
-        Arc::new(topology.clone()),
-        Arc::new(compiled_bundle.clone()),
+        Arc::new(topology),
+        Arc::new(compiled_bundle),
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;

@@ -1,12 +1,32 @@
 {
   "province_relation_id": 47826,
   "province_name": "Groningen",
-  "sample_source": "drivable_highway_geometry_inside_exact_admin_polygon",
+  "source_extract": "datasets/groningen-260508.osm.pbf",
+  "routing_extract": "datasets/groningen-260508-routing-admin.osm.pbf",
+  "sample_source": "random_drivable_highway_geometry_inside_exact_admin_polygon",
+  "random_seed": 260508,
   "counts": {
-    "road_backed_points_considered": 89278,
+    "road_backed_points_considered": 253543,
     "od_pairs": 1000,
     "matrix_origins": 50,
     "matrix_destinations": 50,
-    "route_requests": 100
+    "route_requests": 100,
+    "drivable_highway_features": 56392
+  },
+  "drivable_highway_classes": {
+    "living_street": 401,
+    "motorway": 311,
+    "motorway_link": 244,
+    "primary": 1514,
+    "primary_link": 20,
+    "residential": 12058,
+    "secondary": 3084,
+    "secondary_link": 29,
+    "service": 24629,
+    "tertiary": 4809,
+    "tertiary_link": 3,
+    "trunk": 1036,
+    "trunk_link": 618,
+    "unclassified": 7636
   }
 }
