@@ -12,7 +12,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use netweevil_core::{
     CacheBundleId, CompiledProfileBundle, ConnectedComponentsMeta, DatasetAccelerationBundle,
-    DatasetId, TopologyBounds, TopologyBundle,
+    DatasetId, TopologyBounds, TopologyBundle, TravelMode,
 };
 use netweevil_persist::{
     WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
@@ -20,17 +20,18 @@ use netweevil_persist::{
     read_topology_bundle, write_compiled_profile_bundle, write_compiled_profile_manifest,
 };
 use netweevil_profile::{
-    ProfileDocument, ReturnGeometry, compile_profile_bundle_with_acceleration, load_profile,
+    ProfileDocument, ReturnConfig, ReturnGeometry, compile_profile_bundle_with_acceleration,
+    load_profile,
 };
 use netweevil_query::{
-    AnalysisDiagnostic, EffectiveEngineDescription, EngineMode, MatrixResult, OdPairsDocument,
-    OdResult, PointSetDocument, PreparedRoutingEngine, RouteRequest, RouteResult,
+    AnalysisDiagnostic, EffectiveEngineDescription, EngineMode, LabeledPoint, MatrixResult,
+    OdPairsDocument, OdResult, PointSetDocument, PreparedRoutingEngine, RouteRequest, RouteResult,
     ServiceAreaRequest, ServiceAreaResult, analysis_failure,
 };
 use netweevil_report::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
 use netweevil_transit::{
-    TransitBundle, TransitFeedManifest, TransitRouteRequest, TransitRouteResult,
-    execute_transit_route, read_transit_bundle,
+    PreparedTransitRouter, TransitFeedManifest, TransitLegType, TransitRouteRequest,
+    TransitRouteResult, TransitWalkingGeometry, read_transit_bundle,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -76,7 +77,7 @@ struct LoadedProfile {
 
 struct LoadedTransitFeed {
     manifest: TransitFeedManifest,
-    bundle: Arc<TransitBundle>,
+    router: Arc<PreparedTransitRouter>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -192,6 +193,8 @@ pub struct ServiceAreaExecutionRequest {
 #[derive(Debug, Deserialize)]
 pub struct TransitRouteExecutionRequest {
     pub feed_id: String,
+    #[serde(default)]
+    pub pedestrian_profile_id: Option<String>,
     pub request: TransitRouteRequest,
 }
 
@@ -252,6 +255,9 @@ pub struct TransitExecutionContext {
     service_start_date: String,
     service_days: u32,
     route_engine: String,
+    walking_geometry: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pedestrian_profile_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -445,8 +451,11 @@ fn load_service_runtime(
         let manifest: TransitFeedManifest = read_json(&manifest_path).with_context(|| {
             format!("reading transit feed manifest {}", manifest_path.display())
         })?;
-        let bundle = read_transit_bundle(&manifest.bundle_path)
-            .with_context(|| format!("reading transit bundle {}", manifest.bundle_path))?;
+        let bundle = Arc::new(
+            read_transit_bundle(&manifest.bundle_path)
+                .with_context(|| format!("reading transit bundle {}", manifest.bundle_path))?,
+        );
+        let router = Arc::new(PreparedTransitRouter::new(bundle));
         info!(
             feed_id = %manifest.feed_id,
             stop_count = manifest.stop_count,
@@ -455,10 +464,7 @@ fn load_service_runtime(
         );
         loaded_transit_feeds.insert(
             manifest.feed_id.clone(),
-            LoadedTransitFeed {
-                manifest,
-                bundle: Arc::new(bundle),
-            },
+            LoadedTransitFeed { manifest, router },
         );
     }
 
@@ -695,11 +701,34 @@ async fn transit_route_handler(
         route_id = %payload.request.route_id,
         "request"
     );
-    let bundle = Arc::clone(&feed.bundle);
+    let mut request = payload.request;
+    let walking_geometry = request.returns.walking_geometry;
+    let pedestrian_profile = if matches!(walking_geometry, TransitWalkingGeometry::Network) {
+        request.returns.include_geometry = true;
+        Some(resolve_transit_pedestrian_profile(
+            state.service.as_ref(),
+            payload.pedestrian_profile_id.as_deref(),
+        )?)
+    } else {
+        None
+    };
+    let router = Arc::clone(&feed.router);
     let manifest = feed.manifest.clone();
-    let route_id = payload.request.route_id.clone();
+    let route_id = request.route_id.clone();
+    let pedestrian_profile_id =
+        pedestrian_profile.map(|profile| profile.document.profile.id.clone());
+    let walk_engine = pedestrian_profile.map(|profile| {
+        (
+            profile.document.profile.id.clone(),
+            Arc::clone(&profile.engine),
+        )
+    });
     let result = execute_on_routing_worker(state.service.as_ref(), move || {
-        execute_transit_route(bundle.as_ref(), &payload.request)
+        let mut result = router.execute_route(&request)?;
+        if let Some((profile_id, engine)) = walk_engine.as_ref() {
+            replace_transit_walking_leg_geometries(&mut result, engine, profile_id);
+        }
+        Ok(result)
     })
     .await
     .map_err(|error| {
@@ -712,9 +741,99 @@ async fn transit_route_handler(
             service_start_date: manifest.service_start_date,
             service_days: manifest.service_days,
             route_engine: "scheduled_connection_scan_pedestrian_transit".to_string(),
+            walking_geometry: match walking_geometry {
+                TransitWalkingGeometry::StraightLine => "straight_line".to_string(),
+                TransitWalkingGeometry::Network => "network".to_string(),
+            },
+            pedestrian_profile_id,
         },
         result,
     }))
+}
+
+fn resolve_transit_pedestrian_profile<'a>(
+    service: &'a ServiceRuntime,
+    requested_profile_id: Option<&str>,
+) -> Result<&'a LoadedProfile, ApiError> {
+    if let Some(profile_id) = requested_profile_id {
+        let profile = resolve_profile(service, Some(profile_id))?;
+        if profile.document.profile.mode != TravelMode::Foot {
+            return Err(ApiError::bad_request(format!(
+                "pedestrian_profile_id '{}' uses mode {:?}; network walking geometry requires a foot profile",
+                profile_id, profile.document.profile.mode
+            )));
+        }
+        return Ok(profile);
+    }
+
+    service
+        .profiles
+        .values()
+        .find(|profile| profile.document.profile.mode == TravelMode::Foot)
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "network walking geometry requires a loaded foot profile; start the API with --profile <pedestrian-profile> or pass pedestrian_profile_id".to_string(),
+            )
+        })
+}
+
+fn replace_transit_walking_leg_geometries(
+    result: &mut TransitRouteResult,
+    pedestrian_engine: &PreparedRoutingEngine,
+    pedestrian_profile_id: &str,
+) {
+    for (index, leg) in result.legs.iter_mut().enumerate() {
+        if !matches!(
+            leg.leg_type,
+            TransitLegType::Access | TransitLegType::Transfer | TransitLegType::Egress
+        ) {
+            continue;
+        }
+        let (Some(first), Some(last)) =
+            (leg.geometry.first().copied(), leg.geometry.last().copied())
+        else {
+            result.diagnostics.push(format!(
+                "network walking geometry skipped for leg {} because straight-line endpoints were not returned",
+                index + 1
+            ));
+            continue;
+        };
+        let route_request = RouteRequest {
+            route_id: format!("{}_walk_leg_{}", result.route_id, index + 1),
+            origin: LabeledPoint {
+                id: leg.from_id.clone(),
+                lon: first[0],
+                lat: first[1],
+            },
+            destination: LabeledPoint {
+                id: leg.to_id.clone(),
+                lon: last[0],
+                lat: last[1],
+            },
+            snap: Default::default(),
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig {
+                geometry: ReturnGeometry::Full,
+                ..ReturnConfig::default()
+            },
+        };
+        match pedestrian_engine.execute_route(&route_request) {
+            Ok(route) => {
+                if let Some(geometry) = route.geometry {
+                    leg.geometry = geometry;
+                }
+            }
+            Err(error) => {
+                result.diagnostics.push(format!(
+                    "network walking geometry failed for leg {} using profile '{}': {}",
+                    index + 1,
+                    pedestrian_profile_id,
+                    error
+                ));
+            }
+        }
+    }
 }
 
 async fn od_handler(

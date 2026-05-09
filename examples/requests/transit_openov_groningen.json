@@ -28,6 +28,9 @@
     "max_transfers": 3
   },
   "returns": {
-    "include_geometry": true
+    "include_geometry": true,
+    "walking_geometry": "straight_line",
+    "include_stops": true,
+    "include_stop_segments": true
   }
 }

@@ -1,0 +1,95 @@
+profile:
+  id: pedestrian_fast_v1
+  label: "Slightly faster pedestrian profile"
+  mode: foot
+  defaults_pack: eu_foot_2026_01
+  extends: foot_default
+
+cost:
+  objective: generalized
+  distance_weight: 0.012
+  time_weight: 1.0
+
+speed_rules:
+  - match:
+      highway: path
+    speed_kph: 5.5
+  - match:
+      highway: residential
+    speed_kph: 5.4
+  - match:
+      highway: service
+    speed_kph: 4.6
+  - match:
+      highway: tertiary
+    speed_kph: 5.2
+  - match:
+      highway: secondary
+    speed_kph: 5.2
+  - match:
+      highway: primary
+    speed_kph: 5.1
+  - match:
+      highway: track
+    speed_kph: 5.0
+
+exclude_rules:
+  - match:
+      highway: motorway
+  - match:
+      highway: trunk
+
+factors:
+  - match:
+      surface: gravel
+    speed_factor: 0.92
+  - match:
+      surface: cobblestone
+    speed_factor: 0.84
+  - match:
+      surface: ground
+    speed_factor: 0.90
+  - match:
+      surface: dirt
+    speed_factor: 0.80
+  - match:
+      surface: sand
+    speed_factor: 0.58
+  - match:
+      smoothness: bad
+    speed_factor: 0.84
+  - match:
+      smoothness: very_bad
+    speed_factor: 0.67
+  - match:
+      smoothness: horrible
+    speed_factor: 0.48
+  - match:
+      smoothness: impassable
+    speed_factor: 0.20
+
+ferry:
+  allow: false
+  use_ferry: 0.25
+  boarding_cost_s: 120
+  infer_duration_when_missing: true
+  default_speed_kph: 8
+
+preferences:
+  use_highways: 0.01
+  use_tolls: 0.0
+  use_tracks: 0.45
+  service_penalty_s: 6
+
+returns:
+  geometry: full
+  segment_rows: true
+  road_type_breakdown:
+    - time_s
+    - distance_m
+  surface_breakdown:
+    - time_s
+    - distance_m
+  penalty_breakdown: true
+  explain_cost_derivation: true
+

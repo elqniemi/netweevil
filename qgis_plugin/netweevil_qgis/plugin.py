@@ -37,6 +37,7 @@ from qgis.core import (
     QgsFillSymbol,
     QgsFeatureRequest,
     QgsLineSymbol,
+    QgsMarkerSymbol,
     QgsMapLayerProxyModel,
     QgsMessageLog,
     QgsPointXY,
@@ -903,6 +904,14 @@ class NetweevilDock(QDockWidget):
         self.transit_max_transfers_edit = QLineEdit("3")
         self.transit_include_geometry_check = QCheckBox("Load leg geometry")
         self.transit_include_geometry_check.setChecked(True)
+        self.transit_network_walk_geometry_check = QCheckBox(
+            "Use selected pedestrian profile for walking legs"
+        )
+        self.transit_network_walk_geometry_check.setChecked(False)
+        self.transit_include_stops_check = QCheckBox("Load transit stops")
+        self.transit_include_stops_check.setChecked(True)
+        self.transit_include_stop_segments_check = QCheckBox("Load stop-to-stop segments")
+        self.transit_include_stop_segments_check.setChecked(True)
         mode_form.addRow("Transit modes", transit_modes_row)
         mode_form.addRow("Walk speed kph", self.transit_walk_speed_edit)
         mode_form.addRow("Max access distance m", self.transit_max_access_distance_edit)
@@ -912,6 +921,9 @@ class NetweevilDock(QDockWidget):
         mode_form.addRow("Transfer slack s", self.transit_transfer_slack_edit)
         mode_form.addRow("Max transfers", self.transit_max_transfers_edit)
         mode_form.addRow("", self.transit_include_geometry_check)
+        mode_form.addRow("", self.transit_network_walk_geometry_check)
+        mode_form.addRow("", self.transit_include_stops_check)
+        mode_form.addRow("", self.transit_include_stop_segments_check)
         layout.addWidget(mode_group)
 
         self.transit_pick_status_label = QLabel(
@@ -2150,7 +2162,14 @@ class NetweevilDock(QDockWidget):
                 "max_transfers": int(self.transit_max_transfers_edit.text().strip()),
             },
             "returns": {
-                "include_geometry": self.transit_include_geometry_check.isChecked()
+                "include_geometry": self.transit_include_geometry_check.isChecked(),
+                "walking_geometry": (
+                    "network"
+                    if self.transit_network_walk_geometry_check.isChecked()
+                    else "straight_line"
+                ),
+                "include_stops": self.transit_include_stops_check.isChecked(),
+                "include_stop_segments": self.transit_include_stop_segments_check.isChecked(),
             },
         }
 
@@ -2235,6 +2254,12 @@ class NetweevilDock(QDockWidget):
             return
 
         payload = {"feed_id": feed_id, "request": request}
+        if self.transit_network_walk_geometry_check.isChecked():
+            profile_id = self.selected_profile_id()
+            if not profile_id:
+                self.alert("Choose a loaded pedestrian profile for transit walking geometry.")
+                return
+            payload["pedestrian_profile_id"] = profile_id
         self.save_settings()
         if self.execute_api_request(
             endpoint="/v1/transit-route",
@@ -3296,6 +3321,62 @@ class NetweevilDock(QDockWidget):
             )
         return {"type": "FeatureCollection", "features": features}
 
+    def transit_stop_feature_collection(self, service, result):
+        features = []
+        for stop in result.get("stops") or []:
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [stop.get("lon"), stop.get("lat")],
+                    },
+                    "properties": {
+                        "feed_id": service.get("feed_id"),
+                        "route_id": result.get("route_id"),
+                        "sequence": stop.get("sequence"),
+                        "stop_id": stop.get("stop_id"),
+                        "stop_name": stop.get("stop_name"),
+                        "arrival_s": stop.get("arrival_s"),
+                        "departure_s": stop.get("departure_s"),
+                        "mode": stop.get("mode"),
+                        "gtfs_route_id": stop.get("route_id"),
+                        "route_short_name": stop.get("route_short_name"),
+                        "trip_id": stop.get("trip_id"),
+                        "headsign": stop.get("headsign"),
+                    },
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
+
+    def transit_stop_segment_feature_collection(self, service, result):
+        features = []
+        for segment in result.get("stop_segments") or []:
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": self.item_geometry(segment.get("geometry")),
+                    "properties": {
+                        "feed_id": service.get("feed_id"),
+                        "route_id": result.get("route_id"),
+                        "segment_index": segment.get("segment_index"),
+                        "from_stop_id": segment.get("from_stop_id"),
+                        "to_stop_id": segment.get("to_stop_id"),
+                        "from_stop_name": segment.get("from_stop_name"),
+                        "to_stop_name": segment.get("to_stop_name"),
+                        "departure_s": segment.get("departure_s"),
+                        "arrival_s": segment.get("arrival_s"),
+                        "duration_s": segment.get("duration_s"),
+                        "mode": segment.get("mode"),
+                        "gtfs_route_id": segment.get("route_id"),
+                        "route_short_name": segment.get("route_short_name"),
+                        "trip_id": segment.get("trip_id"),
+                        "headsign": segment.get("headsign"),
+                    },
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
+
     def apply_route_line_style(self, layer, color, width, line_style="solid"):
         if QgsWkbTypes.geometryType(layer.wkbType()) != QgsWkbTypes.LineGeometry:
             return
@@ -3331,17 +3412,35 @@ class NetweevilDock(QDockWidget):
         layer.setRenderer(QgsCategorizedSymbolRenderer("leg_type", categories))
         layer.triggerRepaint()
 
-    def load_route_layers(self, response_json, layer_name):
-        service = response_json.get("service") or {}
-        result = response_json.get("result") or {}
-        route_id = result.get("route_id") or layer_name or "netweevil_route"
+    def apply_transit_stop_style(self, layer):
+        if QgsWkbTypes.geometryType(layer.wkbType()) != QgsWkbTypes.PointGeometry:
+            return
+        symbol = QgsMarkerSymbol.createSimple(
+            {
+                "name": "circle",
+                "color": "#ffffff",
+                "outline_color": "#1971c2",
+                "outline_width": "0.6",
+                "size": "2.8",
+            }
+        )
+        layer.renderer().setSymbol(symbol)
+        layer.triggerRepaint()
+
+    def create_result_group(self, name):
         root = QgsProject.instance().layerTreeRoot()
-        existing_group = root.findGroup(route_id)
+        existing_group = root.findGroup(name)
         if existing_group is not None:
             for tree_layer in existing_group.findLayers():
                 QgsProject.instance().removeMapLayer(tree_layer.layerId())
             root.removeChildNode(existing_group)
-        group = root.addGroup(route_id)
+        return root.insertGroup(0, name)
+
+    def load_route_layers(self, response_json, layer_name):
+        service = response_json.get("service") or {}
+        result = response_json.get("result") or {}
+        route_id = result.get("route_id") or layer_name or "netweevil_route"
+        group = self.create_result_group(route_id)
 
         breakdowns = result.get("breakdowns") or {}
         layer_specs = [
@@ -3426,13 +3525,7 @@ class NetweevilDock(QDockWidget):
         service = response_json.get("service") or {}
         result = response_json.get("result") or {}
         route_id = result.get("route_id") or layer_name or "netweevil_transit"
-        root = QgsProject.instance().layerTreeRoot()
-        existing_group = root.findGroup(route_id)
-        if existing_group is not None:
-            for tree_layer in existing_group.findLayers():
-                QgsProject.instance().removeMapLayer(tree_layer.layerId())
-            root.removeChildNode(existing_group)
-        group = root.addGroup(route_id)
+        group = self.create_result_group(route_id)
 
         layer_specs = [
             (
@@ -3443,6 +3536,20 @@ class NetweevilDock(QDockWidget):
                 "solid",
             ),
             ("legs", self.transit_leg_feature_collection(service, result), None, None, None),
+            (
+                "stop_segments",
+                self.transit_stop_segment_feature_collection(service, result),
+                "#7048e8",
+                0.8,
+                "solid",
+            ),
+            (
+                "stops",
+                self.transit_stop_feature_collection(service, result),
+                None,
+                None,
+                None,
+            ),
         ]
 
         loaded_layers = []
@@ -3460,6 +3567,8 @@ class NetweevilDock(QDockWidget):
                 continue
             if sublayer_name == "legs":
                 self.apply_transit_leg_style(layer)
+            elif sublayer_name == "stops":
+                self.apply_transit_stop_style(layer)
             elif color is not None:
                 self.apply_route_line_style(layer, color, width, line_style)
             QgsProject.instance().addMapLayer(layer, False)
@@ -3626,7 +3735,8 @@ class NetweevilDock(QDockWidget):
         if not layer.isValid():
             self.log("Failed to load layer {}".format(output_path), Qgis.Warning)
             return None
-        QgsProject.instance().addMapLayer(layer)
+        QgsProject.instance().addMapLayer(layer, False)
+        QgsProject.instance().layerTreeRoot().insertLayer(0, layer)
         self.log("Loaded layer {}".format(output_path))
         return layer
 
@@ -3638,13 +3748,7 @@ class NetweevilDock(QDockWidget):
 
         metadata = geojson.get("metadata") or {}
         analysis_id = metadata.get("analysis_id") or layer_name or "netweevil_service_area"
-        root = QgsProject.instance().layerTreeRoot()
-        existing_group = root.findGroup(analysis_id)
-        if existing_group is not None:
-            for tree_layer in existing_group.findLayers():
-                QgsProject.instance().removeMapLayer(tree_layer.layerId())
-            root.removeChildNode(existing_group)
-        group = root.addGroup(analysis_id)
+        group = self.create_result_group(analysis_id)
 
         grouped = {}
         threshold_order = []
@@ -4153,6 +4257,9 @@ class NetweevilDock(QDockWidget):
             "transit_transfer_slack": self.transit_transfer_slack_edit.text().strip(),
             "transit_max_transfers": self.transit_max_transfers_edit.text().strip(),
             "transit_include_geometry": self.transit_include_geometry_check.isChecked(),
+            "transit_network_walk_geometry": self.transit_network_walk_geometry_check.isChecked(),
+            "transit_include_stops": self.transit_include_stops_check.isChecked(),
+            "transit_include_stop_segments": self.transit_include_stop_segments_check.isChecked(),
             "od_pairs_path": self.od_pairs_path_edit.text().strip(),
             "od_output_path": self.od_output_path_edit.text().strip(),
             "matrix_output_path": self.matrix_output_path_edit.text().strip(),
@@ -4349,6 +4456,15 @@ class NetweevilDock(QDockWidget):
         )
         self.transit_include_geometry_check.setChecked(
             self.read_bool_setting("transit_include_geometry", True)
+        )
+        self.transit_network_walk_geometry_check.setChecked(
+            self.read_bool_setting("transit_network_walk_geometry", False)
+        )
+        self.transit_include_stops_check.setChecked(
+            self.read_bool_setting("transit_include_stops", True)
+        )
+        self.transit_include_stop_segments_check.setChecked(
+            self.read_bool_setting("transit_include_stop_segments", True)
         )
         for mode, check in self.transit_mode_checks.items():
             check.setChecked(

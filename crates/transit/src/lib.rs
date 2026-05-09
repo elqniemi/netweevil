@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fs::{self, File};
 use std::io::{BufReader, Read};
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
@@ -268,10 +269,35 @@ fn default_max_transfers() -> u8 {
     4
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitReturnOptions {
     #[serde(default)]
     pub include_geometry: bool,
+    #[serde(default)]
+    pub walking_geometry: TransitWalkingGeometry,
+    #[serde(default)]
+    pub include_stops: bool,
+    #[serde(default)]
+    pub include_stop_segments: bool,
+}
+
+impl Default for TransitReturnOptions {
+    fn default() -> Self {
+        Self {
+            include_geometry: false,
+            walking_geometry: TransitWalkingGeometry::StraightLine,
+            include_stops: false,
+            include_stop_segments: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitWalkingGeometry {
+    #[default]
+    StraightLine,
+    Network,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,6 +306,10 @@ pub struct TransitRouteResult {
     pub outcome: TransitOutcome,
     pub summary: TransitRouteSummary,
     pub legs: Vec<TransitLeg>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stops: Vec<TransitRouteStop>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stop_segments: Vec<TransitRouteStopSegment>,
     pub diagnostics: Vec<String>,
 }
 
@@ -312,6 +342,53 @@ pub struct TransitLeg {
     pub to_name: String,
     pub departure_s: u32,
     pub arrival_s: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<TransitMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_short_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trip_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headsign: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub geometry: Vec<[f64; 2]>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitRouteStop {
+    pub sequence: u32,
+    pub stop_id: String,
+    pub stop_name: String,
+    pub lon: f64,
+    pub lat: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arrival_s: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub departure_s: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<TransitMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_short_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trip_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headsign: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitRouteStopSegment {
+    pub segment_index: u32,
+    pub from_stop_id: String,
+    pub to_stop_id: String,
+    pub from_stop_name: String,
+    pub to_stop_name: String,
+    pub departure_s: u32,
+    pub arrival_s: u32,
+    pub duration_s: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<TransitMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -387,16 +464,61 @@ pub fn transit_import_summary(bundle: &TransitBundle) -> TransitImportSummary {
     }
 }
 
+pub struct PreparedTransitRouter {
+    bundle: Arc<TransitBundle>,
+    departures_by_stop: Vec<Vec<TransitConnection>>,
+    stop_index: StopSpatialIndex,
+}
+
+impl PreparedTransitRouter {
+    pub fn new(bundle: Arc<TransitBundle>) -> Self {
+        let departures_by_stop = build_departures_by_stop(&bundle);
+        let stop_index = StopSpatialIndex::new(&bundle.stops);
+        Self {
+            bundle,
+            departures_by_stop,
+            stop_index,
+        }
+    }
+
+    pub fn bundle(&self) -> &TransitBundle {
+        self.bundle.as_ref()
+    }
+
+    pub fn execute_route(&self, request: &TransitRouteRequest) -> Result<TransitRouteResult> {
+        let runtime = TransitRuntime::new(
+            self.bundle.as_ref(),
+            &self.departures_by_stop,
+            &self.stop_index,
+            &request.modes,
+        );
+        execute_transit_route_with_runtime(&runtime, request)
+    }
+}
+
 pub fn execute_transit_route(
     bundle: &TransitBundle,
     request: &TransitRouteRequest,
 ) -> Result<TransitRouteResult> {
+    let departures_by_stop = build_departures_by_stop(bundle);
+    let stop_index = StopSpatialIndex::new(&bundle.stops);
+    let runtime = TransitRuntime::new(bundle, &departures_by_stop, &stop_index, &request.modes);
+    execute_transit_route_with_runtime(&runtime, request)
+}
+
+fn execute_transit_route_with_runtime(
+    runtime: &TransitRuntime<'_>,
+    request: &TransitRouteRequest,
+) -> Result<TransitRouteResult> {
+    let bundle = runtime.bundle;
     if request.time.arrive_by {
         return Ok(TransitRouteResult {
             route_id: request.route_id.clone(),
             outcome: TransitOutcome::NotImplemented,
             summary: TransitRouteSummary::default(),
             legs: Vec::new(),
+            stops: Vec::new(),
+            stop_segments: Vec::new(),
             diagnostics: vec![
                 "arrive_by transit searches are not implemented yet; use depart-after timing"
                     .to_string(),
@@ -411,13 +533,14 @@ pub fn execute_transit_route(
             outcome: TransitOutcome::NotImplemented,
             summary: TransitRouteSummary::default(),
             legs: Vec::new(),
+            stops: Vec::new(),
+            stop_segments: Vec::new(),
             diagnostics: vec![
                 "only pedestrian access and egress are implemented; bicycle and car access are reserved in the request schema".to_string(),
             ],
         });
     }
 
-    let runtime = TransitRuntime::new(bundle, &request.modes);
     let departure_s = runtime.request_departure_seconds(&request.time.datetime)?;
     let search_end_s = departure_s.saturating_add(request.time.search_window_s);
     let access = runtime.nearby_stops(
@@ -439,6 +562,8 @@ pub fn execute_transit_route(
                 ..TransitRouteSummary::default()
             },
             legs: Vec::new(),
+            stops: Vec::new(),
+            stop_segments: Vec::new(),
             diagnostics: vec![format!(
                 "no stop found within access/egress limits (access candidates {}, egress candidates {})",
                 access.len(),
@@ -598,6 +723,8 @@ pub fn execute_transit_route(
                 ..TransitRouteSummary::default()
             },
             legs: Vec::new(),
+            stops: Vec::new(),
+            stop_segments: Vec::new(),
             diagnostics: vec!["no scheduled journey found inside the search window".to_string()],
         });
     };
@@ -611,6 +738,16 @@ pub fn execute_transit_route(
         arrival_s,
         egress_walk_s,
     )?;
+    let stops = request
+        .returns
+        .include_stops
+        .then(|| build_transit_route_stops(&legs))
+        .unwrap_or_default();
+    let stop_segments = request
+        .returns
+        .include_stop_segments
+        .then(|| build_transit_route_stop_segments(&legs))
+        .unwrap_or_default();
     coalesce_transit_legs(&mut legs);
     let summary = summarize_legs(departure_s, arrival_s, &legs);
     Ok(TransitRouteResult {
@@ -618,6 +755,8 @@ pub fn execute_transit_route(
         outcome: TransitOutcome::Scheduled,
         summary,
         legs,
+        stops,
+        stop_segments,
         diagnostics: Vec::new(),
     })
 }
@@ -1107,22 +1246,110 @@ fn optional_header_index(headers: &csv::StringRecord, name: &str) -> Option<usiz
     headers.iter().position(|candidate| candidate == name)
 }
 
+fn build_departures_by_stop(bundle: &TransitBundle) -> Vec<Vec<TransitConnection>> {
+    let mut departures_by_stop: Vec<Vec<TransitConnection>> = vec![Vec::new(); bundle.stops.len()];
+    let mut unsorted_stops = Vec::<usize>::new();
+    for connection in &bundle.connections {
+        let stop_index = connection.from_stop_index as usize;
+        let departures = &mut departures_by_stop[stop_index];
+        if departures
+            .last()
+            .is_some_and(|previous| previous.departure_s > connection.departure_s)
+        {
+            unsorted_stops.push(stop_index);
+        }
+        departures.push(*connection);
+    }
+    unsorted_stops.sort_unstable();
+    unsorted_stops.dedup();
+    for stop_index in unsorted_stops {
+        departures_by_stop[stop_index].sort_by_key(|connection| connection.departure_s);
+    }
+    departures_by_stop
+}
+
+#[derive(Debug)]
+struct StopSpatialIndex {
+    cell_degrees: f64,
+    cells: HashMap<(i32, i32), Vec<u32>>,
+}
+
+impl StopSpatialIndex {
+    fn new(stops: &[TransitStop]) -> Self {
+        let cell_degrees = 0.01_f64;
+        let mut cells = HashMap::<(i32, i32), Vec<u32>>::new();
+        for (stop_index, stop) in stops.iter().enumerate() {
+            cells
+                .entry(Self::cell_key(stop.lon, stop.lat, cell_degrees))
+                .or_default()
+                .push(stop_index as u32);
+        }
+        Self {
+            cell_degrees,
+            cells,
+        }
+    }
+
+    fn nearby_stops(
+        &self,
+        bundle: &TransitBundle,
+        lon: f64,
+        lat: f64,
+        max_distance_m: f64,
+    ) -> Vec<StopCandidate> {
+        if max_distance_m <= 0.0 {
+            return Vec::new();
+        }
+        let lat_radius = max_distance_m / 110_540.0;
+        let lon_radius = max_distance_m / (111_320.0 * lat.to_radians().cos().abs().max(0.01));
+        let min_col = ((lon - lon_radius) / self.cell_degrees).floor() as i32;
+        let max_col = ((lon + lon_radius) / self.cell_degrees).floor() as i32;
+        let min_row = ((lat - lat_radius) / self.cell_degrees).floor() as i32;
+        let max_row = ((lat + lat_radius) / self.cell_degrees).floor() as i32;
+        let mut candidates = Vec::new();
+        for col in min_col..=max_col {
+            for row in min_row..=max_row {
+                let Some(stop_indexes) = self.cells.get(&(col, row)) else {
+                    continue;
+                };
+                for &stop_index in stop_indexes {
+                    let stop = &bundle.stops[stop_index as usize];
+                    let distance_m = haversine_m(lon, lat, stop.lon, stop.lat);
+                    if distance_m <= max_distance_m {
+                        candidates.push(StopCandidate {
+                            stop_index,
+                            distance_m,
+                        });
+                    }
+                }
+            }
+        }
+        candidates
+    }
+
+    fn cell_key(lon: f64, lat: f64, cell_degrees: f64) -> (i32, i32) {
+        (
+            (lon / cell_degrees).floor() as i32,
+            (lat / cell_degrees).floor() as i32,
+        )
+    }
+}
+
 #[derive(Debug)]
 struct TransitRuntime<'a> {
     bundle: &'a TransitBundle,
-    departures_by_stop: Vec<Vec<TransitConnection>>,
+    departures_by_stop: &'a [Vec<TransitConnection>],
+    stop_index: &'a StopSpatialIndex,
     allowed_routes: Vec<bool>,
 }
 
 impl<'a> TransitRuntime<'a> {
-    fn new(bundle: &'a TransitBundle, modes: &TransitModeOptions) -> Self {
-        let mut departures_by_stop = vec![Vec::new(); bundle.stops.len()];
-        for connection in &bundle.connections {
-            departures_by_stop[connection.from_stop_index as usize].push(*connection);
-        }
-        for departures in &mut departures_by_stop {
-            departures.sort_by_key(|connection| connection.departure_s);
-        }
+    fn new(
+        bundle: &'a TransitBundle,
+        departures_by_stop: &'a [Vec<TransitConnection>],
+        stop_index: &'a StopSpatialIndex,
+        modes: &TransitModeOptions,
+    ) -> Self {
         let allowed_routes = bundle
             .routes
             .iter()
@@ -1131,6 +1358,7 @@ impl<'a> TransitRuntime<'a> {
         Self {
             bundle,
             departures_by_stop,
+            stop_index,
             allowed_routes,
         }
     }
@@ -1161,18 +1389,8 @@ impl<'a> TransitRuntime<'a> {
 
     fn nearby_stops(&self, lon: f64, lat: f64, max_distance_m: f64) -> Vec<StopCandidate> {
         let mut candidates = self
-            .bundle
-            .stops
-            .iter()
-            .enumerate()
-            .filter_map(|(stop_index, stop)| {
-                let distance_m = haversine_m(lon, lat, stop.lon, stop.lat);
-                (distance_m <= max_distance_m).then_some(StopCandidate {
-                    stop_index: stop_index as u32,
-                    distance_m,
-                })
-            })
-            .collect::<Vec<_>>();
+            .stop_index
+            .nearby_stops(self.bundle, lon, lat, max_distance_m);
         candidates.sort_by(|left, right| left.distance_m.total_cmp(&right.distance_m));
         candidates.truncate(32);
         candidates
@@ -1424,6 +1642,82 @@ fn coalesce_transit_legs(legs: &mut Vec<TransitLeg>) {
     *legs = coalesced;
 }
 
+fn build_transit_route_stops(legs: &[TransitLeg]) -> Vec<TransitRouteStop> {
+    let mut stops = Vec::new();
+    for leg in legs
+        .iter()
+        .filter(|leg| leg.leg_type == TransitLegType::Transit)
+    {
+        let Some((&from, &to)) = leg.geometry.first().zip(leg.geometry.last()) else {
+            continue;
+        };
+        if stops
+            .last()
+            .is_none_or(|stop: &TransitRouteStop| stop.stop_id != leg.from_id)
+        {
+            stops.push(TransitRouteStop {
+                sequence: stops.len() as u32 + 1,
+                stop_id: leg.from_id.clone(),
+                stop_name: leg.from_name.clone(),
+                lon: from[0],
+                lat: from[1],
+                arrival_s: None,
+                departure_s: Some(leg.departure_s),
+                mode: leg.mode,
+                route_id: leg.route_id.clone(),
+                route_short_name: leg.route_short_name.clone(),
+                trip_id: leg.trip_id.clone(),
+                headsign: leg.headsign.clone(),
+            });
+        } else if let Some(previous) = stops.last_mut() {
+            previous.departure_s = Some(leg.departure_s);
+            previous.mode = leg.mode;
+            previous.route_id = leg.route_id.clone();
+            previous.route_short_name = leg.route_short_name.clone();
+            previous.trip_id = leg.trip_id.clone();
+            previous.headsign = leg.headsign.clone();
+        }
+        stops.push(TransitRouteStop {
+            sequence: stops.len() as u32 + 1,
+            stop_id: leg.to_id.clone(),
+            stop_name: leg.to_name.clone(),
+            lon: to[0],
+            lat: to[1],
+            arrival_s: Some(leg.arrival_s),
+            departure_s: None,
+            mode: leg.mode,
+            route_id: leg.route_id.clone(),
+            route_short_name: leg.route_short_name.clone(),
+            trip_id: leg.trip_id.clone(),
+            headsign: leg.headsign.clone(),
+        });
+    }
+    stops
+}
+
+fn build_transit_route_stop_segments(legs: &[TransitLeg]) -> Vec<TransitRouteStopSegment> {
+    legs.iter()
+        .filter(|leg| leg.leg_type == TransitLegType::Transit)
+        .enumerate()
+        .map(|(index, leg)| TransitRouteStopSegment {
+            segment_index: index as u32 + 1,
+            from_stop_id: leg.from_id.clone(),
+            to_stop_id: leg.to_id.clone(),
+            from_stop_name: leg.from_name.clone(),
+            to_stop_name: leg.to_name.clone(),
+            departure_s: leg.departure_s,
+            arrival_s: leg.arrival_s,
+            duration_s: leg.arrival_s.saturating_sub(leg.departure_s),
+            mode: leg.mode,
+            route_id: leg.route_id.clone(),
+            route_short_name: leg.route_short_name.clone(),
+            trip_id: leg.trip_id.clone(),
+            headsign: leg.headsign.clone(),
+            geometry: leg.geometry.clone(),
+        })
+        .collect()
+}
+
 fn summarize_legs(departure_s: u32, arrival_s: u32, legs: &[TransitLeg]) -> TransitRouteSummary {
     let mut summary = TransitRouteSummary {
         departure_s,
@@ -1457,7 +1751,10 @@ fn geometry_if_requested(
     from: [f64; 2],
     to: [f64; 2],
 ) -> Vec<[f64; 2]> {
-    if request.returns.include_geometry {
+    if request.returns.include_geometry
+        || request.returns.include_stops
+        || request.returns.include_stop_segments
+    {
         vec![from, to]
     } else {
         Vec::new()
@@ -1523,6 +1820,9 @@ mod tests {
             },
             returns: TransitReturnOptions {
                 include_geometry: true,
+                include_stops: true,
+                include_stop_segments: true,
+                ..TransitReturnOptions::default()
             },
         };
         let result = execute_transit_route(&bundle, &request).expect("route executes");
@@ -1536,6 +1836,59 @@ mod tests {
                 .count(),
             1
         );
+        assert_eq!(result.stops.len(), 3);
+        assert_eq!(result.stop_segments.len(), 2);
+        assert_eq!(result.stops[0].stop_id, "A");
+        assert_eq!(result.stops[2].stop_id, "C");
+        assert_eq!(result.stop_segments[0].from_stop_id, "A");
+        assert_eq!(result.stop_segments[1].to_stop_id, "C");
+    }
+
+    #[test]
+    fn prepared_router_reuses_departures_and_spatial_index() {
+        let bundle = Arc::new(
+            build_bundle_from_files(
+                fixture_files(),
+                "abc".to_string(),
+                TransitImportOptions {
+                    name: "fixture".to_string(),
+                    source_label: "fixture".to_string(),
+                    service_start_date: "2026-05-11".to_string(),
+                    service_days: 7,
+                },
+            )
+            .expect("fixture imports"),
+        );
+        let router = PreparedTransitRouter::new(bundle);
+        let request = TransitRouteRequest {
+            route_id: "r1".to_string(),
+            origin: TransitPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: TransitPoint {
+                id: "dest".to_string(),
+                lon: 6.02,
+                lat: 53.0,
+            },
+            time: TransitQueryTime {
+                datetime: "2026-05-11T08:00:00+02:00".to_string(),
+                arrive_by: false,
+                search_window_s: 3600,
+            },
+            modes: TransitModeOptions {
+                max_access_distance_m: 100.0,
+                max_egress_distance_m: 100.0,
+                ..TransitModeOptions::default()
+            },
+            returns: TransitReturnOptions::default(),
+        };
+
+        let result = router.execute_route(&request).expect("route executes");
+        assert_eq!(result.outcome, TransitOutcome::Scheduled);
+        assert_eq!(result.summary.total_travel_time_s, Some(1201));
+        assert_eq!(result.summary.boarding_count, 1);
     }
 
     #[test]

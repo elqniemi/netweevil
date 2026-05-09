@@ -53,6 +53,22 @@ cmd /c mklink /D "$env:APPDATA\QGIS\QGIS4\profiles\default\python\plugins\netwee
 
 3. In QGIS, enable the plugin from `Plugins -> Manage and Install Plugins`.
 
+## Package ZIP
+
+Build a QGIS-installable ZIP from the repository root:
+
+```bash
+./scripts/package_qgis_plugin.sh
+```
+
+The script reads `version` from `qgis_plugin/netweevil_qgis/metadata.txt` and writes:
+
+```text
+dist/netweevil_qgis-<version>.zip
+```
+
+For manual packaging, the ZIP must contain `netweevil_qgis/metadata.txt`, `netweevil_qgis/__init__.py`, and `netweevil_qgis/plugin.py` at the archive root. Do not include `__pycache__` or `.pyc` files.
+
 ## First Run
 
 Set these fields in the dock:

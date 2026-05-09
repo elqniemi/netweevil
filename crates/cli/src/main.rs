@@ -35,7 +35,7 @@ use netweevil_report::{
     write_route_batch_result, write_route_result, write_service_area_result,
 };
 use netweevil_transit::{
-    OPENOV_GTFS_URL, TransitFeedManifest, TransitImportOptions, execute_transit_route, import_gtfs,
+    OPENOV_GTFS_URL, PreparedTransitRouter, TransitFeedManifest, TransitImportOptions, import_gtfs,
     load_transit_request, read_transit_bundle, transit_import_summary, write_transit_bundle,
 };
 use serde::Serialize;
@@ -845,7 +845,9 @@ fn analyze_transit_route(paths: &WorkspacePaths, args: TransitRouteArgs) -> Resu
     let bundle = read_transit_bundle(&manifest.bundle_path)
         .with_context(|| format!("reading transit bundle {}", manifest.bundle_path))?;
     let request = load_transit_request(&args.request)?;
-    let result = execute_transit_route(&bundle, &request)
+    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    let result = router
+        .execute_route(&request)
         .with_context(|| format!("executing transit route '{}'", request.route_id))?;
     let result_path = args.out.unwrap_or_else(|| {
         paths

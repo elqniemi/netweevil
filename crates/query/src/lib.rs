@@ -5679,12 +5679,20 @@ fn route_between_candidates(
                 } else if routing_graph.acceleration.is_some() {
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);
                     let destination_seeds = destination_edge_seeds(routing_graph, destination);
-                    accelerated_route_query_seeded(
+                    let accelerated_upper_bound = accelerated_route_query_seeded(
                         topology,
                         routing_graph,
                         &origin_seeds,
                         &destination_seeds,
                         direct_path.clone(),
+                    )?
+                    .or(direct_path.clone());
+                    seeded_bidirectional_dijkstra_on_edge_transitions(
+                        topology,
+                        routing_graph,
+                        &origin_seeds,
+                        &destination_seeds,
+                        accelerated_upper_bound,
                     )?
                 } else {
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);
@@ -7761,6 +7769,82 @@ mod tests {
     }
 
     #[test]
+    fn accelerated_engine_falls_back_to_exact_when_shortcuts_miss_pair() {
+        let topology = test_topology();
+        let engine = PreparedRoutingEngine::new(
+            Arc::new(topology),
+            Arc::new(sparse_acceleration_metrics()),
+            None,
+        )
+        .expect("accelerated engine builds");
+        let request = RouteRequest {
+            route_id: "a_to_c_sparse_acceleration".to_string(),
+            origin: super::LabeledPoint {
+                id: "a".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "c".to_string(),
+                lon: 6.002,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+        };
+
+        let route = engine
+            .execute_route(&request)
+            .expect("exact fallback route succeeds");
+        assert_eq!(route.summary.total_distance_m, 300);
+        assert_eq!(route.summary.total_travel_time_s, 30.0);
+    }
+
+    #[test]
+    fn accelerated_engine_uses_shortcut_route_only_as_exact_upper_bound() {
+        let topology = test_topology();
+        let engine = PreparedRoutingEngine::new(
+            Arc::new(topology),
+            Arc::new(direct_only_acceleration_metrics()),
+            None,
+        )
+        .expect("accelerated engine builds");
+        let request = RouteRequest {
+            route_id: "a_to_c_direct_upper_bound".to_string(),
+            origin: super::LabeledPoint {
+                id: "a".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "c".to_string(),
+                lon: 6.002,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig {
+                segment_rows: true,
+                ..ReturnConfig::default()
+            },
+        };
+
+        let route = engine
+            .execute_route(&request)
+            .expect("exact route succeeds");
+        assert_eq!(route.edge_path, vec![0, 1]);
+        assert_eq!(route.summary.total_distance_m, 300);
+        assert_eq!(route.summary.total_travel_time_s, 30.0);
+    }
+
+    #[test]
     fn respects_turn_restrictions() {
         let topology = restricted_topology();
         let metrics = restricted_metrics();
@@ -8336,6 +8420,52 @@ scenarios:
             downward_weight: vec![20.0],
             downward_path_first_out: vec![0, 1],
             downward_path_edges: vec![1],
+        });
+        metrics
+    }
+
+    fn sparse_acceleration_metrics() -> CompiledProfileBundle {
+        let mut metrics = test_metrics();
+        metrics.edge_metrics[2].travel_time_s = None;
+        metrics.edge_metrics[2].generalized_cost = None;
+        metrics.acceleration = Some(CompiledAcceleration {
+            schema_version: 1,
+            source_acceleration_bundle_id: CacheBundleId::new("sparse-acceleration-test"),
+            algorithm: "test".to_string(),
+            edge_order: vec![0, 1, 2],
+            edge_rank: vec![0, 1, 2],
+            upward_first_out: vec![0, 0, 0, 0],
+            upward_head: vec![],
+            upward_weight: vec![],
+            upward_path_first_out: vec![0],
+            upward_path_edges: vec![],
+            downward_first_out: vec![0, 0, 0, 0],
+            downward_head: vec![],
+            downward_weight: vec![],
+            downward_path_first_out: vec![0],
+            downward_path_edges: vec![],
+        });
+        metrics
+    }
+
+    fn direct_only_acceleration_metrics() -> CompiledProfileBundle {
+        let mut metrics = test_metrics();
+        metrics.acceleration = Some(CompiledAcceleration {
+            schema_version: 1,
+            source_acceleration_bundle_id: CacheBundleId::new("direct-only-acceleration-test"),
+            algorithm: "test".to_string(),
+            edge_order: vec![0, 1, 2],
+            edge_rank: vec![0, 1, 2],
+            upward_first_out: vec![0, 0, 0, 0],
+            upward_head: vec![],
+            upward_weight: vec![],
+            upward_path_first_out: vec![0],
+            upward_path_edges: vec![],
+            downward_first_out: vec![0, 0, 0, 0],
+            downward_head: vec![],
+            downward_weight: vec![],
+            downward_path_first_out: vec![0],
+            downward_path_edges: vec![],
         });
         metrics
     }

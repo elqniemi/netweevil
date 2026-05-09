@@ -1,0 +1,102 @@
+profile:
+  id: car_rush_hour_traffic_v1
+  label: "Car rush hour traffic profile"
+  mode: car
+  defaults_pack: eu_car_2026_01
+  extends: car_default
+
+cost:
+  objective: generalized
+  distance_weight: 0.006
+  time_weight: 1.0
+
+speed_rules:
+  - match:
+      highway: motorway
+    speed_kph: 65
+  - match:
+      highway: trunk
+    speed_kph: 55
+  - match:
+      highway: primary
+    speed_kph: 38
+  - match:
+      highway: secondary
+    speed_kph: 32
+  - match:
+      highway: tertiary
+    speed_kph: 28
+  - match:
+      highway: residential
+    speed_kph: 22
+  - match:
+      highway: service
+    speed_kph: 15
+  - match:
+      highway: track
+      surface: gravel
+    speed_kph: 9
+  - match:
+      highway: track
+    speed_kph: 12
+
+factors:
+  - match:
+      surface: gravel
+    speed_factor: 0.82
+  - match:
+      surface: cobblestone
+    speed_factor: 0.72
+  - match:
+      surface: ground
+    speed_factor: 0.65
+  - match:
+      surface: dirt
+    speed_factor: 0.55
+  - match:
+      surface: sand
+    speed_factor: 0.30
+  - match:
+      smoothness: bad
+    speed_factor: 0.72
+  - match:
+      smoothness: very_bad
+    speed_factor: 0.52
+  - match:
+      smoothness: horrible
+    speed_factor: 0.30
+  - match:
+      smoothness: impassable
+    speed_factor: 0.10
+
+turns:
+  left_penalty_s: 9
+  right_penalty_s: 3
+  uturn_penalty_s: 35
+  traffic_signal_penalty_s: 18
+  roundabout_entry_penalty_s: 5
+
+ferry:
+  allow: true
+  use_ferry: 0.25
+  boarding_cost_s: 420
+  infer_duration_when_missing: true
+  default_speed_kph: 18
+
+preferences:
+  use_highways: 0.65
+  use_tolls: 0.55
+  use_tracks: 0.08
+  service_penalty_s: 22
+
+returns:
+  geometry: full
+  segment_rows: true
+  road_type_breakdown:
+    - time_s
+    - distance_m
+  surface_breakdown:
+    - time_s
+    - distance_m
+  penalty_breakdown: true
+  explain_cost_derivation: true
