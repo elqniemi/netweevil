@@ -7,13 +7,29 @@
 # Workspace runtime/cache data (local run state, manifests, bundles, reports)
 /.netan/
 
-# Local dataset/extracts and generated run outputs
+# Local dataset/extracts
 *.osm
 *.osm.bz2
 *.osm.pbf
 *.osm.gz
 *.osm.zip
 *.osm.xml
+
+# Generated analysis outputs and report artifacts
+*.geojson
+*.gpkg
+*.geoparquet
+*.parquet
+*.jsonl
+*.ndjson
+run-manifest.json
+index.html
+
+# Keep committed fixtures and documented examples available to users.
+!examples/**/*.json
+!examples/**/*.geojson
+!examples/**/*.jsonl
+!examples/**/*.ndjson
 
 # QGIS plugin + Python cache
 __pycache__/
