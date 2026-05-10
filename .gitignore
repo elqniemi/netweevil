@@ -7,6 +7,9 @@
 # Workspace runtime/cache data (local run state, manifests, bundles, reports)
 /.netweevil/
 
+# Local project analyses live outside the versioned engine workspace.
+/projects-analyses/
+
 # Local dataset/extracts
 /datasets/*
 !/datasets/.gitkeep
