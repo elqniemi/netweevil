@@ -1,0 +1,18 @@
+netweevil is licensed as follows:
+
+- The Rust workspace crates, command-line/API surfaces, scripts, examples,
+  Docker configuration, documentation, and repository tooling are licensed
+  under either the Apache License, Version 2.0 or the MIT License, at your
+  option. See LICENSE-APACHE and LICENSE-MIT for the full license texts.
+- The QGIS plugin under qgis_plugin/ is licensed under the MIT License. The
+  installable plugin package includes qgis_plugin/netweevil_qgis/LICENSE so the
+  QGIS plugin ZIP carries its license text directly.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in the Rust workspace crates, command-line/API surfaces, scripts,
+examples, Docker configuration, documentation, or repository tooling is licensed
+as Apache-2.0 OR MIT, without any additional terms or conditions.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted
+for inclusion in qgis_plugin/ is licensed as MIT, without any additional terms
+or conditions.

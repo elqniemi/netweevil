@@ -10,6 +10,10 @@
 # Local project analyses live outside the versioned engine workspace.
 /projects-analyses/
 
+# Local agent and assistant workspace files
+/AGENTS.md
+/CLAUDE.md
+
 # Local dataset/extracts
 /datasets/*
 !/datasets/.gitkeep
@@ -31,6 +35,16 @@
 *.ndjson
 run-manifest.json
 index.html
+
+# Generated documentation and presentation artifacts
+/README.pdf
+/qgis_plugin/README.pdf
+/scripts/build_readme_pdfs.sh
+/scripts/build_pitch_deck.py
+
+# Private planning/status documents
+/PROGRESS.md
+/IMPLEMENT_*.md
 
 # Keep hand-authored fixtures and documented examples available to users.
 !examples/requests/**/*.json

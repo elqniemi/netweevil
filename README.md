@@ -455,3 +455,12 @@ For Docker changes:
 docker compose build
 docker compose run --rm api --help
 ```
+
+## License
+
+The Rust workspace crates, CLI/API surfaces, scripts, examples, Docker
+configuration, documentation, and repository tooling are licensed under either
+MIT or Apache-2.0, at your option.
+
+The QGIS plugin under `qgis_plugin/` is licensed under MIT and ships its license
+text inside the installable plugin package.

@@ -149,3 +149,9 @@ Use the `Runs` tab to reload previous outputs without re-running: pick a file fr
 - Route and transit requests always use JSON responses internally so segment rows, breakdown tables, and itinerary legs stay available; the `Saved OD/Matrix/Area format` setting in the Settings tab only affects how those batch responses are written to disk.
 - Connection checks use a short timeout so an unreachable API never freezes QGIS for the full analysis timeout.
 - All analysis options are sent as explicit request fields; saved responses keep dataset/profile hashes and run metadata for provenance.
+
+## License
+
+The QGIS plugin is licensed under MIT. The package directory includes a plain
+`LICENSE` file so installable ZIPs carry the license text required for QGIS
+plugin distribution.
