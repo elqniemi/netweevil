@@ -1426,8 +1426,16 @@ impl PreparedRoutingEngine {
         self.topology.as_ref()
     }
 
+    pub fn topology_arc(&self) -> Arc<TopologyBundle> {
+        self.topology.clone()
+    }
+
     pub fn metrics(&self) -> &CompiledProfileBundle {
         self.metrics.as_ref()
+    }
+
+    pub fn metrics_arc(&self) -> Arc<CompiledProfileBundle> {
+        self.metrics.clone()
     }
 
     pub fn execute_route(&self, request: &RouteRequest) -> Result<RouteResult> {
@@ -1457,6 +1465,53 @@ impl PreparedRoutingEngine {
         mode: EngineMode,
     ) -> Result<RouteResult> {
         self.execute_route_with_optional_edge_names(request, Some(edge_names), mode)
+    }
+
+    /// Snap a point to routable candidates on the default routing graph.
+    /// Lets batch callers (e.g. simulation dispatch) snap each unique
+    /// endpoint once and reuse the candidates across many route executions.
+    pub fn snap_route_candidates(
+        &self,
+        point: &LabeledPoint,
+        max_distance_m: f64,
+        is_origin: bool,
+    ) -> Result<Vec<SnappedPoint>> {
+        snap_candidates(
+            self.topology.as_ref(),
+            &self.default_routing_graph,
+            point,
+            max_distance_m,
+            is_origin,
+        )
+    }
+
+    /// Execute a route between pre-snapped candidate sets produced by
+    /// [`Self::snap_route_candidates`]. Requests with failure modes fall
+    /// back to the full snap-and-route path so degraded-graph semantics
+    /// stay identical to [`Self::execute_route`].
+    pub fn execute_route_between_candidates(
+        &self,
+        request: &RouteRequest,
+        origin_candidates: &[SnappedPoint],
+        destination_candidates: &[SnappedPoint],
+    ) -> Result<RouteResult> {
+        if has_failure_modes(&request.fallback) {
+            return self.execute_route(request);
+        }
+        execute_route_with_candidates(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            &request.route_id,
+            request.snap.max_distance_m,
+            &request.connectivity,
+            &request.fallback,
+            &request.returns,
+            &request.alternatives,
+            origin_candidates,
+            destination_candidates,
+            None,
+        )
     }
 
     fn execute_route_with_optional_edge_names(

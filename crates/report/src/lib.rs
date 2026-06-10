@@ -103,6 +103,7 @@ pub enum RunKind {
     Accessibility,
     ServiceArea,
     Experiment,
+    Simulation,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -374,7 +375,7 @@ pub fn load_run_result_summary(manifest: &RunManifest) -> Result<Option<RunResul
                 warnings: service_area.warnings,
             })
         }
-        RunKind::Experiment => return Ok(None),
+        RunKind::Experiment | RunKind::Simulation => return Ok(None),
     };
     Ok(Some(summary))
 }

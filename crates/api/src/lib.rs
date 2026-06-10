@@ -42,6 +42,10 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
+mod simulation;
+
+use simulation::SimulationRegistry;
+
 #[derive(Debug, Clone)]
 pub struct ApiServeOptions {
     pub bind: SocketAddr,
@@ -54,6 +58,7 @@ pub struct ApiServeOptions {
 #[derive(Clone)]
 struct ApiState {
     service: Arc<ServiceRuntime>,
+    simulations: Arc<SimulationRegistry>,
 }
 
 struct ServiceRuntime {
@@ -340,6 +345,7 @@ impl IntoResponse for ApiError {
 pub async fn serve(paths: WorkspacePaths, options: ApiServeOptions) -> Result<()> {
     let state = ApiState {
         service: Arc::new(load_service_runtime(&paths, &options)?),
+        simulations: Arc::new(SimulationRegistry::default()),
     };
     let app = router(state);
 
@@ -375,6 +381,34 @@ fn router(state: ApiState) -> Router {
         .route("/v1/od", post(od_handler))
         .route("/v1/matrix", post(matrix_handler))
         .route("/v1/service-area", post(service_area_handler))
+        .route(
+            "/v1/simulation",
+            get(simulation::list_simulations).post(simulation::create_simulation),
+        )
+        .route(
+            "/v1/simulation/{simulation_id}",
+            get(simulation::get_simulation).delete(simulation::delete_simulation),
+        )
+        .route(
+            "/v1/simulation/{simulation_id}/control",
+            post(simulation::control_simulation),
+        )
+        .route(
+            "/v1/simulation/{simulation_id}/frames",
+            get(simulation::simulation_frames),
+        )
+        .route(
+            "/v1/simulation/{simulation_id}/edges",
+            get(simulation::simulation_edges),
+        )
+        .route(
+            "/v1/simulation/{simulation_id}/temporal",
+            get(simulation::simulation_temporal),
+        )
+        .route(
+            "/v1/simulation/{simulation_id}/agents/{agent_id}",
+            get(simulation::simulation_agent),
+        )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -510,6 +544,7 @@ fn load_service_runtime(
                 "service_area",
                 "transit_route",
                 "transit_service_area",
+                "simulation",
             ],
             geometry: vec!["none", "full", "segments"],
             breakdown_metrics: vec!["time_s", "distance_m"],
