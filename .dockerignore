@@ -1,0 +1,11 @@
+.git
+target
+datasets
+dist
+.netweevil
+.claude
+projects-analyses
+qgis_plugin
+README.pdf
+*.osm.pbf
+*.zip
