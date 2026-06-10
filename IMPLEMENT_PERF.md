@@ -179,11 +179,12 @@ Exit criteria:
 
 ### Phase 5: Dataset-Level CCH Preprocessing
 
-Status: In progress.
+Status: Completed.
 
 Completed in this phase:
 
 - [x] dataset imports now persist a dataset-level acceleration bundle with a deterministic edge-state order plus upward/downward oriented transition topology
+- [x] dataset imports now run a complete elimination-game contraction (no shortcut budgets) so the hierarchy is exact on its own; see `docs/cch-design.md`
 
 At dataset import time:
 
@@ -197,11 +198,12 @@ Exit criteria:
 
 ### Phase 6: Profile-Level Customization
 
-Status: In progress.
+Status: Completed.
 
 Completed in this phase:
 
 - [x] profile compilation now persists customized upward/downward arc weights aligned with the dataset acceleration bundle
+- [x] customization now runs CCH basic customization (triangle relaxation in elimination order) and records middle pointers for query-time path unpacking
 
 At profile compile time:
 
@@ -217,7 +219,7 @@ Exit criteria:
 
 ### Phase 7: Accelerated Query Engine
 
-Status: Implementation complete; corpus validation pending.
+Status: Completed and corpus-validated (Groningen province warm route p50 131ms -> 2.4ms, p99 348ms -> 13ms; differential-identical to the exact engine).
 
 Completed in this phase:
 
@@ -225,7 +227,7 @@ Completed in this phase:
 - [x] route geometry is still assembled on demand from the persisted topology node coordinates instead of being materialized eagerly in the hot path
 - [x] dataset imports now persist shortcut-capable acceleration arcs with unpack metadata instead of only oriented transition scaffolding
 - [x] profile compilation now customizes persisted shortcut-arc weights from the compiled edge and turn costs
-- [x] query-time route solving now reuses the persisted acceleration bundle as a safe upper-bound accelerator before the exact final search
+- [x] query-time route solving now runs the CCH query as the authoritative result (per-direction termination, middle-pointer unpacking); datasets with via-way restrictions validate candidate paths against restriction sequences with an exact automaton fallback
 
 Exit criteria:
 

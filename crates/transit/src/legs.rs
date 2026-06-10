@@ -39,10 +39,7 @@ pub(crate) fn reconstruct_legs(
         ),
     }];
     let mut cursor = final_state;
-    loop {
-        let Some(step) = prev.get(&cursor) else {
-            break;
-        };
+    while let Some(step) = prev.get(&cursor) {
         match step {
             PrevStep::Access {
                 from_id,

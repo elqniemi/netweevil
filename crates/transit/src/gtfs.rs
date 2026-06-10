@@ -598,11 +598,9 @@ fn parse_calendar_dates(
         let id = record.get(service_id).unwrap_or_default().to_string();
         let entry = active.entry(id).or_default();
         match record.get(exception_type).unwrap_or_default() {
-            "1" => {
-                if !entry.contains(&offset) {
-                    entry.push(offset);
-                    entry.sort_unstable();
-                }
+            "1" if !entry.contains(&offset) => {
+                entry.push(offset);
+                entry.sort_unstable();
             }
             "2" => entry.retain(|candidate| *candidate != offset),
             _ => {}

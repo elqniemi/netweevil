@@ -580,7 +580,7 @@ fn execute_batched_route_with_candidates(
             else {
                 continue;
             };
-            let path = best_path_from_origin_tree(routing_graph, &tree, origin, destination);
+            let path = best_path_from_origin_tree(routing_graph, tree, origin, destination);
             if let Some(path) = path {
                 let path =
                     finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);

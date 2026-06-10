@@ -307,8 +307,10 @@ fn transit_service_area_segment(
         route_id: Some(route.route_id.clone()),
         route_short_name: Some(route.short_name.clone()),
         trip_id: Some(trip.trip_id.clone()),
-        geometry: include_geometry
-            .then(|| transit_connection_geometry(bundle, connection))
-            .unwrap_or_default(),
+        geometry: if include_geometry {
+            transit_connection_geometry(bundle, connection)
+        } else {
+            Default::default()
+        },
     }
 }

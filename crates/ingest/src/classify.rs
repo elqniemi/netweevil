@@ -404,7 +404,7 @@ fn parse_clock_duration(raw: &str) -> Option<f64> {
 
 fn parse_iso8601_duration(raw: &str) -> Option<f64> {
     let mut chars = raw.trim().chars().peekable();
-    if chars.next()?.to_ascii_uppercase() != 'P' {
+    if !chars.next()?.eq_ignore_ascii_case(&'P') {
         return None;
     }
 

@@ -55,9 +55,7 @@ pub(crate) fn build_route_alternatives(
             continue;
         };
         if path.edge_indexes == best_path.edge_indexes
-            || accepted_paths
-                .iter()
-                .any(|accepted_path| *accepted_path == path.edge_indexes)
+            || accepted_paths.contains(&path.edge_indexes)
         {
             continue;
         }
@@ -117,9 +115,7 @@ pub(crate) fn build_route_alternatives(
                     max_generalized_cost,
                 )?
             {
-                let duplicate = accepted_paths
-                    .iter()
-                    .any(|accepted_path| *accepted_path == path.edge_indexes);
+                let duplicate = accepted_paths.contains(&path.edge_indexes);
                 let analysis = analyze_route_path(
                     topology,
                     metrics,

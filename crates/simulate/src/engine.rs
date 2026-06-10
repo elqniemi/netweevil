@@ -1109,7 +1109,7 @@ impl SimulationRunner {
 
         let mut fleet_summaries = Vec::with_capacity(self.fleets.len());
         for fleet in &self.fleets {
-            let arrived = fleet.arrived.max(0) as f64;
+            let arrived = fleet.arrived as f64;
             fleet_summaries.push(FleetSummary {
                 fleet_id: fleet.config.fleet_id.clone(),
                 profile_id: fleet.config.profile_id.clone(),

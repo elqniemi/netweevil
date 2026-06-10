@@ -258,6 +258,73 @@ impl From<LegacyTopologyBundle> for TopologyBundle {
     }
 }
 
+pub fn write_dataset_manifest(
+    paths: &WorkspacePaths,
+    manifest: &DatasetManifest,
+) -> Result<PathBuf> {
+    let path = paths
+        .datasets_dir
+        .join(format!("{}.json", manifest.dataset_id.0));
+    write_json(&path, manifest)?;
+    Ok(path)
+}
+
+pub fn write_compiled_profile_manifest(
+    paths: &WorkspacePaths,
+    manifest: &CompiledProfileManifest,
+) -> Result<PathBuf> {
+    let path = paths
+        .compiled_profiles_dir
+        .join(format!("{}.json", manifest.compile_id));
+    write_json(&path, manifest)?;
+    Ok(path)
+}
+
+pub fn write_run_manifest(paths: &WorkspacePaths, manifest: &RunManifest) -> Result<PathBuf> {
+    let path = paths.runs_dir.join(format!("{}.json", manifest.run_id));
+    write_json(&path, manifest)?;
+    Ok(path)
+}
+
+pub fn list_json_files(dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dir.as_ref())
+        .with_context(|| format!("reading directory {}", dir.as_ref().display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension() == Some(OsStr::new("json")) {
+            entries.push(path);
+        }
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+pub fn read_dataset_manifests(paths: &WorkspacePaths) -> Result<Vec<DatasetManifest>> {
+    list_json_files(&paths.datasets_dir)?
+        .into_iter()
+        .map(read_json)
+        .collect()
+}
+
+pub fn read_dataset_manifest(paths: &WorkspacePaths, dataset_id: &str) -> Result<DatasetManifest> {
+    read_json(paths.datasets_dir.join(format!("{dataset_id}.json")))
+}
+
+pub fn read_compiled_profile_manifests(
+    paths: &WorkspacePaths,
+) -> Result<Vec<CompiledProfileManifest>> {
+    list_json_files(&paths.compiled_profiles_dir)?
+        .into_iter()
+        .map(read_json)
+        .collect()
+}
+
+pub fn read_run_manifest(path: impl AsRef<Path>) -> Result<RunManifest> {
+    read_json(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -458,7 +525,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netweevil-persist-metrics-{unique}.bin"));
+        let path =
+            std::env::temp_dir().join(format!("netweevil-persist-metrics-legacy-{unique}.bin"));
 
         write_binary(&path, &bundle).expect("bundle should serialize");
         let round_tripped =
@@ -499,7 +567,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netweevil-persist-metrics-{unique}.bin"));
+        let path =
+            std::env::temp_dir().join(format!("netweevil-persist-metrics-turns-{unique}.bin"));
 
         write_binary(&path, &bundle).expect("bundle should serialize");
         let round_tripped = read_compiled_profile_bundle(&path).expect("bundle should deserialize");
@@ -510,71 +579,4 @@ mod tests {
 
         fs::remove_file(path).expect("temporary bundle should be removed");
     }
-}
-
-pub fn write_dataset_manifest(
-    paths: &WorkspacePaths,
-    manifest: &DatasetManifest,
-) -> Result<PathBuf> {
-    let path = paths
-        .datasets_dir
-        .join(format!("{}.json", manifest.dataset_id.0));
-    write_json(&path, manifest)?;
-    Ok(path)
-}
-
-pub fn write_compiled_profile_manifest(
-    paths: &WorkspacePaths,
-    manifest: &CompiledProfileManifest,
-) -> Result<PathBuf> {
-    let path = paths
-        .compiled_profiles_dir
-        .join(format!("{}.json", manifest.compile_id));
-    write_json(&path, manifest)?;
-    Ok(path)
-}
-
-pub fn write_run_manifest(paths: &WorkspacePaths, manifest: &RunManifest) -> Result<PathBuf> {
-    let path = paths.runs_dir.join(format!("{}.json", manifest.run_id));
-    write_json(&path, manifest)?;
-    Ok(path)
-}
-
-pub fn list_json_files(dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(dir.as_ref())
-        .with_context(|| format!("reading directory {}", dir.as_ref().display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension() == Some(OsStr::new("json")) {
-            entries.push(path);
-        }
-    }
-    entries.sort();
-    Ok(entries)
-}
-
-pub fn read_dataset_manifests(paths: &WorkspacePaths) -> Result<Vec<DatasetManifest>> {
-    list_json_files(&paths.datasets_dir)?
-        .into_iter()
-        .map(read_json)
-        .collect()
-}
-
-pub fn read_dataset_manifest(paths: &WorkspacePaths, dataset_id: &str) -> Result<DatasetManifest> {
-    read_json(paths.datasets_dir.join(format!("{dataset_id}.json")))
-}
-
-pub fn read_compiled_profile_manifests(
-    paths: &WorkspacePaths,
-) -> Result<Vec<CompiledProfileManifest>> {
-    list_json_files(&paths.compiled_profiles_dir)?
-        .into_iter()
-        .map(read_json)
-        .collect()
-}
-
-pub fn read_run_manifest(path: impl AsRef<Path>) -> Result<RunManifest> {
-    read_json(path)
 }

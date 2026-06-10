@@ -13,3 +13,6 @@ netweevil-persist = { path = "../persist" }
 netweevil-report = { path = "../report" }
 osmpbfreader.workspace = true
 sha2.workspace = true
+
+[lints]
+workspace = true

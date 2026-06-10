@@ -856,10 +856,13 @@ fn service_area_intervals_for_threshold(
         };
         let full_edge_cost =
             service_area_edge_cost(topology, metrics, edge_index, metric_kind).unwrap_or_default();
+        // The start point sits at progress 0 of the remaining edge span by
+        // definition (the generic `(f - start_fraction) / (1 - start_fraction)`
+        // formula evaluated at `f = start_fraction`).
         let start_progress = if start_fraction >= 1.0 - f64::EPSILON {
             1.0
         } else {
-            ((start_fraction - start_fraction) / (1.0 - start_fraction)).clamp(0.0, 1.0)
+            0.0
         };
         let end_progress = if start_fraction >= 1.0 - f64::EPSILON {
             1.0

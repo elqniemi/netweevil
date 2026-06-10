@@ -415,14 +415,14 @@ pub(crate) fn edge_traversal_factor(
     {
         end_factor = destination.snapped_edge_fraction.unwrap_or(1.0);
     }
-    if first_edge == Some(edge_index) && last_edge == Some(edge_index) {
-        if origin.snapped_edge_id == Some(edge_index as u32)
-            && destination.snapped_edge_id == Some(edge_index as u32)
-        {
-            return (destination.snapped_edge_fraction.unwrap_or(1.0)
-                - origin.snapped_edge_fraction.unwrap_or_default())
-            .clamp(0.0, 1.0);
-        }
+    if first_edge == Some(edge_index)
+        && last_edge == Some(edge_index)
+        && origin.snapped_edge_id == Some(edge_index as u32)
+        && destination.snapped_edge_id == Some(edge_index as u32)
+    {
+        return (destination.snapped_edge_fraction.unwrap_or(1.0)
+            - origin.snapped_edge_fraction.unwrap_or_default())
+        .clamp(0.0, 1.0);
     }
     start_factor.min(end_factor)
 }

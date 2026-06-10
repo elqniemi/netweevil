@@ -303,7 +303,7 @@ fn execute_transit_route_with_runtime(
     let found_final_candidate = best_final.is_some();
     let Some((arrival_s, _final_state, _egress_walk_s, mut legs)) = select_transit_final_candidate(
         bundle,
-        &runtime,
+        runtime,
         request,
         &prev,
         best_final,
@@ -327,21 +327,21 @@ fn execute_transit_route_with_runtime(
             alternatives: Vec::new(),
         });
     };
-    let stops = request
-        .returns
-        .include_stops
-        .then(|| build_transit_route_stops(&legs))
-        .unwrap_or_default();
-    let stop_segments = request
-        .returns
-        .include_stop_segments
-        .then(|| build_transit_route_stop_segments(&legs))
-        .unwrap_or_default();
+    let stops = if request.returns.include_stops {
+        build_transit_route_stops(&legs)
+    } else {
+        Default::default()
+    };
+    let stop_segments = if request.returns.include_stop_segments {
+        build_transit_route_stop_segments(&legs)
+    } else {
+        Default::default()
+    };
     coalesce_transit_legs(&mut legs);
     let summary = summarize_legs(departure_s, arrival_s, &legs);
     let alternatives = build_transit_alternatives(
         bundle,
-        &runtime,
+        runtime,
         request,
         &prev,
         departure_s,
@@ -383,7 +383,7 @@ fn select_transit_final_candidate(
     request: &TransitRouteRequest,
     prev: &HashMap<StateKey, PrevStep>,
     best_final: Option<(u32, StateKey, u32)>,
-    final_candidates: &mut Vec<(u32, StateKey, u32)>,
+    final_candidates: &mut [(u32, StateKey, u32)],
 ) -> Result<Option<(u32, StateKey, u32, Vec<TransitLeg>)>> {
     if !transit_leg_minimums_enabled(&request.modes) {
         let Some((arrival_s, final_state, egress_walk_s)) = best_final else {
@@ -480,16 +480,16 @@ fn build_transit_alternatives(
             continue;
         }
         let summary = summarize_legs(departure_s, arrival_s, &legs);
-        let stops = request
-            .returns
-            .include_stops
-            .then(|| build_transit_route_stops(&legs))
-            .unwrap_or_default();
-        let stop_segments = request
-            .returns
-            .include_stop_segments
-            .then(|| build_transit_route_stop_segments(&legs))
-            .unwrap_or_default();
+        let stops = if request.returns.include_stops {
+            build_transit_route_stops(&legs)
+        } else {
+            Default::default()
+        };
+        let stop_segments = if request.returns.include_stop_segments {
+            build_transit_route_stop_segments(&legs)
+        } else {
+            Default::default()
+        };
         let rank = alternatives.len() as u32 + 1;
         alternatives.push(TransitRouteAlternative {
             alternative_index: rank,

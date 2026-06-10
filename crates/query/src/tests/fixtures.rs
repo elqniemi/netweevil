@@ -897,11 +897,10 @@ pub(super) fn weak_components_for_test(topology: &TopologyBundle) -> (Vec<u32>, 
 
     let mut remap = std::collections::BTreeMap::<u32, u32>::new();
     let mut node_component_ids = vec![0_u32; node_count];
-    for node_index in 0..node_count {
+    for (node_index, component_slot) in node_component_ids.iter_mut().enumerate() {
         let root = find_test_component_root(&mut parent, node_index);
         let next_component_id = remap.len() as u32;
-        let component_id = *remap.entry(root).or_insert(next_component_id);
-        node_component_ids[node_index] = component_id;
+        *component_slot = *remap.entry(root).or_insert(next_component_id);
     }
 
     let edge_component_ids = (0..topology.edge_count())

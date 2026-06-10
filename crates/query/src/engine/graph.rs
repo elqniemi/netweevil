@@ -134,6 +134,7 @@ fn edge_based_topology_view(topology: &TopologyBundle) -> Option<EdgeBasedTopolo
     })
 }
 
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn build_edge_based_topology_fallback(
     topology: &TopologyBundle,
 ) -> netweevil_core::EdgeBasedTopology {
@@ -222,6 +223,7 @@ pub(crate) fn build_routing_graph_from_shared(
     )
 }
 
+#[allow(clippy::needless_range_loop)]
 pub(crate) fn build_routing_graph_with_options_from_shared(
     topology: &TopologyBundle,
     metrics: Arc<CompiledProfileBundle>,
@@ -358,10 +360,10 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
                 continue;
             }
             if options.search_time_turn_restrictions
-                || !forbidden_turns[forbidden_turn_first_out[edge_index] as usize
+                || forbidden_turns[forbidden_turn_first_out[edge_index] as usize
                     ..forbidden_turn_first_out[edge_index + 1] as usize]
                     .binary_search(&next_edge)
-                    .is_ok()
+                    .is_err()
             {
                 transition_degree[edge_index] += 1;
             }
@@ -446,6 +448,7 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
     })
 }
 
+#[allow(clippy::needless_range_loop)]
 fn build_acceleration_graph(
     metrics: Arc<CompiledProfileBundle>,
     dataset_acceleration: Option<Arc<DatasetAccelerationBundle>>,

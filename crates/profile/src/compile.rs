@@ -298,11 +298,9 @@ fn compile_acceleration_with_progress(
     // `x -> v` with `rank(x) > rank(v)` when processing middle `v`.
     let mut downward_tail = vec![0_u32; downward_len];
     for tail in 0..edge_count {
-        for slot in
-            bundle.downward_first_out[tail] as usize..bundle.downward_first_out[tail + 1] as usize
-        {
-            downward_tail[slot] = tail as u32;
-        }
+        let range =
+            bundle.downward_first_out[tail] as usize..bundle.downward_first_out[tail + 1] as usize;
+        downward_tail[range].fill(tail as u32);
     }
     let mut reverse_downward_first_out = vec![0_u32; edge_count + 1];
     for &head in &bundle.downward_head {

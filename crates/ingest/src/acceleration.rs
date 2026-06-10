@@ -39,10 +39,10 @@ pub(crate) fn build_dataset_acceleration_bundle_with_progress(
 
     let has_transitions = transition_topology.edge_transition_first_out.len() == edge_count + 1;
     if has_transitions {
-        for edge_index in 0..edge_count {
+        for (edge_index, degree) in out_degree.iter_mut().enumerate() {
             let start = transition_topology.edge_transition_first_out[edge_index] as usize;
             let end = transition_topology.edge_transition_first_out[edge_index + 1] as usize;
-            out_degree[edge_index] = end.saturating_sub(start) as u32;
+            *degree = end.saturating_sub(start) as u32;
             for &next_edge in &transition_topology.edge_transition_edges[start..end] {
                 if let Some(entry) = in_degree.get_mut(next_edge as usize) {
                     *entry += 1;

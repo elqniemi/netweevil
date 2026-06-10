@@ -298,7 +298,7 @@ fn label_weak_components(node_count: usize, edges: &[DirectedEdge]) -> WeakCompo
     let mut node_counts = Vec::<u64>::new();
     let mut node_component_ids = vec![0_u32; node_count];
 
-    for node_index in 0..node_count {
+    for (node_index, component_slot) in node_component_ids.iter_mut().enumerate() {
         let root = find_component_root(&mut parent, node_index);
         let component_id = if let Some(&component_id) = root_to_component.get(&root) {
             component_id
@@ -308,7 +308,7 @@ fn label_weak_components(node_count: usize, edges: &[DirectedEdge]) -> WeakCompo
             node_counts.push(0);
             component_id
         };
-        node_component_ids[node_index] = component_id;
+        *component_slot = component_id;
         node_counts[component_id as usize] += 1;
     }
 
