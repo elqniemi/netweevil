@@ -5,9 +5,10 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use netweevil_core::{
     CacheBundleId, CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle,
-    CompiledTurnCostConfig, DatasetAccelerationBundle, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
-    EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle,
-    TravelMode,
+    CompiledTurnCostConfig, DatasetAccelerationBundle, DirectedEdge,
+    EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW, EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY,
+    EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, HighwayClass, RoadClass,
+    SmoothnessClass, SurfaceClass, TopologyBundle, TravelMode,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -47,6 +48,8 @@ pub struct ProfileDocument {
     pub exclude_rules: Vec<ExcludeRule>,
     #[serde(default)]
     pub factors: Vec<FactorRule>,
+    #[serde(default)]
+    pub direction: DirectionConfig,
     #[serde(default)]
     pub turns: TurnConfig,
     #[serde(default)]
@@ -165,6 +168,14 @@ pub struct FactorRule {
     #[serde(rename = "match")]
     pub r#match: TagMatch,
     pub speed_factor: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct DirectionConfig {
+    #[serde(default)]
+    pub ignore_plain_oneway_for_foot: bool,
+    #[serde(default)]
+    pub allow_bicycle_contraflow_on_roads: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -331,16 +342,19 @@ where
 
     for edge_index in 0..edge_count {
         let edge = topology.edge(edge_index);
+        let edge_profile = topology.edge_profile(edge_index);
         let metric = if !edge.access_mask.contains(mode_bit)
             || (edge.road_class == RoadClass::Ferry && !profile.ferry.allow)
-            || is_excluded(profile, &edge)
+            || is_directionally_excluded(profile, &edge)
+            || is_excluded(profile, &edge, edge_profile.highway)
         {
             CompiledEdgeMetric {
                 edge_id: edge.edge_id,
                 travel_time_s: None,
                 generalized_cost: None,
             }
-        } else if let Some(travel_time_s) = edge_travel_time_s(profile, &edge) {
+        } else if let Some(travel_time_s) = edge_travel_time_s(profile, &edge, edge_profile.highway)
+        {
             CompiledEdgeMetric {
                 edge_id: edge.edge_id,
                 travel_time_s: Some(travel_time_s),
@@ -686,13 +700,18 @@ impl PercentReporter {
     }
 }
 
-fn edge_travel_time_s(profile: &ProfileDocument, edge: &DirectedEdge) -> Option<f64> {
+fn edge_travel_time_s(
+    profile: &ProfileDocument,
+    edge: &DirectedEdge,
+    highway: HighwayClass,
+) -> Option<f64> {
     if edge.road_class == RoadClass::Ferry {
         let scheduled_duration_s = edge.duration_s;
         let inferred_duration_s = profile.ferry.infer_duration_when_missing.then(|| {
             let speed_kph =
-                matching_speed(profile, edge).unwrap_or(profile.ferry.default_speed_kph);
-            let effective_speed_kph = (speed_kph * matching_speed_factor(profile, edge)).max(1.0);
+                matching_speed(profile, edge, highway).unwrap_or(profile.ferry.default_speed_kph);
+            let effective_speed_kph =
+                (speed_kph * matching_speed_factor(profile, edge, highway)).max(1.0);
             edge.length_m as f64 / (effective_speed_kph * 1000.0 / 3600.0)
         });
 
@@ -702,11 +721,11 @@ fn edge_travel_time_s(profile: &ProfileDocument, edge: &DirectedEdge) -> Option<
     }
 
     let mut speed_kph = default_speed_kph(edge.road_class);
-    if let Some(rule_speed) = matching_speed(profile, edge) {
+    if let Some(rule_speed) = matching_speed(profile, edge, highway) {
         speed_kph = rule_speed;
     }
 
-    let effective_speed_kph = (speed_kph * matching_speed_factor(profile, edge)).max(1.0);
+    let effective_speed_kph = (speed_kph * matching_speed_factor(profile, edge, highway)).max(1.0);
     Some(edge.length_m as f64 / (effective_speed_kph * 1000.0 / 3600.0))
 }
 
@@ -730,46 +749,69 @@ fn ensure_supported_keys(
 ) -> Result<()> {
     for key in tags.keys() {
         match key.as_str() {
-            "highway" | "surface" | "smoothness" | "route" | "toll" => {}
+            "highway" | "road_class" | "surface" | "smoothness" | "route" | "toll" => {}
             other => bail!(
-                "{rule_group}[{rule_index}] uses unsupported match key '{other}'; supported keys are highway, surface, smoothness, route, toll"
+                "{rule_group}[{rule_index}] uses unsupported match key '{other}'; supported keys are highway, road_class, surface, smoothness, route, toll"
             ),
         }
     }
     Ok(())
 }
 
-fn matching_speed(profile: &ProfileDocument, edge: &DirectedEdge) -> Option<f64> {
+fn matching_speed(
+    profile: &ProfileDocument,
+    edge: &DirectedEdge,
+    highway: HighwayClass,
+) -> Option<f64> {
     profile
         .speed_rules
         .iter()
-        .find(|rule| matches_edge(&rule.r#match.tags, edge))
+        .find(|rule| matches_edge(&rule.r#match.tags, edge, highway))
         .map(|rule| rule.speed_kph)
 }
 
-fn matching_speed_factor(profile: &ProfileDocument, edge: &DirectedEdge) -> f64 {
+fn matching_speed_factor(
+    profile: &ProfileDocument,
+    edge: &DirectedEdge,
+    highway: HighwayClass,
+) -> f64 {
     profile
         .factors
         .iter()
-        .filter(|rule| matches_edge(&rule.r#match.tags, edge))
+        .filter(|rule| matches_edge(&rule.r#match.tags, edge, highway))
         .fold(1.0, |product, rule| product * rule.speed_factor)
 }
 
-fn is_excluded(profile: &ProfileDocument, edge: &DirectedEdge) -> bool {
+fn is_directionally_excluded(profile: &ProfileDocument, edge: &DirectedEdge) -> bool {
+    (matches!(profile.profile.mode, TravelMode::Foot)
+        && edge.flags & EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY != 0
+        && !profile.direction.ignore_plain_oneway_for_foot)
+        || (matches!(profile.profile.mode, TravelMode::Bicycle)
+            && edge.flags & EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW != 0
+            && !profile.direction.allow_bicycle_contraflow_on_roads)
+}
+
+fn is_excluded(profile: &ProfileDocument, edge: &DirectedEdge, highway: HighwayClass) -> bool {
     profile
         .exclude_rules
         .iter()
-        .any(|rule| matches_edge(&rule.r#match.tags, edge))
+        .any(|rule| matches_edge(&rule.r#match.tags, edge, highway))
 }
 
-fn matches_edge(tags: &BTreeMap<String, String>, edge: &DirectedEdge) -> bool {
-    tags.iter()
-        .all(|(key, expected)| edge_tag_value(edge, key).is_some_and(|actual| actual == expected))
+fn matches_edge(
+    tags: &BTreeMap<String, String>,
+    edge: &DirectedEdge,
+    highway: HighwayClass,
+) -> bool {
+    tags.iter().all(|(key, expected)| {
+        edge_tag_value(edge, highway, key).is_some_and(|actual| actual == expected)
+    })
 }
 
-fn edge_tag_value<'a>(edge: &'a DirectedEdge, key: &str) -> Option<&'a str> {
+fn edge_tag_value(edge: &DirectedEdge, highway: HighwayClass, key: &str) -> Option<&'static str> {
     match key {
-        "highway" => road_class_name(edge.road_class),
+        "highway" => highway_name(highway).or_else(|| road_class_name(edge.road_class)),
+        "road_class" => road_class_name(edge.road_class),
         "surface" => surface_name(edge.surface),
         "smoothness" => smoothness_name(edge.smoothness),
         "route" => (edge.road_class == RoadClass::Ferry).then_some("ferry"),
@@ -791,6 +833,33 @@ fn road_class_name(road_class: RoadClass) -> Option<&'static str> {
         RoadClass::Ferry => None,
         RoadClass::Path => Some("path"),
         RoadClass::Unknown => None,
+    }
+}
+
+fn highway_name(highway: HighwayClass) -> Option<&'static str> {
+    match highway {
+        HighwayClass::Motorway => Some("motorway"),
+        HighwayClass::MotorwayLink => Some("motorway_link"),
+        HighwayClass::Trunk => Some("trunk"),
+        HighwayClass::TrunkLink => Some("trunk_link"),
+        HighwayClass::Primary => Some("primary"),
+        HighwayClass::PrimaryLink => Some("primary_link"),
+        HighwayClass::Secondary => Some("secondary"),
+        HighwayClass::SecondaryLink => Some("secondary_link"),
+        HighwayClass::Tertiary => Some("tertiary"),
+        HighwayClass::TertiaryLink => Some("tertiary_link"),
+        HighwayClass::Residential => Some("residential"),
+        HighwayClass::Unclassified => Some("unclassified"),
+        HighwayClass::LivingStreet => Some("living_street"),
+        HighwayClass::Service => Some("service"),
+        HighwayClass::Track => Some("track"),
+        HighwayClass::Path => Some("path"),
+        HighwayClass::Cycleway => Some("cycleway"),
+        HighwayClass::Footway => Some("footway"),
+        HighwayClass::Pedestrian => Some("pedestrian"),
+        HighwayClass::Steps => Some("steps"),
+        HighwayClass::Bridleway => Some("bridleway"),
+        HighwayClass::Ferry | HighwayClass::Unknown => None,
     }
 }
 
@@ -1007,6 +1076,7 @@ mod tests {
         ProfileDocument, ProfileHeader, ReturnConfig, SpeedRule, TagMatch, compile_profile_bundle,
         compile_profile_bundle_with_acceleration,
     };
+    use crate::DirectionConfig;
     use netweevil_core::{
         AccessMask, CacheBundleId, DatasetAccelerationBundle, DirectedEdge, EdgeBasedTopology,
         EdgeId, NodeId, RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle, TopologyNode,
@@ -1038,6 +1108,7 @@ mod tests {
                 r#match: tag_match([("smoothness", "bad")]),
                 speed_factor: 0.5,
             }],
+            direction: DirectionConfig::default(),
             turns: Default::default(),
             ferry: FerryConfig::default(),
             preferences: PreferencesConfig::default(),
@@ -1101,6 +1172,7 @@ mod tests {
             }],
             exclude_rules: vec![],
             factors: vec![],
+            direction: DirectionConfig::default(),
             turns: Default::default(),
             ferry: FerryConfig::default(),
             preferences: PreferencesConfig::default(),
@@ -1143,6 +1215,7 @@ mod tests {
                 r#match: tag_match([("highway", "primary")]),
             }],
             factors: vec![],
+            direction: DirectionConfig::default(),
             turns: Default::default(),
             ferry: FerryConfig::default(),
             preferences: PreferencesConfig::default(),
@@ -1398,6 +1471,7 @@ mod tests {
             speed_rules: vec![],
             exclude_rules: vec![],
             factors: vec![],
+            direction: DirectionConfig::default(),
             turns: Default::default(),
             ferry: FerryConfig {
                 allow: true,

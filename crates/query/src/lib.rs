@@ -4459,6 +4459,7 @@ fn build_route_alternatives(
     let mut accepted_paths = vec![best_path.edge_indexes.clone()];
     let mut accepted = Vec::new();
     let mut tried_bans = HashSet::new();
+    let max_generalized_cost = alternative_max_generalized_cost(best_summary, alternatives);
     for &banned_edge in &best_path.edge_indexes {
         if accepted.len() + 1 >= alternatives.max_routes {
             break;
@@ -4479,6 +4480,7 @@ fn build_route_alternatives(
                 origin_candidates,
                 destination_candidates,
                 &banned_edges,
+                max_generalized_cost,
             )?
         else {
             continue;
@@ -4543,6 +4545,7 @@ fn build_route_alternatives(
                     origin_candidates,
                     destination_candidates,
                     &expanded_bans,
+                    max_generalized_cost,
                 )?
             {
                 let duplicate = accepted_paths
@@ -4584,6 +4587,14 @@ fn build_route_alternatives(
     }
 
     Ok(accepted)
+}
+
+fn alternative_max_generalized_cost(
+    best: &RouteSummary,
+    alternatives: &AlternativeRouteOptions,
+) -> Option<f64> {
+    let limit = best.total_generalized_cost.max(1.0) * alternatives.max_cost_ratio;
+    limit.is_finite().then_some(limit)
 }
 
 fn alternative_within_limits(
@@ -6975,6 +6986,7 @@ fn route_between_candidates_with_banned_edges(
     origin_candidates: &[SnappedPoint],
     destination_candidates: &[SnappedPoint],
     banned_edges: &HashSet<usize>,
+    max_generalized_cost: Option<f64>,
 ) -> Result<Option<(SnappedPoint, SnappedPoint, RoutePath, HopSelectionInfo)>> {
     let mut best: Option<(SnappedPoint, SnappedPoint, RoutePath, HopSelectionInfo)> = None;
     for origin in origin_candidates {
@@ -7002,7 +7014,7 @@ fn route_between_candidates_with_banned_edges(
                 .into_iter()
                 .filter(|(edge, _)| !banned_edges.contains(edge))
                 .collect::<Vec<_>>();
-            let Some(path) = seeded_forward_dijkstra_with_banned_edges(
+            let Some(path) = seeded_route_with_banned_edges(
                 topology,
                 metrics,
                 routing_graph,
@@ -7011,6 +7023,7 @@ fn route_between_candidates_with_banned_edges(
                 direct_path,
                 fallback,
                 banned_edges,
+                max_generalized_cost,
             )?
             else {
                 continue;
@@ -7028,6 +7041,215 @@ fn route_between_candidates_with_banned_edges(
     Ok(best)
 }
 
+fn seeded_route_with_banned_edges(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    origin_seeds: &[(usize, f64)],
+    destination_seeds: &[(usize, f64)],
+    initial_upper_bound: Option<RoutePath>,
+    fallback: &FallbackPolicy,
+    banned_edges: &HashSet<usize>,
+    max_generalized_cost: Option<f64>,
+) -> Result<Option<RoutePath>> {
+    if !has_failure_modes(fallback) {
+        let candidate = seeded_bidirectional_dijkstra_with_banned_edges(
+            topology,
+            routing_graph,
+            origin_seeds,
+            destination_seeds,
+            initial_upper_bound.clone(),
+            banned_edges,
+            max_generalized_cost,
+        )?;
+        if !routing_graph.has_restriction_sequences()
+            || candidate.as_ref().is_some_and(|path| {
+                path_respects_restriction_sequences(routing_graph, &path.edge_indexes)
+            })
+        {
+            return Ok(candidate);
+        }
+    }
+
+    seeded_forward_dijkstra_with_banned_edges(
+        topology,
+        metrics,
+        routing_graph,
+        origin_seeds,
+        destination_seeds,
+        initial_upper_bound,
+        fallback,
+        banned_edges,
+        max_generalized_cost,
+    )
+}
+
+fn seeded_bidirectional_dijkstra_with_banned_edges(
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    origin_seeds: &[(usize, f64)],
+    destination_seeds: &[(usize, f64)],
+    initial_upper_bound: Option<RoutePath>,
+    banned_edges: &HashSet<usize>,
+    max_generalized_cost: Option<f64>,
+) -> Result<Option<RoutePath>> {
+    EDGE_SEARCH_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        scratch.prepare(topology.edge_count());
+
+        for &(edge_index, cost) in origin_seeds {
+            if banned_edges.contains(&edge_index) {
+                continue;
+            }
+            if !scratch.update_forward(edge_index, cost, NO_PREVIOUS_EDGE) {
+                continue;
+            }
+            scratch.forward_heap.push(State {
+                edge_index,
+                automaton_state: 0,
+                cost,
+                score: cost,
+            });
+        }
+        for &(edge_index, cost) in destination_seeds {
+            if banned_edges.contains(&edge_index) {
+                continue;
+            }
+            if !scratch.update_backward(edge_index, cost, NO_PREVIOUS_EDGE) {
+                continue;
+            }
+            scratch.backward_heap.push(State {
+                edge_index,
+                automaton_state: 0,
+                cost,
+                score: cost,
+            });
+        }
+
+        let mut best_path = initial_upper_bound.filter(|path| {
+            max_generalized_cost.is_none_or(|limit| path.total_generalized_cost <= limit)
+        });
+        let mut best_cost = best_path
+            .as_ref()
+            .map(|path| path.total_generalized_cost)
+            .unwrap_or_else(|| max_generalized_cost.unwrap_or(f64::INFINITY));
+        let mut best_edge = None;
+
+        while !(scratch.forward_heap.is_empty() || scratch.backward_heap.is_empty()) {
+            let next_forward_cost = scratch
+                .forward_heap
+                .peek()
+                .map(|state| state.cost)
+                .unwrap_or(f64::INFINITY);
+            let next_backward_cost = scratch
+                .backward_heap
+                .peek()
+                .map(|state| state.cost)
+                .unwrap_or(f64::INFINITY);
+            if next_forward_cost + next_backward_cost >= best_cost {
+                break;
+            }
+
+            if next_forward_cost <= next_backward_cost {
+                let Some(State {
+                    edge_index,
+                    automaton_state: _,
+                    cost,
+                    score: _,
+                }) = scratch.forward_heap.pop()
+                else {
+                    break;
+                };
+                if banned_edges.contains(&edge_index) || cost > scratch.forward_dist[edge_index] {
+                    continue;
+                }
+                if scratch.backward_dist[edge_index].is_finite() {
+                    let candidate_cost = cost + scratch.backward_dist[edge_index];
+                    if candidate_cost < best_cost {
+                        best_cost = candidate_cost;
+                        best_edge = Some(edge_index);
+                    }
+                }
+                if cost > best_cost {
+                    continue;
+                }
+
+                for transition_index in routing_graph.transition_range(edge_index) {
+                    let next_edge = routing_graph.transition_edges[transition_index] as usize;
+                    if banned_edges.contains(&next_edge) {
+                        continue;
+                    }
+                    let next_cost = cost + routing_graph.transition_costs[transition_index];
+                    if next_cost >= best_cost
+                        || !scratch.update_forward(next_edge, next_cost, edge_index as u32)
+                    {
+                        continue;
+                    }
+                    scratch.forward_heap.push(State {
+                        edge_index: next_edge,
+                        automaton_state: 0,
+                        cost: next_cost,
+                        score: next_cost,
+                    });
+                }
+            } else {
+                let Some(State {
+                    edge_index,
+                    automaton_state: _,
+                    cost,
+                    score: _,
+                }) = scratch.backward_heap.pop()
+                else {
+                    break;
+                };
+                if banned_edges.contains(&edge_index) || cost > scratch.backward_dist[edge_index] {
+                    continue;
+                }
+                if scratch.forward_dist[edge_index].is_finite() {
+                    let candidate_cost = scratch.forward_dist[edge_index] + cost;
+                    if candidate_cost < best_cost {
+                        best_cost = candidate_cost;
+                        best_edge = Some(edge_index);
+                    }
+                }
+                if cost > best_cost {
+                    continue;
+                }
+
+                for transition_index in routing_graph.reverse_transition_range(edge_index) {
+                    let previous_edge =
+                        routing_graph.reverse_transition_edges[transition_index] as usize;
+                    if banned_edges.contains(&previous_edge) {
+                        continue;
+                    }
+                    let next_cost = cost + routing_graph.reverse_transition_costs[transition_index];
+                    if next_cost >= best_cost
+                        || !scratch.update_backward(previous_edge, next_cost, edge_index as u32)
+                    {
+                        continue;
+                    }
+                    scratch.backward_heap.push(State {
+                        edge_index: previous_edge,
+                        automaton_state: 0,
+                        cost: next_cost,
+                        score: next_cost,
+                    });
+                }
+            }
+        }
+
+        if let Some(meeting_edge) = best_edge {
+            best_path = Some(reconstruct_bidirectional_route_path(
+                &scratch,
+                meeting_edge,
+                best_cost,
+            ));
+        }
+
+        Ok(best_path)
+    })
+}
+
 fn seeded_forward_dijkstra_with_banned_edges(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
@@ -7037,6 +7259,7 @@ fn seeded_forward_dijkstra_with_banned_edges(
     initial_upper_bound: Option<RoutePath>,
     fallback: &FallbackPolicy,
     banned_edges: &HashSet<usize>,
+    max_generalized_cost: Option<f64>,
 ) -> Result<Option<RoutePath>> {
     let mut heap = BinaryHeap::new();
     let mut dist = HashMap::<SearchStateKey, f64>::new();
@@ -7049,11 +7272,13 @@ fn seeded_forward_dijkstra_with_banned_edges(
             .or_insert(adjustment);
     }
 
-    let mut best_path = initial_upper_bound;
+    let mut best_path = initial_upper_bound.filter(|path| {
+        max_generalized_cost.is_none_or(|limit| path.total_generalized_cost <= limit)
+    });
     let mut best_cost = best_path
         .as_ref()
         .map(|path| path.total_generalized_cost)
-        .unwrap_or(f64::INFINITY);
+        .unwrap_or_else(|| max_generalized_cost.unwrap_or(f64::INFINITY));
     let mut best_state = None;
 
     for &(edge_index, cost) in origin_seeds {
@@ -9553,6 +9778,45 @@ mod tests {
         let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
         assert_eq!(result.edge_path, vec![3, 2]);
         assert_eq!(result.summary.total_distance_m, 300);
+    }
+
+    #[test]
+    fn alternative_routes_fall_back_to_restricted_search_when_needed() {
+        let topology = multi_edge_restricted_topology();
+        let metrics = restricted_metrics();
+        let request = RouteRequest {
+            route_id: "multi-edge-restricted-alternative".to_string(),
+            origin: super::LabeledPoint {
+                id: "a".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: super::LabeledPoint {
+                id: "d".to_string(),
+                lon: 6.003,
+                lat: 53.0,
+            },
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig {
+                geometry: ReturnGeometry::Full,
+                ..ReturnConfig::default()
+            },
+            alternatives: AlternativeRouteOptions {
+                max_routes: 2,
+                max_cost_ratio: 2.0,
+                ..AlternativeRouteOptions::default()
+            },
+        };
+
+        let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
+
+        assert_eq!(result.edge_path, vec![3, 2]);
+        assert_eq!(result.alternatives.len(), 1);
+        assert_eq!(result.alternatives[0].edge_path, vec![0, 1, 4]);
     }
 
     #[test]

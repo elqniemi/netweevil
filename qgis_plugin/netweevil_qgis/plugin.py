@@ -943,6 +943,8 @@ class NetweevilDock(QDockWidget):
         self.transit_board_slack_edit = QLineEdit("30")
         self.transit_transfer_slack_edit = QLineEdit("120")
         self.transit_max_transfers_edit = QLineEdit("3")
+        self.transit_min_leg_duration_edit = QLineEdit("0")
+        self.transit_min_leg_distance_edit = QLineEdit("0")
         self.transit_alternative_count_edit = QLineEdit("1")
         self.transit_alternative_time_ratio_edit = QLineEdit("1.5")
         self.transit_include_geometry_check = QCheckBox("Load leg geometry")
@@ -963,6 +965,8 @@ class NetweevilDock(QDockWidget):
         mode_form.addRow("Board slack s", self.transit_board_slack_edit)
         mode_form.addRow("Transfer slack s", self.transit_transfer_slack_edit)
         mode_form.addRow("Max transfers", self.transit_max_transfers_edit)
+        mode_form.addRow("Min transit leg duration s", self.transit_min_leg_duration_edit)
+        mode_form.addRow("Min transit leg distance m", self.transit_min_leg_distance_edit)
         mode_form.addRow("Alternative max routes", self.transit_alternative_count_edit)
         mode_form.addRow("Alternative max time ratio", self.transit_alternative_time_ratio_edit)
         mode_form.addRow("", self.transit_include_geometry_check)
@@ -2172,6 +2176,18 @@ class NetweevilDock(QDockWidget):
                     )
                     if hasattr(self, "transit_max_transfers_edit")
                     else 3,
+                    "min_transit_leg_duration_s": int(
+                        float(
+                            getattr(self, "transit_min_leg_duration_edit").text().strip() or "0"
+                        )
+                    )
+                    if hasattr(self, "transit_min_leg_duration_edit")
+                    else 0,
+                    "min_transit_leg_distance_m": float(
+                        getattr(self, "transit_min_leg_distance_edit").text().strip() or "0"
+                    )
+                    if hasattr(self, "transit_min_leg_distance_edit")
+                    else 0.0,
                 },
                 "max_travel_time_s": int(
                     float(self.service_area_transit_max_time_edit.text().strip() or "3600")
@@ -2312,6 +2328,16 @@ class NetweevilDock(QDockWidget):
                 "board_slack_s": int(self.transit_board_slack_edit.text().strip()),
                 "transfer_slack_s": int(self.transit_transfer_slack_edit.text().strip()),
                 "max_transfers": int(self.transit_max_transfers_edit.text().strip()),
+                "min_transit_leg_duration_s": self.parse_optional_int(
+                    self.transit_min_leg_duration_edit.text(),
+                    "Min transit leg duration",
+                )
+                or 0,
+                "min_transit_leg_distance_m": self.parse_optional_float(
+                    self.transit_min_leg_distance_edit.text(),
+                    "Min transit leg distance",
+                )
+                or 0.0,
             },
             "returns": {
                 "include_geometry": self.transit_include_geometry_check.isChecked(),
@@ -4525,6 +4551,8 @@ class NetweevilDock(QDockWidget):
             "transit_board_slack": self.transit_board_slack_edit.text().strip(),
             "transit_transfer_slack": self.transit_transfer_slack_edit.text().strip(),
             "transit_max_transfers": self.transit_max_transfers_edit.text().strip(),
+            "transit_min_leg_duration": self.transit_min_leg_duration_edit.text().strip(),
+            "transit_min_leg_distance": self.transit_min_leg_distance_edit.text().strip(),
             "transit_alternative_count": self.transit_alternative_count_edit.text().strip(),
             "transit_alternative_time_ratio": self.transit_alternative_time_ratio_edit.text().strip(),
             "transit_include_geometry": self.transit_include_geometry_check.isChecked(),
@@ -4728,6 +4756,18 @@ class NetweevilDock(QDockWidget):
         )
         self.transit_max_transfers_edit.setText(
             self.read_setting("transit_max_transfers", self.transit_max_transfers_edit.text())
+        )
+        self.transit_min_leg_duration_edit.setText(
+            self.read_setting(
+                "transit_min_leg_duration",
+                self.transit_min_leg_duration_edit.text(),
+            )
+        )
+        self.transit_min_leg_distance_edit.setText(
+            self.read_setting(
+                "transit_min_leg_distance",
+                self.transit_min_leg_distance_edit.text(),
+            )
         )
         self.transit_alternative_count_edit.setText(
             self.read_setting("transit_alternative_count", self.transit_alternative_count_edit.text())

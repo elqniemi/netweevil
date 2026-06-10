@@ -68,6 +68,9 @@ factors:
       smoothness: impassable
     speed_factor: 0.20
 
+direction:
+  ignore_plain_oneway_for_foot: true
+
 ferry:
   allow: false
   use_ferry: 0.25
@@ -92,4 +95,3 @@ returns:
     - distance_m
   penalty_breakdown: true
   explain_cost_derivation: true
-

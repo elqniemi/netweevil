@@ -10,10 +10,11 @@ use anyhow::{Context, Result, bail};
 use netweevil_core::{
     AccelerationBuildSettings, AccelerationBundleStats, AccessMask, BuildStage, CacheBundleId,
     ConnectedComponentKind, ConnectedComponentsMeta, DatasetAccelerationBundle, DatasetId,
-    DirectedEdge, EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId,
-    EdgeNameBundle, NodeId, RoadClass, SmoothnessClass, SpatialIndexCell, SurfaceClass,
-    TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyNode, TurnRestriction,
-    TurnRestrictionKind,
+    DirectedEdge, EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW, EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY,
+    EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId,
+    EdgeNameBundle, HighwayClass, NodeId, RoadClass, SmoothnessClass, SpatialIndexCell,
+    SurfaceClass, TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyNode,
+    TurnRestriction, TurnRestrictionKind,
 };
 use netweevil_persist::{
     WorkspacePaths, write_acceleration_bundle, write_dataset_manifest, write_edge_name_bundle,
@@ -245,13 +246,16 @@ struct PendingWay {
     osm_way_id: i64,
     node_ids: Vec<i64>,
     road_class: RoadClass,
+    highway: HighwayClass,
     duration_s: Option<f64>,
     surface: SurfaceClass,
     smoothness: SmoothnessClass,
-    access_mask: AccessMask,
+    forward_access_mask: AccessMask,
+    reverse_access_mask: AccessMask,
     is_toll: bool,
     is_roundabout: bool,
-    direction: EdgeDirection,
+    forward_extra_flags: u32,
+    reverse_extra_flags: u32,
     name: Option<String>,
 }
 
@@ -282,6 +286,14 @@ enum EdgeDirection {
     Both,
     ForwardOnly,
     ReverseOnly,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DirectionalAccess {
+    forward_access: AccessMask,
+    reverse_access: AccessMask,
+    forward_flags: u32,
+    reverse_flags: u32,
 }
 
 #[derive(Debug, Default)]
@@ -316,6 +328,7 @@ fn build_topology_bundle(
     let spatial_index = build_spatial_index(&nodes);
 
     let mut edges = Vec::new();
+    let mut edge_highways = Vec::new();
     let mut skipped_way_count = 0_u64;
     let mut build_reporter = PercentReporter::starting_at_zero();
     for (way_index, way) in pending_ways.iter().enumerate() {
@@ -370,10 +383,7 @@ fn build_topology_bundle(
                 reverse_flags |= EDGE_FLAG_TARGET_TRAFFIC_SIGNAL;
             }
 
-            if matches!(
-                way.direction,
-                EdgeDirection::Both | EdgeDirection::ForwardOnly
-            ) {
+            if way.forward_access_mask.0 != 0 {
                 edges.push(DirectedEdge {
                     edge_id: EdgeId(edges.len() as u32),
                     from: from_id,
@@ -384,19 +394,17 @@ fn build_topology_bundle(
                     road_class: way.road_class,
                     surface: way.surface,
                     smoothness: way.smoothness,
-                    access_mask: way.access_mask,
+                    access_mask: way.forward_access_mask,
                     is_toll: way.is_toll,
                     name_index,
                     geometry_offset: 0,
                     geometry_len: 0,
-                    flags: forward_flags,
+                    flags: forward_flags | way.forward_extra_flags,
                 });
+                edge_highways.push(way.highway);
             }
 
-            if matches!(
-                way.direction,
-                EdgeDirection::Both | EdgeDirection::ReverseOnly
-            ) {
+            if way.reverse_access_mask.0 != 0 {
                 edges.push(DirectedEdge {
                     edge_id: EdgeId(edges.len() as u32),
                     from: to_id,
@@ -407,13 +415,14 @@ fn build_topology_bundle(
                     road_class: way.road_class,
                     surface: way.surface,
                     smoothness: way.smoothness,
-                    access_mask: way.access_mask,
+                    access_mask: way.reverse_access_mask,
                     is_toll: way.is_toll,
                     name_index,
                     geometry_offset: 0,
                     geometry_len: 0,
-                    flags: reverse_flags,
+                    flags: reverse_flags | way.reverse_extra_flags,
                 });
+                edge_highways.push(way.highway);
             }
         }
 
@@ -464,9 +473,12 @@ fn build_topology_bundle(
     let edge_based_topology = build_edge_based_topology(nodes.len(), &edges);
     let components = label_weak_components(nodes.len(), &edges);
 
-    let edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges);
+    let mut edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges);
+    for (profile, highway) in edge_layers.profile.iter_mut().zip(edge_highways) {
+        profile.highway = highway;
+    }
     let bundle = TopologyBundle {
-        schema_version: 8,
+        schema_version: 9,
         source_path: source_path.display().to_string(),
         source_sha256: source_sha256.to_string(),
         nodes,
@@ -1085,24 +1097,29 @@ fn scan_routable_objects(
             }
             OsmObj::Way(way) => {
                 counts.ways += 1;
-                let Some((road_class, access_mask)) = classify_way(&way.tags) else {
+                let Some((road_class, highway, access_mask)) = classify_way(&way.tags) else {
                     continue;
                 };
                 if way.nodes.len() < 2 {
                     continue;
                 }
+                let directional_access =
+                    classify_directional_access(&way.tags, highway, road_class, access_mask);
 
                 let pending = PendingWay {
                     osm_way_id: way.id.0,
                     node_ids: way.nodes.into_iter().map(|node| node.0).collect(),
                     road_class,
+                    highway,
                     duration_s: parse_duration_from_tags(&way.tags),
                     surface: classify_surface(&way.tags),
                     smoothness: classify_smoothness(&way.tags),
-                    access_mask,
+                    forward_access_mask: directional_access.forward_access,
+                    reverse_access_mask: directional_access.reverse_access,
                     is_toll: classify_toll(&way.tags),
                     is_roundabout: tag(&way.tags, "junction") == Some("roundabout"),
-                    direction: classify_direction(&way.tags, road_class),
+                    forward_extra_flags: directional_access.forward_flags,
+                    reverse_extra_flags: directional_access.reverse_flags,
                     name: way.tags.get("name").map(ToString::to_string),
                 };
 
@@ -1809,35 +1826,51 @@ fn apportioned_duration_s(
     None
 }
 
-fn classify_way(tags: &Tags) -> Option<(RoadClass, AccessMask)> {
+fn classify_way(tags: &Tags) -> Option<(RoadClass, HighwayClass, AccessMask)> {
     if let Some(highway) = tag(tags, "highway") {
-        let road_class = classify_highway(highway)?;
+        let highway_class = classify_highway(highway)?;
+        let road_class = highway_class.road_class();
         return Some((
             road_class,
+            highway_class,
             classify_access(tags, highway, tag(tags, "route")),
         ));
     }
 
     if tag(tags, "route") == Some("ferry") || tag(tags, "ferry").is_some() {
-        return Some((RoadClass::Ferry, classify_access(tags, "", Some("ferry"))));
+        return Some((
+            RoadClass::Ferry,
+            HighwayClass::Ferry,
+            classify_access(tags, "", Some("ferry")),
+        ));
     }
 
     None
 }
 
-fn classify_highway(highway: &str) -> Option<RoadClass> {
+fn classify_highway(highway: &str) -> Option<HighwayClass> {
     match highway {
-        "motorway" | "motorway_link" => Some(RoadClass::Motorway),
-        "trunk" | "trunk_link" => Some(RoadClass::Trunk),
-        "primary" | "primary_link" => Some(RoadClass::Primary),
-        "secondary" | "secondary_link" => Some(RoadClass::Secondary),
-        "tertiary" | "tertiary_link" => Some(RoadClass::Tertiary),
-        "residential" | "unclassified" | "living_street" => Some(RoadClass::Residential),
-        "service" => Some(RoadClass::Service),
-        "track" => Some(RoadClass::Track),
-        "path" | "cycleway" | "footway" | "pedestrian" | "steps" | "bridleway" => {
-            Some(RoadClass::Path)
-        }
+        "motorway" => Some(HighwayClass::Motorway),
+        "motorway_link" => Some(HighwayClass::MotorwayLink),
+        "trunk" => Some(HighwayClass::Trunk),
+        "trunk_link" => Some(HighwayClass::TrunkLink),
+        "primary" => Some(HighwayClass::Primary),
+        "primary_link" => Some(HighwayClass::PrimaryLink),
+        "secondary" => Some(HighwayClass::Secondary),
+        "secondary_link" => Some(HighwayClass::SecondaryLink),
+        "tertiary" => Some(HighwayClass::Tertiary),
+        "tertiary_link" => Some(HighwayClass::TertiaryLink),
+        "residential" => Some(HighwayClass::Residential),
+        "unclassified" => Some(HighwayClass::Unclassified),
+        "living_street" => Some(HighwayClass::LivingStreet),
+        "service" => Some(HighwayClass::Service),
+        "track" => Some(HighwayClass::Track),
+        "path" => Some(HighwayClass::Path),
+        "cycleway" => Some(HighwayClass::Cycleway),
+        "footway" => Some(HighwayClass::Footway),
+        "pedestrian" => Some(HighwayClass::Pedestrian),
+        "steps" => Some(HighwayClass::Steps),
+        "bridleway" => Some(HighwayClass::Bridleway),
         _ => None,
     }
 }
@@ -1980,6 +2013,163 @@ fn classify_direction(tags: &Tags, road_class: RoadClass) -> EdgeDirection {
         _ if tag(tags, "junction") == Some("roundabout") => EdgeDirection::ForwardOnly,
         _ => EdgeDirection::Both,
     }
+}
+
+fn classify_directional_access(
+    tags: &Tags,
+    highway: HighwayClass,
+    road_class: RoadClass,
+    base_access: AccessMask,
+) -> DirectionalAccess {
+    let generic_direction = classify_direction(tags, road_class);
+    let mut directional = DirectionalAccess {
+        forward_access: AccessMask::new(0),
+        reverse_access: AccessMask::new(0),
+        forward_flags: 0,
+        reverse_flags: 0,
+    };
+
+    for bit in [AccessMask::CAR, AccessMask::TRANSIT, AccessMask::HGV] {
+        if base_access.contains(bit) {
+            add_directional_bit(&mut directional, bit, generic_direction);
+        }
+    }
+
+    if base_access.contains(AccessMask::FOOT) {
+        let explicit_direction =
+            explicit_oneway_direction(tags, &["oneway:foot", "oneway:pedestrian"])
+                .or_else(|| access_forward_backward_direction(tags, "foot"));
+        if let Some(foot_direction) = explicit_direction {
+            add_directional_bit(&mut directional, AccessMask::FOOT, foot_direction);
+        } else {
+            add_bidirectional_bit_with_inferred_counterflow(
+                &mut directional,
+                AccessMask::FOOT,
+                generic_direction,
+                EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY,
+            );
+        }
+    }
+
+    if base_access.contains(AccessMask::BICYCLE) {
+        let explicit_direction =
+            explicit_oneway_direction(tags, &["oneway:bicycle", "bicycle:oneway"])
+                .or_else(|| access_forward_backward_direction(tags, "bicycle"));
+        if let Some(direction) = explicit_direction {
+            add_directional_bit(&mut directional, AccessMask::BICYCLE, direction);
+        } else if has_legacy_bicycle_opposite(tags) {
+            add_directional_bit(&mut directional, AccessMask::BICYCLE, EdgeDirection::Both);
+        } else if highway == HighwayClass::Cycleway {
+            add_directional_bit(&mut directional, AccessMask::BICYCLE, generic_direction);
+        } else if is_ordinary_bicycle_contraflow_road(highway) {
+            add_bidirectional_bit_with_inferred_counterflow(
+                &mut directional,
+                AccessMask::BICYCLE,
+                generic_direction,
+                EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW,
+            );
+        } else {
+            add_directional_bit(&mut directional, AccessMask::BICYCLE, generic_direction);
+        }
+    }
+
+    directional
+}
+
+fn add_directional_bit(directional: &mut DirectionalAccess, bit: u16, direction: EdgeDirection) {
+    match direction {
+        EdgeDirection::Both => {
+            directional.forward_access.0 |= bit;
+            directional.reverse_access.0 |= bit;
+        }
+        EdgeDirection::ForwardOnly => {
+            directional.forward_access.0 |= bit;
+        }
+        EdgeDirection::ReverseOnly => {
+            directional.reverse_access.0 |= bit;
+        }
+    }
+}
+
+fn add_bidirectional_bit_with_inferred_counterflow(
+    directional: &mut DirectionalAccess,
+    bit: u16,
+    generic_direction: EdgeDirection,
+    flag: u32,
+) {
+    directional.forward_access.0 |= bit;
+    directional.reverse_access.0 |= bit;
+    match generic_direction {
+        EdgeDirection::Both => {}
+        EdgeDirection::ForwardOnly => directional.reverse_flags |= flag,
+        EdgeDirection::ReverseOnly => directional.forward_flags |= flag,
+    }
+}
+
+fn explicit_oneway_direction(tags: &Tags, keys: &[&str]) -> Option<EdgeDirection> {
+    keys.iter()
+        .find_map(|key| tag(tags, key).and_then(parse_oneway_direction))
+}
+
+fn parse_oneway_direction(value: &str) -> Option<EdgeDirection> {
+    match value {
+        "-1" | "reverse" => Some(EdgeDirection::ReverseOnly),
+        "yes" | "true" | "1" => Some(EdgeDirection::ForwardOnly),
+        "no" | "false" | "0" => Some(EdgeDirection::Both),
+        _ => None,
+    }
+}
+
+fn access_forward_backward_direction(tags: &Tags, prefix: &str) -> Option<EdgeDirection> {
+    let forward_key = format!("{prefix}:forward");
+    let backward_key = format!("{prefix}:backward");
+    let forward_allowed = tag(tags, &forward_key).map(|value| !is_access_no(value));
+    let backward_allowed = tag(tags, &backward_key).map(|value| !is_access_no(value));
+    match (forward_allowed, backward_allowed) {
+        (Some(true), Some(true)) => Some(EdgeDirection::Both),
+        (Some(true), Some(false)) | (Some(true), None) | (None, Some(false)) => {
+            Some(EdgeDirection::ForwardOnly)
+        }
+        (Some(false), Some(true)) | (Some(false), None) | (None, Some(true)) => {
+            Some(EdgeDirection::ReverseOnly)
+        }
+        (Some(false), Some(false)) => Some(EdgeDirection::Both),
+        (None, None) => None,
+    }
+}
+
+fn is_access_no(value: &str) -> bool {
+    matches!(value, "no" | "private")
+}
+
+fn has_legacy_bicycle_opposite(tags: &Tags) -> bool {
+    matches!(
+        tag(tags, "cycleway"),
+        Some("opposite" | "opposite_lane" | "opposite_track" | "opposite_share_busway")
+    ) || matches!(
+        tag(tags, "cycleway:left"),
+        Some("opposite" | "opposite_lane" | "opposite_track" | "opposite_share_busway")
+    ) || matches!(
+        tag(tags, "cycleway:right"),
+        Some("opposite" | "opposite_lane" | "opposite_track" | "opposite_share_busway")
+    )
+}
+
+fn is_ordinary_bicycle_contraflow_road(highway: HighwayClass) -> bool {
+    matches!(
+        highway,
+        HighwayClass::Primary
+            | HighwayClass::PrimaryLink
+            | HighwayClass::Secondary
+            | HighwayClass::SecondaryLink
+            | HighwayClass::Tertiary
+            | HighwayClass::TertiaryLink
+            | HighwayClass::Residential
+            | HighwayClass::Unclassified
+            | HighwayClass::LivingStreet
+            | HighwayClass::Service
+            | HighwayClass::Track
+    )
 }
 
 fn parse_turn_restriction_relation(relation: &Relation) -> Option<TurnRestrictionCandidate> {
@@ -2281,22 +2471,27 @@ mod tests {
         EdgeDirection, PendingWay, RestrictionKind, TurnRestrictionCandidate, ViaSpec,
         apportioned_duration_s, build_dataset_acceleration_bundle,
         build_dataset_acceleration_bundle_with_settings, build_edge_based_topology,
-        build_turn_restrictions, classify_access, classify_direction, classify_highway,
-        haversine_meters, parse_duration_seconds, parse_turn_restriction_relation,
+        build_turn_restrictions, classify_access, classify_direction, classify_directional_access,
+        classify_highway, haversine_meters, parse_duration_seconds,
+        parse_turn_restriction_relation,
     };
     use netweevil_core::{
         AccelerationBuildProfile, AccelerationBuildSettings, AccessMask, CacheBundleId,
-        DirectedEdge, EdgeId, NodeId, RoadClass, SurfaceClass, TopologyBundle, TopologyNode,
-        TurnRestrictionKind,
+        DirectedEdge, EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW,
+        EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY, EdgeId, HighwayClass, NodeId, RoadClass,
+        SurfaceClass, TopologyBundle, TopologyNode, TurnRestrictionKind,
     };
     use osmpbfreader::{NodeId as OsmNodeId, OsmId, Ref, Relation, RelationId, Tags, WayId};
     use std::collections::HashMap;
 
     #[test]
     fn classifies_major_highways() {
-        assert_eq!(classify_highway("motorway"), Some(RoadClass::Motorway));
-        assert_eq!(classify_highway("primary_link"), Some(RoadClass::Primary));
-        assert_eq!(classify_highway("footway"), Some(RoadClass::Path));
+        assert_eq!(classify_highway("motorway"), Some(HighwayClass::Motorway));
+        assert_eq!(
+            classify_highway("primary_link"),
+            Some(HighwayClass::PrimaryLink)
+        );
+        assert_eq!(classify_highway("footway"), Some(HighwayClass::Footway));
         assert_eq!(classify_highway("construction"), None);
     }
 
@@ -2361,6 +2556,46 @@ mod tests {
             classify_direction(&empty, RoadClass::Residential),
             EdgeDirection::Both
         );
+    }
+
+    #[test]
+    fn builds_mode_specific_oneway_access() {
+        let road = Tags::from_iter([
+            ("highway".into(), "residential".into()),
+            ("oneway".into(), "yes".into()),
+        ]);
+        let access = classify_directional_access(
+            &road,
+            HighwayClass::Residential,
+            RoadClass::Residential,
+            AccessMask::new(AccessMask::CAR | AccessMask::BICYCLE | AccessMask::FOOT),
+        );
+        assert!(access.forward_access.contains(AccessMask::CAR));
+        assert!(!access.reverse_access.contains(AccessMask::CAR));
+        assert!(access.reverse_access.contains(AccessMask::FOOT));
+        assert!(access.reverse_access.contains(AccessMask::BICYCLE));
+        assert_ne!(
+            access.reverse_flags & EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY,
+            0
+        );
+        assert_ne!(
+            access.reverse_flags & EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW,
+            0
+        );
+
+        let cycleway = Tags::from_iter([
+            ("highway".into(), "cycleway".into()),
+            ("oneway".into(), "yes".into()),
+        ]);
+        let access = classify_directional_access(
+            &cycleway,
+            HighwayClass::Cycleway,
+            RoadClass::Path,
+            AccessMask::new(AccessMask::BICYCLE | AccessMask::FOOT),
+        );
+        assert!(access.forward_access.contains(AccessMask::BICYCLE));
+        assert!(!access.reverse_access.contains(AccessMask::BICYCLE));
+        assert!(access.reverse_access.contains(AccessMask::FOOT));
     }
 
     #[test]
@@ -2745,13 +2980,16 @@ mod tests {
             osm_way_id,
             node_ids: node_ids.to_vec(),
             road_class: RoadClass::Residential,
+            highway: HighwayClass::Residential,
             duration_s: None,
             surface: SurfaceClass::Asphalt,
             smoothness: Default::default(),
-            access_mask: AccessMask::new(AccessMask::CAR),
+            forward_access_mask: AccessMask::new(AccessMask::CAR),
+            reverse_access_mask: AccessMask::new(AccessMask::CAR),
             is_toll: false,
             is_roundabout: false,
-            direction: EdgeDirection::Both,
+            forward_extra_flags: 0,
+            reverse_extra_flags: 0,
             name: None,
         }
     }

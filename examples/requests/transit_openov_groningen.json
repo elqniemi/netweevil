@@ -25,7 +25,9 @@
     "max_transfer_distance_m": 500.0,
     "board_slack_s": 30,
     "transfer_slack_s": 120,
-    "max_transfers": 3
+    "max_transfers": 3,
+    "min_transit_leg_duration_s": 0,
+    "min_transit_leg_distance_m": 0.0
   },
   "returns": {
     "include_geometry": true,
