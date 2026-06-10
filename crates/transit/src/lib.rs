@@ -278,6 +278,10 @@ pub struct TransitModeOptions {
     pub transfer_slack_s: u32,
     #[serde(default = "default_max_transfers")]
     pub max_transfers: u8,
+    #[serde(default)]
+    pub min_transit_leg_duration_s: u32,
+    #[serde(default)]
+    pub min_transit_leg_distance_m: f64,
 }
 
 impl Default for TransitModeOptions {
@@ -295,6 +299,8 @@ impl Default for TransitModeOptions {
             board_slack_s: default_board_slack_s(),
             transfer_slack_s: default_transfer_slack_s(),
             max_transfers: default_max_transfers(),
+            min_transit_leg_duration_s: 0,
+            min_transit_leg_distance_m: 0.0,
         }
     }
 }
@@ -721,8 +727,11 @@ fn execute_transit_service_area_with_runtime(
     let mut skipped_origin_count = 0_usize;
 
     for origin in &request.origins {
-        let access =
-            runtime.nearby_stops(origin.lon, origin.lat, request.modes.max_access_distance_m);
+        let access = runtime.nearby_access_stops(
+            origin.lon,
+            origin.lat,
+            request.modes.max_access_distance_m,
+        );
         if access.is_empty() {
             skipped_origin_count += 1;
             diagnostics.push(format!(
@@ -777,41 +786,40 @@ fn execute_transit_service_area_with_runtime(
                 continue;
             }
 
-            let transfer_departure_s = if entry.state.trip_index == u32::MAX {
-                entry.time_s
-            } else {
-                entry.time_s.saturating_add(request.modes.transfer_slack_s)
-            };
-            for transfer in runtime.nearby_stop_indexes(
-                entry.state.stop_index,
-                request.modes.max_transfer_distance_m,
-            ) {
-                if transfer.stop_index == entry.state.stop_index {
-                    continue;
+            if can_start_transfer_walk(entry.state) {
+                let transfer_departure_s =
+                    entry.time_s.saturating_add(request.modes.transfer_slack_s);
+                for transfer in runtime.nearby_stop_indexes(
+                    entry.state.stop_index,
+                    request.modes.max_transfer_distance_m,
+                ) {
+                    if transfer.stop_index == entry.state.stop_index {
+                        continue;
+                    }
+                    let walk_s =
+                        seconds_for_distance(transfer.distance_m, request.modes.walk_speed_kph);
+                    let arrival_s = transfer_departure_s.saturating_add(walk_s);
+                    if arrival_s > time_limit_s {
+                        continue;
+                    }
+                    let next_state = StateKey {
+                        stop_index: transfer.stop_index,
+                        boardings: entry.state.boardings,
+                        trip_index: u32::MAX,
+                    };
+                    relax_state(
+                        &mut heap,
+                        &mut best,
+                        &mut prev,
+                        next_state,
+                        arrival_s,
+                        PrevStep::Transfer {
+                            previous: entry.state,
+                            distance_m: transfer.distance_m,
+                            departure_s: transfer_departure_s,
+                        },
+                    );
                 }
-                let walk_s =
-                    seconds_for_distance(transfer.distance_m, request.modes.walk_speed_kph);
-                let arrival_s = transfer_departure_s.saturating_add(walk_s);
-                if arrival_s > time_limit_s {
-                    continue;
-                }
-                let next_state = StateKey {
-                    stop_index: transfer.stop_index,
-                    boardings: entry.state.boardings,
-                    trip_index: u32::MAX,
-                };
-                relax_state(
-                    &mut heap,
-                    &mut best,
-                    &mut prev,
-                    next_state,
-                    arrival_s,
-                    PrevStep::Transfer {
-                        previous: entry.state,
-                        distance_m: transfer.distance_m,
-                        departure_s: transfer_departure_s,
-                    },
-                );
             }
 
             if let Some(departures) = runtime
@@ -1002,12 +1010,12 @@ fn execute_transit_route_with_runtime(
 
     let departure_s = runtime.request_departure_seconds(&request.time.datetime)?;
     let search_end_s = departure_s.saturating_add(request.time.search_window_s);
-    let access = runtime.nearby_stops(
+    let access = runtime.nearby_access_stops(
         request.origin.lon,
         request.origin.lat,
         request.modes.max_access_distance_m,
     );
-    let egress = runtime.nearby_stops(
+    let egress = runtime.nearby_access_stops(
         request.destination.lon,
         request.destination.lat,
         request.modes.max_egress_distance_m,
@@ -1068,6 +1076,8 @@ fn execute_transit_route_with_runtime(
     let mut best_final: Option<(u32, StateKey, u32)> = None;
     let mut final_candidates = Vec::<(u32, StateKey, u32)>::new();
     let collect_alternatives = request.alternatives.max_routes > 1;
+    let collect_final_candidates =
+        collect_alternatives || transit_leg_minimums_enabled(&request.modes);
 
     while let Some(entry) = heap.pop() {
         if best
@@ -1092,50 +1102,51 @@ fn execute_transit_route_with_runtime(
             continue;
         }
 
-        if let Some(distance_m) = egress_by_stop.get(&entry.state.stop_index).copied() {
-            let walk_s = seconds_for_distance(distance_m, request.modes.walk_speed_kph);
-            let arrival_s = entry.time_s.saturating_add(walk_s);
-            if collect_alternatives {
-                final_candidates.push((arrival_s, entry.state, walk_s));
-            }
-            if best_final
-                .as_ref()
-                .is_none_or(|(best_arrival_s, _, _)| arrival_s < *best_arrival_s)
-            {
-                best_final = Some((arrival_s, entry.state, walk_s));
+        if can_finish_with_egress(entry.state) {
+            if let Some(distance_m) = egress_by_stop.get(&entry.state.stop_index).copied() {
+                let walk_s = seconds_for_distance(distance_m, request.modes.walk_speed_kph);
+                let arrival_s = entry.time_s.saturating_add(walk_s);
+                if collect_final_candidates {
+                    final_candidates.push((arrival_s, entry.state, walk_s));
+                }
+                if best_final
+                    .as_ref()
+                    .is_none_or(|(best_arrival_s, _, _)| arrival_s < *best_arrival_s)
+                {
+                    best_final = Some((arrival_s, entry.state, walk_s));
+                }
             }
         }
 
-        let transfer_departure_s = if entry.state.trip_index == u32::MAX {
-            entry.time_s
-        } else {
-            entry.time_s.saturating_add(request.modes.transfer_slack_s)
-        };
-        for transfer in runtime.nearby_stop_indexes(
-            entry.state.stop_index,
-            request.modes.max_transfer_distance_m,
-        ) {
-            if transfer.stop_index == entry.state.stop_index {
-                continue;
+        if can_start_transfer_walk(entry.state) {
+            let transfer_departure_s = entry.time_s.saturating_add(request.modes.transfer_slack_s);
+            for transfer in runtime.nearby_stop_indexes(
+                entry.state.stop_index,
+                request.modes.max_transfer_distance_m,
+            ) {
+                if transfer.stop_index == entry.state.stop_index {
+                    continue;
+                }
+                let walk_s =
+                    seconds_for_distance(transfer.distance_m, request.modes.walk_speed_kph);
+                let next_state = StateKey {
+                    stop_index: transfer.stop_index,
+                    boardings: entry.state.boardings,
+                    trip_index: u32::MAX,
+                };
+                relax_state(
+                    &mut heap,
+                    &mut best,
+                    &mut prev,
+                    next_state,
+                    transfer_departure_s.saturating_add(walk_s),
+                    PrevStep::Transfer {
+                        previous: entry.state,
+                        distance_m: transfer.distance_m,
+                        departure_s: transfer_departure_s,
+                    },
+                );
             }
-            let walk_s = seconds_for_distance(transfer.distance_m, request.modes.walk_speed_kph);
-            let next_state = StateKey {
-                stop_index: transfer.stop_index,
-                boardings: entry.state.boardings,
-                trip_index: u32::MAX,
-            };
-            relax_state(
-                &mut heap,
-                &mut best,
-                &mut prev,
-                next_state,
-                transfer_departure_s.saturating_add(walk_s),
-                PrevStep::Transfer {
-                    previous: entry.state,
-                    distance_m: transfer.distance_m,
-                    departure_s: transfer_departure_s,
-                },
-            );
         }
 
         if let Some(departures) = runtime
@@ -1186,7 +1197,16 @@ fn execute_transit_route_with_runtime(
         }
     }
 
-    let Some((arrival_s, final_state, egress_walk_s)) = best_final else {
+    let found_final_candidate = best_final.is_some();
+    let Some((arrival_s, _final_state, _egress_walk_s, mut legs)) = select_transit_final_candidate(
+        bundle,
+        &runtime,
+        request,
+        &prev,
+        best_final,
+        &mut final_candidates,
+    )?
+    else {
         return Ok(TransitRouteResult {
             route_id: request.route_id.clone(),
             outcome: TransitOutcome::Unreachable,
@@ -1197,20 +1217,13 @@ fn execute_transit_route_with_runtime(
             legs: Vec::new(),
             stops: Vec::new(),
             stop_segments: Vec::new(),
-            diagnostics: vec!["no scheduled journey found inside the search window".to_string()],
+            diagnostics: vec![unreachable_transit_route_diagnostic(
+                request,
+                found_final_candidate,
+            )],
             alternatives: Vec::new(),
         });
     };
-
-    let mut legs = reconstruct_legs(
-        bundle,
-        &runtime,
-        request,
-        &prev,
-        final_state,
-        arrival_s,
-        egress_walk_s,
-    )?;
     let stops = request
         .returns
         .include_stops
@@ -1261,6 +1274,64 @@ fn transit_alternative_arrival_limit(
     ratio_limit.min(extra_limit)
 }
 
+fn select_transit_final_candidate(
+    bundle: &TransitBundle,
+    runtime: &TransitRuntime<'_>,
+    request: &TransitRouteRequest,
+    prev: &HashMap<StateKey, PrevStep>,
+    best_final: Option<(u32, StateKey, u32)>,
+    final_candidates: &mut Vec<(u32, StateKey, u32)>,
+) -> Result<Option<(u32, StateKey, u32, Vec<TransitLeg>)>> {
+    if !transit_leg_minimums_enabled(&request.modes) {
+        let Some((arrival_s, final_state, egress_walk_s)) = best_final else {
+            return Ok(None);
+        };
+        let legs = reconstruct_legs(
+            bundle,
+            runtime,
+            request,
+            prev,
+            final_state,
+            arrival_s,
+            egress_walk_s,
+        )?;
+        return Ok(Some((arrival_s, final_state, egress_walk_s, legs)));
+    }
+
+    final_candidates.sort_by_key(|(arrival_s, state, _)| (*arrival_s, state.boardings));
+    for &(arrival_s, final_state, egress_walk_s) in final_candidates.iter() {
+        let legs = reconstruct_legs(
+            bundle,
+            runtime,
+            request,
+            prev,
+            final_state,
+            arrival_s,
+            egress_walk_s,
+        )?;
+        let mut coalesced = legs.clone();
+        coalesce_transit_legs(&mut coalesced);
+        if transit_legs_satisfy_minimums(bundle, &coalesced, &request.modes) {
+            return Ok(Some((arrival_s, final_state, egress_walk_s, legs)));
+        }
+    }
+
+    Ok(None)
+}
+
+fn unreachable_transit_route_diagnostic(
+    request: &TransitRouteRequest,
+    found_candidate: bool,
+) -> String {
+    if found_candidate && transit_leg_minimums_enabled(&request.modes) {
+        return format!(
+            "no scheduled journey found that satisfies minimum transit leg constraints (min duration {} s, min distance {:.0} m)",
+            request.modes.min_transit_leg_duration_s, request.modes.min_transit_leg_distance_m
+        );
+    }
+    "no scheduled journey found inside the search window".to_string()
+}
+
 fn build_transit_alternatives(
     bundle: &TransitBundle,
     runtime: &TransitRuntime<'_>,
@@ -1298,6 +1369,9 @@ fn build_transit_alternatives(
             egress_walk_s,
         )?;
         coalesce_transit_legs(&mut legs);
+        if !transit_legs_satisfy_minimums(bundle, &legs, &request.modes) {
+            continue;
+        }
         let signature = transit_leg_signature(&legs);
         if !signatures.insert(signature) {
             continue;
@@ -2104,18 +2178,34 @@ impl<'a> TransitRuntime<'a> {
             + parsed.second() as u32)
     }
 
-    fn nearby_stops(&self, lon: f64, lat: f64, max_distance_m: f64) -> Vec<StopCandidate> {
+    fn nearby_access_stops(&self, lon: f64, lat: f64, max_distance_m: f64) -> Vec<StopCandidate> {
+        self.nearby_stops(lon, lat, max_distance_m, None)
+    }
+
+    fn nearby_transfer_stops(&self, lon: f64, lat: f64, max_distance_m: f64) -> Vec<StopCandidate> {
+        self.nearby_stops(lon, lat, max_distance_m, Some(32))
+    }
+
+    fn nearby_stops(
+        &self,
+        lon: f64,
+        lat: f64,
+        max_distance_m: f64,
+        limit: Option<usize>,
+    ) -> Vec<StopCandidate> {
         let mut candidates = self
             .stop_index
             .nearby_stops(self.bundle, lon, lat, max_distance_m);
         candidates.sort_by(|left, right| left.distance_m.total_cmp(&right.distance_m));
-        candidates.truncate(32);
+        if let Some(limit) = limit {
+            candidates.truncate(limit);
+        }
         candidates
     }
 
     fn nearby_stop_indexes(&self, stop_index: u32, max_distance_m: f64) -> Vec<StopCandidate> {
         let stop = &self.bundle.stops[stop_index as usize];
-        self.nearby_stops(stop.lon, stop.lat, max_distance_m)
+        self.nearby_transfer_stops(stop.lon, stop.lat, max_distance_m)
     }
 }
 
@@ -2146,6 +2236,14 @@ struct StateKey {
     stop_index: u32,
     boardings: u8,
     trip_index: u32,
+}
+
+fn can_start_transfer_walk(state: StateKey) -> bool {
+    state.boardings > 0 && state.trip_index != u32::MAX
+}
+
+fn can_finish_with_egress(state: StateKey) -> bool {
+    state.boardings > 0 && state.trip_index != u32::MAX
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -2433,6 +2531,62 @@ fn build_transit_route_stop_segments(legs: &[TransitLeg]) -> Vec<TransitRouteSto
             geometry: leg.geometry.clone(),
         })
         .collect()
+}
+
+fn transit_leg_minimums_enabled(modes: &TransitModeOptions) -> bool {
+    modes.min_transit_leg_duration_s > 0 || modes.min_transit_leg_distance_m > 0.0
+}
+
+fn transit_legs_satisfy_minimums(
+    bundle: &TransitBundle,
+    legs: &[TransitLeg],
+    modes: &TransitModeOptions,
+) -> bool {
+    legs.iter()
+        .filter(|leg| leg.leg_type == TransitLegType::Transit)
+        .all(|leg| transit_leg_satisfies_minimums(bundle, leg, modes))
+}
+
+fn transit_leg_satisfies_minimums(
+    bundle: &TransitBundle,
+    leg: &TransitLeg,
+    modes: &TransitModeOptions,
+) -> bool {
+    if !transit_leg_minimums_enabled(modes) {
+        return true;
+    }
+
+    let duration_ok = modes.min_transit_leg_duration_s == 0
+        || leg.arrival_s.saturating_sub(leg.departure_s) >= modes.min_transit_leg_duration_s;
+    let distance_ok = modes.min_transit_leg_distance_m <= 0.0
+        || transit_leg_distance_m(bundle, leg)
+            .is_some_and(|distance_m| distance_m >= modes.min_transit_leg_distance_m);
+
+    if modes.min_transit_leg_duration_s > 0 && modes.min_transit_leg_distance_m > 0.0 {
+        duration_ok || distance_ok
+    } else {
+        duration_ok && distance_ok
+    }
+}
+
+fn transit_leg_distance_m(bundle: &TransitBundle, leg: &TransitLeg) -> Option<f64> {
+    if leg.geometry.len() >= 2 {
+        return Some(linestring_distance_m(&leg.geometry));
+    }
+
+    let from = bundle
+        .stops
+        .iter()
+        .find(|stop| stop.stop_id == leg.from_id)?;
+    let to = bundle.stops.iter().find(|stop| stop.stop_id == leg.to_id)?;
+    Some(haversine_m(from.lon, from.lat, to.lon, to.lat))
+}
+
+fn linestring_distance_m(points: &[[f64; 2]]) -> f64 {
+    points
+        .windows(2)
+        .map(|window| haversine_m(window[0][0], window[0][1], window[1][0], window[1][1]))
+        .sum()
 }
 
 fn summarize_legs(departure_s: u32, arrival_s: u32, legs: &[TransitLeg]) -> TransitRouteSummary {
@@ -2796,6 +2950,191 @@ mod tests {
     }
 
     #[test]
+    fn does_not_walk_transfer_before_first_boarding() {
+        let bundle = build_bundle_from_files(
+            access_transfer_fixture_files(),
+            "abc".to_string(),
+            TransitImportOptions {
+                name: "fixture".to_string(),
+                source_label: "fixture".to_string(),
+                service_start_date: "2026-05-11".to_string(),
+                service_days: 1,
+            },
+        )
+        .expect("fixture imports");
+        let request = TransitRouteRequest {
+            route_id: "no_preboard_transfer".to_string(),
+            origin: TransitPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: TransitPoint {
+                id: "dest".to_string(),
+                lon: 6.01,
+                lat: 53.0,
+            },
+            time: TransitQueryTime {
+                datetime: "2026-05-11T08:00:00+02:00".to_string(),
+                arrive_by: false,
+                search_window_s: 3600,
+            },
+            modes: TransitModeOptions {
+                max_access_distance_m: 100.0,
+                max_egress_distance_m: 100.0,
+                max_transfer_distance_m: 1_000.0,
+                ..TransitModeOptions::default()
+            },
+            returns: TransitReturnOptions::default(),
+            alternatives: TransitAlternativeOptions::default(),
+        };
+
+        let result = execute_transit_route(&bundle, &request).expect("route executes");
+
+        assert_eq!(result.outcome, TransitOutcome::Unreachable);
+        assert!(result.legs.is_empty());
+    }
+
+    #[test]
+    fn does_not_finish_by_transferring_to_an_egress_stop() {
+        let bundle = build_bundle_from_files(
+            terminal_transfer_fixture_files(),
+            "abc".to_string(),
+            TransitImportOptions {
+                name: "fixture".to_string(),
+                source_label: "fixture".to_string(),
+                service_start_date: "2026-05-11".to_string(),
+                service_days: 1,
+            },
+        )
+        .expect("fixture imports");
+        let request = TransitRouteRequest {
+            route_id: "no_terminal_transfer".to_string(),
+            origin: TransitPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: TransitPoint {
+                id: "dest".to_string(),
+                lon: 6.01,
+                lat: 53.0,
+            },
+            time: TransitQueryTime {
+                datetime: "2026-05-11T08:00:00+02:00".to_string(),
+                arrive_by: false,
+                search_window_s: 3600,
+            },
+            modes: TransitModeOptions {
+                max_access_distance_m: 100.0,
+                max_egress_distance_m: 100.0,
+                max_transfer_distance_m: 1_000.0,
+                ..TransitModeOptions::default()
+            },
+            returns: TransitReturnOptions::default(),
+            alternatives: TransitAlternativeOptions::default(),
+        };
+
+        let result = execute_transit_route(&bundle, &request).expect("route executes");
+
+        assert_eq!(result.outcome, TransitOutcome::Unreachable);
+        assert!(result.legs.is_empty());
+    }
+
+    #[test]
+    fn rejects_routes_with_transit_legs_below_minimum_duration() {
+        let bundle = build_bundle_from_files(
+            fixture_files(),
+            "abc".to_string(),
+            TransitImportOptions {
+                name: "fixture".to_string(),
+                source_label: "fixture".to_string(),
+                service_start_date: "2026-05-11".to_string(),
+                service_days: 1,
+            },
+        )
+        .expect("fixture imports");
+        let request = TransitRouteRequest {
+            route_id: "min_leg_duration".to_string(),
+            origin: TransitPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: TransitPoint {
+                id: "dest".to_string(),
+                lon: 6.02,
+                lat: 53.0,
+            },
+            time: TransitQueryTime {
+                datetime: "2026-05-11T08:00:00+02:00".to_string(),
+                arrive_by: false,
+                search_window_s: 3600,
+            },
+            modes: TransitModeOptions {
+                max_access_distance_m: 100.0,
+                max_egress_distance_m: 100.0,
+                min_transit_leg_duration_s: 600,
+                ..TransitModeOptions::default()
+            },
+            returns: TransitReturnOptions::default(),
+            alternatives: TransitAlternativeOptions::default(),
+        };
+
+        let result = execute_transit_route(&bundle, &request).expect("route executes");
+
+        assert_eq!(result.outcome, TransitOutcome::Unreachable);
+        assert!(result.diagnostics[0].contains("minimum transit leg constraints"));
+    }
+
+    #[test]
+    fn accepts_routes_when_transit_leg_distance_minimum_passes() {
+        let bundle = build_bundle_from_files(
+            fixture_files(),
+            "abc".to_string(),
+            TransitImportOptions {
+                name: "fixture".to_string(),
+                source_label: "fixture".to_string(),
+                service_start_date: "2026-05-11".to_string(),
+                service_days: 1,
+            },
+        )
+        .expect("fixture imports");
+        let request = TransitRouteRequest {
+            route_id: "min_leg_distance".to_string(),
+            origin: TransitPoint {
+                id: "origin".to_string(),
+                lon: 6.0,
+                lat: 53.0,
+            },
+            destination: TransitPoint {
+                id: "dest".to_string(),
+                lon: 6.02,
+                lat: 53.0,
+            },
+            time: TransitQueryTime {
+                datetime: "2026-05-11T08:00:00+02:00".to_string(),
+                arrive_by: false,
+                search_window_s: 3600,
+            },
+            modes: TransitModeOptions {
+                max_access_distance_m: 100.0,
+                max_egress_distance_m: 100.0,
+                min_transit_leg_duration_s: 600,
+                min_transit_leg_distance_m: 1_000.0,
+                ..TransitModeOptions::default()
+            },
+            returns: TransitReturnOptions::default(),
+            alternatives: TransitAlternativeOptions::default(),
+        };
+
+        let result = execute_transit_route(&bundle, &request).expect("route executes");
+
+        assert_eq!(result.outcome, TransitOutcome::Scheduled);
+        assert_eq!(result.summary.boarding_count, 1);
+    }
+
+    #[test]
     fn expands_frequency_based_trips() {
         let bundle = build_bundle_from_files(
             frequency_fixture_files(),
@@ -2969,6 +3308,66 @@ mod tests {
         files.insert(
             "frequencies.txt",
             "trip_id,start_time,end_time,headway_secs\nT1,08:00:00,08:31:00,600\n".to_string(),
+        );
+        files
+    }
+
+    fn access_transfer_fixture_files() -> GtfsFiles {
+        let mut files = GtfsFiles::default();
+        files.insert(
+            "stops.txt",
+            "stop_id,stop_name,stop_lat,stop_lon\nA,A,53.0,6.0\nB,B,53.0,6.005\nC,C,53.0,6.01\n"
+                .to_string(),
+        );
+        files.insert(
+            "routes.txt",
+            "route_id,route_short_name,route_long_name,route_type\nR,1,Line 1,3\n".to_string(),
+        );
+        files.insert(
+            "trips.txt",
+            "route_id,service_id,trip_id,trip_headsign\nR,WEEK,T1,C\n".to_string(),
+        );
+        files.insert(
+            "calendar.txt",
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nWEEK,1,1,1,1,1,1,1,20260501,20260531\n".to_string(),
+        );
+        files.insert(
+            "calendar_dates.txt",
+            "service_id,date,exception_type\n".to_string(),
+        );
+        files.insert(
+            "stop_times.txt",
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,08:10:00,08:10:30,B,1\nT1,08:15:00,08:15:00,C,2\n".to_string(),
+        );
+        files
+    }
+
+    fn terminal_transfer_fixture_files() -> GtfsFiles {
+        let mut files = GtfsFiles::default();
+        files.insert(
+            "stops.txt",
+            "stop_id,stop_name,stop_lat,stop_lon\nA,A,53.0,6.0\nB,B,53.0,6.005\nC,C,53.0,6.01\n"
+                .to_string(),
+        );
+        files.insert(
+            "routes.txt",
+            "route_id,route_short_name,route_long_name,route_type\nR,1,Line 1,3\n".to_string(),
+        );
+        files.insert(
+            "trips.txt",
+            "route_id,service_id,trip_id,trip_headsign\nR,WEEK,T1,B\n".to_string(),
+        );
+        files.insert(
+            "calendar.txt",
+            "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nWEEK,1,1,1,1,1,1,1,20260501,20260531\n".to_string(),
+        );
+        files.insert(
+            "calendar_dates.txt",
+            "service_id,date,exception_type\n".to_string(),
+        );
+        files.insert(
+            "stop_times.txt",
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,08:10:00,08:10:30,A,1\nT1,08:15:00,08:15:00,B,2\n".to_string(),
         );
         files
     }

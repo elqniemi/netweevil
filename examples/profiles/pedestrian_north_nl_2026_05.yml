@@ -1,6 +1,6 @@
 profile:
-  id: pedestrian_research_v1
-  label: "Pedestrian profile for local OD analysis"
+  id: pedestrian_north_nl_2026_05
+  label: "Pedestrian profile for North Netherlands May 2026"
   mode: foot
   defaults_pack: eu_foot_2026_01
   extends: foot_default
@@ -11,6 +11,12 @@ cost:
   time_weight: 1.0
 
 speed_rules:
+  - match:
+      highway: footway
+    speed_kph: 5.0
+  - match:
+      highway: pedestrian
+    speed_kph: 5.0
   - match:
       highway: path
     speed_kph: 5.0
@@ -38,6 +44,7 @@ exclude_rules:
       highway: motorway
   - match:
       highway: trunk
+
 factors:
   - match:
       surface: gravel
@@ -71,7 +78,7 @@ direction:
   ignore_plain_oneway_for_foot: true
 
 ferry:
-  allow: false
+  allow: true
   use_ferry: 0.25
   boarding_cost_s: 120
   infer_duration_when_missing: true

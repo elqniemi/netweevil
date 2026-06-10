@@ -1,0 +1,78 @@
+profile:
+  id: car_north_nl_2026_05
+  label: "Car profile for North Netherlands May 2026"
+  mode: car
+  defaults_pack: eu_car_2026_01
+  extends: car_default
+
+cost:
+  objective: fastest
+  distance_weight: 0.0
+  time_weight: 1.0
+
+speed_rules:
+  - match:
+      highway: motorway
+    speed_kph: 100
+  - match:
+      highway: trunk
+    speed_kph: 80
+  - match:
+      highway: primary
+    speed_kph: 70
+  - match:
+      highway: secondary
+    speed_kph: 60
+  - match:
+      highway: tertiary
+    speed_kph: 50
+  - match:
+      highway: residential
+    speed_kph: 30
+  - match:
+      highway: service
+    speed_kph: 20
+  - match:
+      highway: track
+      surface: gravel
+    speed_kph: 12
+
+factors:
+  - match:
+      surface: cobblestone
+    speed_factor: 0.75
+  - match:
+      smoothness: bad
+    speed_factor: 0.70
+
+turns:
+  left_penalty_s: 4
+  right_penalty_s: 1
+  uturn_penalty_s: 25
+  traffic_signal_penalty_s: 6
+  roundabout_entry_penalty_s: 2
+
+ferry:
+  allow: true
+  use_ferry: 0.35
+  boarding_cost_s: 300
+  infer_duration_when_missing: true
+  default_speed_kph: 22
+
+preferences:
+  use_highways: 0.8
+  use_tolls: 0.4
+  use_tracks: 0.1
+  service_penalty_s: 15
+
+returns:
+  geometry: full
+  segment_rows: true
+  road_type_breakdown:
+    - time_s
+    - distance_m
+  surface_breakdown:
+    - time_s
+    - distance_m
+  penalty_breakdown: true
+  explain_cost_derivation: true

@@ -1,6 +1,6 @@
 profile:
-  id: bicycle_cycle_path_preferred_v1
-  label: "Bicycle profile with strong cycle-path preference"
+  id: cycling_north_nl_2026_05
+  label: "Cycling profile for North Netherlands May 2026"
   mode: bicycle
   defaults_pack: eu_bicycle_2026_01
   extends: bicycle_default
@@ -12,8 +12,11 @@ cost:
 
 speed_rules:
   - match:
-      highway: path
+      highway: cycleway
     speed_kph: 23.0
+  - match:
+      highway: path
+    speed_kph: 20.0
   - match:
       highway: residential
     speed_kph: 18.0

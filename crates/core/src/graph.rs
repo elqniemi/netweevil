@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 pub const EDGE_FLAG_ROUNDABOUT: u32 = 1 << 0;
 pub const EDGE_FLAG_TARGET_TRAFFIC_SIGNAL: u32 = 1 << 1;
+pub const EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY: u32 = 1 << 2;
+pub const EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW: u32 = 1 << 3;
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
@@ -28,6 +30,74 @@ pub enum RoadClass {
     Path,
     #[default]
     Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HighwayClass {
+    Motorway,
+    MotorwayLink,
+    Trunk,
+    TrunkLink,
+    Primary,
+    PrimaryLink,
+    Secondary,
+    SecondaryLink,
+    Tertiary,
+    TertiaryLink,
+    Residential,
+    Unclassified,
+    LivingStreet,
+    Service,
+    Track,
+    Path,
+    Cycleway,
+    Footway,
+    Pedestrian,
+    Steps,
+    Bridleway,
+    Ferry,
+    #[default]
+    Unknown,
+}
+
+impl HighwayClass {
+    pub const fn road_class(self) -> RoadClass {
+        match self {
+            Self::Motorway | Self::MotorwayLink => RoadClass::Motorway,
+            Self::Trunk | Self::TrunkLink => RoadClass::Trunk,
+            Self::Primary | Self::PrimaryLink => RoadClass::Primary,
+            Self::Secondary | Self::SecondaryLink => RoadClass::Secondary,
+            Self::Tertiary | Self::TertiaryLink => RoadClass::Tertiary,
+            Self::Residential | Self::Unclassified | Self::LivingStreet => RoadClass::Residential,
+            Self::Service => RoadClass::Service,
+            Self::Track => RoadClass::Track,
+            Self::Path
+            | Self::Cycleway
+            | Self::Footway
+            | Self::Pedestrian
+            | Self::Steps
+            | Self::Bridleway => RoadClass::Path,
+            Self::Ferry => RoadClass::Ferry,
+            Self::Unknown => RoadClass::Unknown,
+        }
+    }
+
+    pub const fn from_road_class(road_class: RoadClass) -> Self {
+        match road_class {
+            RoadClass::Motorway => Self::Motorway,
+            RoadClass::Trunk => Self::Trunk,
+            RoadClass::Primary => Self::Primary,
+            RoadClass::Secondary => Self::Secondary,
+            RoadClass::Tertiary => Self::Tertiary,
+            RoadClass::Residential => Self::Residential,
+            RoadClass::Service => Self::Service,
+            RoadClass::Track => Self::Track,
+            RoadClass::Ferry => Self::Ferry,
+            RoadClass::Path => Self::Path,
+            RoadClass::Unknown => Self::Unknown,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -115,6 +185,8 @@ pub struct EdgeProfileAttributes {
     #[serde(default)]
     pub duration_s: Option<f64>,
     pub road_class: RoadClass,
+    #[serde(default)]
+    pub highway: HighwayClass,
     pub surface: SurfaceClass,
     #[serde(default)]
     pub smoothness: SmoothnessClass,
@@ -157,6 +229,7 @@ impl TopologyEdgeLayers {
             profile.push(EdgeProfileAttributes {
                 duration_s: edge.duration_s,
                 road_class: edge.road_class,
+                highway: HighwayClass::from_road_class(edge.road_class),
                 surface: edge.surface,
                 smoothness: edge.smoothness,
                 access_mask: edge.access_mask,
@@ -339,6 +412,7 @@ impl TopologyBundle {
             EdgeProfileAttributes {
                 duration_s: edge.duration_s,
                 road_class: edge.road_class,
+                highway: HighwayClass::from_road_class(edge.road_class),
                 surface: edge.surface,
                 smoothness: edge.smoothness,
                 access_mask: edge.access_mask,
@@ -403,6 +477,7 @@ impl TopologyBundle {
             self.edge_layers.profile.push(EdgeProfileAttributes {
                 duration_s: edge.duration_s,
                 road_class: edge.road_class,
+                highway: HighwayClass::from_road_class(edge.road_class),
                 surface: edge.surface,
                 smoothness: edge.smoothness,
                 access_mask: edge.access_mask,
