@@ -2,14 +2,29 @@
 name=netweevil
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99.0
+supportsQt6=True
 description=Run netweevil API route, transit, OD, matrix, service-area, and agent-based traffic simulation analyses with live playback, congestion layers, and grouped output layers directly in QGIS 3 and QGIS 4.
-version=0.9.0
+version=1.0.0
 icon=logo.svg
 author=Elmeri Niemi
-email=none@example.invalid
-about=Connects QGIS directly to the netweevil HTTP API, discovers loaded datasets, profiles, and transit feeds, submits route/transit/OD/matrix/service-area JSON requests with advanced analysis controls, runs multi-mode agent-based traffic simulations with mid-run control, animated playback, congestion and busy-segment layers, and loads grouped spatial outputs from API JSON or GeoJSON responses.
+email=elmeri.niemi@gmail.com
+about=Connects QGIS directly to the netweevil HTTP API, discovers loaded datasets, profiles, and transit feeds, submits route/transit/OD/matrix/service-area JSON requests with advanced analysis controls, runs multi-mode agent-based traffic simulations with mid-run control, animated playback, congestion and busy-segment layers, and loads grouped spatial outputs from API JSON or GeoJSON responses. Works on QGIS 3.28+ (Qt 5) and QGIS 4 (Qt 6).
 category=Vector
 hasProcessingProvider=no
-
-[help]
-homepage=https://example.invalid/netweevil
+tags=routing,network analysis,accessibility,service area,transit,gtfs,simulation,osm
+homepage=https://github.com/elqniemi/netweevil
+tracker=https://github.com/elqniemi/netweevil/issues
+repository=https://github.com/elqniemi/netweevil
+changelog=
+  1.0.0
+  - QGIS 4 / Qt 6 support (supportsQt6, scoped-enum-safe compatibility layer)
+  - Plugin split into focused modules instead of one 6000-line file
+  - Always-visible connection bar with status indicator, auto-connect on open,
+    and lazy reconnect before every run
+  - Task-first tab order; points-first layouts in Route and Transit
+  - Service Area tab only shows the controls the selected mode actually uses
+  - Unsafe degraded-routing modes no longer persist between sessions and are
+    highlighted in red while enabled
+  - Workspace root no longer defaults to the plugin install directory
+  - Friendly validation messages and non-modal message-bar alerts
+  - Request JSON defaults moved out of examples/ into .netweevil/requests/

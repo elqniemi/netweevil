@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="qgis_plugin/netweevil_qgis/logo.svg" alt="netweevil logo" width="128" height="128">
+</p>
+
 # netweevil
 
 `netweevil` is a Rust-first local network analysis system for OSM routing research, reproducible analysis runs, GTFS transit experiments, agent-based traffic simulation, and QGIS workflows.
