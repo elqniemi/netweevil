@@ -211,7 +211,10 @@ fn prepared_engine_reuses_prebuilt_graph() {
 #[test]
 fn accelerated_query_returns_an_unpacked_path() {
     let topology = test_topology();
-    let graph = build_routing_graph(&topology, &accelerated_test_metrics()).expect("graph builds");
+    let (bundle, metrics) = build_test_cch(&topology, &test_metrics());
+    let graph = crate::build_routing_graph_from_shared(&topology, Arc::new(metrics), Some(bundle))
+        .expect("graph builds");
+    assert!(graph.acceleration.is_some(), "test CCH must be active");
 
     let path = crate::accelerated_route_query(&topology, &graph, 0, 2)
         .expect("accelerated query succeeds")
@@ -632,13 +635,14 @@ fn matrix_matches_repeated_exact_route_execution() {
 #[test]
 fn accelerated_engine_matches_exact_engine_on_small_topology() {
     let topology = test_topology();
+    let (bundle, accelerated_metrics) = build_test_cch(&topology, &test_metrics());
     let exact_engine =
         PreparedRoutingEngine::new(Arc::new(topology.clone()), Arc::new(test_metrics()), None)
             .expect("exact engine builds");
     let accelerated_engine = PreparedRoutingEngine::new(
         Arc::new(topology),
-        Arc::new(accelerated_test_metrics()),
-        None,
+        Arc::new(accelerated_metrics),
+        Some(bundle),
     )
     .expect("accelerated engine builds");
 
@@ -713,12 +717,16 @@ fn accelerated_engine_matches_exact_engine_on_small_topology() {
 }
 
 #[test]
-fn accelerated_engine_falls_back_to_exact_when_shortcuts_miss_pair() {
+fn accelerated_engine_excludes_profile_pruned_edges() {
     let topology = test_topology();
+    let mut sparse_metrics = test_metrics();
+    sparse_metrics.edge_metrics[2].travel_time_s = None;
+    sparse_metrics.edge_metrics[2].generalized_cost = None;
+    let (bundle, accelerated_metrics) = build_test_cch(&topology, &sparse_metrics);
     let engine = PreparedRoutingEngine::new(
         Arc::new(topology),
-        Arc::new(sparse_acceleration_metrics()),
-        None,
+        Arc::new(accelerated_metrics),
+        Some(bundle),
     )
     .expect("accelerated engine builds");
     let request = RouteRequest {
@@ -744,50 +752,82 @@ fn accelerated_engine_falls_back_to_exact_when_shortcuts_miss_pair() {
 
     let route = engine
         .execute_route(&request)
-        .expect("exact fallback route succeeds");
+        .expect("accelerated route succeeds");
     assert_eq!(route.summary.total_distance_m, 300);
     assert_eq!(route.summary.total_travel_time_s, 30.0);
 }
 
 #[test]
-fn accelerated_engine_uses_shortcut_route_only_as_exact_upper_bound() {
-    let topology = test_topology();
-    let engine = PreparedRoutingEngine::new(
-        Arc::new(topology),
-        Arc::new(direct_only_acceleration_metrics()),
-        None,
+fn accelerated_engine_matches_exact_engine_under_pairwise_restrictions() {
+    let topology = restricted_topology();
+    let metrics = restricted_metrics();
+    let (bundle, accelerated_metrics) = build_test_cch(&topology, &metrics);
+    let exact_engine =
+        PreparedRoutingEngine::new(Arc::new(topology.clone()), Arc::new(metrics), None)
+            .expect("exact engine builds");
+    let accelerated_engine = PreparedRoutingEngine::new(
+        Arc::new(topology.clone()),
+        Arc::new(accelerated_metrics),
+        Some(bundle),
     )
     .expect("accelerated engine builds");
-    let request = RouteRequest {
-        route_id: "a_to_c_direct_upper_bound".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            segment_rows: true,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-    };
 
-    let route = engine
-        .execute_route(&request)
-        .expect("exact route succeeds");
-    assert_eq!(route.edge_path, vec![0, 1]);
-    assert_eq!(route.summary.total_distance_m, 300);
-    assert_eq!(route.summary.total_travel_time_s, 30.0);
+    // All-pairs differential against the exact engine, including the pair
+    // affected by the pairwise turn restriction.
+    for origin in &topology.nodes {
+        for destination in &topology.nodes {
+            if origin.node_id == destination.node_id {
+                continue;
+            }
+            let request = RouteRequest {
+                route_id: format!("diff_{}_{}", origin.node_id.0, destination.node_id.0),
+                origin: crate::LabeledPoint {
+                    id: format!("o{}", origin.node_id.0),
+                    lon: origin.lon,
+                    lat: origin.lat,
+                },
+                destination: crate::LabeledPoint {
+                    id: format!("d{}", destination.node_id.0),
+                    lon: destination.lon,
+                    lat: destination.lat,
+                },
+                snap: SnapOptions {
+                    max_distance_m: 500.0,
+                },
+                connectivity: Default::default(),
+                fallback: Default::default(),
+                returns: ReturnConfig {
+                    geometry: ReturnGeometry::Full,
+                    ..ReturnConfig::default()
+                },
+                alternatives: Default::default(),
+            };
+            let exact = exact_engine.execute_route(&request);
+            let accelerated = accelerated_engine.execute_route(&request);
+            match (exact, accelerated) {
+                (Ok(exact), Ok(accelerated)) => {
+                    assert_eq!(
+                        accelerated.summary.total_generalized_cost,
+                        exact.summary.total_generalized_cost,
+                        "cost mismatch for {}",
+                        request.route_id
+                    );
+                    assert_eq!(
+                        accelerated.edge_path, exact.edge_path,
+                        "path mismatch for {}",
+                        request.route_id
+                    );
+                }
+                (Err(_), Err(_)) => {}
+                (exact, accelerated) => panic!(
+                    "engines disagree on feasibility for {}: exact={:?} accelerated={:?}",
+                    request.route_id,
+                    exact.map(|route| route.edge_path),
+                    accelerated.map(|route| route.edge_path)
+                ),
+            }
+        }
+    }
 }
 
 #[test]

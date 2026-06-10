@@ -3,7 +3,7 @@ use std::collections::BinaryHeap;
 use anyhow::Result;
 #[cfg(test)]
 use anyhow::bail;
-use netweevil_core::TopologyBundle;
+use netweevil_core::{NO_MIDDLE, TopologyBundle};
 
 use crate::*;
 
@@ -17,6 +17,7 @@ pub(crate) struct BidirectionalAccelerationScratch {
     backward_next_arc: Vec<u32>,
     backward_touched: Vec<u32>,
     backward_heap: BinaryHeap<State>,
+    unpack_stack: Vec<(bool, u32)>,
 }
 
 impl BidirectionalAccelerationScratch {
@@ -73,9 +74,59 @@ impl BidirectionalAccelerationScratch {
     }
 }
 
+/// Expands one hierarchy arc to the base edge states it covers, excluding the
+/// arc's tail and including its head, recursing through customized middle
+/// pointers. Both child arcs of a middle `m` exist by contraction
+/// completeness: `tail -> m` is a downward arc of `tail`, `m -> head` an
+/// upward arc of `m`.
+fn push_unpacked_arc(
+    acceleration: &AccelerationGraph,
+    stack: &mut Vec<(bool, u32)>,
+    is_upward: bool,
+    arc_slot: u32,
+    edge_indexes: &mut Vec<usize>,
+) {
+    let compiled = acceleration
+        .metrics
+        .acceleration
+        .as_ref()
+        .expect("validated acceleration weights");
+    debug_assert!(stack.is_empty());
+    stack.push((is_upward, arc_slot));
+    while let Some((is_upward, slot)) = stack.pop() {
+        let slot_index = slot as usize;
+        let (tail, head, middle) = if is_upward {
+            (
+                acceleration.upward_tail[slot_index] as usize,
+                acceleration.source.upward_head[slot_index],
+                compiled.upward_middle[slot_index],
+            )
+        } else {
+            (
+                acceleration.downward_tail[slot_index] as usize,
+                acceleration.source.downward_head[slot_index],
+                compiled.downward_middle[slot_index],
+            )
+        };
+        if middle == NO_MIDDLE {
+            edge_indexes.push(head as usize);
+            continue;
+        }
+        let left = acceleration
+            .downward_arc_slot(tail, middle)
+            .expect("customized middle implies a downward arc tail -> middle");
+        let right = acceleration
+            .upward_arc_slot(middle as usize, head)
+            .expect("customized middle implies an upward arc middle -> head");
+        // Process left before right: LIFO stack, so push right first.
+        stack.push((true, right as u32));
+        stack.push((false, left as u32));
+    }
+}
+
 fn reconstruct_accelerated_route_path(
     acceleration: &AccelerationGraph,
-    scratch: &BidirectionalAccelerationScratch,
+    scratch: &mut BidirectionalAccelerationScratch,
     meeting_edge: usize,
     total_generalized_cost: f64,
 ) -> RoutePath {
@@ -87,18 +138,18 @@ fn reconstruct_accelerated_route_path(
         if previous_arc == NO_PREVIOUS_ARC {
             break;
         }
-        let previous_arc = previous_arc as usize;
         forward_arc_ids.push(previous_arc);
-        cursor = acceleration.upward_tail[previous_arc] as usize;
+        cursor = acceleration.upward_tail[previous_arc as usize] as usize;
     }
     edge_indexes.push(cursor);
-    for arc_index in forward_arc_ids.into_iter().rev() {
-        let start = acceleration.source.upward_path_first_out[arc_index] as usize;
-        let end = acceleration.source.upward_path_first_out[arc_index + 1] as usize;
-        edge_indexes.extend(
-            acceleration.source.upward_path_edges[start..end]
-                .iter()
-                .map(|&edge_index| edge_index as usize),
+    let mut unpack_stack = std::mem::take(&mut scratch.unpack_stack);
+    for arc_slot in forward_arc_ids.into_iter().rev() {
+        push_unpacked_arc(
+            acceleration,
+            &mut unpack_stack,
+            true,
+            arc_slot,
+            &mut edge_indexes,
         );
     }
 
@@ -108,16 +159,16 @@ fn reconstruct_accelerated_route_path(
         if next_arc == NO_PREVIOUS_ARC {
             break;
         }
-        let next_arc = next_arc as usize;
-        let start = acceleration.source.downward_path_first_out[next_arc] as usize;
-        let end = acceleration.source.downward_path_first_out[next_arc + 1] as usize;
-        edge_indexes.extend(
-            acceleration.source.downward_path_edges[start..end]
-                .iter()
-                .map(|&edge_index| edge_index as usize),
+        push_unpacked_arc(
+            acceleration,
+            &mut unpack_stack,
+            false,
+            next_arc,
+            &mut edge_indexes,
         );
-        cursor = acceleration.source.downward_head[next_arc] as usize;
+        cursor = acceleration.source.downward_head[next_arc as usize] as usize;
     }
+    scratch.unpack_stack = unpack_stack;
 
     RoutePath {
         edge_indexes,
@@ -163,6 +214,17 @@ pub(crate) fn accelerated_route_query(
     )
 }
 
+/// Exact point-to-point query over the customized CCH.
+///
+/// Forward search relaxes upward arcs from the origin seeds; backward search
+/// relaxes downward arcs toward the destination seeds. Each direction runs
+/// until its queue minimum reaches the best known up-down cost — the sum rule
+/// used by same-graph bidirectional Dijkstra is NOT sound here because the
+/// two directions explore disjoint arc sets, so a meeting state is only ever
+/// labeled by the side that reaches it.
+///
+/// With the complete contraction this result is authoritative: no follow-up
+/// search on the base graph is required.
 pub(crate) fn accelerated_route_query_seeded(
     topology: &TopologyBundle,
     routing_graph: &RoutingGraph,
@@ -208,7 +270,13 @@ pub(crate) fn accelerated_route_query_seeded(
             .unwrap_or(f64::INFINITY);
         let mut best_edge = None;
 
-        while !(scratch.forward_heap.is_empty() || scratch.backward_heap.is_empty()) {
+        let compiled = acceleration
+            .metrics
+            .acceleration
+            .as_ref()
+            .expect("validated acceleration weights");
+
+        loop {
             let next_forward_cost = scratch
                 .forward_heap
                 .peek()
@@ -219,16 +287,15 @@ pub(crate) fn accelerated_route_query_seeded(
                 .peek()
                 .map(|state| state.cost)
                 .unwrap_or(f64::INFINITY);
-            if next_forward_cost + next_backward_cost >= best_cost {
+            let forward_active = next_forward_cost < best_cost;
+            let backward_active = next_backward_cost < best_cost;
+            if !forward_active && !backward_active {
                 break;
             }
 
-            if next_forward_cost <= next_backward_cost {
+            if forward_active && (next_forward_cost <= next_backward_cost || !backward_active) {
                 let Some(State {
-                    edge_index,
-                    automaton_state: _,
-                    cost,
-                    score: _,
+                    edge_index, cost, ..
                 }) = scratch.forward_heap.pop()
                 else {
                     break;
@@ -243,15 +310,7 @@ pub(crate) fn accelerated_route_query_seeded(
                         best_edge = Some(edge_index);
                     }
                 }
-                if cost > best_cost {
-                    continue;
-                }
 
-                let compiled = acceleration
-                    .metrics
-                    .acceleration
-                    .as_ref()
-                    .expect("validated acceleration weights");
                 for slot in acceleration.source.upward_first_out[edge_index] as usize
                     ..acceleration.source.upward_first_out[edge_index + 1] as usize
                 {
@@ -269,10 +328,7 @@ pub(crate) fn accelerated_route_query_seeded(
                 }
             } else {
                 let Some(State {
-                    edge_index,
-                    automaton_state: _,
-                    cost,
-                    score: _,
+                    edge_index, cost, ..
                 }) = scratch.backward_heap.pop()
                 else {
                     break;
@@ -287,15 +343,7 @@ pub(crate) fn accelerated_route_query_seeded(
                         best_edge = Some(edge_index);
                     }
                 }
-                if cost > best_cost {
-                    continue;
-                }
 
-                let compiled = acceleration
-                    .metrics
-                    .acceleration
-                    .as_ref()
-                    .expect("validated acceleration weights");
                 for slot in acceleration.reverse_downward_first_out[edge_index] as usize
                     ..acceleration.reverse_downward_first_out[edge_index + 1] as usize
                 {
@@ -326,7 +374,7 @@ pub(crate) fn accelerated_route_query_seeded(
 
         best_path = Some(reconstruct_accelerated_route_path(
             acceleration,
-            &scratch,
+            &mut scratch,
             meeting_edge,
             best_cost,
         ));

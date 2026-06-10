@@ -2,9 +2,11 @@
 
 `netweevil` is a Rust-first local network analysis tool for OSM-based routing research.
 
-This repository now includes:
+This repository includes:
 
-- a shared Rust routing core
+- a shared Rust routing core with an edge-based CCH (Customizable Contraction
+  Hierarchies) accelerator for fast exact routing — see
+  [`docs/cch-design.md`](docs/cch-design.md)
 - a CLI for reproducible local runs
 - a preloadable HTTP API for interactive execution
 - an additive GTFS transit processor and pedestrian+transit route command
@@ -12,16 +14,23 @@ This repository now includes:
 - explicit manifests and bundles under `.netweevil/`
 - local exports to `json`, `csv`, `geojson`, `gpkg`, `parquet`, and `geoparquet`
 
-Via-way turn restriction handling, turn penalties, persisted acceleration bundles, and the preloadable API path are present. See [`PROGRESS.md`](/home/elmeriniemi/stuff/netweevil/PROGRESS.md).
+Via-way turn restriction handling, turn penalties, persisted acceleration bundles, and the preloadable API path are present. See [`PROGRESS.md`](PROGRESS.md).
 
 ## Workspace Layout
 
-- [`crates/cli`](/home/elmeriniemi/stuff/netweevil/crates/cli): `netweevil` CLI entry point
-- [`crates/api`](/home/elmeriniemi/stuff/netweevil/crates/api): preloadable HTTP API
-- [`crates/transit`](/home/elmeriniemi/stuff/netweevil/crates/transit): GTFS schedule import and pedestrian+transit routing
-- [`examples/profiles`](/home/elmeriniemi/stuff/netweevil/examples/profiles): reusable example profiles
-- [`examples/requests`](/home/elmeriniemi/stuff/netweevil/examples/requests): route, OD, and matrix inputs
-- [`qgis_plugin/netweevil_qgis`](/home/elmeriniemi/stuff/netweevil/qgis_plugin/netweevil_qgis): QGIS plugin package
+- [`crates/core`](crates/core): graph primitives, bundle formats, shared types
+- [`crates/ingest`](crates/ingest): OSM PBF import, topology build, CCH preprocessing
+- [`crates/profile`](crates/profile): profile schema, validation, compilation, CCH customization
+- [`crates/query`](crates/query): routing engines (exact + CCH), OD/matrix, service areas, accessibility
+- [`crates/persist`](crates/persist): cache and bundle persistence under `.netweevil/`
+- [`crates/report`](crates/report): manifests, report rendering, spatial exports
+- [`crates/cli`](crates/cli): `netweevil` CLI entry point
+- [`crates/api`](crates/api): preloadable HTTP API
+- [`crates/transit`](crates/transit): GTFS schedule import and pedestrian+transit routing
+- [`crates/simulate`](crates/simulate): scenario simulation engine
+- [`examples/profiles`](examples/profiles): reusable example profiles
+- [`examples/requests`](examples/requests): route, OD, and matrix inputs
+- [`qgis_plugin/netweevil_qgis`](qgis_plugin/netweevil_qgis): QGIS plugin package
 
 ## Build
 
@@ -30,6 +39,28 @@ cargo fmt --all
 cargo check
 cargo test
 ```
+
+## Docker
+
+Build the image and run the API with Docker Compose. Datasets are imported
+into a named volume once, then served warm:
+
+```bash
+docker compose build
+
+# Import an OSM extract (writes into the netweevil-state volume).
+docker compose run --rm api dataset import datasets/your-extract.osm.pbf --name osm
+
+# Serve the API on :8080 (NETWEEVIL_DATASET defaults to "osm").
+docker compose up -d api
+curl http://localhost:8080/healthz
+```
+
+Configuration knobs (environment variables read by `docker-compose.yml`):
+
+- `NETWEEVIL_DATASET`: dataset id to serve (default `osm`)
+- `NETWEEVIL_PROFILE`: default profile path (default `examples/profiles/car_research_v1.yml`)
+- `NETWEEVIL_PORT`: host port (default `8080`)
 
 ## CLI Quickstart
 

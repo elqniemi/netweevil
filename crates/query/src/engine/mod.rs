@@ -337,16 +337,24 @@ impl PreparedRoutingEngine {
 
 fn effective_engine_description(routing_graph: &RoutingGraph) -> EffectiveEngineDescription {
     if routing_graph.has_restriction_sequences() {
-        EffectiveEngineDescription {
-            route_engine: "astar_exact_multi_edge_turns",
-            batch_engine: "astar_exact_multi_edge_turns_batch_reuse",
-            acceleration: "spatial_index+a_star+turn_automaton",
+        if routing_graph.acceleration.is_some() {
+            EffectiveEngineDescription {
+                route_engine: "cch_with_restriction_sequence_validation",
+                batch_engine: "cch_with_restriction_sequence_validation_batch_reuse",
+                acceleration: "spatial_index+edge_phantoms+cch+turn_automaton_fallback",
+            }
+        } else {
+            EffectiveEngineDescription {
+                route_engine: "astar_exact_multi_edge_turns",
+                batch_engine: "astar_exact_multi_edge_turns_batch_reuse",
+                acceleration: "spatial_index+a_star+turn_automaton",
+            }
         }
     } else if routing_graph.acceleration.is_some() {
         EffectiveEngineDescription {
             route_engine: "accelerated_pairwise_turns",
             batch_engine: "accelerated_pairwise_turns_batch_reuse",
-            acceleration: "spatial_index+edge_phantoms+shortcut_query",
+            acceleration: "spatial_index+edge_phantoms+cch",
         }
     } else {
         EffectiveEngineDescription {

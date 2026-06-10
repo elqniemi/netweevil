@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.87-slim-bookworm AS builder
+FROM rust:1.88-slim-bookworm AS builder
 WORKDIR /build
 
 RUN apt-get update \
@@ -20,7 +20,9 @@ FROM debian:bookworm-slim AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --create-home --home-dir /data netweevil
+    && useradd --system --create-home --home-dir /data netweevil \
+    && mkdir -p /data/.netweevil \
+    && chown -R netweevil /data/.netweevil
 
 COPY --from=builder /usr/local/bin/netweevil /usr/local/bin/netweevil
 

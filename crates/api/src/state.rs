@@ -4,9 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
-use netweevil_core::{
-    CacheBundleId, CompiledProfileBundle, DatasetAccelerationBundle, DatasetId, TopologyBundle,
-};
+use netweevil_core::{CacheBundleId, DatasetAccelerationBundle, DatasetId, TopologyBundle};
 use netweevil_persist::{
     WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
     read_compiled_profile_manifests, read_dataset_manifest, read_edge_name_bundle, read_json,
@@ -106,7 +104,6 @@ pub(crate) fn load_service_runtime(
         turns = topology_meta.map(|m| m.turn_count).unwrap_or(0),
         "topology loaded"
     );
-    let engine = engine_description(topology.as_ref());
     let routing_workers = Arc::new(Semaphore::new(
         std::thread::available_parallelism()
             .map(|count| count.get())
@@ -156,6 +153,19 @@ pub(crate) fn load_service_runtime(
 
     let default_profile_id =
         default_profile_id.context("default profile could not be loaded into the API runtime")?;
+    let engine = loaded_profiles
+        .get(&default_profile_id)
+        .map(|profile| {
+            let effective = profile
+                .engine
+                .effective_engine_description(netweevil_query::EngineMode::Auto);
+            EngineDescription {
+                route_engine: effective.route_engine,
+                batch_engine: effective.batch_engine,
+                acceleration: effective.acceleration,
+            }
+        })
+        .unwrap_or_else(|| engine_description(topology.as_ref()));
 
     let mut loaded_transit_feeds = BTreeMap::new();
     for feed_id in &options.transit_feeds {
@@ -250,11 +260,30 @@ fn load_or_compile_profile(
         })
         .transpose()?;
 
-    let manifest = if let Some(existing) = compiled_manifests.iter().find(|manifest| {
-        manifest.dataset_id.0 == dataset_manifest.dataset_id.0
-            && manifest.profile_hash == profile_hash
-    }) {
-        existing.clone()
+    // Reuse a cached compiled bundle only when it still reads cleanly and its
+    // acceleration matches the dataset's current CCH bundle; otherwise fall
+    // through to a fresh compile (covers format migrations and re-imports).
+    let cached = compiled_manifests
+        .iter()
+        .find(|manifest| {
+            manifest.dataset_id.0 == dataset_manifest.dataset_id.0
+                && manifest.profile_hash == profile_hash
+        })
+        .and_then(|manifest| {
+            let bundle = read_compiled_profile_bundle(&manifest.bundle.path).ok()?;
+            let acceleration_current = match (dataset_acceleration.as_ref(), &bundle.acceleration) {
+                (Some(_), Some(acceleration)) => {
+                    acceleration.algorithm == netweevil_core::CCH_ALGORITHM
+                        && acceleration.schema_version == 3
+                }
+                (Some(_), None) => false,
+                (None, _) => true,
+            };
+            acceleration_current.then(|| (manifest.clone(), bundle))
+        });
+
+    let (manifest, compiled_bundle) = if let Some(cached) = cached {
+        cached
     } else {
         let compiled_bundle = compile_profile_bundle_with_acceleration(
             &document,
@@ -293,12 +322,9 @@ fn load_or_compile_profile(
             },
         };
         write_compiled_profile_manifest(paths, &manifest)?;
-        manifest
+        (manifest, compiled_bundle)
     };
 
-    let compiled_bundle: CompiledProfileBundle =
-        read_compiled_profile_bundle(&manifest.bundle.path)
-            .with_context(|| format!("reading compiled profile bundle {}", manifest.bundle.path))?;
     let engine = Arc::new(
         PreparedRoutingEngine::new(topology, Arc::new(compiled_bundle), dataset_acceleration)
             .with_context(|| {

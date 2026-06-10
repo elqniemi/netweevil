@@ -66,9 +66,31 @@ pub(crate) struct AccelerationGraph {
     pub(crate) source: Arc<DatasetAccelerationBundle>,
     pub(crate) metrics: Arc<CompiledProfileBundle>,
     pub(crate) upward_tail: Vec<u32>,
+    pub(crate) downward_tail: Vec<u32>,
     pub(crate) reverse_downward_first_out: Vec<u32>,
     pub(crate) reverse_downward_edge: Vec<u32>,
     pub(crate) reverse_downward_arc: Vec<u32>,
+}
+
+impl AccelerationGraph {
+    /// Binary-searches the head-sorted CSR row of `tail` for an arc to `head`.
+    pub(crate) fn upward_arc_slot(&self, tail: usize, head: u32) -> Option<usize> {
+        let start = self.source.upward_first_out[tail] as usize;
+        let end = self.source.upward_first_out[tail + 1] as usize;
+        self.source.upward_head[start..end]
+            .binary_search(&head)
+            .ok()
+            .map(|offset| start + offset)
+    }
+
+    pub(crate) fn downward_arc_slot(&self, tail: usize, head: u32) -> Option<usize> {
+        let start = self.source.downward_first_out[tail] as usize;
+        let end = self.source.downward_first_out[tail + 1] as usize;
+        self.source.downward_head[start..end]
+            .binary_search(&head)
+            .ok()
+            .map(|offset| start + offset)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -432,38 +454,28 @@ fn build_acceleration_graph(
     let Some(acceleration) = metrics.acceleration.as_ref() else {
         return Ok(None);
     };
-    let topology_source = if let Some(bundle) = dataset_acceleration {
-        if bundle.source_topology_bundle_id != metrics.source_topology_bundle_id {
-            bail!(
-                "dataset acceleration bundle does not match the compiled topology bundle; re-import the dataset and recompile the profile"
-            );
-        }
-        bundle
-    } else if !acceleration.upward_first_out.is_empty()
-        || !acceleration.downward_first_out.is_empty()
-        || !acceleration.upward_head.is_empty()
-        || !acceleration.downward_head.is_empty()
-    {
-        Arc::new(DatasetAccelerationBundle {
-            schema_version: 0,
-            source_topology_bundle_id: metrics.source_topology_bundle_id.clone(),
-            algorithm: acceleration.algorithm.clone(),
-            build_settings: Default::default(),
-            stats: Default::default(),
-            edge_order: acceleration.edge_order.clone(),
-            edge_rank: acceleration.edge_rank.clone(),
-            upward_first_out: acceleration.upward_first_out.clone(),
-            upward_head: acceleration.upward_head.clone(),
-            upward_path_first_out: acceleration.upward_path_first_out.clone(),
-            upward_path_edges: acceleration.upward_path_edges.clone(),
-            downward_first_out: acceleration.downward_first_out.clone(),
-            downward_head: acceleration.downward_head.clone(),
-            downward_path_first_out: acceleration.downward_path_first_out.clone(),
-            downward_path_edges: acceleration.downward_path_edges.clone(),
-        })
-    } else {
+    let Some(topology_source) = dataset_acceleration else {
+        // Profiles compiled without a dataset CCH bundle in reach run on the
+        // exact engine only.
         return Ok(None);
     };
+    if topology_source.source_topology_bundle_id != metrics.source_topology_bundle_id {
+        bail!(
+            "dataset acceleration bundle does not match the compiled topology bundle; re-import the dataset and recompile the profile"
+        );
+    }
+    if !topology_source.is_current_format() {
+        bail!(
+            "dataset acceleration bundle uses an outdated format (algorithm '{}', schema {}); re-import the dataset",
+            topology_source.algorithm,
+            topology_source.schema_version
+        );
+    }
+    if acceleration.algorithm != netweevil_core::CCH_ALGORITHM || acceleration.schema_version != 3 {
+        bail!(
+            "compiled profile acceleration uses an outdated format; recompile the profile against the current dataset"
+        );
+    }
     if topology_source.edge_order.len() != edge_count
         || topology_source.edge_rank.len() != edge_count
         || topology_source.upward_first_out.len() != edge_count + 1
@@ -485,7 +497,7 @@ fn build_acceleration_graph(
         .unwrap_or_default() as usize;
     if topology_source.upward_head.len() != upward_len
         || acceleration.upward_weight.len() != upward_len
-        || topology_source.upward_path_first_out.len() != upward_len + 1
+        || acceleration.upward_middle.len() != upward_len
     {
         bail!(
             "acceleration upward arrays are inconsistent; re-import the dataset and recompile the profile"
@@ -493,30 +505,10 @@ fn build_acceleration_graph(
     }
     if topology_source.downward_head.len() != downward_len
         || acceleration.downward_weight.len() != downward_len
-        || topology_source.downward_path_first_out.len() != downward_len + 1
+        || acceleration.downward_middle.len() != downward_len
     {
         bail!(
             "acceleration downward arrays are inconsistent; re-import the dataset and recompile the profile"
-        );
-    }
-    let upward_path_len = topology_source
-        .upward_path_first_out
-        .last()
-        .copied()
-        .unwrap_or_default() as usize;
-    if topology_source.upward_path_edges.len() != upward_path_len {
-        bail!(
-            "acceleration upward path arrays are inconsistent; re-import the dataset and recompile the profile"
-        );
-    }
-    let downward_path_len = topology_source
-        .downward_path_first_out
-        .last()
-        .copied()
-        .unwrap_or_default() as usize;
-    if topology_source.downward_path_edges.len() != downward_path_len {
-        bail!(
-            "acceleration downward path arrays are inconsistent; re-import the dataset and recompile the profile"
         );
     }
 
@@ -529,11 +521,13 @@ fn build_acceleration_graph(
     }
     let mut reverse_downward_edge = vec![0_u32; downward_len];
     let mut reverse_downward_arc = vec![0_u32; downward_len];
+    let mut downward_tail = vec![0_u32; downward_len];
     let mut write_positions = reverse_downward_first_out[..edge_count].to_vec();
     for edge_index in 0..edge_count {
         for slot in topology_source.downward_first_out[edge_index] as usize
             ..topology_source.downward_first_out[edge_index + 1] as usize
         {
+            downward_tail[slot] = edge_index as u32;
             let next_edge = topology_source.downward_head[slot] as usize;
             let write_index = &mut write_positions[next_edge];
             let target_slot = *write_index as usize;
@@ -555,6 +549,7 @@ fn build_acceleration_graph(
         source: topology_source,
         metrics,
         upward_tail,
+        downward_tail,
         reverse_downward_first_out,
         reverse_downward_edge,
         reverse_downward_arc,

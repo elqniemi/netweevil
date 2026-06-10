@@ -395,21 +395,16 @@ mod tests {
     #[test]
     fn round_trips_acceleration_bundle_binary() {
         let bundle = DatasetAccelerationBundle {
-            schema_version: 1,
+            schema_version: netweevil_core::ACCELERATION_BUNDLE_SCHEMA_VERSION,
             source_topology_bundle_id: CacheBundleId::new("topology-test"),
-            algorithm: "edge_based_shortcut_ch_v1".to_string(),
-            build_settings: Default::default(),
+            algorithm: netweevil_core::CCH_ALGORITHM.to_string(),
             stats: Default::default(),
             edge_order: vec![0, 2, 1],
             edge_rank: vec![0, 2, 1],
             upward_first_out: vec![0, 1, 1, 1],
             upward_head: vec![2],
-            upward_path_first_out: vec![0, 1],
-            upward_path_edges: vec![2],
             downward_first_out: vec![0, 0, 1, 1],
             downward_head: vec![0],
-            downward_path_first_out: vec![0, 1],
-            downward_path_edges: vec![0],
         };
 
         let unique = SystemTime::now()
@@ -425,7 +420,6 @@ mod tests {
 
         assert_eq!(round_tripped.schema_version, bundle.schema_version);
         assert_eq!(round_tripped.algorithm, bundle.algorithm);
-        assert_eq!(round_tripped.build_settings, bundle.build_settings);
         assert_eq!(round_tripped.stats, bundle.stats);
         assert_eq!(round_tripped.edge_order, bundle.edge_order);
         assert_eq!(round_tripped.edge_rank, bundle.edge_rank);

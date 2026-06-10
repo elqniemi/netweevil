@@ -217,72 +217,120 @@ pub(super) fn service_area_linear_metrics() -> CompiledProfileBundle {
     }
 }
 
-pub(super) fn accelerated_test_metrics() -> CompiledProfileBundle {
-    let mut metrics = test_metrics();
-    metrics.acceleration = Some(CompiledAcceleration {
-        schema_version: 1,
-        source_acceleration_bundle_id: CacheBundleId::new("acceleration-test"),
-        algorithm: "test".to_string(),
-        edge_order: vec![0, 1, 2],
-        edge_rank: vec![2, 0, 1],
-        upward_first_out: vec![0, 0, 0, 0],
-        upward_head: vec![],
-        upward_weight: vec![],
-        upward_path_first_out: vec![0],
-        upward_path_edges: vec![],
-        downward_first_out: vec![0, 1, 1, 1],
-        downward_head: vec![1],
-        downward_weight: vec![20.0],
-        downward_path_first_out: vec![0, 1],
-        downward_path_edges: vec![1],
-    });
-    metrics
-}
+/// Builds a complete CCH for a fixture topology with an independent
+/// mini-implementation: identity elimination order, complete elimination
+/// game, and weight customization replaying the elimination with the routing
+/// graph's own transition costs. Returns the dataset bundle plus the metrics
+/// with the customized weights attached, ready for
+/// `PreparedRoutingEngine::new(.., Some(bundle))`.
+pub(super) fn build_test_cch(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+) -> (
+    std::sync::Arc<netweevil_core::DatasetAccelerationBundle>,
+    CompiledProfileBundle,
+) {
+    use netweevil_core::{
+        ACCELERATION_BUNDLE_SCHEMA_VERSION, CCH_ALGORITHM, DatasetAccelerationBundle, NO_MIDDLE,
+    };
+    use std::collections::BTreeMap;
 
-pub(super) fn sparse_acceleration_metrics() -> CompiledProfileBundle {
-    let mut metrics = test_metrics();
-    metrics.edge_metrics[2].travel_time_s = None;
-    metrics.edge_metrics[2].generalized_cost = None;
-    metrics.acceleration = Some(CompiledAcceleration {
-        schema_version: 1,
-        source_acceleration_bundle_id: CacheBundleId::new("sparse-acceleration-test"),
-        algorithm: "test".to_string(),
-        edge_order: vec![0, 1, 2],
-        edge_rank: vec![0, 1, 2],
-        upward_first_out: vec![0, 0, 0, 0],
-        upward_head: vec![],
-        upward_weight: vec![],
-        upward_path_first_out: vec![0],
-        upward_path_edges: vec![],
-        downward_first_out: vec![0, 0, 0, 0],
-        downward_head: vec![],
-        downward_weight: vec![],
-        downward_path_first_out: vec![0],
-        downward_path_edges: vec![],
-    });
-    metrics
-}
+    let graph = crate::build_routing_graph(topology, metrics).expect("routing graph builds");
+    let edge_count = topology.edge_count();
 
-pub(super) fn direct_only_acceleration_metrics() -> CompiledProfileBundle {
-    let mut metrics = test_metrics();
-    metrics.acceleration = Some(CompiledAcceleration {
-        schema_version: 1,
-        source_acceleration_bundle_id: CacheBundleId::new("direct-only-acceleration-test"),
-        algorithm: "test".to_string(),
-        edge_order: vec![0, 1, 2],
-        edge_rank: vec![0, 1, 2],
-        upward_first_out: vec![0, 0, 0, 0],
-        upward_head: vec![],
-        upward_weight: vec![],
-        upward_path_first_out: vec![0],
-        upward_path_edges: vec![],
-        downward_first_out: vec![0, 0, 0, 0],
-        downward_head: vec![],
-        downward_weight: vec![],
-        downward_path_first_out: vec![0],
-        downward_path_edges: vec![],
+    // (tail, head) -> (weight, middle); identity order means rank == id.
+    let mut arcs = BTreeMap::<(u32, u32), (f64, u32)>::new();
+    for from_edge in 0..edge_count {
+        for transition_index in graph.transition_range(from_edge) {
+            let to_edge = graph.transition_edges[transition_index];
+            if to_edge as usize == from_edge {
+                continue;
+            }
+            let cost = graph.transition_costs[transition_index];
+            let entry = arcs
+                .entry((from_edge as u32, to_edge))
+                .or_insert((f64::INFINITY, NO_MIDDLE));
+            if cost < entry.0 {
+                *entry = (cost, NO_MIDDLE);
+            }
+        }
+    }
+    for middle in 0..edge_count as u32 {
+        let incoming = arcs
+            .range((0, 0)..(u32::MAX, 0))
+            .filter(|&(&(tail, head), _)| head == middle && tail > middle)
+            .map(|(&(tail, _), &(weight, _))| (tail, weight))
+            .collect::<Vec<_>>();
+        let outgoing = arcs
+            .range((middle, 0)..(middle + 1, 0))
+            .filter(|&(&(_, head), _)| head > middle)
+            .map(|(&(_, head), &(weight, _))| (head, weight))
+            .collect::<Vec<_>>();
+        for &(tail, incoming_weight) in &incoming {
+            for &(head, outgoing_weight) in &outgoing {
+                if tail == head {
+                    continue;
+                }
+                let candidate = incoming_weight + outgoing_weight;
+                let entry = arcs
+                    .entry((tail, head))
+                    .or_insert((f64::INFINITY, NO_MIDDLE));
+                if candidate < entry.0 {
+                    *entry = (candidate, middle);
+                }
+            }
+        }
+    }
+
+    let mut upward_first_out = vec![0_u32; edge_count + 1];
+    let mut upward_head = Vec::new();
+    let mut upward_weight = Vec::new();
+    let mut upward_middle = Vec::new();
+    let mut downward_first_out = vec![0_u32; edge_count + 1];
+    let mut downward_head = Vec::new();
+    let mut downward_weight = Vec::new();
+    let mut downward_middle = Vec::new();
+    for (&(tail, head), &(weight, middle)) in &arcs {
+        if tail < head {
+            upward_first_out[tail as usize + 1] += 1;
+            upward_head.push(head);
+            upward_weight.push(weight);
+            upward_middle.push(middle);
+        } else {
+            downward_first_out[tail as usize + 1] += 1;
+            downward_head.push(head);
+            downward_weight.push(weight);
+            downward_middle.push(middle);
+        }
+    }
+    for edge_index in 0..edge_count {
+        upward_first_out[edge_index + 1] += upward_first_out[edge_index];
+        downward_first_out[edge_index + 1] += downward_first_out[edge_index];
+    }
+
+    let bundle = std::sync::Arc::new(DatasetAccelerationBundle {
+        schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
+        source_topology_bundle_id: metrics.source_topology_bundle_id.clone(),
+        algorithm: CCH_ALGORITHM.to_string(),
+        stats: Default::default(),
+        edge_order: (0..edge_count as u32).collect(),
+        edge_rank: (0..edge_count as u32).collect(),
+        upward_first_out,
+        upward_head,
+        downward_first_out,
+        downward_head,
     });
-    metrics
+    let mut metrics = metrics.clone();
+    metrics.acceleration = Some(CompiledAcceleration {
+        schema_version: 3,
+        source_acceleration_bundle_id: CacheBundleId::new("test-cch"),
+        algorithm: CCH_ALGORITHM.to_string(),
+        upward_weight,
+        upward_middle,
+        downward_weight,
+        downward_middle,
+    });
+    (bundle, metrics)
 }
 
 pub(super) fn restricted_topology() -> TopologyBundle {

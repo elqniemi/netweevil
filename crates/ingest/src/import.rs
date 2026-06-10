@@ -7,7 +7,7 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result, bail};
-use netweevil_core::{AccelerationBuildSettings, BuildStage, CacheBundleId, DatasetId};
+use netweevil_core::{BuildStage, CacheBundleId, DatasetId};
 use netweevil_persist::{
     WorkspacePaths, write_acceleration_bundle, write_dataset_manifest, write_edge_name_bundle,
     write_topology_bundle,
@@ -22,7 +22,6 @@ use crate::topology::build_topology_bundle;
 pub struct DatasetImportOptions {
     pub name: String,
     pub source: String,
-    pub acceleration_settings: AccelerationBuildSettings,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -111,12 +110,8 @@ where
         .join(format!("{}.bin", acceleration_bundle_id.0));
     let (bundle, edge_name_bundle, topology_meta) =
         build_topology_bundle(source_path, size, &sha256, &mut progress)?;
-    let acceleration_bundle = build_dataset_acceleration_bundle_with_progress(
-        &bundle,
-        bundle_id.clone(),
-        options.acceleration_settings.clone(),
-        &mut progress,
-    );
+    let acceleration_bundle =
+        build_dataset_acceleration_bundle_with_progress(&bundle, bundle_id.clone(), &mut progress);
     emit_progress(
         &mut progress,
         DatasetImportStage::WriteTopologyBundle,
@@ -166,7 +161,6 @@ where
             path: acceleration_bundle_path.display().to_string(),
         }),
         topology_meta: Some(topology_meta),
-        acceleration_settings: Some(acceleration_bundle.build_settings.clone()),
         acceleration_stats: Some(acceleration_bundle.stats.clone()),
     };
 

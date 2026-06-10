@@ -463,13 +463,13 @@ pub(crate) fn run_route_analysis(
     }
     let (topology, acceleration, compiled_manifest, compiled_bundle) =
         load_route_execution_inputs(paths, dataset_id, profile)?;
-    let engine = engine_description(&topology);
     let prepared = PreparedRoutingEngine::new(
         Arc::new(topology),
         Arc::new(compiled_bundle),
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
+    let engine = engine_description_from(&prepared);
     let edge_names = if request.returns.segment_rows {
         load_edge_names(paths, dataset_id)?
     } else {
@@ -504,13 +504,13 @@ fn run_route_batch_analysis(
 ) -> Result<StoredRun> {
     let (topology, acceleration, compiled_manifest, compiled_bundle) =
         load_route_execution_inputs(paths, dataset_id, profile)?;
-    let engine = engine_description(&topology);
     let prepared = PreparedRoutingEngine::new(
         Arc::new(topology),
         Arc::new(compiled_bundle),
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
+    let engine = engine_description_from(&prepared);
 
     let needs_edge_names = requests
         .requests
@@ -621,13 +621,13 @@ pub(crate) fn run_od_analysis(
     }
     let (topology, acceleration, compiled_manifest, compiled_bundle) =
         load_route_execution_inputs(paths, dataset_id, profile)?;
-    let engine = engine_description(&topology);
     let prepared = PreparedRoutingEngine::new(
         Arc::new(topology),
         Arc::new(compiled_bundle),
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
+    let engine = engine_description_from(&prepared);
     let result = prepared
         .execute_od(&request)
         .with_context(|| format!("executing OD pairs from '{}'", pairs_path.display()))?;
@@ -664,13 +664,13 @@ pub(crate) fn run_matrix_analysis(
     }
     let (topology, acceleration, compiled_manifest, compiled_bundle) =
         load_route_execution_inputs(paths, dataset_id, profile)?;
-    let engine = engine_description(&topology);
     let prepared = PreparedRoutingEngine::new(
         Arc::new(topology),
         Arc::new(compiled_bundle),
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
+    let engine = engine_description_from(&prepared);
     let result = prepared
         .execute_matrix(&origins, &destinations)
         .with_context(|| {
@@ -733,13 +733,13 @@ fn run_accessibility_analysis(
 ) -> Result<StoredRun> {
     let (topology, acceleration, compiled_manifest, compiled_bundle) =
         load_route_execution_inputs(paths, dataset_id, profile)?;
-    let engine = engine_description(&topology);
     let prepared = PreparedRoutingEngine::new(
         Arc::new(topology),
         Arc::new(compiled_bundle),
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
+    let engine = engine_description_from(&prepared);
     let result = prepared
         .execute_accessibility(request)
         .with_context(|| format!("executing accessibility from '{}'", origins_path.display()))?;
@@ -766,13 +766,13 @@ pub(crate) fn run_service_area_analysis(
 ) -> Result<StoredRun> {
     let (topology, acceleration, compiled_manifest, compiled_bundle) =
         load_route_execution_inputs(paths, dataset_id, profile)?;
-    let engine = engine_description(&topology);
     let prepared = PreparedRoutingEngine::new(
         Arc::new(topology),
         Arc::new(compiled_bundle),
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
+    let engine = engine_description_from(&prepared);
     let result = prepared
         .execute_service_area(request)
         .with_context(|| format!("executing service-area '{}'", request.analysis_id))?;
@@ -1220,7 +1220,7 @@ fn load_route_execution_inputs(
     let compiled_bundle: CompiledProfileBundle =
         read_compiled_profile_bundle(&compiled_manifest.bundle.path).with_context(|| {
             format!(
-                "reading compiled profile bundle {}",
+                "reading compiled profile bundle {}; if the dataset was re-imported with a newer format, run `netweevil profile compile` again",
                 compiled_manifest.bundle.path
             )
         })?;
@@ -1241,27 +1241,32 @@ fn load_edge_names(paths: &WorkspacePaths, dataset_id: &str) -> Result<Option<Ve
     )
 }
 
-fn engine_description(topology: &TopologyBundle) -> EngineDescription {
-    let has_multi_edge_restrictions = topology
-        .turn_restrictions
-        .iter()
-        .any(|restriction| restriction.edge_path.len() > 2);
-    if has_multi_edge_restrictions {
-        EngineDescription {
-            route_engine: "astar_exact_multi_edge_turns",
-            route_summary: "Exact forward A* shortest-path search over the compiled directed edge graph with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences.",
-            batch_engine: "astar_exact_multi_edge_turns_batch_reuse",
-            batch_summary: "Exact forward A* shortest-path searches over the compiled directed edge graph with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences, with per-batch snap reuse and duplicate snapped-pair solve reuse for OD and matrix execution.",
-            acceleration: "spatial_index+a_star+turn_automaton",
-        }
-    } else {
-        EngineDescription {
-            route_engine: "bidirectional_exact_pairwise_turns",
-            route_summary: "Exact bidirectional shortest-path search over the compiled directed edge graph with edge-phantom snapping for endpoints and pairwise turn prohibitions.",
-            batch_engine: "bidirectional_exact_pairwise_turns_batch_reuse",
-            batch_summary: "Exact bidirectional shortest-path searches over the compiled directed edge graph with edge-phantom snapping for endpoints and pairwise turn prohibitions, with per-batch snap reuse and duplicate snapped-pair solve reuse for OD and matrix execution.",
-            acceleration: "spatial_index+edge_phantoms",
-        }
+fn engine_description_from(prepared: &PreparedRoutingEngine) -> EngineDescription {
+    let effective = prepared.effective_engine_description(netweevil_query::EngineMode::Auto);
+    let (route_summary, batch_summary) = match effective.route_engine {
+        "cch_with_restriction_sequence_validation" => (
+            "Customizable contraction hierarchy query over the compiled directed edge graph with edge-phantom snapping; candidate paths are validated against multi-edge turn-restriction sequences with an exact automaton fallback.",
+            "Customizable contraction hierarchy queries with per-batch snap reuse and duplicate snapped-pair solve reuse; candidate paths are validated against multi-edge turn-restriction sequences with an exact automaton fallback.",
+        ),
+        "accelerated_pairwise_turns" => (
+            "Customizable contraction hierarchy query over the compiled directed edge graph with edge-phantom snapping for endpoints and pairwise turn prohibitions.",
+            "Customizable contraction hierarchy queries with per-batch snap reuse and duplicate snapped-pair solve reuse for OD and matrix execution.",
+        ),
+        "astar_exact_multi_edge_turns" => (
+            "Exact forward A* shortest-path search over the compiled directed edge graph with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences.",
+            "Exact forward A* shortest-path searches over the compiled directed edge graph with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences, with per-batch snap reuse and duplicate snapped-pair solve reuse for OD and matrix execution.",
+        ),
+        _ => (
+            "Exact bidirectional shortest-path search over the compiled directed edge graph with edge-phantom snapping for endpoints and pairwise turn prohibitions.",
+            "Exact bidirectional shortest-path searches over the compiled directed edge graph with edge-phantom snapping for endpoints and pairwise turn prohibitions, with per-batch snap reuse and duplicate snapped-pair solve reuse for OD and matrix execution.",
+        ),
+    };
+    EngineDescription {
+        route_engine: effective.route_engine,
+        route_summary,
+        batch_engine: effective.batch_engine,
+        batch_summary,
+        acceleration: effective.acceleration,
     }
 }
 

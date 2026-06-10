@@ -179,13 +179,28 @@ pub(crate) fn route_between_candidates(
                             fallback,
                         )?
                     } else {
-                        let pairwise_candidate = seeded_bidirectional_dijkstra_on_edge_transitions(
-                            topology,
-                            routing_graph,
-                            &origin_seeds,
-                            &destination_seeds,
-                            direct_path.clone(),
-                        )?;
+                        // The CCH (when present) and the bidirectional search
+                        // both ignore multi-edge restriction sequences, so the
+                        // candidate is a lower bound: if it happens to respect
+                        // the sequences it is also feasible and therefore
+                        // optimal; otherwise the automaton search decides.
+                        let pairwise_candidate = if routing_graph.acceleration.is_some() {
+                            accelerated_route_query_seeded(
+                                topology,
+                                routing_graph,
+                                &origin_seeds,
+                                &destination_seeds,
+                                direct_path.clone(),
+                            )?
+                        } else {
+                            seeded_bidirectional_dijkstra_on_edge_transitions(
+                                topology,
+                                routing_graph,
+                                &origin_seeds,
+                                &destination_seeds,
+                                direct_path.clone(),
+                            )?
+                        };
                         match pairwise_candidate {
                             Some(path)
                                 if path_respects_restriction_sequences(
@@ -208,22 +223,16 @@ pub(crate) fn route_between_candidates(
                         }
                     }
                 } else if routing_graph.acceleration.is_some() {
+                    // The complete CCH query is exact on its own; no
+                    // follow-up search on the base graph is needed.
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);
                     let destination_seeds = destination_edge_seeds(routing_graph, destination);
-                    let accelerated_upper_bound = accelerated_route_query_seeded(
+                    accelerated_route_query_seeded(
                         topology,
                         routing_graph,
                         &origin_seeds,
                         &destination_seeds,
                         direct_path.clone(),
-                    )?
-                    .or(direct_path.clone());
-                    seeded_bidirectional_dijkstra_on_edge_transitions(
-                        topology,
-                        routing_graph,
-                        &origin_seeds,
-                        &destination_seeds,
-                        accelerated_upper_bound,
                     )?
                 } else {
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);

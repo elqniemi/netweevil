@@ -27,35 +27,29 @@ pub struct CompiledEdgeMetric {
     pub generalized_cost: Option<f64>,
 }
 
+/// Sentinel for arcs whose weight comes from the base transition rather than
+/// a lower triangle; such arcs unpack directly to their head edge state.
+pub const NO_MIDDLE: u32 = u32::MAX;
+
+/// Per-profile CCH customization aligned with a [`crate::DatasetAccelerationBundle`].
+///
+/// `upward_middle`/`downward_middle` record, per arc, the edge state whose
+/// contraction produced the winning lower triangle (or [`NO_MIDDLE`] when the
+/// base transition wins) so query-time unpacking can recurse without storing
+/// full path expansions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompiledAcceleration {
     pub schema_version: u32,
     pub source_acceleration_bundle_id: CacheBundleId,
     pub algorithm: String,
     #[serde(default)]
-    pub edge_order: Vec<u32>,
-    #[serde(default)]
-    pub edge_rank: Vec<u32>,
-    #[serde(default)]
-    pub upward_first_out: Vec<u32>,
-    #[serde(default)]
-    pub upward_head: Vec<u32>,
-    #[serde(default)]
     pub upward_weight: Vec<f64>,
     #[serde(default)]
-    pub upward_path_first_out: Vec<u32>,
-    #[serde(default)]
-    pub upward_path_edges: Vec<u32>,
-    #[serde(default)]
-    pub downward_first_out: Vec<u32>,
-    #[serde(default)]
-    pub downward_head: Vec<u32>,
+    pub upward_middle: Vec<u32>,
     #[serde(default)]
     pub downward_weight: Vec<f64>,
     #[serde(default)]
-    pub downward_path_first_out: Vec<u32>,
-    #[serde(default)]
-    pub downward_path_edges: Vec<u32>,
+    pub downward_middle: Vec<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -7,7 +7,7 @@ services:
         "api",
         "serve",
         "--dataset",
-        "${NETWEEVIL_DATASET:?set NETWEEVIL_DATASET to an imported dataset id}",
+        "${NETWEEVIL_DATASET:-osm}",
         "--default-profile",
         "${NETWEEVIL_PROFILE:-examples/profiles/car_research_v1.yml}",
         "--bind",
