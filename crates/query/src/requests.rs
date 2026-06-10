@@ -1,0 +1,359 @@
+use std::path::PathBuf;
+
+use netweevil_profile::ReturnConfig;
+use serde::{Deserialize, Serialize};
+
+use crate::*;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineMode {
+    #[default]
+    Auto,
+    IgnoreMultiEdgeRestrictions,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffectiveEngineDescription {
+    pub route_engine: &'static str,
+    pub batch_engine: &'static str,
+    pub acceleration: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RouteRequest {
+    pub route_id: String,
+    pub origin: LabeledPoint,
+    pub destination: LabeledPoint,
+    #[serde(default)]
+    pub snap: SnapOptions,
+    #[serde(default)]
+    pub connectivity: ConnectivityPolicy,
+    #[serde(default)]
+    pub fallback: FallbackPolicy,
+    #[serde(default)]
+    pub returns: ReturnConfig,
+    #[serde(default)]
+    pub alternatives: AlternativeRouteOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AlternativeRouteOptions {
+    #[serde(default = "default_alternative_max_routes")]
+    pub max_routes: usize,
+    #[serde(default = "default_alternative_max_cost_ratio")]
+    pub max_cost_ratio: f64,
+    #[serde(default)]
+    pub max_extra_time_s: Option<f64>,
+    #[serde(default)]
+    pub max_extra_distance_m: Option<u64>,
+    #[serde(default = "default_alternative_min_jaccard_distance")]
+    pub min_jaccard_distance: f64,
+}
+
+impl Default for AlternativeRouteOptions {
+    fn default() -> Self {
+        Self {
+            max_routes: default_alternative_max_routes(),
+            max_cost_ratio: default_alternative_max_cost_ratio(),
+            max_extra_time_s: None,
+            max_extra_distance_m: None,
+            min_jaccard_distance: default_alternative_min_jaccard_distance(),
+        }
+    }
+}
+
+fn default_alternative_max_routes() -> usize {
+    1
+}
+
+fn default_alternative_max_cost_ratio() -> f64 {
+    1.35
+}
+
+fn default_alternative_min_jaccard_distance() -> f64 {
+    0.2
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LabeledPoint {
+    pub id: String,
+    pub lon: f64,
+    pub lat: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapOptions {
+    #[serde(default = "default_snap_distance")]
+    pub max_distance_m: f64,
+}
+
+impl Default for SnapOptions {
+    fn default() -> Self {
+        Self {
+            max_distance_m: default_snap_distance(),
+        }
+    }
+}
+
+fn default_snap_distance() -> f64 {
+    500.0
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DisconnectedNetworkMode {
+    #[default]
+    Strict,
+    IgnoreUnreachable,
+    HopOriginToNearestReachableComponent,
+    HopDestinationToNearestReachableComponent,
+    HopEitherEnd,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConnectivityPolicy {
+    #[serde(default)]
+    pub disconnected: DisconnectedNetworkMode,
+    #[serde(default)]
+    pub max_hop_distance_m: Option<f64>,
+    #[serde(default)]
+    pub report_hop_distance_separately: bool,
+}
+
+impl Default for ConnectivityPolicy {
+    fn default() -> Self {
+        Self {
+            disconnected: DisconnectedNetworkMode::Strict,
+            max_hop_distance_m: None,
+            report_hop_distance_separately: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct IllegalMovementPenaltyPolicy {
+    #[serde(default)]
+    pub reverse_oneway_penalty_s: Option<f64>,
+    #[serde(default)]
+    pub illegal_turn_penalty_s: Option<f64>,
+    #[serde(default)]
+    pub ignored_turn_restriction_penalty_s: Option<f64>,
+    #[serde(default)]
+    pub forbidden_uturn_penalty_s: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct FallbackPolicy {
+    #[serde(default)]
+    pub allow_reverse_oneway: bool,
+    #[serde(default)]
+    pub allow_illegal_turn: bool,
+    #[serde(default)]
+    pub ignore_turn_restrictions: bool,
+    #[serde(default)]
+    pub allow_uturn_where_normally_forbidden: bool,
+    #[serde(default)]
+    pub auto_relax_unreachable: bool,
+    #[serde(default)]
+    pub penalties: IllegalMovementPenaltyPolicy,
+    #[serde(default)]
+    pub max_illegal_distance_m: Option<f64>,
+    #[serde(default)]
+    pub max_illegal_turns: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaThresholdMetric {
+    DistanceM,
+    TravelTimeS,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAreaThreshold {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub limit: f64,
+    pub metric: ServiceAreaThresholdMetric,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaOutputMode {
+    Network,
+    Polygon,
+    #[default]
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaBandMode {
+    #[default]
+    Cumulative,
+    Ring,
+    #[serde(rename = "none")]
+    Unbanded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaBoundaryMode {
+    #[default]
+    Overlap,
+    CutAtBoundary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaMultiOriginMode {
+    #[default]
+    Merge,
+    Overlap,
+    Cut,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAreaPolygonOptions {
+    #[serde(default = "default_hull_aggressiveness")]
+    pub hull_aggressiveness: f64,
+    #[serde(default)]
+    pub simplification_tolerance_m: Option<f64>,
+}
+
+impl Default for ServiceAreaPolygonOptions {
+    fn default() -> Self {
+        Self {
+            hull_aggressiveness: default_hull_aggressiveness(),
+            simplification_tolerance_m: None,
+        }
+    }
+}
+
+fn default_hull_aggressiveness() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAreaReturnOptions {
+    #[serde(default = "default_true")]
+    pub geometry: bool,
+    #[serde(default = "default_true")]
+    pub attributes: bool,
+    #[serde(default = "default_true")]
+    pub per_threshold_summary: bool,
+    #[serde(default = "default_true")]
+    pub diagnostics: bool,
+    #[serde(default)]
+    pub segments: bool,
+}
+
+impl Default for ServiceAreaReturnOptions {
+    fn default() -> Self {
+        Self {
+            geometry: true,
+            attributes: true,
+            per_threshold_summary: true,
+            diagnostics: true,
+            segments: false,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceAreaRequest {
+    pub analysis_id: String,
+    #[serde(default)]
+    pub origins: Vec<LabeledPoint>,
+    #[serde(default)]
+    pub thresholds: Vec<ServiceAreaThreshold>,
+    #[serde(default)]
+    pub snap: SnapOptions,
+    #[serde(default)]
+    pub connectivity: ConnectivityPolicy,
+    #[serde(default)]
+    pub fallback: FallbackPolicy,
+    #[serde(default)]
+    pub output_mode: ServiceAreaOutputMode,
+    #[serde(default)]
+    pub band_mode: ServiceAreaBandMode,
+    #[serde(default)]
+    pub boundary_mode: ServiceAreaBoundaryMode,
+    #[serde(default)]
+    pub multi_origin_mode: ServiceAreaMultiOriginMode,
+    #[serde(default)]
+    pub polygon: ServiceAreaPolygonOptions,
+    #[serde(default)]
+    pub returns: ServiceAreaReturnOptions,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessibilityCategoryRequest {
+    pub category_id: String,
+    pub destinations: PointSetDocument,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessibilityRequest {
+    pub origins: PointSetDocument,
+    #[serde(default)]
+    pub categories: Vec<AccessibilityCategoryRequest>,
+    #[serde(default)]
+    pub thresholds_s: Vec<f64>,
+    pub max_travel_time_s: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OdAnalysisRequest {
+    pub pairs_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatrixAnalysisRequest {
+    pub origins_path: PathBuf,
+    pub destinations_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentDocument {
+    pub experiment: ExperimentHeader,
+    #[serde(default)]
+    pub scenarios: Vec<ScenarioSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExperimentHeader {
+    pub id: String,
+    pub label: String,
+    pub dataset: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnalysisKind {
+    Route,
+    Od,
+    Matrix,
+    ServiceArea,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScenarioSpec {
+    #[serde(default)]
+    pub id: Option<String>,
+    pub profile: PathBuf,
+    pub analysis: AnalysisKind,
+    #[serde(default)]
+    pub request: Option<PathBuf>,
+    #[serde(default)]
+    pub origins: Option<PathBuf>,
+    #[serde(default)]
+    pub destinations: Option<PathBuf>,
+    #[serde(default)]
+    pub out: Option<PathBuf>,
+}

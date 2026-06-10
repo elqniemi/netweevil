@@ -1,0 +1,482 @@
+use std::collections::BinaryHeap;
+
+use anyhow::Result;
+#[cfg(test)]
+use anyhow::bail;
+use netweevil_core::TopologyBundle;
+
+use crate::*;
+
+#[derive(Default)]
+pub(crate) struct BidirectionalAccelerationScratch {
+    forward_dist: Vec<f64>,
+    forward_previous_arc: Vec<u32>,
+    forward_touched: Vec<u32>,
+    forward_heap: BinaryHeap<State>,
+    backward_dist: Vec<f64>,
+    backward_next_arc: Vec<u32>,
+    backward_touched: Vec<u32>,
+    backward_heap: BinaryHeap<State>,
+}
+
+impl BidirectionalAccelerationScratch {
+    fn prepare(&mut self, edge_count: usize) {
+        if self.forward_dist.len() < edge_count {
+            self.forward_dist.resize(edge_count, f64::INFINITY);
+            self.forward_previous_arc
+                .resize(edge_count, NO_PREVIOUS_ARC);
+            self.backward_dist.resize(edge_count, f64::INFINITY);
+            self.backward_next_arc.resize(edge_count, NO_PREVIOUS_ARC);
+        }
+        for &edge_index in &self.forward_touched {
+            self.forward_dist[edge_index as usize] = f64::INFINITY;
+            self.forward_previous_arc[edge_index as usize] = NO_PREVIOUS_ARC;
+        }
+        for &edge_index in &self.backward_touched {
+            self.backward_dist[edge_index as usize] = f64::INFINITY;
+            self.backward_next_arc[edge_index as usize] = NO_PREVIOUS_ARC;
+        }
+        self.forward_touched.clear();
+        self.forward_heap.clear();
+        self.backward_touched.clear();
+        self.backward_heap.clear();
+    }
+
+    fn update_forward(&mut self, edge_index: usize, cost: f64, previous_arc: u32) -> bool {
+        if !cost.is_finite() {
+            return false;
+        }
+        if cost + f64::EPSILON >= self.forward_dist[edge_index] {
+            return false;
+        }
+        if !self.forward_dist[edge_index].is_finite() {
+            self.forward_touched.push(edge_index as u32);
+        }
+        self.forward_dist[edge_index] = cost;
+        self.forward_previous_arc[edge_index] = previous_arc;
+        true
+    }
+
+    fn update_backward(&mut self, edge_index: usize, cost: f64, next_arc: u32) -> bool {
+        if !cost.is_finite() {
+            return false;
+        }
+        if cost + f64::EPSILON >= self.backward_dist[edge_index] {
+            return false;
+        }
+        if !self.backward_dist[edge_index].is_finite() {
+            self.backward_touched.push(edge_index as u32);
+        }
+        self.backward_dist[edge_index] = cost;
+        self.backward_next_arc[edge_index] = next_arc;
+        true
+    }
+}
+
+fn reconstruct_accelerated_route_path(
+    acceleration: &AccelerationGraph,
+    scratch: &BidirectionalAccelerationScratch,
+    meeting_edge: usize,
+    total_generalized_cost: f64,
+) -> RoutePath {
+    let mut edge_indexes = Vec::new();
+    let mut forward_arc_ids = Vec::new();
+    let mut cursor = meeting_edge;
+    loop {
+        let previous_arc = scratch.forward_previous_arc[cursor];
+        if previous_arc == NO_PREVIOUS_ARC {
+            break;
+        }
+        let previous_arc = previous_arc as usize;
+        forward_arc_ids.push(previous_arc);
+        cursor = acceleration.upward_tail[previous_arc] as usize;
+    }
+    edge_indexes.push(cursor);
+    for arc_index in forward_arc_ids.into_iter().rev() {
+        let start = acceleration.source.upward_path_first_out[arc_index] as usize;
+        let end = acceleration.source.upward_path_first_out[arc_index + 1] as usize;
+        edge_indexes.extend(
+            acceleration.source.upward_path_edges[start..end]
+                .iter()
+                .map(|&edge_index| edge_index as usize),
+        );
+    }
+
+    let mut cursor = meeting_edge;
+    loop {
+        let next_arc = scratch.backward_next_arc[cursor];
+        if next_arc == NO_PREVIOUS_ARC {
+            break;
+        }
+        let next_arc = next_arc as usize;
+        let start = acceleration.source.downward_path_first_out[next_arc] as usize;
+        let end = acceleration.source.downward_path_first_out[next_arc + 1] as usize;
+        edge_indexes.extend(
+            acceleration.source.downward_path_edges[start..end]
+                .iter()
+                .map(|&edge_index| edge_index as usize),
+        );
+        cursor = acceleration.source.downward_head[next_arc] as usize;
+    }
+
+    RoutePath {
+        edge_indexes,
+        total_generalized_cost,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn accelerated_route_query(
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    source: usize,
+    target: usize,
+) -> Result<Option<RoutePath>> {
+    if source >= topology.nodes.len() || target >= topology.nodes.len() {
+        bail!("source or target node is out of bounds for the topology bundle");
+    }
+    let origin_seeds = routing_graph
+        .outgoing_edges(source)
+        .iter()
+        .filter_map(|&edge_index| {
+            let edge_cost = routing_graph.edge_costs[edge_index as usize];
+            edge_cost
+                .is_finite()
+                .then_some((edge_index as usize, edge_cost))
+        })
+        .collect::<Vec<_>>();
+    let destination_seeds = routing_graph
+        .incoming_edges(target)
+        .iter()
+        .map(|&edge_index| (edge_index as usize, 0.0))
+        .collect::<Vec<_>>();
+    let initial_path = (source == target).then_some(RoutePath {
+        edge_indexes: Vec::new(),
+        total_generalized_cost: 0.0,
+    });
+    accelerated_route_query_seeded(
+        topology,
+        routing_graph,
+        &origin_seeds,
+        &destination_seeds,
+        initial_path,
+    )
+}
+
+pub(crate) fn accelerated_route_query_seeded(
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    origin_seeds: &[(usize, f64)],
+    destination_seeds: &[(usize, f64)],
+    initial_path: Option<RoutePath>,
+) -> Result<Option<RoutePath>> {
+    let Some(acceleration) = routing_graph.acceleration.as_ref() else {
+        return Ok(None);
+    };
+
+    ACCELERATION_SEARCH_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        scratch.prepare(topology.edge_count());
+
+        for &(edge_index, cost) in origin_seeds {
+            if !scratch.update_forward(edge_index, cost, NO_PREVIOUS_ARC) {
+                continue;
+            }
+            scratch.forward_heap.push(State {
+                edge_index,
+                automaton_state: 0,
+                cost,
+                score: cost,
+            });
+        }
+        for &(edge_index, cost) in destination_seeds {
+            if !scratch.update_backward(edge_index, cost, NO_PREVIOUS_ARC) {
+                continue;
+            }
+            scratch.backward_heap.push(State {
+                edge_index,
+                automaton_state: 0,
+                cost,
+                score: cost,
+            });
+        }
+
+        let mut best_path = initial_path;
+        let mut best_cost = best_path
+            .as_ref()
+            .map(|path| path.total_generalized_cost)
+            .unwrap_or(f64::INFINITY);
+        let mut best_edge = None;
+
+        while !(scratch.forward_heap.is_empty() || scratch.backward_heap.is_empty()) {
+            let next_forward_cost = scratch
+                .forward_heap
+                .peek()
+                .map(|state| state.cost)
+                .unwrap_or(f64::INFINITY);
+            let next_backward_cost = scratch
+                .backward_heap
+                .peek()
+                .map(|state| state.cost)
+                .unwrap_or(f64::INFINITY);
+            if next_forward_cost + next_backward_cost >= best_cost {
+                break;
+            }
+
+            if next_forward_cost <= next_backward_cost {
+                let Some(State {
+                    edge_index,
+                    automaton_state: _,
+                    cost,
+                    score: _,
+                }) = scratch.forward_heap.pop()
+                else {
+                    break;
+                };
+                if cost > scratch.forward_dist[edge_index] {
+                    continue;
+                }
+                if scratch.backward_dist[edge_index].is_finite() {
+                    let candidate_cost = cost + scratch.backward_dist[edge_index];
+                    if candidate_cost < best_cost {
+                        best_cost = candidate_cost;
+                        best_edge = Some(edge_index);
+                    }
+                }
+                if cost > best_cost {
+                    continue;
+                }
+
+                let compiled = acceleration
+                    .metrics
+                    .acceleration
+                    .as_ref()
+                    .expect("validated acceleration weights");
+                for slot in acceleration.source.upward_first_out[edge_index] as usize
+                    ..acceleration.source.upward_first_out[edge_index + 1] as usize
+                {
+                    let next_edge = acceleration.source.upward_head[slot] as usize;
+                    let next_cost = cost + compiled.upward_weight[slot];
+                    if !scratch.update_forward(next_edge, next_cost, slot as u32) {
+                        continue;
+                    }
+                    scratch.forward_heap.push(State {
+                        edge_index: next_edge,
+                        automaton_state: 0,
+                        cost: next_cost,
+                        score: next_cost,
+                    });
+                }
+            } else {
+                let Some(State {
+                    edge_index,
+                    automaton_state: _,
+                    cost,
+                    score: _,
+                }) = scratch.backward_heap.pop()
+                else {
+                    break;
+                };
+                if cost > scratch.backward_dist[edge_index] {
+                    continue;
+                }
+                if scratch.forward_dist[edge_index].is_finite() {
+                    let candidate_cost = scratch.forward_dist[edge_index] + cost;
+                    if candidate_cost < best_cost {
+                        best_cost = candidate_cost;
+                        best_edge = Some(edge_index);
+                    }
+                }
+                if cost > best_cost {
+                    continue;
+                }
+
+                let compiled = acceleration
+                    .metrics
+                    .acceleration
+                    .as_ref()
+                    .expect("validated acceleration weights");
+                for slot in acceleration.reverse_downward_first_out[edge_index] as usize
+                    ..acceleration.reverse_downward_first_out[edge_index + 1] as usize
+                {
+                    let previous_edge = acceleration.reverse_downward_edge[slot] as usize;
+                    let next_cost = cost
+                        + compiled.downward_weight
+                            [acceleration.reverse_downward_arc[slot] as usize];
+                    if !scratch.update_backward(
+                        previous_edge,
+                        next_cost,
+                        acceleration.reverse_downward_arc[slot],
+                    ) {
+                        continue;
+                    }
+                    scratch.backward_heap.push(State {
+                        edge_index: previous_edge,
+                        automaton_state: 0,
+                        cost: next_cost,
+                        score: next_cost,
+                    });
+                }
+            }
+        }
+
+        let Some(meeting_edge) = best_edge else {
+            return Ok(best_path);
+        };
+
+        best_path = Some(reconstruct_accelerated_route_path(
+            acceleration,
+            &scratch,
+            meeting_edge,
+            best_cost,
+        ));
+
+        Ok(best_path)
+    })
+}
+
+pub(crate) fn seeded_bidirectional_dijkstra_on_edge_transitions(
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    origin_seeds: &[(usize, f64)],
+    destination_seeds: &[(usize, f64)],
+    initial_upper_bound: Option<RoutePath>,
+) -> Result<Option<RoutePath>> {
+    EDGE_SEARCH_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        scratch.prepare(topology.edge_count());
+
+        for &(edge_index, cost) in origin_seeds {
+            if !scratch.update_forward(edge_index, cost, NO_PREVIOUS_EDGE) {
+                continue;
+            }
+            scratch.forward_heap.push(State {
+                edge_index,
+                automaton_state: 0,
+                cost,
+                score: cost,
+            });
+        }
+        for &(edge_index, cost) in destination_seeds {
+            if !scratch.update_backward(edge_index, cost, NO_PREVIOUS_EDGE) {
+                continue;
+            }
+            scratch.backward_heap.push(State {
+                edge_index,
+                automaton_state: 0,
+                cost,
+                score: cost,
+            });
+        }
+
+        let mut best_path = initial_upper_bound;
+        let mut best_cost = best_path
+            .as_ref()
+            .map(|path| path.total_generalized_cost)
+            .unwrap_or(f64::INFINITY);
+        let mut best_edge = None;
+
+        while !(scratch.forward_heap.is_empty() || scratch.backward_heap.is_empty()) {
+            let next_forward_cost = scratch
+                .forward_heap
+                .peek()
+                .map(|state| state.cost)
+                .unwrap_or(f64::INFINITY);
+            let next_backward_cost = scratch
+                .backward_heap
+                .peek()
+                .map(|state| state.cost)
+                .unwrap_or(f64::INFINITY);
+            if best_path.is_some() && next_forward_cost + next_backward_cost >= best_cost {
+                break;
+            }
+
+            if next_forward_cost <= next_backward_cost {
+                let Some(State {
+                    edge_index,
+                    automaton_state: _,
+                    cost,
+                    score: _,
+                }) = scratch.forward_heap.pop()
+                else {
+                    break;
+                };
+                if cost > scratch.forward_dist[edge_index] {
+                    continue;
+                }
+                if scratch.backward_dist[edge_index].is_finite() {
+                    let candidate_cost = cost + scratch.backward_dist[edge_index];
+                    if candidate_cost < best_cost {
+                        best_cost = candidate_cost;
+                        best_edge = Some(edge_index);
+                    }
+                }
+                if cost > best_cost {
+                    continue;
+                }
+
+                for transition_index in routing_graph.transition_range(edge_index) {
+                    let next_edge = routing_graph.transition_edges[transition_index] as usize;
+                    let next_cost = cost + routing_graph.transition_costs[transition_index];
+                    if !scratch.update_forward(next_edge, next_cost, edge_index as u32) {
+                        continue;
+                    }
+                    scratch.forward_heap.push(State {
+                        edge_index: next_edge,
+                        automaton_state: 0,
+                        cost: next_cost,
+                        score: next_cost,
+                    });
+                }
+            } else {
+                let Some(State {
+                    edge_index,
+                    automaton_state: _,
+                    cost,
+                    score: _,
+                }) = scratch.backward_heap.pop()
+                else {
+                    break;
+                };
+                if cost > scratch.backward_dist[edge_index] {
+                    continue;
+                }
+                if scratch.forward_dist[edge_index].is_finite() {
+                    let candidate_cost = scratch.forward_dist[edge_index] + cost;
+                    if candidate_cost < best_cost {
+                        best_cost = candidate_cost;
+                        best_edge = Some(edge_index);
+                    }
+                }
+                if cost > best_cost {
+                    continue;
+                }
+
+                for transition_index in routing_graph.reverse_transition_range(edge_index) {
+                    let previous_edge =
+                        routing_graph.reverse_transition_edges[transition_index] as usize;
+                    let next_cost = cost + routing_graph.reverse_transition_costs[transition_index];
+                    if !scratch.update_backward(previous_edge, next_cost, edge_index as u32) {
+                        continue;
+                    }
+                    scratch.backward_heap.push(State {
+                        edge_index: previous_edge,
+                        automaton_state: 0,
+                        cost: next_cost,
+                        score: next_cost,
+                    });
+                }
+            }
+        }
+
+        if let Some(meeting_edge) = best_edge {
+            best_path = Some(reconstruct_bidirectional_route_path(
+                &scratch,
+                meeting_edge,
+                best_cost,
+            ));
+        }
+
+        Ok(best_path)
+    })
+}
