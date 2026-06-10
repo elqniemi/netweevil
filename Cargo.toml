@@ -8,6 +8,7 @@ members = [
     "crates/profile",
     "crates/query",
     "crates/report",
+    "crates/simulate",
     "crates/transit",
 ]
 resolver = "2"
@@ -32,6 +33,7 @@ hex = "0.4.3"
 memmap2 = "0.9.8"
 osmpbfreader = "0.17.0"
 parquet = { version = "56.2.0", default-features = false, features = ["arrow"] }
+rayon = "1.10.0"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 serde_yaml = "0.9.34"

@@ -13,6 +13,7 @@ netweevil-persist = { path = "../persist" }
 netweevil-profile = { path = "../profile" }
 netweevil-query = { path = "../query" }
 netweevil-report = { path = "../report" }
+netweevil-simulate = { path = "../simulate" }
 netweevil-transit = { path = "../transit" }
 serde.workspace = true
 serde_json.workspace = true
