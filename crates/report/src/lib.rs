@@ -5,8 +5,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use netweevil_core::{
-    AccelerationBuildSettings, AccelerationBundleStats, BuildStage, CacheBundleId, DatasetId,
-    TopologyBundleMeta, TravelMode,
+    AccelerationBundleStats, BuildStage, CacheBundleId, DatasetId, TopologyBundleMeta, TravelMode,
 };
 use netweevil_profile::ProfileDocument;
 use netweevil_query::{
@@ -40,8 +39,6 @@ pub struct DatasetManifest {
     pub acceleration_bundle: Option<BundleRef>,
     #[serde(default)]
     pub topology_meta: Option<TopologyBundleMeta>,
-    #[serde(default)]
-    pub acceleration_settings: Option<AccelerationBuildSettings>,
     #[serde(default)]
     pub acceleration_stats: Option<AccelerationBundleStats>,
 }

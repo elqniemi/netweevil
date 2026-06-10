@@ -14,6 +14,9 @@ The system targets local OSM routing and network analysis with explicit, version
 
 ### Completed
 
+- [x] Edge-based Customizable Contraction Hierarchies (CCH) as the primary route accelerator: complete metric-independent contraction at dataset import, per-profile customization with middle-pointer unpacking, and an authoritative hierarchy query with exact automaton fallback for via-way restriction sequences (see `docs/cch-design.md`). Groningen province warm route p50 dropped from 131 ms to 2.4 ms with differential-identical results to the exact engine.
+- [x] OSS production packaging: Dockerfile + docker-compose with persistent state volume and healthcheck, dual MIT/Apache-2.0 license files, GitHub Actions CI (fmt, clippy, build, test, docker build), workspace lint configuration, and module-level crate splits replacing the former multi-thousand-line files.
+
 - [x] Initialize a Rust workspace with the planned crate split:
   - `core`
   - `ingest`

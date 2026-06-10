@@ -4,7 +4,7 @@ pub mod graph;
 pub mod metrics;
 
 pub use acceleration::{
-    AccelerationBuildProfile, AccelerationBuildSettings, AccelerationBundleStats,
+    ACCELERATION_BUNDLE_SCHEMA_VERSION, AccelerationBundleStats, CCH_ALGORITHM,
     DatasetAccelerationBundle,
 };
 pub use dataset::{BuildStage, CacheBundleId, DatasetId, TravelMode};
@@ -19,4 +19,5 @@ pub use graph::{
 };
 pub use metrics::{
     CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle, CompiledTurnCostConfig,
+    NO_MIDDLE,
 };

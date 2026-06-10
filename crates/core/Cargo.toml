@@ -9,3 +9,6 @@ rust-version.workspace = true
 serde.workspace = true
 time.workspace = true
 
+
+[lints]
+workspace = true

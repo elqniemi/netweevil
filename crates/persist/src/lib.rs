@@ -258,6 +258,73 @@ impl From<LegacyTopologyBundle> for TopologyBundle {
     }
 }
 
+pub fn write_dataset_manifest(
+    paths: &WorkspacePaths,
+    manifest: &DatasetManifest,
+) -> Result<PathBuf> {
+    let path = paths
+        .datasets_dir
+        .join(format!("{}.json", manifest.dataset_id.0));
+    write_json(&path, manifest)?;
+    Ok(path)
+}
+
+pub fn write_compiled_profile_manifest(
+    paths: &WorkspacePaths,
+    manifest: &CompiledProfileManifest,
+) -> Result<PathBuf> {
+    let path = paths
+        .compiled_profiles_dir
+        .join(format!("{}.json", manifest.compile_id));
+    write_json(&path, manifest)?;
+    Ok(path)
+}
+
+pub fn write_run_manifest(paths: &WorkspacePaths, manifest: &RunManifest) -> Result<PathBuf> {
+    let path = paths.runs_dir.join(format!("{}.json", manifest.run_id));
+    write_json(&path, manifest)?;
+    Ok(path)
+}
+
+pub fn list_json_files(dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(dir.as_ref())
+        .with_context(|| format!("reading directory {}", dir.as_ref().display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension() == Some(OsStr::new("json")) {
+            entries.push(path);
+        }
+    }
+    entries.sort();
+    Ok(entries)
+}
+
+pub fn read_dataset_manifests(paths: &WorkspacePaths) -> Result<Vec<DatasetManifest>> {
+    list_json_files(&paths.datasets_dir)?
+        .into_iter()
+        .map(read_json)
+        .collect()
+}
+
+pub fn read_dataset_manifest(paths: &WorkspacePaths, dataset_id: &str) -> Result<DatasetManifest> {
+    read_json(paths.datasets_dir.join(format!("{dataset_id}.json")))
+}
+
+pub fn read_compiled_profile_manifests(
+    paths: &WorkspacePaths,
+) -> Result<Vec<CompiledProfileManifest>> {
+    list_json_files(&paths.compiled_profiles_dir)?
+        .into_iter()
+        .map(read_json)
+        .collect()
+}
+
+pub fn read_run_manifest(path: impl AsRef<Path>) -> Result<RunManifest> {
+    read_json(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -395,21 +462,16 @@ mod tests {
     #[test]
     fn round_trips_acceleration_bundle_binary() {
         let bundle = DatasetAccelerationBundle {
-            schema_version: 1,
+            schema_version: netweevil_core::ACCELERATION_BUNDLE_SCHEMA_VERSION,
             source_topology_bundle_id: CacheBundleId::new("topology-test"),
-            algorithm: "edge_based_shortcut_ch_v1".to_string(),
-            build_settings: Default::default(),
+            algorithm: netweevil_core::CCH_ALGORITHM.to_string(),
             stats: Default::default(),
             edge_order: vec![0, 2, 1],
             edge_rank: vec![0, 2, 1],
             upward_first_out: vec![0, 1, 1, 1],
             upward_head: vec![2],
-            upward_path_first_out: vec![0, 1],
-            upward_path_edges: vec![2],
             downward_first_out: vec![0, 0, 1, 1],
             downward_head: vec![0],
-            downward_path_first_out: vec![0, 1],
-            downward_path_edges: vec![0],
         };
 
         let unique = SystemTime::now()
@@ -425,7 +487,6 @@ mod tests {
 
         assert_eq!(round_tripped.schema_version, bundle.schema_version);
         assert_eq!(round_tripped.algorithm, bundle.algorithm);
-        assert_eq!(round_tripped.build_settings, bundle.build_settings);
         assert_eq!(round_tripped.stats, bundle.stats);
         assert_eq!(round_tripped.edge_order, bundle.edge_order);
         assert_eq!(round_tripped.edge_rank, bundle.edge_rank);
@@ -464,7 +525,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netweevil-persist-metrics-{unique}.bin"));
+        let path =
+            std::env::temp_dir().join(format!("netweevil-persist-metrics-legacy-{unique}.bin"));
 
         write_binary(&path, &bundle).expect("bundle should serialize");
         let round_tripped =
@@ -505,7 +567,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock should be after unix epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("netweevil-persist-metrics-{unique}.bin"));
+        let path =
+            std::env::temp_dir().join(format!("netweevil-persist-metrics-turns-{unique}.bin"));
 
         write_binary(&path, &bundle).expect("bundle should serialize");
         let round_tripped = read_compiled_profile_bundle(&path).expect("bundle should deserialize");
@@ -516,71 +579,4 @@ mod tests {
 
         fs::remove_file(path).expect("temporary bundle should be removed");
     }
-}
-
-pub fn write_dataset_manifest(
-    paths: &WorkspacePaths,
-    manifest: &DatasetManifest,
-) -> Result<PathBuf> {
-    let path = paths
-        .datasets_dir
-        .join(format!("{}.json", manifest.dataset_id.0));
-    write_json(&path, manifest)?;
-    Ok(path)
-}
-
-pub fn write_compiled_profile_manifest(
-    paths: &WorkspacePaths,
-    manifest: &CompiledProfileManifest,
-) -> Result<PathBuf> {
-    let path = paths
-        .compiled_profiles_dir
-        .join(format!("{}.json", manifest.compile_id));
-    write_json(&path, manifest)?;
-    Ok(path)
-}
-
-pub fn write_run_manifest(paths: &WorkspacePaths, manifest: &RunManifest) -> Result<PathBuf> {
-    let path = paths.runs_dir.join(format!("{}.json", manifest.run_id));
-    write_json(&path, manifest)?;
-    Ok(path)
-}
-
-pub fn list_json_files(dir: impl AsRef<Path>) -> Result<Vec<PathBuf>> {
-    let mut entries = Vec::new();
-    for entry in fs::read_dir(dir.as_ref())
-        .with_context(|| format!("reading directory {}", dir.as_ref().display()))?
-    {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension() == Some(OsStr::new("json")) {
-            entries.push(path);
-        }
-    }
-    entries.sort();
-    Ok(entries)
-}
-
-pub fn read_dataset_manifests(paths: &WorkspacePaths) -> Result<Vec<DatasetManifest>> {
-    list_json_files(&paths.datasets_dir)?
-        .into_iter()
-        .map(read_json)
-        .collect()
-}
-
-pub fn read_dataset_manifest(paths: &WorkspacePaths, dataset_id: &str) -> Result<DatasetManifest> {
-    read_json(paths.datasets_dir.join(format!("{dataset_id}.json")))
-}
-
-pub fn read_compiled_profile_manifests(
-    paths: &WorkspacePaths,
-) -> Result<Vec<CompiledProfileManifest>> {
-    list_json_files(&paths.compiled_profiles_dir)?
-        .into_iter()
-        .map(read_json)
-        .collect()
-}
-
-pub fn read_run_manifest(path: impl AsRef<Path>) -> Result<RunManifest> {
-    read_json(path)
 }

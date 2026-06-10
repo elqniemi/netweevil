@@ -477,6 +477,8 @@ fn default_edge_bin() -> f64 {
 }
 
 impl SimulationScenario {
+    // `!(x > 0.0)` deliberately rejects NaN; `x <= 0.0` would accept it.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     pub fn validate(&self) -> Result<()> {
         if self.scenario.id.trim().is_empty() {
             bail!("scenario.id must not be empty");
