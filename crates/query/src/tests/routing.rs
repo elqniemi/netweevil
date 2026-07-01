@@ -1220,3 +1220,109 @@ scenarios:
     );
     fs::remove_file(path).ok();
 }
+
+#[test]
+fn accelerated_many_to_many_matrix_matches_pairwise_routes() {
+    let topology = test_topology();
+    let (bundle, accelerated_metrics) = build_test_cch(&topology, &test_metrics());
+    let engine = PreparedRoutingEngine::new(
+        Arc::new(topology),
+        Arc::new(accelerated_metrics),
+        Some(bundle),
+    )
+    .expect("accelerated engine builds");
+
+    let point = |id: &str, lon: f64| crate::LabeledPoint {
+        id: id.to_string(),
+        lon,
+        lat: 53.0,
+    };
+    // Five distinct snapped destinations per origin push the batch strategy
+    // onto the shared CCH search-space path; the pairwise CCH query answers
+    // the same pairs one by one for comparison.
+    let origin_points = vec![point("a", 6.0), point("ab_mid", 6.0004)];
+    let destination_points = vec![
+        point("b", 6.001),
+        point("c", 6.002),
+        point("bc_low", 6.0013),
+        point("bc_mid", 6.0015),
+        point("bc_high", 6.0017),
+    ];
+    let point_set = |points: Vec<crate::LabeledPoint>| PointSetDocument {
+        points,
+        snap: SnapOptions {
+            max_distance_m: 500.0,
+        },
+        connectivity: Default::default(),
+        fallback: Default::default(),
+        returns: ReturnConfig::default(),
+        alternatives: Default::default(),
+    };
+    let origins = point_set(origin_points.clone());
+    let destinations = point_set(destination_points.clone());
+
+    let matrix = engine
+        .execute_matrix(&origins, &destinations)
+        .expect("matrix succeeds");
+    assert_eq!(
+        matrix.cell_count,
+        origin_points.len() * destination_points.len()
+    );
+
+    for cell in &matrix.cells {
+        let origin = origin_points
+            .iter()
+            .find(|point| point.id == cell.origin_id)
+            .expect("cell origin known");
+        let destination = destination_points
+            .iter()
+            .find(|point| point.id == cell.destination_id)
+            .expect("cell destination known");
+        let request = RouteRequest {
+            route_id: format!("{}-{}", cell.origin_id, cell.destination_id),
+            origin: origin.clone(),
+            destination: destination.clone(),
+            snap: SnapOptions {
+                max_distance_m: 500.0,
+            },
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+            alternatives: Default::default(),
+        };
+        let pairwise = engine.execute_route(&request);
+        match (&cell.status, pairwise) {
+            (crate::BatchItemStatus::Succeeded, Ok(route)) => {
+                let matrix_cost = cell.total_generalized_cost.expect("matrix cost");
+                assert!(
+                    (matrix_cost - route.summary.total_generalized_cost).abs() <= 1e-6,
+                    "cell {}->{} cost {} != pairwise {}",
+                    cell.origin_id,
+                    cell.destination_id,
+                    matrix_cost,
+                    route.summary.total_generalized_cost
+                );
+                let matrix_time = cell.total_travel_time_s.expect("matrix time");
+                assert!(
+                    (matrix_time - route.summary.total_travel_time_s).abs() <= 1e-6,
+                    "cell {}->{} time {} != pairwise {}",
+                    cell.origin_id,
+                    cell.destination_id,
+                    matrix_time,
+                    route.summary.total_travel_time_s
+                );
+            }
+            (crate::BatchItemStatus::Succeeded, Err(error)) => {
+                panic!(
+                    "matrix cell {}->{} succeeded but pairwise route failed: {error:#}",
+                    cell.origin_id, cell.destination_id
+                );
+            }
+            (_, Ok(route)) => panic!(
+                "matrix cell {}->{} did not succeed but pairwise route did (cost {})",
+                cell.origin_id, cell.destination_id, route.summary.total_generalized_cost
+            ),
+            (_, Err(_)) => {}
+        }
+    }
+}

@@ -383,6 +383,267 @@ pub(crate) fn accelerated_route_query_seeded(
     })
 }
 
+/// One settled hierarchy state of a full CCH search space.
+#[derive(Debug, Clone, Copy)]
+struct CchSpaceEntry {
+    edge_index: u32,
+    cost: f64,
+    arc: u32,
+}
+
+/// Complete (unpruned) upward search space from a set of seeds, sorted by
+/// edge index. Forward spaces store the predecessor upward arc per state;
+/// backward spaces store the successor downward arc. Because both spaces are
+/// complete, `min over shared states of (forward + backward)` equals the
+/// exact shortest-path cost — the same guarantee the pairwise CCH query
+/// relies on, shared across every origin/destination combination instead of
+/// being recomputed per pair.
+#[derive(Debug)]
+pub(crate) struct CchSearchSpace {
+    entries: Vec<CchSpaceEntry>,
+}
+
+impl CchSearchSpace {
+    fn lookup(&self, edge_index: u32) -> Option<(f64, u32)> {
+        self.entries
+            .binary_search_by_key(&edge_index, |entry| entry.edge_index)
+            .ok()
+            .map(|position| (self.entries[position].cost, self.entries[position].arc))
+    }
+}
+
+pub(crate) fn build_forward_cch_space(
+    routing_graph: &RoutingGraph,
+    seeds: &[(usize, f64)],
+) -> CchSearchSpace {
+    let acceleration = routing_graph
+        .acceleration
+        .as_ref()
+        .expect("many-to-many CCH space requires acceleration");
+    let compiled = acceleration
+        .metrics
+        .acceleration
+        .as_ref()
+        .expect("validated acceleration weights");
+
+    ACCELERATION_SEARCH_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        scratch.prepare(routing_graph.edge_costs.len());
+
+        for &(edge_index, cost) in seeds {
+            if !scratch.update_forward(edge_index, cost, NO_PREVIOUS_ARC) {
+                continue;
+            }
+            scratch.forward_heap.push(State {
+                edge_index,
+                automaton_state: 0,
+                cost,
+                score: cost,
+            });
+        }
+
+        while let Some(State {
+            edge_index, cost, ..
+        }) = scratch.forward_heap.pop()
+        {
+            if cost > scratch.forward_dist[edge_index] {
+                continue;
+            }
+            for slot in acceleration.source.upward_first_out[edge_index] as usize
+                ..acceleration.source.upward_first_out[edge_index + 1] as usize
+            {
+                let next_edge = acceleration.source.upward_head[slot] as usize;
+                let next_cost = cost + compiled.upward_weight[slot];
+                if !scratch.update_forward(next_edge, next_cost, slot as u32) {
+                    continue;
+                }
+                scratch.forward_heap.push(State {
+                    edge_index: next_edge,
+                    automaton_state: 0,
+                    cost: next_cost,
+                    score: next_cost,
+                });
+            }
+        }
+
+        let mut entries = scratch
+            .forward_touched
+            .iter()
+            .map(|&edge_index| CchSpaceEntry {
+                edge_index,
+                cost: scratch.forward_dist[edge_index as usize],
+                arc: scratch.forward_previous_arc[edge_index as usize],
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|entry| entry.edge_index);
+        CchSearchSpace { entries }
+    })
+}
+
+pub(crate) fn build_backward_cch_space(
+    routing_graph: &RoutingGraph,
+    seeds: &[(usize, f64)],
+) -> CchSearchSpace {
+    let acceleration = routing_graph
+        .acceleration
+        .as_ref()
+        .expect("many-to-many CCH space requires acceleration");
+    let compiled = acceleration
+        .metrics
+        .acceleration
+        .as_ref()
+        .expect("validated acceleration weights");
+
+    ACCELERATION_SEARCH_SCRATCH.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        scratch.prepare(routing_graph.edge_costs.len());
+
+        for &(edge_index, cost) in seeds {
+            if !scratch.update_backward(edge_index, cost, NO_PREVIOUS_ARC) {
+                continue;
+            }
+            scratch.backward_heap.push(State {
+                edge_index,
+                automaton_state: 0,
+                cost,
+                score: cost,
+            });
+        }
+
+        while let Some(State {
+            edge_index, cost, ..
+        }) = scratch.backward_heap.pop()
+        {
+            if cost > scratch.backward_dist[edge_index] {
+                continue;
+            }
+            for slot in acceleration.reverse_downward_first_out[edge_index] as usize
+                ..acceleration.reverse_downward_first_out[edge_index + 1] as usize
+            {
+                let previous_edge = acceleration.reverse_downward_edge[slot] as usize;
+                let next_cost = cost
+                    + compiled.downward_weight[acceleration.reverse_downward_arc[slot] as usize];
+                if !scratch.update_backward(
+                    previous_edge,
+                    next_cost,
+                    acceleration.reverse_downward_arc[slot],
+                ) {
+                    continue;
+                }
+                scratch.backward_heap.push(State {
+                    edge_index: previous_edge,
+                    automaton_state: 0,
+                    cost: next_cost,
+                    score: next_cost,
+                });
+            }
+        }
+
+        let mut entries = scratch
+            .backward_touched
+            .iter()
+            .map(|&edge_index| CchSpaceEntry {
+                edge_index,
+                cost: scratch.backward_dist[edge_index as usize],
+                arc: scratch.backward_next_arc[edge_index as usize],
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|entry| entry.edge_index);
+        CchSearchSpace { entries }
+    })
+}
+
+/// Exact minimum up-down cost over the shared states of two complete search
+/// spaces, via a linear merge of the edge-sorted entry lists.
+pub(crate) fn join_cch_spaces(
+    forward: &CchSearchSpace,
+    backward: &CchSearchSpace,
+) -> Option<(f64, u32)> {
+    let mut best: Option<(f64, u32)> = None;
+    let (mut i, mut j) = (0_usize, 0_usize);
+    while i < forward.entries.len() && j < backward.entries.len() {
+        let left = &forward.entries[i];
+        let right = &backward.entries[j];
+        match left.edge_index.cmp(&right.edge_index) {
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+            std::cmp::Ordering::Equal => {
+                let cost = left.cost + right.cost;
+                if best.is_none_or(|(known, _)| cost < known) {
+                    best = Some((cost, left.edge_index));
+                }
+                i += 1;
+                j += 1;
+            }
+        }
+    }
+    best
+}
+
+/// Unpacks the up-down path through `meeting_edge` from two stored search
+/// spaces, mirroring `reconstruct_accelerated_route_path` on the pairwise
+/// scratch.
+pub(crate) fn reconstruct_cch_space_path(
+    routing_graph: &RoutingGraph,
+    forward: &CchSearchSpace,
+    backward: &CchSearchSpace,
+    meeting_edge: u32,
+    total_generalized_cost: f64,
+) -> RoutePath {
+    let acceleration = routing_graph
+        .acceleration
+        .as_ref()
+        .expect("many-to-many CCH space requires acceleration");
+
+    let mut forward_arc_ids = Vec::new();
+    let mut cursor = meeting_edge;
+    loop {
+        let (_, arc) = forward
+            .lookup(cursor)
+            .expect("meeting edge chain settled in forward space");
+        if arc == NO_PREVIOUS_ARC {
+            break;
+        }
+        forward_arc_ids.push(arc);
+        cursor = acceleration.upward_tail[arc as usize];
+    }
+
+    let mut edge_indexes = vec![cursor as usize];
+    let mut unpack_stack = Vec::new();
+    for arc_slot in forward_arc_ids.into_iter().rev() {
+        push_unpacked_arc(
+            acceleration,
+            &mut unpack_stack,
+            true,
+            arc_slot,
+            &mut edge_indexes,
+        );
+    }
+
+    let mut cursor = meeting_edge;
+    loop {
+        let (_, arc) = backward
+            .lookup(cursor)
+            .expect("meeting edge chain settled in backward space");
+        if arc == NO_PREVIOUS_ARC {
+            break;
+        }
+        push_unpacked_arc(
+            acceleration,
+            &mut unpack_stack,
+            false,
+            arc,
+            &mut edge_indexes,
+        );
+        cursor = acceleration.source.downward_head[arc as usize];
+    }
+
+    RoutePath {
+        edge_indexes,
+        total_generalized_cost,
+    }
+}
+
 pub(crate) fn seeded_bidirectional_dijkstra_on_edge_transitions(
     topology: &TopologyBundle,
     routing_graph: &RoutingGraph,

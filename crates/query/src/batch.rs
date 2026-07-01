@@ -51,6 +51,7 @@ pub(crate) fn execute_od_with_graph(
     );
     let mut route_cache = HashMap::new();
     let mut origin_tree_cache = HashMap::new();
+    let mut cch_space_caches = CchSpaceCaches::default();
     let mut pairs = Vec::with_capacity(document.pairs.len());
     let mut succeeded_count = 0_usize;
     let mut ignored_count = 0_usize;
@@ -65,6 +66,7 @@ pub(crate) fn execute_od_with_graph(
             (Ok(origin_set_id), Ok(destination_set_id)) => cached_batch_route_result(
                 &mut route_cache,
                 &mut origin_tree_cache,
+                &mut cch_space_caches,
                 topology,
                 metrics,
                 routing_graph,
@@ -217,6 +219,7 @@ pub(crate) fn execute_matrix_with_graph(
     );
     let mut route_cache = HashMap::new();
     let mut origin_tree_cache = HashMap::new();
+    let mut cch_space_caches = CchSpaceCaches::default();
     let mut cells = Vec::with_capacity(origins.points.len() * destinations.points.len());
     let mut succeeded_count = 0_usize;
     let mut ignored_count = 0_usize;
@@ -227,6 +230,7 @@ pub(crate) fn execute_matrix_with_graph(
                 (Ok(origin_set_id), Ok(destination_set_id)) => cached_batch_route_result(
                     &mut route_cache,
                     &mut origin_tree_cache,
+                    &mut cch_space_caches,
                     topology,
                     metrics,
                     routing_graph,
@@ -488,6 +492,7 @@ pub(crate) fn intern_candidate_sets(
 fn cached_batch_route_result(
     cache: &mut HashMap<(usize, usize), std::result::Result<RouteResult, AnalysisFailure>>,
     origin_tree_cache: &mut HashMap<(u32, u64, u64), Result<SingleSourceEdgeTree, String>>,
+    cch_space_caches: &mut CchSpaceCaches,
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     routing_graph: &RoutingGraph,
@@ -507,6 +512,7 @@ fn cached_batch_route_result(
     let value = cache.entry(key).or_insert_with(|| {
         execute_batched_route_with_candidates(
             origin_tree_cache,
+            cch_space_caches,
             topology,
             metrics,
             routing_graph,
@@ -529,8 +535,18 @@ fn cached_batch_route_result(
     value.clone().map_err(anyhow::Error::new)
 }
 
+/// Per-request caches of complete CCH search spaces, keyed by snapped
+/// candidate identity. Each unique endpoint pays for one full upward search;
+/// every origin/destination combination is answered by a merge-join.
+#[derive(Default)]
+struct CchSpaceCaches {
+    forward: HashMap<(u32, u64, u64), CchSearchSpace>,
+    backward: HashMap<(u32, u64, u64), CchSearchSpace>,
+}
+
 fn execute_batched_route_with_candidates(
     origin_tree_cache: &mut HashMap<(u32, u64, u64), Result<SingleSourceEdgeTree, String>>,
+    cch_space_caches: &mut CchSpaceCaches,
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     routing_graph: &RoutingGraph,
@@ -544,12 +560,15 @@ fn execute_batched_route_with_candidates(
     origin_candidates: &[SnappedPoint],
     destination_candidates: &[SnappedPoint],
 ) -> Result<RouteResult> {
-    if !matches!(strategy, BatchRouteStrategy::SingleSource)
-        || routing_graph.has_restriction_sequences()
-        || has_failure_modes(fallback)
-        || auto_relaxation_requested(fallback)
-        || alternatives.max_routes > 1
-    {
+    let batchable = !routing_graph.has_restriction_sequences()
+        && !has_failure_modes(fallback)
+        && !auto_relaxation_requested(fallback)
+        && alternatives.max_routes <= 1;
+    let use_single_source = batchable && matches!(strategy, BatchRouteStrategy::SingleSource);
+    let use_cch_spaces = batchable
+        && matches!(strategy, BatchRouteStrategy::AcceleratedManyToMany)
+        && routing_graph.acceleration.is_some();
+    if !use_single_source && !use_cch_spaces {
         return execute_route_with_candidates(
             topology,
             metrics,
@@ -566,109 +585,105 @@ fn execute_batched_route_with_candidates(
         );
     }
 
-    for origin in origin_candidates {
-        let tree =
-            cached_single_source_edge_tree(origin_tree_cache, topology, routing_graph, origin)?;
-        for destination in destination_candidates {
-            if same_edge_reverse_pair(origin, destination) {
-                continue;
-            }
-            let Some(hop_info) =
-                hop_info_for_pair(origin, destination, snap_max_distance_m, connectivity)
-            else {
-                continue;
-            };
-            let path = best_path_from_origin_tree(routing_graph, tree, origin, destination);
-            if let Some(path) = path {
-                let path =
-                    finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
-                let analysis = analyze_route_path(
-                    topology,
-                    metrics,
-                    routing_graph,
-                    fallback,
-                    &path,
-                    origin,
-                    destination,
-                )?;
-                return Ok(RouteResult {
-                    route_id: route_id.to_string(),
-                    origin: origin.clone(),
-                    destination: destination.clone(),
-                    outcome: if !analysis.violations.is_empty() || hop_info.fallback_used {
-                        AnalysisOutcome::Degraded
-                    } else {
-                        AnalysisOutcome::Legal
-                    },
-                    fallback_used: hop_info.fallback_used || !analysis.violations.is_empty(),
-                    origin_hop_distance_m: hop_info.origin_hop_distance_m,
-                    destination_hop_distance_m: hop_info.destination_hop_distance_m,
-                    summary: analysis.summary,
-                    node_path: Vec::new(),
-                    edge_path: Vec::new(),
-                    geometry: match returns.geometry {
-                        netweevil_profile::ReturnGeometry::None => None,
-                        _ => Some(build_route_geometry(
-                            topology,
-                            &path.edge_indexes,
-                            origin,
-                            destination,
-                        )),
-                    },
-                    hop_segments: hop_info.hop_segments,
-                    segments: if returns.segment_rows {
-                        Some(
-                            path.edge_indexes
-                                .iter()
-                                .map(|&edge_index| {
-                                    let edge = topology.edge(edge_index);
-                                    let metric = &metrics.edge_metrics[edge_index];
-                                    let factor = edge_traversal_factor(
-                                        edge_index,
-                                        path.edge_indexes.first().copied(),
-                                        path.edge_indexes.last().copied(),
-                                        origin,
-                                        destination,
-                                    );
-                                    RouteSegment {
-                                        edge_id: edge.edge_id.0,
-                                        from_node_id: edge.from.0,
-                                        to_node_id: edge.to.0,
-                                        source_way_id: edge.source_way_id,
-                                        length_m: (edge.length_m as f64 * factor).round() as u32,
-                                        travel_time_s: metric.travel_time_s.unwrap_or_default()
-                                            * factor,
-                                        generalized_cost: metric
-                                            .generalized_cost
-                                            .unwrap_or_default()
-                                            * factor,
-                                        road_class: edge.road_class,
-                                        surface: edge.surface,
-                                        name: edge
-                                            .name_index
-                                            .and_then(|index| topology.names.get(index as usize))
-                                            .cloned(),
-                                        violation_type: analysis
-                                            .segment_violation_types
-                                            .get(&edge_index)
-                                            .copied()
-                                            .flatten(),
-                                    }
-                                })
-                                .collect(),
-                        )
-                    } else {
-                        None
-                    },
-                    breakdowns: build_breakdowns(topology, metrics, &path.edge_indexes, returns),
-                    violations: analysis.violations,
-                    diagnostics: hop_info.diagnostics,
-                    warnings: merge_warnings(
-                        merge_warnings(execution_warnings(metrics), analysis.warnings),
-                        hop_info.warnings,
-                    ),
-                    alternatives: Vec::new(),
+    if use_cch_spaces {
+        let CchSpaceCaches {
+            forward: forward_cache,
+            backward: backward_cache,
+        } = cch_space_caches;
+        for origin in origin_candidates {
+            let forward = forward_cache
+                .entry(snap_cache_key(origin))
+                .or_insert_with(|| {
+                    build_forward_cch_space(
+                        routing_graph,
+                        &origin_edge_seeds(routing_graph, origin),
+                    )
                 });
+            for destination in destination_candidates {
+                if same_edge_reverse_pair(origin, destination) {
+                    continue;
+                }
+                let Some(hop_info) =
+                    hop_info_for_pair(origin, destination, snap_max_distance_m, connectivity)
+                else {
+                    continue;
+                };
+                let backward = backward_cache
+                    .entry(snap_cache_key(destination))
+                    .or_insert_with(|| {
+                        build_backward_cch_space(
+                            routing_graph,
+                            &destination_edge_seeds(routing_graph, destination),
+                        )
+                    });
+                let direct = direct_same_edge_path(routing_graph, origin, destination);
+                let joined = join_cch_spaces(forward, backward);
+                let path = match (direct, joined) {
+                    (Some(direct), Some((cost, meeting)))
+                        if cost < direct.total_generalized_cost =>
+                    {
+                        Some(reconstruct_cch_space_path(
+                            routing_graph,
+                            forward,
+                            backward,
+                            meeting,
+                            cost,
+                        ))
+                    }
+                    (Some(direct), _) => Some(direct),
+                    (None, Some((cost, meeting))) => Some(reconstruct_cch_space_path(
+                        routing_graph,
+                        forward,
+                        backward,
+                        meeting,
+                        cost,
+                    )),
+                    (None, None) => None,
+                };
+                if let Some(path) = path {
+                    return batch_route_result_for_path(
+                        topology,
+                        metrics,
+                        routing_graph,
+                        route_id,
+                        fallback,
+                        returns,
+                        origin,
+                        destination,
+                        hop_info,
+                        path,
+                    );
+                }
+            }
+        }
+    } else {
+        for origin in origin_candidates {
+            let tree =
+                cached_single_source_edge_tree(origin_tree_cache, topology, routing_graph, origin)?;
+            for destination in destination_candidates {
+                if same_edge_reverse_pair(origin, destination) {
+                    continue;
+                }
+                let Some(hop_info) =
+                    hop_info_for_pair(origin, destination, snap_max_distance_m, connectivity)
+                else {
+                    continue;
+                };
+                let path = best_path_from_origin_tree(routing_graph, tree, origin, destination);
+                if let Some(path) = path {
+                    return batch_route_result_for_path(
+                        topology,
+                        metrics,
+                        routing_graph,
+                        route_id,
+                        fallback,
+                        returns,
+                        origin,
+                        destination,
+                        hop_info,
+                        path,
+                    );
+                }
             }
         }
     }
@@ -691,10 +706,109 @@ fn execute_batched_route_with_candidates(
     Err(failure.into())
 }
 
+fn batch_route_result_for_path(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    route_id: &str,
+    fallback: &FallbackPolicy,
+    returns: &ReturnConfig,
+    origin: &SnappedPoint,
+    destination: &SnappedPoint,
+    hop_info: HopSelectionInfo,
+    path: RoutePath,
+) -> Result<RouteResult> {
+    let path = finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
+    let analysis = analyze_route_path(
+        topology,
+        metrics,
+        routing_graph,
+        fallback,
+        &path,
+        origin,
+        destination,
+    )?;
+    Ok(RouteResult {
+        route_id: route_id.to_string(),
+        origin: origin.clone(),
+        destination: destination.clone(),
+        outcome: if !analysis.violations.is_empty() || hop_info.fallback_used {
+            AnalysisOutcome::Degraded
+        } else {
+            AnalysisOutcome::Legal
+        },
+        fallback_used: hop_info.fallback_used || !analysis.violations.is_empty(),
+        origin_hop_distance_m: hop_info.origin_hop_distance_m,
+        destination_hop_distance_m: hop_info.destination_hop_distance_m,
+        summary: analysis.summary,
+        node_path: Vec::new(),
+        edge_path: Vec::new(),
+        geometry: match returns.geometry {
+            netweevil_profile::ReturnGeometry::None => None,
+            _ => Some(build_route_geometry(
+                topology,
+                &path.edge_indexes,
+                origin,
+                destination,
+            )),
+        },
+        hop_segments: hop_info.hop_segments,
+        segments: if returns.segment_rows {
+            Some(
+                path.edge_indexes
+                    .iter()
+                    .map(|&edge_index| {
+                        let edge = topology.edge(edge_index);
+                        let metric = &metrics.edge_metrics[edge_index];
+                        let factor = edge_traversal_factor(
+                            edge_index,
+                            path.edge_indexes.first().copied(),
+                            path.edge_indexes.last().copied(),
+                            origin,
+                            destination,
+                        );
+                        RouteSegment {
+                            edge_id: edge.edge_id.0,
+                            from_node_id: edge.from.0,
+                            to_node_id: edge.to.0,
+                            source_way_id: edge.source_way_id,
+                            length_m: (edge.length_m as f64 * factor).round() as u32,
+                            travel_time_s: metric.travel_time_s.unwrap_or_default() * factor,
+                            generalized_cost: metric.generalized_cost.unwrap_or_default() * factor,
+                            road_class: edge.road_class,
+                            surface: edge.surface,
+                            name: edge
+                                .name_index
+                                .and_then(|index| topology.names.get(index as usize))
+                                .cloned(),
+                            violation_type: analysis
+                                .segment_violation_types
+                                .get(&edge_index)
+                                .copied()
+                                .flatten(),
+                        }
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        },
+        breakdowns: build_breakdowns(topology, metrics, &path.edge_indexes, returns),
+        violations: analysis.violations,
+        diagnostics: hop_info.diagnostics,
+        warnings: merge_warnings(
+            merge_warnings(execution_warnings(metrics), analysis.warnings),
+            hop_info.warnings,
+        ),
+        alternatives: Vec::new(),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BatchRouteStrategy {
     Pairwise,
     SingleSource,
+    AcceleratedManyToMany,
 }
 
 fn choose_batch_route_strategy(
@@ -708,17 +822,20 @@ fn choose_batch_route_strategy(
 
     let average_destination_count =
         unique_pair_count.saturating_add(unique_origin_count - 1) / unique_origin_count;
-    // A single-source tree costs one exhaustive Dijkstra per origin while a
-    // pairwise query costs one point-to-point search per pair. Both are exact
-    // on the same weights, so this is purely a cost crossover: CCH pairwise
-    // searches are roughly 45x faster than plain ones, so with acceleration
-    // available the tree only wins on much wider destination fan-outs.
-    let single_source_threshold = if routing_graph.acceleration.is_some() {
-        48
-    } else {
-        8
-    };
-    if average_destination_count >= single_source_threshold {
+    if routing_graph.acceleration.is_some() {
+        // Complete forward/backward CCH search spaces cost about one pairwise
+        // query per unique endpoint and answer every origin/destination
+        // combination with a cheap merge-join, so they win as soon as
+        // endpoints are reused a few times.
+        if average_destination_count >= 4 {
+            BatchRouteStrategy::AcceleratedManyToMany
+        } else {
+            BatchRouteStrategy::Pairwise
+        }
+    } else if average_destination_count >= 8 {
+        // A single-source tree costs one exhaustive Dijkstra per origin while
+        // a pairwise query costs one point-to-point search per pair; the tree
+        // wins once each origin serves several destinations.
         BatchRouteStrategy::SingleSource
     } else {
         BatchRouteStrategy::Pairwise
