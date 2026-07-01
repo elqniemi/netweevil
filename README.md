@@ -38,7 +38,9 @@ The production surface is the `netweevil` CLI plus a preloadable HTTP API. The Q
 
 ## Local Quickstart
 
-Use the checked-in Groningen routing extract for a complete local setup:
+Download the Groningen sample extract first — datasets are not checked in;
+[`datasets/README.md`](datasets/README.md) has the download and filter
+commands. Then run:
 
 ```bash
 cargo fmt --all
