@@ -166,10 +166,11 @@ impl PreparedRoutingEngine {
                 self.topology.as_ref(),
                 self.metrics.as_ref(),
                 &request.fallback,
+                Some(&self.default_routing_graph),
             )?;
             return execute_route_with_graph(
                 &degraded.topology,
-                &degraded.metrics,
+                degraded.metrics.as_ref(),
                 &degraded.routing_graph,
                 request,
                 edge_names,
@@ -199,10 +200,11 @@ impl PreparedRoutingEngine {
                 self.topology.as_ref(),
                 self.metrics.as_ref(),
                 &document.fallback,
+                Some(&self.default_routing_graph),
             )?;
             return execute_od_with_graph(
                 &degraded.topology,
-                &degraded.metrics,
+                degraded.metrics.as_ref(),
                 &degraded.routing_graph,
                 document,
             );
@@ -236,10 +238,11 @@ impl PreparedRoutingEngine {
                 self.topology.as_ref(),
                 self.metrics.as_ref(),
                 &fallback,
+                Some(&self.default_routing_graph),
             )?;
             return execute_matrix_with_graph(
                 &degraded.topology,
-                &degraded.metrics,
+                degraded.metrics.as_ref(),
                 &degraded.routing_graph,
                 origins,
                 destinations,
@@ -272,10 +275,11 @@ impl PreparedRoutingEngine {
                 self.topology.as_ref(),
                 self.metrics.as_ref(),
                 &request.origins.fallback,
+                Some(&self.default_routing_graph),
             )?;
             return execute_accessibility_with_graph(
                 &degraded.topology,
-                &degraded.metrics,
+                degraded.metrics.as_ref(),
                 &degraded.routing_graph,
                 request,
             );

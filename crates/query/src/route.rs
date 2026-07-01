@@ -31,10 +31,10 @@ fn execute_route_with_optional_edge_names(
 ) -> Result<RouteResult> {
     if has_failure_modes(&request.fallback) {
         validate_execution_inputs(topology, metrics)?;
-        let degraded = cached_failure_mode_bundle(topology, metrics, &request.fallback)?;
+        let degraded = cached_failure_mode_bundle(topology, metrics, &request.fallback, None)?;
         return execute_route_with_graph(
             &degraded.topology,
-            &degraded.metrics,
+            degraded.metrics.as_ref(),
             &degraded.routing_graph,
             request,
             edge_names,
@@ -157,29 +157,77 @@ fn fallback_mode_labels(fallback: &FallbackPolicy) -> Vec<&'static str> {
 /// per-request penalties are applied at search time.
 pub(crate) struct FailureModeBundle {
     pub(crate) topology: TopologyBundle,
-    pub(crate) metrics: CompiledProfileBundle,
+    pub(crate) metrics: std::sync::Arc<CompiledProfileBundle>,
     pub(crate) routing_graph: RoutingGraph,
 }
 
-/// Cache key: dataset bundle id, profile hash, reverse-oneway flag, plus the
-/// base topology's structural counts. Production bundle ids are
+/// Cache key: dataset bundle id, profile hash, the full failure-mode
+/// configuration (flags and penalty values, which bake into the customized
+/// acceleration weights), whether a base acceleration was available, plus
+/// the base topology's structural counts. Production bundle ids are
 /// content-derived, so the counts are redundant there; they guard against
 /// hand-constructed bundles (e.g. tests) that reuse placeholder ids across
 /// different topologies.
 type FailureModeKey = (
     netweevil_core::CacheBundleId,
     String,
+    [bool; 4],
+    [u64; 4],
     bool,
     usize,
     usize,
     usize,
 );
 
+fn failure_mode_key(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    fallback: &FallbackPolicy,
+    base_acceleration_available: bool,
+) -> FailureModeKey {
+    (
+        metrics.source_topology_bundle_id.clone(),
+        metrics.profile_hash.clone(),
+        [
+            fallback.allow_reverse_oneway,
+            fallback.allow_illegal_turn,
+            fallback.ignore_turn_restrictions,
+            fallback.allow_uturn_where_normally_forbidden,
+        ],
+        [
+            fallback
+                .penalties
+                .reverse_oneway_penalty_s
+                .unwrap_or_default()
+                .to_bits(),
+            fallback
+                .penalties
+                .illegal_turn_penalty_s
+                .unwrap_or_default()
+                .to_bits(),
+            fallback
+                .penalties
+                .ignored_turn_restriction_penalty_s
+                .unwrap_or_default()
+                .to_bits(),
+            fallback
+                .penalties
+                .forbidden_uturn_penalty_s
+                .unwrap_or_default()
+                .to_bits(),
+        ],
+        base_acceleration_available,
+        topology.edge_count(),
+        topology.nodes.len(),
+        topology.edge_based_topology.edge_transition_edges.len(),
+    )
+}
+
 /// Degraded bundles are expensive (a full topology clone plus a CSR graph
 /// rebuild) and were previously rebuilt on every failure-mode request. Keep
 /// the few most recent variants; each (dataset, profile) pair has at most
 /// two (with and without reverse-oneway edges).
-const FAILURE_MODE_CACHE_CAPACITY: usize = 4;
+const FAILURE_MODE_CACHE_CAPACITY: usize = 8;
 
 static FAILURE_MODE_CACHE: std::sync::Mutex<
     Vec<(FailureModeKey, std::sync::Arc<FailureModeBundle>)>,
@@ -189,15 +237,15 @@ pub(crate) fn cached_failure_mode_bundle(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     fallback: &FallbackPolicy,
+    base_graph: Option<&RoutingGraph>,
 ) -> Result<std::sync::Arc<FailureModeBundle>> {
-    let key = (
-        metrics.source_topology_bundle_id.clone(),
-        metrics.profile_hash.clone(),
-        fallback.allow_reverse_oneway,
-        topology.edge_count(),
-        topology.nodes.len(),
-        topology.edge_based_topology.edge_transition_edges.len(),
-    );
+    // Reverse-oneway variants add virtual edges, so the base contraction no
+    // longer covers the edge set; the other failure modes are weight-only
+    // and can reuse the base CCH with penalty-customized weights.
+    let base_acceleration = base_graph
+        .filter(|_| !fallback.allow_reverse_oneway)
+        .and_then(|graph| graph.acceleration.as_ref());
+    let key = failure_mode_key(topology, metrics, fallback, base_acceleration.is_some());
     let mut cache = FAILURE_MODE_CACHE.lock().expect("failure-mode cache lock");
     if let Some(position) = cache.iter().position(|(existing, _)| existing == &key) {
         let entry = cache.remove(position);
@@ -206,8 +254,33 @@ pub(crate) fn cached_failure_mode_bundle(
         cache.push(entry);
         return Ok(bundle);
     }
-    let (degraded_topology, degraded_metrics, routing_graph) =
+    let (degraded_topology, mut degraded_metrics, mut routing_graph) =
         build_failure_mode_bundle(topology, metrics, fallback)?;
+
+    if let Some(base_acceleration) = base_acceleration
+        && let Some(customized) = customize_failure_mode_acceleration(
+            &degraded_topology,
+            &degraded_metrics,
+            &routing_graph,
+            base_acceleration,
+            fallback,
+        )
+    {
+        degraded_metrics.acceleration = Some(customized);
+    }
+    let degraded_metrics = std::sync::Arc::new(degraded_metrics);
+    if degraded_metrics.acceleration.is_some()
+        && let Some(base_acceleration) = base_acceleration
+    {
+        routing_graph.acceleration = build_acceleration_graph(
+            degraded_metrics.clone(),
+            Some(base_acceleration.source.clone()),
+            degraded_topology.edge_count(),
+        )?;
+        routing_graph.acceleration_includes_failure_penalties =
+            routing_graph.acceleration.is_some();
+    }
+
     let bundle = std::sync::Arc::new(FailureModeBundle {
         topology: degraded_topology,
         metrics: degraded_metrics,
@@ -589,10 +662,10 @@ fn try_auto_relaxed_route_with_candidates(
     edge_names: Option<&[String]>,
 ) -> Result<Option<RouteResult>> {
     let seed_fallback = auto_relaxed_seed_fallback(fallback);
-    let degraded = cached_failure_mode_bundle(topology, metrics, &seed_fallback)?;
+    let degraded = cached_failure_mode_bundle(topology, metrics, &seed_fallback, None)?;
     let seed_result = match execute_route_with_candidates(
         &degraded.topology,
-        &degraded.metrics,
+        degraded.metrics.as_ref(),
         &degraded.routing_graph,
         route_id,
         snap_max_distance_m,
@@ -619,10 +692,10 @@ fn try_auto_relaxed_route_with_candidates(
     let mut result = if selected_fallback == seed_fallback {
         seed_result
     } else {
-        let selected = cached_failure_mode_bundle(topology, metrics, &selected_fallback)?;
+        let selected = cached_failure_mode_bundle(topology, metrics, &selected_fallback, None)?;
         execute_route_with_candidates(
             &selected.topology,
-            &selected.metrics,
+            selected.metrics.as_ref(),
             &selected.routing_graph,
             route_id,
             snap_max_distance_m,

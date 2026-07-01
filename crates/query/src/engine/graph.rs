@@ -24,6 +24,10 @@ pub(crate) struct RoutingGraph {
     pub(crate) reverse_transition_edges: Vec<u32>,
     pub(crate) reverse_transition_costs: Vec<f64>,
     pub(crate) acceleration: Option<AccelerationGraph>,
+    /// True when the attached acceleration weights were customized with the
+    /// request's failure-mode penalties baked in (degraded graphs only);
+    /// plain acceleration weights must never serve failure-mode searches.
+    pub(crate) acceleration_includes_failure_penalties: bool,
     pub(crate) automaton: RestrictionAutomaton,
     pub(crate) virtual_reverse_of: Vec<Option<usize>>,
 }
@@ -73,6 +77,28 @@ pub(crate) struct AccelerationGraph {
 }
 
 impl AccelerationGraph {
+    /// Customized weight sets for a service-area metric over the hierarchy
+    /// arcs, or `None` when the profile was compiled before per-metric
+    /// weights existed.
+    pub(crate) fn metric_weights(
+        &self,
+        metric_kind: crate::service_area::ServiceAreaMetricKind,
+    ) -> Option<(&[f64], &[f64])> {
+        let compiled = self.metrics.acceleration.as_ref()?;
+        let (upward, downward) = match metric_kind {
+            crate::service_area::ServiceAreaMetricKind::TravelTimeS => {
+                (&compiled.time_upward_weight, &compiled.time_downward_weight)
+            }
+            crate::service_area::ServiceAreaMetricKind::DistanceM => (
+                &compiled.distance_upward_weight,
+                &compiled.distance_downward_weight,
+            ),
+        };
+        (upward.len() == self.source.upward_head.len()
+            && downward.len() == self.source.downward_head.len())
+        .then_some((upward.as_slice(), downward.as_slice()))
+    }
+
     /// Binary-searches the head-sorted CSR row of `tail` for an arc to `head`.
     pub(crate) fn upward_arc_slot(&self, tail: usize, head: u32) -> Option<usize> {
         let start = self.source.upward_first_out[tail] as usize;
@@ -443,13 +469,14 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
         reverse_transition_edges,
         reverse_transition_costs,
         acceleration: build_acceleration_graph(metrics, acceleration, edge_count)?,
+        acceleration_includes_failure_penalties: false,
         automaton: RestrictionAutomaton::build(&restricted_sequences),
         virtual_reverse_of: vec![None; edge_count],
     })
 }
 
 #[allow(clippy::needless_range_loop)]
-fn build_acceleration_graph(
+pub(crate) fn build_acceleration_graph(
     metrics: Arc<CompiledProfileBundle>,
     dataset_acceleration: Option<Arc<DatasetAccelerationBundle>>,
     edge_count: usize,
@@ -526,6 +553,21 @@ fn build_acceleration_graph(
         bail!(
             "acceleration downward arrays are inconsistent; re-import the dataset and recompile the profile"
         );
+    }
+    for (upward, downward) in [
+        (
+            &acceleration.time_upward_weight,
+            &acceleration.time_downward_weight,
+        ),
+        (
+            &acceleration.distance_upward_weight,
+            &acceleration.distance_downward_weight,
+        ),
+    ] {
+        let present = !upward.is_empty() || !downward.is_empty();
+        if present && (upward.len() != upward_len || downward.len() != downward_len) {
+            bail!("acceleration per-metric weight arrays are inconsistent; recompile the profile");
+        }
     }
 
     let mut reverse_downward_first_out = vec![0_u32; edge_count + 1];

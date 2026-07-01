@@ -86,6 +86,139 @@ pub(crate) fn transition_failure_mode_penalty(
     ))
 }
 
+/// Customizes CCH weights for a degraded (failure-mode) graph so requests
+/// with failure modes route accelerated instead of via graph-wide A*.
+///
+/// Only sound when every restriction is pairwise: the failure penalties are
+/// then a function of (previous edge, next edge) alone and bake into arc
+/// weights exactly. Datasets with multi-edge restriction sequences return
+/// `None` (their penalties are state-dependent) and keep the A* path.
+/// Reverse-oneway variants change the edge set and never reach here.
+pub(crate) fn customize_failure_mode_acceleration(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    degraded_graph: &RoutingGraph,
+    base_acceleration: &AccelerationGraph,
+    fallback: &FallbackPolicy,
+) -> Option<netweevil_core::CompiledAcceleration> {
+    use netweevil_core::NO_MIDDLE;
+
+    let mode_bit = metrics.mode.access_bit();
+    if topology.turn_restrictions.iter().any(|restriction| {
+        restriction.mode_mask.contains(mode_bit) && restriction.edge_path.len() > 2
+    }) {
+        return None;
+    }
+    let source = base_acceleration.source.as_ref();
+    let edge_count = degraded_graph.edge_costs.len();
+    if source.upward_first_out.len() != edge_count + 1
+        || source.downward_first_out.len() != edge_count + 1
+    {
+        return None;
+    }
+    let base_compiled = base_acceleration.metrics.acceleration.as_ref()?;
+
+    let upward_len = source.upward_head.len();
+    let downward_len = source.downward_head.len();
+    let mut upward_weight = vec![f64::INFINITY; upward_len];
+    let mut upward_middle = vec![NO_MIDDLE; upward_len];
+    let mut downward_weight = vec![f64::INFINITY; downward_len];
+    let mut downward_middle = vec![NO_MIDDLE; downward_len];
+
+    // Phase 1: degraded transition costs plus the pairwise failure
+    // penalties, exactly as the A* search would pay them.
+    for edge_index in 0..edge_count {
+        let automaton_state = degraded_graph.automaton.transition(0, edge_index);
+        for transition_index in degraded_graph.transition_range(edge_index) {
+            let next_edge = degraded_graph.transition_edges[transition_index] as usize;
+            if next_edge == edge_index {
+                continue;
+            }
+            let Some((_, penalty_cost)) = transition_failure_mode_penalty(
+                topology,
+                metrics,
+                degraded_graph,
+                automaton_state,
+                edge_index,
+                next_edge,
+                fallback,
+            ) else {
+                continue;
+            };
+            let weight = degraded_graph.transition_costs[transition_index] + penalty_cost;
+            if !weight.is_finite() {
+                continue;
+            }
+            if source.edge_rank[edge_index] < source.edge_rank[next_edge] {
+                if let Some(slot) = base_acceleration.upward_arc_slot(edge_index, next_edge as u32)
+                {
+                    upward_weight[slot] = upward_weight[slot].min(weight);
+                }
+            } else if let Some(slot) =
+                base_acceleration.downward_arc_slot(edge_index, next_edge as u32)
+            {
+                downward_weight[slot] = downward_weight[slot].min(weight);
+            }
+        }
+    }
+
+    // Phase 2: triangle relaxation in elimination order, reusing the base
+    // graph's reverse-downward index over the identical arc topology.
+    for &middle in source.edge_order.iter() {
+        let middle_index = middle as usize;
+        let incoming_range = base_acceleration.reverse_downward_first_out[middle_index] as usize
+            ..base_acceleration.reverse_downward_first_out[middle_index + 1] as usize;
+        let outgoing_range = source.upward_first_out[middle_index] as usize
+            ..source.upward_first_out[middle_index + 1] as usize;
+        for reverse_slot in incoming_range {
+            let incoming_arc = base_acceleration.reverse_downward_arc[reverse_slot] as usize;
+            let incoming_weight = downward_weight[incoming_arc];
+            if !incoming_weight.is_finite() {
+                continue;
+            }
+            let tail = base_acceleration.downward_tail[incoming_arc] as usize;
+            for outgoing_arc in outgoing_range.clone() {
+                let head = source.upward_head[outgoing_arc];
+                if head as usize == tail {
+                    continue;
+                }
+                let outgoing_weight = upward_weight[outgoing_arc];
+                if !outgoing_weight.is_finite() {
+                    continue;
+                }
+                let candidate = incoming_weight + outgoing_weight;
+                if source.edge_rank[tail] < source.edge_rank[head as usize] {
+                    if let Some(slot) = base_acceleration.upward_arc_slot(tail, head)
+                        && candidate < upward_weight[slot]
+                    {
+                        upward_weight[slot] = candidate;
+                        upward_middle[slot] = middle;
+                    }
+                } else if let Some(slot) = base_acceleration.downward_arc_slot(tail, head)
+                    && candidate < downward_weight[slot]
+                {
+                    downward_weight[slot] = candidate;
+                    downward_middle[slot] = middle;
+                }
+            }
+        }
+    }
+
+    Some(netweevil_core::CompiledAcceleration {
+        schema_version: 3,
+        source_acceleration_bundle_id: base_compiled.source_acceleration_bundle_id.clone(),
+        algorithm: source.algorithm.clone(),
+        upward_weight,
+        upward_middle,
+        downward_weight,
+        downward_middle,
+        time_upward_weight: Vec::new(),
+        time_downward_weight: Vec::new(),
+        distance_upward_weight: Vec::new(),
+        distance_downward_weight: Vec::new(),
+    })
+}
+
 pub(crate) fn astar_between_edge_seeds_with_failure_modes(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,

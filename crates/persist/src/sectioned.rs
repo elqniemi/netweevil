@@ -30,10 +30,25 @@ use netweevil_core::{
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-const MAGIC: &[u8; 8] = b"NWSECB01";
+const MAGIC_PREFIX: &[u8; 6] = b"NWSECB";
+const MAGIC_LEN: usize = 8;
+/// Version 2 drops the topology `osm_node_id` column; version 1 files are
+/// still read (the column is discarded).
+const CURRENT_MAGIC: &[u8; 8] = b"NWSECB02";
 
 pub(crate) fn is_sectioned(bytes: &[u8]) -> bool {
-    bytes.len() >= MAGIC.len() && &bytes[..MAGIC.len()] == MAGIC
+    bytes.len() >= MAGIC_LEN && &bytes[..MAGIC_PREFIX.len()] == MAGIC_PREFIX
+}
+
+fn format_version(bytes: &[u8]) -> Result<u8> {
+    match &bytes[MAGIC_PREFIX.len()..MAGIC_LEN] {
+        b"01" => Ok(1),
+        b"02" => Ok(2),
+        other => bail!(
+            "unsupported sectioned bundle version '{}'",
+            String::from_utf8_lossy(other)
+        ),
+    }
 }
 
 struct SectionWriter<W: Write> {
@@ -42,7 +57,9 @@ struct SectionWriter<W: Write> {
 
 impl<W: Write> SectionWriter<W> {
     fn new(mut writer: W) -> Result<Self> {
-        writer.write_all(MAGIC).context("writing bundle magic")?;
+        writer
+            .write_all(CURRENT_MAGIC)
+            .context("writing bundle magic")?;
         Ok(Self { writer })
     }
 
@@ -70,6 +87,7 @@ impl<W: Write> SectionWriter<W> {
 struct SectionReader<'a> {
     bytes: &'a [u8],
     offset: usize,
+    version: u8,
 }
 
 impl<'a> SectionReader<'a> {
@@ -79,7 +97,8 @@ impl<'a> SectionReader<'a> {
         }
         Ok(Self {
             bytes,
-            offset: MAGIC.len(),
+            offset: MAGIC_LEN,
+            version: format_version(bytes)?,
         })
     }
 
@@ -258,12 +277,20 @@ pub(crate) fn write_compiled_profile_sectioned(
             writer.write_raw(&acceleration.upward_middle)?;
             writer.write_raw(&acceleration.downward_weight)?;
             writer.write_raw(&acceleration.downward_middle)?;
+            writer.write_raw(&acceleration.time_upward_weight)?;
+            writer.write_raw(&acceleration.time_downward_weight)?;
+            writer.write_raw(&acceleration.distance_upward_weight)?;
+            writer.write_raw(&acceleration.distance_downward_weight)?;
         }
         None => {
             writer.write_raw(EMPTY_F64)?;
             writer.write_raw(EMPTY_U32)?;
             writer.write_raw(EMPTY_F64)?;
             writer.write_raw(EMPTY_U32)?;
+            writer.write_raw(EMPTY_F64)?;
+            writer.write_raw(EMPTY_F64)?;
+            writer.write_raw(EMPTY_F64)?;
+            writer.write_raw(EMPTY_F64)?;
         }
     }
     writer.finish()
@@ -300,6 +327,22 @@ pub(crate) fn read_compiled_profile_sectioned(bytes: &[u8]) -> Result<CompiledPr
     let upward_middle: Vec<u32> = reader.read_raw()?;
     let downward_weight: Vec<f64> = reader.read_raw()?;
     let downward_middle: Vec<u32> = reader.read_raw()?;
+    // Version 1 predates the per-metric weight sections.
+    let (
+        time_upward_weight,
+        time_downward_weight,
+        distance_upward_weight,
+        distance_downward_weight,
+    ) = if reader.version >= 2 {
+        (
+            reader.read_raw()?,
+            reader.read_raw()?,
+            reader.read_raw()?,
+            reader.read_raw()?,
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
     let acceleration = header
         .acceleration
         .map(|acceleration| CompiledAcceleration {
@@ -310,6 +353,10 @@ pub(crate) fn read_compiled_profile_sectioned(bytes: &[u8]) -> Result<CompiledPr
             upward_middle,
             downward_weight,
             downward_middle,
+            time_upward_weight,
+            time_downward_weight,
+            distance_upward_weight,
+            distance_downward_weight,
         });
 
     Ok(CompiledProfileBundle {
@@ -403,11 +450,9 @@ pub(crate) fn write_topology_sectioned(path: &Path, bundle: &TopologyBundle) -> 
 
     // Nodes as columnar raw arrays.
     let node_ids: Vec<u32> = bundle.nodes.iter().map(|node| node.node_id.0).collect();
-    let osm_node_ids: Vec<i64> = bundle.nodes.iter().map(|node| node.osm_node_id).collect();
     let lons: Vec<f64> = bundle.nodes.iter().map(|node| node.lon).collect();
     let lats: Vec<f64> = bundle.nodes.iter().map(|node| node.lat).collect();
     writer.write_raw(&node_ids)?;
-    writer.write_raw(&osm_node_ids)?;
     writer.write_raw(&lons)?;
     writer.write_raw(&lats)?;
 
@@ -463,23 +508,21 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8]) -> Result<TopologyBundle> {
     let header: TopologyHeader = reader.read_bincode()?;
 
     let node_ids: Vec<u32> = reader.read_raw()?;
-    let osm_node_ids: Vec<i64> = reader.read_raw()?;
+    if reader.version == 1 {
+        // Version 1 stored the import-only OSM node ids; discard them.
+        let _osm_node_ids: Vec<i64> = reader.read_raw()?;
+    }
     let lons: Vec<f64> = reader.read_raw()?;
     let lats: Vec<f64> = reader.read_raw()?;
-    if node_ids.len() != osm_node_ids.len()
-        || node_ids.len() != lons.len()
-        || node_ids.len() != lats.len()
-    {
+    if node_ids.len() != lons.len() || node_ids.len() != lats.len() {
         bail!("topology node sections have inconsistent lengths");
     }
     let nodes = node_ids
         .into_iter()
-        .zip(osm_node_ids)
         .zip(lons)
         .zip(lats)
-        .map(|(((node_id, osm_node_id), lon), lat)| TopologyNode {
+        .map(|((node_id, lon), lat)| TopologyNode {
             node_id: NodeId(node_id),
-            osm_node_id,
             lon,
             lat,
         })

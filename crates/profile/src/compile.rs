@@ -199,6 +199,10 @@ fn compile_acceleration_with_progress(
             upward_middle,
             downward_weight,
             downward_middle,
+            time_upward_weight: Vec::new(),
+            time_downward_weight: Vec::new(),
+            distance_upward_weight: Vec::new(),
+            distance_downward_weight: Vec::new(),
         }
     };
 
@@ -383,12 +387,144 @@ fn compile_acceleration_with_progress(
         format!("Customizing CCH 100% (upward {upward_len} arcs, downward {downward_len} arcs)"),
     );
 
-    result_template(
+    // Per-metric weight sets over the same arcs, for exact one-to-all
+    // sweeps on time- and distance-limited isochrones. Middles are not
+    // recorded: isochrones need distances, not unpacked paths. Both runs
+    // are independent of the generalized-cost weights, so they customize in
+    // parallel.
+    let customize_metric =
+        |base_weight: &(dyn Fn(usize, usize) -> f64 + Sync)| -> (Vec<f64>, Vec<f64>) {
+            let mut metric_upward = vec![f64::INFINITY; upward_len];
+            let mut metric_downward = vec![f64::INFINITY; downward_len];
+            for edge_index in 0..edge_count {
+                if edge_metrics[edge_index].generalized_cost.is_none() {
+                    continue;
+                }
+                let start = transition_topology.edge_transition_first_out[edge_index] as usize;
+                let end = transition_topology.edge_transition_first_out[edge_index + 1] as usize;
+                for &next_edge in &transition_topology.edge_transition_edges[start..end] {
+                    let next_index = next_edge as usize;
+                    if next_index == edge_index || next_index >= edge_count {
+                        continue;
+                    }
+                    if edge_metrics[next_index].generalized_cost.is_none() {
+                        continue;
+                    }
+                    if pairwise_forbidden_turns
+                        .get(edge_index)
+                        .is_some_and(|blocked| blocked.binary_search(&next_edge).is_ok())
+                    {
+                        continue;
+                    }
+                    let weight = base_weight(edge_index, next_index);
+                    if !weight.is_finite() {
+                        continue;
+                    }
+                    if edge_rank[edge_index] < edge_rank[next_index] {
+                        if let Some(slot) = find_arc(
+                            &bundle.upward_first_out,
+                            &bundle.upward_head,
+                            edge_index,
+                            next_edge,
+                        ) {
+                            metric_upward[slot] = metric_upward[slot].min(weight);
+                        }
+                    } else if let Some(slot) = find_arc(
+                        &bundle.downward_first_out,
+                        &bundle.downward_head,
+                        edge_index,
+                        next_edge,
+                    ) {
+                        metric_downward[slot] = metric_downward[slot].min(weight);
+                    }
+                }
+            }
+            for &middle in bundle.edge_order.iter() {
+                let middle_index = middle as usize;
+                let incoming_range = reverse_downward_first_out[middle_index] as usize
+                    ..reverse_downward_first_out[middle_index + 1] as usize;
+                let outgoing_range = bundle.upward_first_out[middle_index] as usize
+                    ..bundle.upward_first_out[middle_index + 1] as usize;
+                for reverse_slot in incoming_range {
+                    let incoming_arc = reverse_downward_arc[reverse_slot] as usize;
+                    let incoming_weight = metric_downward[incoming_arc];
+                    if !incoming_weight.is_finite() {
+                        continue;
+                    }
+                    let tail = downward_tail[incoming_arc] as usize;
+                    for outgoing_arc in outgoing_range.clone() {
+                        let head = bundle.upward_head[outgoing_arc];
+                        if head as usize == tail {
+                            continue;
+                        }
+                        let outgoing_weight = metric_upward[outgoing_arc];
+                        if !outgoing_weight.is_finite() {
+                            continue;
+                        }
+                        let candidate = incoming_weight + outgoing_weight;
+                        if edge_rank[tail] < edge_rank[head as usize] {
+                            if let Some(slot) =
+                                find_arc(&bundle.upward_first_out, &bundle.upward_head, tail, head)
+                                && candidate < metric_upward[slot]
+                            {
+                                metric_upward[slot] = candidate;
+                            }
+                        } else if let Some(slot) = find_arc(
+                            &bundle.downward_first_out,
+                            &bundle.downward_head,
+                            tail,
+                            head,
+                        ) && candidate < metric_downward[slot]
+                        {
+                            metric_downward[slot] = candidate;
+                        }
+                    }
+                }
+            }
+            (metric_upward, metric_downward)
+        };
+
+    let time_weight = |edge_index: usize, next_index: usize| -> f64 {
+        let Some(travel_time_s) = edge_metrics[next_index].travel_time_s else {
+            return f64::INFINITY;
+        };
+        travel_time_s
+            + transition_turn_penalty_cost(
+                topology,
+                edge_index,
+                next_index,
+                profile.turns.left_penalty_s,
+                profile.turns.right_penalty_s,
+                profile.turns.uturn_penalty_s,
+                profile.turns.traffic_signal_penalty_s,
+                profile.turns.roundabout_entry_penalty_s,
+                1.0,
+            )
+    };
+    let distance_weight = |_edge_index: usize, next_index: usize| -> f64 {
+        topology.routing_edge(next_index).length_m as f64
+    };
+    let (
+        (time_upward_weight, time_downward_weight),
+        (distance_upward_weight, distance_downward_weight),
+    ) = rayon::join(
+        || customize_metric(&time_weight),
+        || customize_metric(&distance_weight),
+    );
+
+    CompiledAcceleration {
+        schema_version: 3,
+        source_acceleration_bundle_id,
+        algorithm: bundle.algorithm.clone(),
         upward_weight,
         upward_middle,
         downward_weight,
         downward_middle,
-    )
+        time_upward_weight,
+        time_downward_weight,
+        distance_upward_weight,
+        distance_downward_weight,
+    }
 }
 
 fn build_pairwise_forbidden_turn_table(topology: &TopologyBundle, mode_bit: u16) -> Vec<Vec<u32>> {
@@ -692,19 +828,16 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     node_id: NodeId(0),
-                    osm_node_id: 1,
                     lon: 0.0,
                     lat: 0.0,
                 },
                 TopologyNode {
                     node_id: NodeId(1),
-                    osm_node_id: 2,
                     lon: 1.0,
                     lat: 0.0,
                 },
                 TopologyNode {
                     node_id: NodeId(2),
-                    osm_node_id: 3,
                     lon: 2.0,
                     lat: 0.0,
                 },
@@ -795,6 +928,13 @@ mod tests {
             vec![netweevil_core::NO_MIDDLE]
         );
         assert!(compiled_acceleration.downward_weight.is_empty());
+        // Per-metric weight sets align with the same arcs.
+        assert_eq!(compiled_acceleration.time_upward_weight.len(), 1);
+        assert!(compiled_acceleration.time_upward_weight[0].is_finite());
+        assert_eq!(compiled_acceleration.distance_upward_weight.len(), 1);
+        assert!(compiled_acceleration.distance_upward_weight[0].is_finite());
+        assert!(compiled_acceleration.time_downward_weight.is_empty());
+        assert!(compiled_acceleration.distance_downward_weight.is_empty());
     }
 
     fn tag_match<const N: usize>(pairs: [(&str, &str); N]) -> TagMatch {

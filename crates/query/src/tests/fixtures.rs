@@ -13,19 +13,16 @@ pub(super) fn test_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.002,
                 lat: 53.0,
             },
@@ -136,19 +133,16 @@ pub(super) fn service_area_linear_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.002,
                 lat: 53.0,
             },
@@ -248,49 +242,106 @@ pub(super) fn build_test_cch(
     let graph = crate::build_routing_graph(topology, metrics).expect("routing graph builds");
     let edge_count = topology.edge_count();
 
-    // (tail, head) -> (weight, middle); identity order means rank == id.
-    let mut arcs = BTreeMap::<(u32, u32), (f64, u32)>::new();
+    // Arc topology mirrors the real preprocessor: arcs exist for every
+    // TOPOLOGICAL transition (restrictions included) plus their elimination
+    // closure; weights decide traversability. Identity order: rank == id.
+    let mut arc_set = std::collections::BTreeSet::<(u32, u32)>::new();
+    let transition_topology = &topology.edge_based_topology;
     for from_edge in 0..edge_count {
-        for transition_index in graph.transition_range(from_edge) {
-            let to_edge = graph.transition_edges[transition_index];
-            if to_edge as usize == from_edge {
-                continue;
-            }
-            let cost = graph.transition_costs[transition_index];
-            let entry = arcs
-                .entry((from_edge as u32, to_edge))
-                .or_insert((f64::INFINITY, NO_MIDDLE));
-            if cost < entry.0 {
-                *entry = (cost, NO_MIDDLE);
+        let start = transition_topology.edge_transition_first_out[from_edge] as usize;
+        let end = transition_topology.edge_transition_first_out[from_edge + 1] as usize;
+        for &to_edge in &transition_topology.edge_transition_edges[start..end] {
+            if to_edge as usize != from_edge && (to_edge as usize) < edge_count {
+                arc_set.insert((from_edge as u32, to_edge));
             }
         }
     }
     for middle in 0..edge_count as u32 {
-        let incoming = arcs
-            .range((0, 0)..(u32::MAX, 0))
-            .filter(|&(&(tail, head), _)| head == middle && tail > middle)
-            .map(|(&(tail, _), &(weight, _))| (tail, weight))
+        let incoming = arc_set
+            .iter()
+            .filter(|&&(tail, head)| head == middle && tail > middle)
+            .map(|&(tail, _)| tail)
             .collect::<Vec<_>>();
-        let outgoing = arcs
+        let outgoing = arc_set
             .range((middle, 0)..(middle + 1, 0))
-            .filter(|&(&(_, head), _)| head > middle)
-            .map(|(&(_, head), &(weight, _))| (head, weight))
+            .filter(|&&(_, head)| head > middle)
+            .map(|&(_, head)| head)
             .collect::<Vec<_>>();
-        for &(tail, incoming_weight) in &incoming {
-            for &(head, outgoing_weight) in &outgoing {
-                if tail == head {
-                    continue;
-                }
-                let candidate = incoming_weight + outgoing_weight;
-                let entry = arcs
-                    .entry((tail, head))
-                    .or_insert((f64::INFINITY, NO_MIDDLE));
-                if candidate < entry.0 {
-                    *entry = (candidate, middle);
+        for &tail in &incoming {
+            for &head in &outgoing {
+                if tail != head {
+                    arc_set.insert((tail, head));
                 }
             }
         }
     }
+
+    // Customize the fixed arc set for any base transition weight, mirroring
+    // the real compiler.
+    let customize = |base: &dyn Fn(usize, usize) -> f64| -> BTreeMap<(u32, u32), (f64, u32)> {
+        let mut arcs = BTreeMap::<(u32, u32), (f64, u32)>::new();
+        for &(tail, head) in &arc_set {
+            arcs.insert(
+                (tail, head),
+                (base(tail as usize, head as usize), NO_MIDDLE),
+            );
+        }
+        for middle in 0..edge_count as u32 {
+            let incoming = arcs
+                .range((0, 0)..(u32::MAX, 0))
+                .filter(|&(&(tail, head), _)| head == middle && tail > middle)
+                .map(|(&(tail, _), &(weight, _))| (tail, weight))
+                .collect::<Vec<_>>();
+            let outgoing = arcs
+                .range((middle, 0)..(middle + 1, 0))
+                .filter(|&(&(_, head), _)| head > middle)
+                .map(|(&(_, head), &(weight, _))| (head, weight))
+                .collect::<Vec<_>>();
+            for &(tail, incoming_weight) in &incoming {
+                for &(head, outgoing_weight) in &outgoing {
+                    if tail == head {
+                        continue;
+                    }
+                    if !incoming_weight.is_finite() || !outgoing_weight.is_finite() {
+                        continue;
+                    }
+                    let candidate = incoming_weight + outgoing_weight;
+                    let entry = arcs
+                        .entry((tail, head))
+                        .or_insert((f64::INFINITY, NO_MIDDLE));
+                    if candidate < entry.0 {
+                        *entry = (candidate, middle);
+                    }
+                }
+            }
+        }
+        arcs
+    };
+
+    let routing_transition_weight = |from_edge: usize, to_edge: usize| -> f64 {
+        graph
+            .transition_range(from_edge)
+            .filter(|&index| graph.transition_edges[index] as usize == to_edge)
+            .map(|index| graph.transition_costs[index])
+            .fold(f64::INFINITY, f64::min)
+    };
+
+    let arcs = customize(&routing_transition_weight);
+    let time_arcs = customize(&|from_edge, to_edge| {
+        if !routing_transition_weight(from_edge, to_edge).is_finite() {
+            return f64::INFINITY;
+        }
+        let Some(travel_time_s) = metrics.edge_metrics[to_edge].travel_time_s else {
+            return f64::INFINITY;
+        };
+        travel_time_s + crate::turn_penalty_seconds(topology, metrics, from_edge, to_edge)
+    });
+    let distance_arcs = customize(&|from_edge, to_edge| {
+        if !routing_transition_weight(from_edge, to_edge).is_finite() {
+            return f64::INFINITY;
+        }
+        topology.routing_edge(to_edge).length_m as f64
+    });
 
     let mut upward_first_out = vec![0_u32; edge_count + 1];
     let mut upward_head = Vec::new();
@@ -300,17 +351,30 @@ pub(super) fn build_test_cch(
     let mut downward_head = Vec::new();
     let mut downward_weight = Vec::new();
     let mut downward_middle = Vec::new();
+    let mut time_upward_weight = Vec::new();
+    let mut time_downward_weight = Vec::new();
+    let mut distance_upward_weight = Vec::new();
+    let mut distance_downward_weight = Vec::new();
+    let metric_weight = |arcs: &BTreeMap<(u32, u32), (f64, u32)>, tail: u32, head: u32| {
+        arcs.get(&(tail, head))
+            .map(|&(weight, _)| weight)
+            .unwrap_or(f64::INFINITY)
+    };
     for (&(tail, head), &(weight, middle)) in &arcs {
         if tail < head {
             upward_first_out[tail as usize + 1] += 1;
             upward_head.push(head);
             upward_weight.push(weight);
             upward_middle.push(middle);
+            time_upward_weight.push(metric_weight(&time_arcs, tail, head));
+            distance_upward_weight.push(metric_weight(&distance_arcs, tail, head));
         } else {
             downward_first_out[tail as usize + 1] += 1;
             downward_head.push(head);
             downward_weight.push(weight);
             downward_middle.push(middle);
+            time_downward_weight.push(metric_weight(&time_arcs, tail, head));
+            distance_downward_weight.push(metric_weight(&distance_arcs, tail, head));
         }
     }
     for edge_index in 0..edge_count {
@@ -339,6 +403,10 @@ pub(super) fn build_test_cch(
         upward_middle,
         downward_weight,
         downward_middle,
+        time_upward_weight,
+        time_downward_weight,
+        distance_upward_weight,
+        distance_downward_weight,
     });
     (bundle, metrics)
 }
@@ -351,25 +419,21 @@ pub(super) fn restricted_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.002,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(3),
-                osm_node_id: 4,
                 lon: 6.003,
                 lat: 53.0,
             },
@@ -559,31 +623,26 @@ pub(super) fn turn_penalty_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.001,
                 lat: 53.001,
             },
             TopologyNode {
                 node_id: NodeId(3),
-                osm_node_id: 4,
                 lon: 6.002,
                 lat: 53.001,
             },
             TopologyNode {
                 node_id: NodeId(4),
-                osm_node_id: 5,
                 lon: 6.0,
                 lat: 53.001,
             },
@@ -720,25 +779,21 @@ pub(super) fn roundabout_entry_penalty_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.002,
                 lat: 53.001,
             },
             TopologyNode {
                 node_id: NodeId(3),
-                osm_node_id: 4,
                 lon: 6.0,
                 lat: 53.001,
             },
@@ -872,7 +927,6 @@ pub(super) fn snap_test_topology() -> TopologyBundle {
     let nodes = (0..10)
         .map(|index| TopologyNode {
             node_id: NodeId(index),
-            osm_node_id: (index + 1) as i64,
             lon: 6.0 + f64::from(index) * 0.0001,
             lat: 53.0,
         })
@@ -1020,19 +1074,16 @@ pub(super) fn one_way_dead_end_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.002,
                 lat: 53.0,
             },
@@ -1106,19 +1157,16 @@ pub(super) fn dead_node_snap_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 10,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 11,
                 lon: 6.0001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 12,
                 lon: 6.0002,
                 lat: 53.0,
             },
@@ -1160,25 +1208,21 @@ pub(super) fn ignored_restriction_only_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.002,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(3),
-                osm_node_id: 4,
                 lon: 6.003,
                 lat: 53.0,
             },
@@ -1265,19 +1309,16 @@ pub(super) fn forbidden_uturn_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.0,
                 lat: 53.001,
             },
@@ -1364,25 +1405,21 @@ pub(super) fn ferry_only_subnetwork_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.01,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(3),
-                osm_node_id: 4,
                 lon: 6.011,
                 lat: 53.0,
             },

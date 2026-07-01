@@ -14,6 +14,7 @@ mod diagnostics;
 mod documents;
 mod engine;
 mod geometry;
+mod isochrone_polygon;
 mod requests;
 mod results;
 mod route;

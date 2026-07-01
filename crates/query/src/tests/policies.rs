@@ -1070,3 +1070,80 @@ fn skips_non_traversable_nodes_when_snapping_route_endpoints() {
     assert_eq!(result.origin.snapped_node_id, 1);
     assert_eq!(result.destination.snapped_node_id, 2);
 }
+
+#[test]
+fn accelerated_failure_mode_route_matches_astar_route() {
+    // Pairwise-only restriction: the failure penalties bake into customized
+    // CCH weights, so the accelerated engine must return the same degraded
+    // route as the unaccelerated A* path.
+    let topology = illegal_turn_only_topology();
+    let metrics = uniform_metrics(topology.edge_count(), 10.0);
+    let (bundle, accelerated_metrics) = build_test_cch(&topology, &metrics);
+    let plain_engine = crate::PreparedRoutingEngine::new(
+        std::sync::Arc::new(topology.clone()),
+        std::sync::Arc::new(metrics),
+        None,
+    )
+    .expect("plain engine builds");
+    let accelerated_engine = crate::PreparedRoutingEngine::new(
+        std::sync::Arc::new(topology),
+        std::sync::Arc::new(accelerated_metrics),
+        Some(bundle),
+    )
+    .expect("accelerated engine builds");
+
+    let request = RouteRequest {
+        route_id: "illegal-turn-accelerated".to_string(),
+        origin: crate::LabeledPoint {
+            id: "origin".to_string(),
+            lon: 6.0,
+            lat: 53.0,
+        },
+        destination: crate::LabeledPoint {
+            id: "destination".to_string(),
+            lon: 6.002,
+            lat: 53.0,
+        },
+        snap: SnapOptions {
+            max_distance_m: 40.0,
+        },
+        connectivity: Default::default(),
+        fallback: FallbackPolicy {
+            allow_illegal_turn: true,
+            penalties: IllegalMovementPenaltyPolicy {
+                illegal_turn_penalty_s: Some(45.0),
+                ..IllegalMovementPenaltyPolicy::default()
+            },
+            ..FallbackPolicy::default()
+        },
+        returns: ReturnConfig::default(),
+        alternatives: Default::default(),
+    };
+
+    let plain = plain_engine
+        .execute_route(&request)
+        .expect("plain degraded route succeeds");
+    let accelerated = accelerated_engine
+        .execute_route(&request)
+        .expect("accelerated degraded route succeeds");
+
+    assert_eq!(plain.outcome, accelerated.outcome);
+    assert_eq!(
+        plain.summary.violation_types,
+        accelerated.summary.violation_types
+    );
+    assert!(
+        (plain.summary.total_generalized_cost - accelerated.summary.total_generalized_cost).abs()
+            <= 1e-9,
+        "degraded cost differs: {} vs {}",
+        plain.summary.total_generalized_cost,
+        accelerated.summary.total_generalized_cost
+    );
+    assert!(
+        (plain.summary.total_travel_time_s - accelerated.summary.total_travel_time_s).abs() <= 1e-9
+    );
+    assert_eq!(
+        plain.summary.total_distance_m,
+        accelerated.summary.total_distance_m
+    );
+}

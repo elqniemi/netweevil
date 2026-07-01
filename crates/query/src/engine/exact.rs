@@ -169,15 +169,32 @@ pub(crate) fn route_between_candidates(
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);
                     let destination_seeds = destination_edge_seeds(routing_graph, destination);
                     if has_failure_modes(fallback) {
-                        astar_between_edge_seeds_with_failure_modes(
-                            topology,
-                            metrics,
-                            routing_graph,
-                            &origin_seeds,
-                            &destination_seeds,
-                            direct_path.clone(),
-                            fallback,
-                        )?
+                        if routing_graph.acceleration.is_some()
+                            && routing_graph.acceleration_includes_failure_penalties
+                        {
+                            // The customized weights already carry the
+                            // pairwise failure penalties (customization is
+                            // only attached for pairwise-only datasets), so
+                            // the hierarchy query is exact here without an
+                            // automaton pass.
+                            accelerated_route_query_seeded(
+                                topology,
+                                routing_graph,
+                                &origin_seeds,
+                                &destination_seeds,
+                                direct_path.clone(),
+                            )?
+                        } else {
+                            astar_between_edge_seeds_with_failure_modes(
+                                topology,
+                                metrics,
+                                routing_graph,
+                                &origin_seeds,
+                                &destination_seeds,
+                                direct_path.clone(),
+                                fallback,
+                            )?
+                        }
                     } else {
                         // The CCH (when present) and the bidirectional search
                         // both ignore multi-edge restriction sequences, so the

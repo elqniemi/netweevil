@@ -230,6 +230,11 @@ pub struct ServiceAreaPolygonOptions {
     pub hull_aggressiveness: f64,
     #[serde(default)]
     pub simplification_tolerance_m: Option<f64>,
+    /// Grid cell size used to trace the concave polygon boundary. Smaller
+    /// cells hug the network more tightly at higher cost; defaults to
+    /// 25m x hull_aggressiveness (minimum 10m).
+    #[serde(default)]
+    pub cell_size_m: Option<f64>,
 }
 
 impl Default for ServiceAreaPolygonOptions {
@@ -237,6 +242,7 @@ impl Default for ServiceAreaPolygonOptions {
         Self {
             hull_aggressiveness: default_hull_aggressiveness(),
             simplification_tolerance_m: None,
+            cell_size_m: None,
         }
     }
 }

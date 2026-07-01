@@ -45,6 +45,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Service-area polygons are now concave: reachable segments are traced on
+  a metric grid into boundary rings that hug the network, and enclosed
+  unreachable pockets (water, restricted areas) become GeoJSON holes
+  instead of being covered by a convex hull. New `polygon.cell_size_m`
+  option controls the resolution.
+- Profile compilation customizes per-metric CCH weight sets (travel time
+  and distance) alongside the generalized-cost weights; service areas and
+  accessibility adaptively switch from the bounded Dijkstra to an exact
+  PHAST hierarchy sweep once the reachable ball exceeds an eighth of the
+  graph. Old compiled profiles keep the Dijkstra path until recompiled.
+- Failure-mode requests on pairwise-only-restriction datasets route over
+  penalty-customized CCH weights instead of graph-wide A*; multi-edge
+  restriction datasets and reverse-oneway variants keep the exact A* path.
+- Query-time topology nodes no longer carry the import-only OSM node id
+  (sectioned bundle format v2; older bundles keep loading).
+
 - Bundle persistence: topology, acceleration, and compiled-profile bundles
   use a sectioned fast-load format whose large primitive arrays are read
   with one memcpy per array from the memory-mapped file; bundles written

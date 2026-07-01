@@ -366,25 +366,21 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     node_id: NodeId(0),
-                    osm_node_id: 100,
                     lon: 0.0,
                     lat: 0.0,
                 },
                 TopologyNode {
                     node_id: NodeId(1),
-                    osm_node_id: 101,
                     lon: 1.0,
                     lat: 0.0,
                 },
                 TopologyNode {
                     node_id: NodeId(2),
-                    osm_node_id: 102,
                     lon: 2.0,
                     lat: 0.0,
                 },
                 TopologyNode {
                     node_id: NodeId(3),
-                    osm_node_id: 103,
                     lon: 3.0,
                     lat: 0.0,
                 },
@@ -483,7 +479,6 @@ mod tests {
         let nodes = (0..side * side)
             .map(|node| TopologyNode {
                 node_id: NodeId(node),
-                osm_node_id: node as i64,
                 lon: (node % side) as f64 * 0.001,
                 lat: (node / side) as f64 * 0.001,
             })
