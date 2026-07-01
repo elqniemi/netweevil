@@ -1,5 +1,11 @@
 //! Local state layout and IO for the `.netweevil/` directory: dataset,
 //! profile, and run manifests plus binary bundle reading and writing.
+//!
+//! Large bundles use a sectioned fast-load format (see [`sectioned`]) whose
+//! big primitive arrays load with one memcpy per array from the mapped
+//! file; bundles written by earlier versions fall back to bincode parsing.
+
+mod sectioned;
 
 use std::ffi::OsStr;
 use std::fs::{self, File};
@@ -109,12 +115,7 @@ pub fn read_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
 }
 
 pub fn write_topology_bundle(path: impl AsRef<Path>, bundle: &TopologyBundle) -> Result<()> {
-    let mut compact = bundle.clone();
-    if compact.edge_layers.routing.is_empty() && !compact.edges.is_empty() {
-        compact.edge_layers = TopologyEdgeLayers::from_directed_edges(&compact.edges);
-    }
-    compact.edges.clear();
-    write_binary(path, &compact)
+    sectioned::write_topology_sectioned(path.as_ref(), bundle)
 }
 
 pub fn write_edge_name_bundle(path: impl AsRef<Path>, bundle: &EdgeNameBundle) -> Result<()> {
@@ -125,7 +126,7 @@ pub fn write_acceleration_bundle(
     path: impl AsRef<Path>,
     bundle: &DatasetAccelerationBundle,
 ) -> Result<()> {
-    write_binary(path, bundle)
+    sectioned::write_acceleration_sectioned(path.as_ref(), bundle)
 }
 
 pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
@@ -139,8 +140,14 @@ pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
             "legacy gzip topology bundles are no longer supported; re-import the dataset to write the current .bin topology format"
         );
     }
-    read_binary_mmap(path)
-        .or_else(|_| read_binary_mmap::<LegacyTopologyBundle>(path).map(TopologyBundle::from))
+    let mmap = sectioned::map_file(path)?;
+    if sectioned::is_sectioned(&mmap) {
+        return sectioned::read_topology_sectioned(&mmap)
+            .with_context(|| format!("parsing topology bundle {}", path.display()));
+    }
+    bincode::deserialize(&mmap)
+        .or_else(|_| bincode::deserialize::<LegacyTopologyBundle>(&mmap).map(TopologyBundle::from))
+        .with_context(|| format!("parsing topology bundle {}", path.display()))
 }
 
 pub fn read_edge_name_bundle(path: impl AsRef<Path>) -> Result<EdgeNameBundle> {
@@ -148,21 +155,30 @@ pub fn read_edge_name_bundle(path: impl AsRef<Path>) -> Result<EdgeNameBundle> {
 }
 
 pub fn read_acceleration_bundle(path: impl AsRef<Path>) -> Result<DatasetAccelerationBundle> {
-    read_binary_mmap(path)
+    let path = path.as_ref();
+    let mmap = sectioned::map_file(path)?;
+    if sectioned::is_sectioned(&mmap) {
+        return sectioned::read_acceleration_sectioned(&mmap)
+            .with_context(|| format!("parsing acceleration bundle {}", path.display()));
+    }
+    bincode::deserialize(&mmap)
+        .with_context(|| format!("parsing acceleration bundle {}", path.display()))
 }
 
 pub fn write_compiled_profile_bundle(
     path: impl AsRef<Path>,
     bundle: &CompiledProfileBundle,
 ) -> Result<()> {
-    write_binary(path, bundle)
+    sectioned::write_compiled_profile_sectioned(path.as_ref(), bundle)
 }
 
 pub fn read_compiled_profile_bundle(path: impl AsRef<Path>) -> Result<CompiledProfileBundle> {
     let path = path.as_ref();
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mmap = unsafe { Mmap::map(&file) }
-        .with_context(|| format!("memory-mapping {}", path.display()))?;
+    let mmap = sectioned::map_file(path)?;
+    if sectioned::is_sectioned(&mmap) {
+        return sectioned::read_compiled_profile_sectioned(&mmap)
+            .with_context(|| format!("parsing compiled profile bundle {}", path.display()));
+    }
     bincode::deserialize(&mmap)
         .or_else(|_| {
             bincode::deserialize::<LegacyCompiledProfileBundle>(&mmap)
@@ -580,6 +596,44 @@ mod tests {
         assert_eq!(round_tripped.turn_costs.cost_time_weight, 1.5);
         assert_eq!(round_tripped.edge_metrics.len(), 1);
 
+        fs::remove_file(path).expect("temporary bundle should be removed");
+    }
+}
+
+#[cfg(test)]
+mod sectioned_compat_tests {
+    use super::*;
+    use netweevil_core::DatasetAccelerationBundle;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_path(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("netweevil-persist-{label}-{unique}.bin"))
+    }
+
+    #[test]
+    fn reads_bincode_acceleration_bundles_written_before_the_sectioned_format() {
+        let bundle = DatasetAccelerationBundle {
+            schema_version: netweevil_core::ACCELERATION_BUNDLE_SCHEMA_VERSION,
+            source_topology_bundle_id: CacheBundleId::new("topology-test"),
+            algorithm: netweevil_core::CCH_ALGORITHM.to_string(),
+            stats: Default::default(),
+            edge_order: vec![0, 2, 1],
+            edge_rank: vec![0, 2, 1],
+            upward_first_out: vec![0, 1, 1, 1],
+            upward_head: vec![2],
+            downward_first_out: vec![0, 0, 1, 1],
+            downward_head: vec![0],
+        };
+        let path = temp_path("acceleration-bincode-compat");
+        write_binary(&path, &bundle).expect("bincode bundle should serialize");
+        let round_tripped =
+            read_acceleration_bundle(&path).expect("bincode-format bundle should still load");
+        assert_eq!(round_tripped.edge_order, bundle.edge_order);
+        assert_eq!(round_tripped.upward_head, bundle.upward_head);
         fs::remove_file(path).expect("temporary bundle should be removed");
     }
 }
