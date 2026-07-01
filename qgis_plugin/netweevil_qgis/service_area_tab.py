@@ -218,14 +218,37 @@ class ServiceAreaTabMixin:
         self.service_area_transit_max_time_edit.setToolTip(
             "Maximum total travel time in seconds for the transit service area."
         )
+        self.service_area_access_mode_combo = QComboBox()
+        for label, value in self.STREET_MODE_ITEMS:
+            self.service_area_access_mode_combo.addItem(label, value)
+        self.service_area_access_mode_combo.setToolTip(
+            "First-mile street mode from each origin to nearby stops: "
+            "walking+transit, cycling+transit, or car+transit."
+        )
+        self.service_area_access_distance_edit = QLineEdit("1200")
+        self.service_area_access_distance_edit.setToolTip(
+            "Maximum first-mile distance in meters from an origin to a stop "
+            "with the selected access mode."
+        )
+        self.service_area_access_speed_edit = QLineEdit("4.8")
+        self.service_area_access_speed_edit.setToolTip(
+            "Average first-mile speed in kph for the selected access mode."
+        )
         transit_note = QLabel(
-            "Uses the feed selected in the Transit tab. Transit mode filters and "
-            "walking limits also come from the Transit tab's Modes and Limits."
+            "Uses the feed selected in the Transit tab. Transit mode filters, "
+            "transfer limits, and slacks come from the Transit tab's Modes and "
+            "Limits; the first mile uses the access mode chosen above."
         )
         transit_note.setWordWrap(True)
         transit_form.addRow("Transit departure", self.service_area_transit_datetime_edit)
         transit_form.addRow("Transit max time s", self.service_area_transit_max_time_edit)
+        transit_form.addRow("Access mode", self.service_area_access_mode_combo)
+        transit_form.addRow("Access distance m", self.service_area_access_distance_edit)
+        transit_form.addRow("Access speed kph", self.service_area_access_speed_edit)
         transit_form.addRow("", transit_note)
+        self.service_area_access_mode_combo.currentIndexChanged.connect(
+            self.sync_service_area_access_mode_defaults
+        )
         layout.addWidget(self.service_area_transit_group)
 
         service_area_advanced_widget = self._build_advanced_controls(
@@ -404,6 +427,22 @@ class ServiceAreaTabMixin:
         )
         self.log("Restored the last saved service-area threshold list.")
 
+    SERVICE_AREA_ACCESS_DEFAULTS = {
+        "walk": ("1200", "4.8"),
+        "bicycle": ("5000", "15"),
+        "car": ("15000", "25"),
+    }
+
+    def selected_service_area_access_mode(self):
+        return self.service_area_access_mode_combo.currentData() or "walk"
+
+    def sync_service_area_access_mode_defaults(self, *_args):
+        distance, speed = self.SERVICE_AREA_ACCESS_DEFAULTS.get(
+            self.selected_service_area_access_mode(), ("1200", "4.8")
+        )
+        self.service_area_access_distance_edit.setText(distance)
+        self.service_area_access_speed_edit.setText(speed)
+
     def sync_service_area_hull_preset(self):
         preset = self.service_area_hull_preset_combo.currentData()
         if preset:
@@ -447,6 +486,55 @@ class ServiceAreaTabMixin:
             )
         return origins
 
+    def build_service_area_transit_street_modes(self):
+        access_mode = self.selected_service_area_access_mode()
+        distance_default, speed_default = self.SERVICE_AREA_ACCESS_DEFAULTS[access_mode]
+        access_distance = self.parse_float_with_default(
+            self.service_area_access_distance_edit.text(),
+            "Access distance",
+            float(distance_default),
+        )
+        access_speed = self.parse_float_with_default(
+            self.service_area_access_speed_edit.text(),
+            "Access speed",
+            float(speed_default),
+        )
+        modes = {
+            "access": [access_mode],
+            "egress": [access_mode],
+            "walk_speed_kph": self.parse_float_with_default(
+                self.transit_walk_speed_edit.text(), "Walk speed", 4.8
+            )
+            if hasattr(self, "transit_walk_speed_edit")
+            else 4.8,
+        }
+        distance_keys = {
+            "walk": "max_access_distance_m",
+            "bicycle": "max_bicycle_access_distance_m",
+            "car": "max_car_access_distance_m",
+        }
+        speed_keys = {
+            "walk": "walk_speed_kph",
+            "bicycle": "bicycle_speed_kph",
+            "car": "car_access_speed_kph",
+        }
+        modes[distance_keys[access_mode]] = access_distance
+        modes[speed_keys[access_mode]] = access_speed
+        return modes
+
+    def build_service_area_transit_returns(self):
+        return {
+            "include_stops": self.transit_include_stops_check.isChecked()
+            if hasattr(self, "transit_include_stops_check")
+            else True,
+            "include_stop_segments": self.transit_include_stop_segments_check.isChecked()
+            if hasattr(self, "transit_include_stop_segments_check")
+            else True,
+            "include_geometry": self.transit_include_geometry_check.isChecked()
+            if hasattr(self, "transit_include_geometry_check")
+            else True,
+        }
+
     def build_service_area_request(self):
         if self.service_area_mode_combo.currentData() == "transit":
             transit_modes = []
@@ -470,59 +558,46 @@ class ServiceAreaTabMixin:
                     if hasattr(self, "transit_search_window_edit")
                     else 3600,
                 },
-                "modes": {
-                    "access": ["walk"],
-                    "egress": ["walk"],
-                    "transit": transit_modes,
-                    "walk_speed_kph": self.parse_float_with_default(
-                        self.transit_walk_speed_edit.text(), "Walk speed", 4.8
-                    )
-                    if hasattr(self, "transit_walk_speed_edit")
-                    else 4.8,
-                    "max_access_distance_m": self.parse_float_with_default(
-                        self.transit_max_access_distance_edit.text(),
-                        "Max access distance",
-                        1200.0,
-                    )
-                    if hasattr(self, "transit_max_access_distance_edit")
-                    else 1200.0,
-                    "max_transfer_distance_m": self.parse_float_with_default(
+                "modes": dict(
+                    self.build_service_area_transit_street_modes(),
+                    transit=transit_modes,
+                    max_transfer_distance_m=self.parse_float_with_default(
                         self.transit_max_transfer_distance_edit.text(),
                         "Max transfer distance",
                         500.0,
                     )
                     if hasattr(self, "transit_max_transfer_distance_edit")
                     else 500.0,
-                    "board_slack_s": self.parse_int_with_default(
+                    board_slack_s=self.parse_int_with_default(
                         self.transit_board_slack_edit.text(), "Board slack", 30
                     )
                     if hasattr(self, "transit_board_slack_edit")
                     else 30,
-                    "transfer_slack_s": self.parse_int_with_default(
+                    transfer_slack_s=self.parse_int_with_default(
                         self.transit_transfer_slack_edit.text(), "Transfer slack", 120
                     )
                     if hasattr(self, "transit_transfer_slack_edit")
                     else 120,
-                    "max_transfers": self.parse_int_with_default(
+                    max_transfers=self.parse_int_with_default(
                         self.transit_max_transfers_edit.text(), "Max transfers", 3
                     )
                     if hasattr(self, "transit_max_transfers_edit")
                     else 3,
-                    "min_transit_leg_duration_s": self.parse_int_with_default(
+                    min_transit_leg_duration_s=self.parse_int_with_default(
                         self.transit_min_leg_duration_edit.text(),
                         "Min transit leg duration",
                         0,
                     )
                     if hasattr(self, "transit_min_leg_duration_edit")
                     else 0,
-                    "min_transit_leg_distance_m": self.parse_float_with_default(
+                    min_transit_leg_distance_m=self.parse_float_with_default(
                         self.transit_min_leg_distance_edit.text(),
                         "Min transit leg distance",
                         0.0,
                     )
                     if hasattr(self, "transit_min_leg_distance_edit")
                     else 0.0,
-                },
+                ),
                 "max_travel_time_s": int(
                     self.parse_float_with_default(
                         self.service_area_transit_max_time_edit.text(),
@@ -530,11 +605,7 @@ class ServiceAreaTabMixin:
                         3600.0,
                     )
                 ),
-                "returns": {
-                    "include_stops": True,
-                    "include_stop_segments": True,
-                    "include_geometry": True,
-                },
+                "returns": self.build_service_area_transit_returns(),
             }
 
         output_mode = self.service_area_output_mode_combo.currentData() or "both"

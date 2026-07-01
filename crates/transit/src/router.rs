@@ -14,10 +14,20 @@ use crate::model::{
     TransitServiceAreaRequest, TransitServiceAreaResult,
 };
 use crate::runtime::{
-    PrevStep, StateKey, StopSpatialIndex, TransitRuntime, build_departures_by_stop,
-    can_finish_with_egress, can_start_transfer_walk, relax_state,
+    PrevStep, StateKey, StopSpatialIndex, TransitRuntime, best_street_candidates,
+    build_departures_by_stop, can_finish_with_egress, can_start_transfer_walk, relax_state,
 };
 use crate::service_area::execute_transit_service_area_with_runtime;
+
+/// Completed journey candidate: a transit state plus the egress leg that
+/// finishes it at the requested destination.
+#[derive(Debug, Clone, Copy)]
+struct FinalCandidate {
+    arrival_s: u32,
+    state: StateKey,
+    egress_time_s: u32,
+    egress_mode: AccessMode,
+}
 
 pub struct PreparedTransitRouter {
     bundle: Arc<TransitBundle>,
@@ -94,34 +104,26 @@ fn execute_transit_route_with_runtime(
             alternatives: Vec::new(),
         });
     }
-    if !request.modes.access.contains(&AccessMode::Walk)
-        || !request.modes.egress.contains(&AccessMode::Walk)
-    {
-        return Ok(TransitRouteResult {
-            route_id: request.route_id.clone(),
-            outcome: TransitOutcome::NotImplemented,
-            summary: TransitRouteSummary::default(),
-            legs: Vec::new(),
-            stops: Vec::new(),
-            stop_segments: Vec::new(),
-            diagnostics: vec![
-                "only pedestrian access and egress are implemented; bicycle and car access are reserved in the request schema".to_string(),
-            ],
-            alternatives: Vec::new(),
-        });
-    }
+    let access_modes = request.modes.validated_access_modes()?;
+    let egress_modes = request.modes.validated_egress_modes()?;
 
     let departure_s = runtime.request_departure_seconds(&request.time.datetime)?;
     let search_end_s = departure_s.saturating_add(request.time.search_window_s);
-    let access = runtime.nearby_access_stops(
+    let access = best_street_candidates(
+        runtime,
         request.origin.lon,
         request.origin.lat,
-        request.modes.max_access_distance_m,
+        &access_modes,
+        &request.modes,
+        false,
     );
-    let egress = runtime.nearby_access_stops(
+    let egress = best_street_candidates(
+        runtime,
         request.destination.lon,
         request.destination.lat,
-        request.modes.max_egress_distance_m,
+        &egress_modes,
+        &request.modes,
+        true,
     );
     if access.is_empty() || egress.is_empty() {
         return Ok(TransitRouteResult {
@@ -147,14 +149,12 @@ fn execute_transit_route_with_runtime(
     let mut best = HashMap::<StateKey, u32>::new();
     let mut prev = HashMap::<StateKey, PrevStep>::new();
     for candidate in access {
-        let access_time_s =
-            seconds_for_distance(candidate.distance_m, request.modes.walk_speed_kph);
         let state = StateKey {
             stop_index: candidate.stop_index,
             boardings: 0,
             trip_index: u32::MAX,
         };
-        let arrival_s = departure_s.saturating_add(access_time_s);
+        let arrival_s = departure_s.saturating_add(candidate.time_s);
         relax_state(
             &mut heap,
             &mut best,
@@ -168,16 +168,17 @@ fn execute_transit_route_with_runtime(
                 from_lat: request.origin.lat,
                 distance_m: candidate.distance_m,
                 departure_s,
+                mode: candidate.mode,
             },
         );
     }
 
     let egress_by_stop = egress
         .into_iter()
-        .map(|candidate| (candidate.stop_index, candidate.distance_m))
+        .map(|candidate| (candidate.stop_index, (candidate.time_s, candidate.mode)))
         .collect::<HashMap<_, _>>();
-    let mut best_final: Option<(u32, StateKey, u32)> = None;
-    let mut final_candidates = Vec::<(u32, StateKey, u32)>::new();
+    let mut best_final: Option<FinalCandidate> = None;
+    let mut final_candidates = Vec::<FinalCandidate>::new();
     let collect_alternatives = request.alternatives.max_routes > 1;
     let collect_final_candidates =
         collect_alternatives || transit_leg_minimums_enabled(&request.modes);
@@ -190,13 +191,14 @@ fn execute_transit_route_with_runtime(
             continue;
         }
         if !collect_alternatives {
-            if let Some((arrival_s, _, _)) = best_final {
-                if entry.time_s >= arrival_s {
+            if let Some(found) = best_final {
+                if entry.time_s >= found.arrival_s {
                     continue;
                 }
             }
-        } else if let Some((arrival_s, _, _)) = best_final {
-            let max_arrival_s = transit_alternative_arrival_limit(departure_s, arrival_s, request);
+        } else if let Some(found) = best_final {
+            let max_arrival_s =
+                transit_alternative_arrival_limit(departure_s, found.arrival_s, request);
             if entry.time_s > max_arrival_s {
                 continue;
             }
@@ -206,17 +208,24 @@ fn execute_transit_route_with_runtime(
         }
 
         if can_finish_with_egress(entry.state) {
-            if let Some(distance_m) = egress_by_stop.get(&entry.state.stop_index).copied() {
-                let walk_s = seconds_for_distance(distance_m, request.modes.walk_speed_kph);
-                let arrival_s = entry.time_s.saturating_add(walk_s);
+            if let Some((egress_time_s, egress_mode)) =
+                egress_by_stop.get(&entry.state.stop_index).copied()
+            {
+                let arrival_s = entry.time_s.saturating_add(egress_time_s);
+                let candidate = FinalCandidate {
+                    arrival_s,
+                    state: entry.state,
+                    egress_time_s,
+                    egress_mode,
+                };
                 if collect_final_candidates {
-                    final_candidates.push((arrival_s, entry.state, walk_s));
+                    final_candidates.push(candidate);
                 }
                 if best_final
                     .as_ref()
-                    .is_none_or(|(best_arrival_s, _, _)| arrival_s < *best_arrival_s)
+                    .is_none_or(|found| arrival_s < found.arrival_s)
                 {
-                    best_final = Some((arrival_s, entry.state, walk_s));
+                    best_final = Some(candidate);
                 }
             }
         }
@@ -301,7 +310,7 @@ fn execute_transit_route_with_runtime(
     }
 
     let found_final_candidate = best_final.is_some();
-    let Some((arrival_s, _final_state, _egress_walk_s, mut legs)) = select_transit_final_candidate(
+    let Some((arrival_s, mut legs)) = select_transit_final_candidate(
         bundle,
         runtime,
         request,
@@ -382,11 +391,11 @@ fn select_transit_final_candidate(
     runtime: &TransitRuntime<'_>,
     request: &TransitRouteRequest,
     prev: &HashMap<StateKey, PrevStep>,
-    best_final: Option<(u32, StateKey, u32)>,
-    final_candidates: &mut [(u32, StateKey, u32)],
-) -> Result<Option<(u32, StateKey, u32, Vec<TransitLeg>)>> {
+    best_final: Option<FinalCandidate>,
+    final_candidates: &mut [FinalCandidate],
+) -> Result<Option<(u32, Vec<TransitLeg>)>> {
     if !transit_leg_minimums_enabled(&request.modes) {
-        let Some((arrival_s, final_state, egress_walk_s)) = best_final else {
+        let Some(candidate) = best_final else {
             return Ok(None);
         };
         let legs = reconstruct_legs(
@@ -394,28 +403,30 @@ fn select_transit_final_candidate(
             runtime,
             request,
             prev,
-            final_state,
-            arrival_s,
-            egress_walk_s,
+            candidate.state,
+            candidate.arrival_s,
+            candidate.egress_time_s,
+            candidate.egress_mode,
         )?;
-        return Ok(Some((arrival_s, final_state, egress_walk_s, legs)));
+        return Ok(Some((candidate.arrival_s, legs)));
     }
 
-    final_candidates.sort_by_key(|(arrival_s, state, _)| (*arrival_s, state.boardings));
-    for &(arrival_s, final_state, egress_walk_s) in final_candidates.iter() {
+    final_candidates.sort_by_key(|candidate| (candidate.arrival_s, candidate.state.boardings));
+    for &candidate in final_candidates.iter() {
         let legs = reconstruct_legs(
             bundle,
             runtime,
             request,
             prev,
-            final_state,
-            arrival_s,
-            egress_walk_s,
+            candidate.state,
+            candidate.arrival_s,
+            candidate.egress_time_s,
+            candidate.egress_mode,
         )?;
         let mut coalesced = legs.clone();
         coalesce_transit_legs(&mut coalesced);
         if transit_legs_satisfy_minimums(bundle, &coalesced, &request.modes) {
-            return Ok(Some((arrival_s, final_state, egress_walk_s, legs)));
+            return Ok(Some((candidate.arrival_s, legs)));
         }
     }
 
@@ -443,22 +454,23 @@ fn build_transit_alternatives(
     departure_s: u32,
     best_summary: &TransitRouteSummary,
     best_legs: &[TransitLeg],
-    mut final_candidates: Vec<(u32, StateKey, u32)>,
+    mut final_candidates: Vec<FinalCandidate>,
 ) -> Result<Vec<TransitRouteAlternative>> {
     if request.alternatives.max_routes <= 1 {
         return Ok(Vec::new());
     }
-    final_candidates.sort_by_key(|(arrival_s, state, _)| (*arrival_s, state.boardings));
+    final_candidates.sort_by_key(|candidate| (candidate.arrival_s, candidate.state.boardings));
     let mut alternatives = Vec::new();
     let mut signatures = HashSet::new();
     signatures.insert(transit_leg_signature(best_legs));
     let best_arrival_s = best_summary.arrival_s.unwrap_or(departure_s);
     let arrival_limit = transit_alternative_arrival_limit(departure_s, best_arrival_s, request);
 
-    for (arrival_s, final_state, egress_walk_s) in final_candidates {
+    for candidate in final_candidates {
         if alternatives.len() + 1 >= request.alternatives.max_routes {
             break;
         }
+        let arrival_s = candidate.arrival_s;
         if arrival_s > arrival_limit {
             continue;
         }
@@ -467,9 +479,10 @@ fn build_transit_alternatives(
             runtime,
             request,
             prev,
-            final_state,
+            candidate.state,
             arrival_s,
-            egress_walk_s,
+            candidate.egress_time_s,
+            candidate.egress_mode,
         )?;
         coalesce_transit_legs(&mut legs);
         if !transit_legs_satisfy_minimums(bundle, &legs, &request.modes) {

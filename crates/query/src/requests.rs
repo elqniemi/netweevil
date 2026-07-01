@@ -247,6 +247,12 @@ pub struct ServiceAreaReturnOptions {
     pub diagnostics: bool,
     #[serde(default)]
     pub segments: bool,
+    #[serde(default = "default_service_area_max_features")]
+    pub max_features: usize,
+    #[serde(default = "default_service_area_max_segments")]
+    pub max_segments: usize,
+    #[serde(default = "default_service_area_max_geometry_points")]
+    pub max_geometry_points: usize,
 }
 
 impl Default for ServiceAreaReturnOptions {
@@ -257,12 +263,27 @@ impl Default for ServiceAreaReturnOptions {
             per_threshold_summary: true,
             diagnostics: true,
             segments: false,
+            max_features: default_service_area_max_features(),
+            max_segments: default_service_area_max_segments(),
+            max_geometry_points: default_service_area_max_geometry_points(),
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_service_area_max_features() -> usize {
+    250_000
+}
+
+fn default_service_area_max_segments() -> usize {
+    250_000
+}
+
+fn default_service_area_max_geometry_points() -> usize {
+    1_000_000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

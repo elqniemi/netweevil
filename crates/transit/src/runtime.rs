@@ -5,8 +5,8 @@ use anyhow::{Context, Result, anyhow};
 use time::{OffsetDateTime, PrimitiveDateTime, Time, format_description::well_known::Rfc3339};
 
 use crate::gtfs::parse_iso_date;
-use crate::legs::haversine_m;
-use crate::model::{TransitBundle, TransitConnection, TransitModeOptions, TransitStop};
+use crate::legs::{haversine_m, seconds_for_distance};
+use crate::model::{AccessMode, TransitBundle, TransitConnection, TransitModeOptions, TransitStop};
 
 pub(crate) fn build_departures_by_stop(bundle: &TransitBundle) -> Vec<Vec<TransitConnection>> {
     let mut departures_by_stop: Vec<Vec<TransitConnection>> = vec![Vec::new(); bundle.stops.len()];
@@ -211,6 +211,57 @@ pub(crate) struct StopCandidate {
     pub(crate) distance_m: f64,
 }
 
+/// Best street-mode connection between a point and a stop, picked across the
+/// requested access or egress modes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StreetCandidate {
+    pub(crate) stop_index: u32,
+    pub(crate) distance_m: f64,
+    pub(crate) time_s: u32,
+    pub(crate) mode: AccessMode,
+}
+
+pub(crate) fn best_street_candidates(
+    runtime: &TransitRuntime<'_>,
+    lon: f64,
+    lat: f64,
+    street_modes: &[AccessMode],
+    options: &TransitModeOptions,
+    egress: bool,
+) -> Vec<StreetCandidate> {
+    let mut best = HashMap::<u32, StreetCandidate>::new();
+    for &mode in street_modes {
+        let max_distance_m = if egress {
+            mode.max_egress_distance_m(options)
+        } else {
+            mode.max_access_distance_m(options)
+        };
+        for candidate in runtime.nearby_access_stops(lon, lat, max_distance_m) {
+            let time_s = seconds_for_distance(candidate.distance_m, mode.speed_kph(options));
+            let entry = StreetCandidate {
+                stop_index: candidate.stop_index,
+                distance_m: candidate.distance_m,
+                time_s,
+                mode,
+            };
+            best.entry(candidate.stop_index)
+                .and_modify(|known| {
+                    if time_s < known.time_s {
+                        *known = entry;
+                    }
+                })
+                .or_insert(entry);
+        }
+    }
+    let mut candidates = best.into_values().collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.time_s
+            .cmp(&right.time_s)
+            .then_with(|| left.stop_index.cmp(&right.stop_index))
+    });
+    candidates
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct StateKey {
     pub(crate) stop_index: u32,
@@ -258,6 +309,7 @@ pub(crate) enum PrevStep {
         from_lat: f64,
         distance_m: f64,
         departure_s: u32,
+        mode: AccessMode,
     },
     Transfer {
         previous: StateKey,

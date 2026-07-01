@@ -52,7 +52,12 @@ class SettingsIoMixin:
             "transit_destination_id": self.transit_destination_id_edit.text().strip(),
             "transit_destination_lon": self.transit_destination_lon_edit.text().strip(),
             "transit_destination_lat": self.transit_destination_lat_edit.text().strip(),
+            "transit_access_mode": self.transit_access_mode_combo.currentData(),
+            "transit_separate_egress": self.transit_separate_egress_check.isChecked(),
+            "transit_egress_mode": self.transit_egress_mode_combo.currentData(),
             "transit_walk_speed": self.transit_walk_speed_edit.text().strip(),
+            "transit_bicycle_speed": self.transit_bicycle_speed_edit.text().strip(),
+            "transit_car_speed": self.transit_car_speed_edit.text().strip(),
             "transit_max_access_distance": self.transit_max_access_distance_edit.text().strip(),
             "transit_max_egress_distance": self.transit_max_egress_distance_edit.text().strip(),
             "transit_max_transfer_distance": self.transit_max_transfer_distance_edit.text().strip(),
@@ -82,6 +87,9 @@ class SettingsIoMixin:
             "service_area_mode": self.service_area_mode_combo.currentData(),
             "service_area_transit_datetime": self.service_area_transit_datetime_edit.text().strip(),
             "service_area_transit_max_time": self.service_area_transit_max_time_edit.text().strip(),
+            "service_area_access_mode": self.service_area_access_mode_combo.currentData(),
+            "service_area_access_distance": self.service_area_access_distance_edit.text().strip(),
+            "service_area_access_speed": self.service_area_access_speed_edit.text().strip(),
             "service_area_snap_distance": self.service_area_snap_distance_edit.text().strip(),
             "service_area_output_path": self.service_area_output_path_edit.text().strip(),
             "service_area_request_path": self.service_area_request_path_edit.text().strip(),
@@ -233,8 +241,28 @@ class SettingsIoMixin:
         self.transit_destination_lat_edit.setText(
             self.read_setting("transit_destination_lat", "")
         )
+        self.set_combo_by_data(
+            self.transit_access_mode_combo,
+            self.read_setting("transit_access_mode", "walk"),
+        )
+        self.transit_separate_egress_check.setChecked(
+            self.read_bool_setting("transit_separate_egress", False)
+        )
+        self.set_combo_by_data(
+            self.transit_egress_mode_combo,
+            self.read_setting("transit_egress_mode", "walk"),
+        )
+        self.update_transit_egress_mode_state()
         self.transit_walk_speed_edit.setText(
             self.read_setting("transit_walk_speed", self.transit_walk_speed_edit.text())
+        )
+        self.transit_bicycle_speed_edit.setText(
+            self.read_setting(
+                "transit_bicycle_speed", self.transit_bicycle_speed_edit.text()
+            )
+        )
+        self.transit_car_speed_edit.setText(
+            self.read_setting("transit_car_speed", self.transit_car_speed_edit.text())
         )
         self.transit_max_access_distance_edit.setText(
             self.read_setting(
@@ -331,6 +359,22 @@ class SettingsIoMixin:
             self.read_setting(
                 "service_area_transit_max_time",
                 self.service_area_transit_max_time_edit.text(),
+            )
+        )
+        self.set_combo_by_data(
+            self.service_area_access_mode_combo,
+            self.read_setting("service_area_access_mode", "walk"),
+        )
+        self.service_area_access_distance_edit.setText(
+            self.read_setting(
+                "service_area_access_distance",
+                self.service_area_access_distance_edit.text(),
+            )
+        )
+        self.service_area_access_speed_edit.setText(
+            self.read_setting(
+                "service_area_access_speed",
+                self.service_area_access_speed_edit.text(),
             )
         )
         self.service_area_output_path_edit.setText(

@@ -19,6 +19,8 @@ from qgis.core import (
 
 from .compat import MSG_WARNING, MSG_CRITICAL, GEOM_POINT, GEOM_LINE
 
+SERVICE_AREA_DIRECT_LOAD_BYTES = 50 * 1024 * 1024
+
 
 class ResultsMixin:
     def execute_api_request(
@@ -36,19 +38,26 @@ class ResultsMixin:
             response_format=response_format_override,
         )
         self.log("POST {}".format(url))
+        local_output_path = self.resolve_local_path(output_path)
         try:
-            content_type, body = self.http_post_json(url, payload)
+            content_type, saved_path = self.http_post_json_to_file(
+                url, payload, local_output_path
+            )
         except Exception as exc:
             self.alert("API request failed: {}".format(exc))
             return False
 
-        local_output_path = self.resolve_local_path(output_path)
-        saved_path = self.save_response(local_output_path, content_type, body)
         self.log("Saved API response to {}".format(saved_path))
 
         if "geo+json" in content_type or saved_path.suffix.lower() == ".geojson":
+            if self.should_direct_load_service_area(analysis_kind, saved_path):
+                loaded_layer = self.load_output_layer(saved_path, layer_name)
+                if loaded_layer is not None:
+                    self.set_last_output_layers([loaded_layer])
+                return True
+
             try:
-                geojson = json.loads(body.decode("utf-8"))
+                geojson = json.loads(saved_path.read_text(encoding="utf-8"))
             except Exception as exc:
                 self.log(
                     "Failed to parse GeoJSON response for logging; loading the raw layer instead: {}".format(
@@ -71,8 +80,11 @@ class ResultsMixin:
                 self.set_last_output_layers([loaded_layer])
             return True
 
+        if self.should_skip_large_service_area_parse(analysis_kind, saved_path):
+            return True
+
         try:
-            response_json = json.loads(body.decode("utf-8"))
+            response_json = json.loads(saved_path.read_text(encoding="utf-8"))
         except Exception as exc:
             self.alert("Failed to parse API JSON response: {}".format(exc))
             return False
@@ -103,6 +115,40 @@ class ResultsMixin:
         loaded_layer = self.load_output_layer(temp_path, layer_name)
         if loaded_layer is not None:
             self.set_last_output_layers([loaded_layer])
+        return True
+
+    def should_direct_load_service_area(self, analysis_kind, saved_path):
+        if analysis_kind != "service_area":
+            return False
+        try:
+            size_bytes = Path(saved_path).stat().st_size
+        except OSError:
+            return False
+        if size_bytes <= SERVICE_AREA_DIRECT_LOAD_BYTES:
+            return False
+        self.log(
+            "Service-area GeoJSON is {:.1f} MB; loading it directly to avoid duplicating it in memory.".format(
+                size_bytes / (1024 * 1024)
+            ),
+            MSG_WARNING,
+        )
+        return True
+
+    def should_skip_large_service_area_parse(self, analysis_kind, saved_path):
+        if analysis_kind != "service_area":
+            return False
+        try:
+            size_bytes = Path(saved_path).stat().st_size
+        except OSError:
+            return False
+        if size_bytes <= SERVICE_AREA_DIRECT_LOAD_BYTES:
+            return False
+        self.log(
+            "Service-area JSON is {:.1f} MB; saved it but skipped automatic layer conversion to avoid memory pressure. Use GeoJSON output for direct loading of very large service areas.".format(
+                size_bytes / (1024 * 1024)
+            ),
+            MSG_WARNING,
+        )
         return True
 
     def json_text(self, value):
@@ -482,6 +528,7 @@ class ResultsMixin:
                             else None
                         ),
                         "mode": leg.get("mode"),
+                        "street_mode": leg.get("street_mode"),
                         "gtfs_route_id": leg.get("route_id"),
                         "route_short_name": leg.get("route_short_name"),
                         "trip_id": leg.get("trip_id"),
@@ -515,6 +562,7 @@ class ResultsMixin:
                                 else None
                             ),
                             "mode": leg.get("mode"),
+                            "street_mode": leg.get("street_mode"),
                             "gtfs_route_id": leg.get("route_id"),
                             "route_short_name": leg.get("route_short_name"),
                             "trip_id": leg.get("trip_id"),
@@ -927,7 +975,7 @@ class ResultsMixin:
     def write_temp_geojson(self, layer_name, geojson):
         safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", layer_name).strip("_") or "netweevil_layer"
         path = self.temp_layers_dir / "{}.geojson".format(safe_name)
-        path.write_text(json.dumps(geojson, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(geojson, separators=(",", ":")), encoding="utf-8")
         return path
 
     def load_output_layer(self, output_path, layer_name=None):

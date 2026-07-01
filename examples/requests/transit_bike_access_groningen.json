@@ -1,0 +1,38 @@
+{
+  "route_id": "openov_groningen_bike_first_mile_1",
+  "origin": {
+    "id": "groningen_suburb",
+    "lon": 6.6035,
+    "lat": 53.2099
+  },
+  "destination": {
+    "id": "zernike_campus",
+    "lon": 6.5337,
+    "lat": 53.2406
+  },
+  "time": {
+    "datetime": "2026-05-11T08:30:00+02:00",
+    "arrive_by": false,
+    "search_window_s": 7200
+  },
+  "modes": {
+    "access": ["bicycle"],
+    "egress": ["walk"],
+    "mixed_access_egress": true,
+    "transit": ["bus", "tram", "rail"],
+    "walk_speed_kph": 4.8,
+    "bicycle_speed_kph": 15.0,
+    "max_bicycle_access_distance_m": 5000.0,
+    "max_egress_distance_m": 1200.0,
+    "max_transfer_distance_m": 500.0,
+    "board_slack_s": 30,
+    "transfer_slack_s": 120,
+    "max_transfers": 3
+  },
+  "returns": {
+    "include_geometry": true,
+    "walking_geometry": "straight_line",
+    "include_stops": true,
+    "include_stop_segments": true
+  }
+}

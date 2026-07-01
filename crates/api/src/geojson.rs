@@ -348,6 +348,7 @@ pub(crate) fn transit_service_area_result_geojson(
                 "arrival_s": stop.arrival_s,
                 "travel_time_s": stop.travel_time_s,
                 "boarding_count": stop.boarding_count,
+                "access_mode": stop.access_mode,
             }
         }));
     }

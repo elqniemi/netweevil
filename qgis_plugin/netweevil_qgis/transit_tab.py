@@ -19,14 +19,36 @@ from .constants import ResponseFormat, PickTarget
 
 
 class TransitTabMixin:
+    STREET_MODE_ITEMS = [
+        ("Walking", "walk"),
+        ("Cycling", "bicycle"),
+        ("Car", "car"),
+    ]
+    STREET_MODE_ACCESS_DISTANCE_KEYS = {
+        "walk": "max_access_distance_m",
+        "bicycle": "max_bicycle_access_distance_m",
+        "car": "max_car_access_distance_m",
+    }
+    STREET_MODE_EGRESS_DISTANCE_KEYS = {
+        "walk": "max_egress_distance_m",
+        "bicycle": "max_bicycle_egress_distance_m",
+        "car": "max_car_egress_distance_m",
+    }
+    STREET_MODE_DEFAULT_DISTANCES = {
+        "walk": "1200",
+        "bicycle": "5000",
+        "car": "15000",
+    }
+
     def _build_transit_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
         summary = QLabel(
-            "Plan a pedestrian access + scheduled transit route through a GTFS "
-            "feed loaded by the API. Pick an origin and destination, set the "
-            "departure time, then press Run Transit Route."
+            "Plan a street access + scheduled transit route through a GTFS "
+            "feed loaded by the API. The first mile can be walked, cycled, or "
+            "driven; pick an origin and destination, set the departure time, "
+            "then press Run Transit Route."
         )
         summary.setWordWrap(True)
         layout.addWidget(summary)
@@ -132,14 +154,42 @@ class TransitTabMixin:
             transit_modes_layout.addWidget(check)
             self.transit_mode_checks[value] = check
         transit_modes_layout.addStretch(1)
+        self.transit_access_mode_combo = QComboBox()
+        for label, value in self.STREET_MODE_ITEMS:
+            self.transit_access_mode_combo.addItem(label, value)
+        self.transit_access_mode_combo.setToolTip(
+            "Street mode used for the first mile from the origin to the first stop."
+        )
+        self.transit_separate_egress_check = QCheckBox(
+            "Advanced: use a different last-mile (egress) mode"
+        )
+        self.transit_separate_egress_check.setChecked(False)
+        self.transit_separate_egress_check.setToolTip(
+            "Plan the first and last mile with different street modes, for "
+            "example cycle to the station and walk from the final stop."
+        )
+        self.transit_egress_mode_combo = QComboBox()
+        for label, value in self.STREET_MODE_ITEMS:
+            self.transit_egress_mode_combo.addItem(label, value)
+        self.transit_egress_mode_combo.setToolTip(
+            "Street mode used for the last mile from the final stop to the destination."
+        )
+        self.transit_egress_mode_combo.setEnabled(False)
         self.transit_walk_speed_edit = QLineEdit("4.8")
+        self.transit_bicycle_speed_edit = QLineEdit("15")
+        self.transit_car_speed_edit = QLineEdit("25")
+        self.transit_car_speed_edit.setToolTip(
+            "Average door-to-stop car speed in kph, including parking."
+        )
         self.transit_max_access_distance_edit = QLineEdit("1200")
         self.transit_max_access_distance_edit.setToolTip(
-            "Maximum walking distance in meters from the origin to the first stop."
+            "Maximum first-mile distance in meters from the origin to the "
+            "first stop, using the selected access mode."
         )
         self.transit_max_egress_distance_edit = QLineEdit("1200")
         self.transit_max_egress_distance_edit.setToolTip(
-            "Maximum walking distance in meters from the last stop to the destination."
+            "Maximum last-mile distance in meters from the last stop to the "
+            "destination, using the selected egress mode."
         )
         self.transit_max_transfer_distance_edit = QLineEdit("500")
         self.transit_board_slack_edit = QLineEdit("30")
@@ -158,20 +208,26 @@ class TransitTabMixin:
         self.transit_include_geometry_check = QCheckBox("Load leg geometry")
         self.transit_include_geometry_check.setChecked(True)
         self.transit_network_walk_geometry_check = QCheckBox(
-            "Use selected pedestrian profile for walking legs"
+            "Draw street legs over the road network"
         )
         self.transit_network_walk_geometry_check.setChecked(False)
         self.transit_network_walk_geometry_check.setToolTip(
             "Route walking legs over the road network using the profile selected "
             "in the connection bar (must be a pedestrian profile) instead of "
-            "straight lines."
+            "straight lines. Cycling and car first/last-mile legs use a loaded "
+            "profile of the matching mode when the API has one."
         )
         self.transit_include_stops_check = QCheckBox("Load transit stops")
         self.transit_include_stops_check.setChecked(True)
         self.transit_include_stop_segments_check = QCheckBox("Load stop-to-stop segments")
         self.transit_include_stop_segments_check.setChecked(True)
         mode_form.addRow("Transit modes", transit_modes_row)
+        mode_form.addRow("Access (first mile)", self.transit_access_mode_combo)
+        mode_form.addRow("", self.transit_separate_egress_check)
+        mode_form.addRow("Egress (last mile)", self.transit_egress_mode_combo)
         mode_form.addRow("Walk speed kph", self.transit_walk_speed_edit)
+        mode_form.addRow("Cycling speed kph", self.transit_bicycle_speed_edit)
+        mode_form.addRow("Car access speed kph", self.transit_car_speed_edit)
         mode_form.addRow("Max access distance m", self.transit_max_access_distance_edit)
         mode_form.addRow("Max egress distance m", self.transit_max_egress_distance_edit)
         mode_form.addRow("Max transfer distance m", self.transit_max_transfer_distance_edit)
@@ -204,6 +260,16 @@ class TransitTabMixin:
             self.sync_transit_output_path_from_route_id
         )
         self.sync_transit_output_path_from_route_id()
+        self.transit_separate_egress_check.toggled.connect(
+            self.update_transit_egress_mode_state
+        )
+        self.transit_access_mode_combo.currentIndexChanged.connect(
+            self.sync_transit_access_mode_defaults
+        )
+        self.transit_egress_mode_combo.currentIndexChanged.connect(
+            self.sync_transit_egress_mode_defaults
+        )
+        self.update_transit_egress_mode_state()
 
         layout.addStretch(1)
         return tab
@@ -299,6 +365,76 @@ class TransitTabMixin:
     def selected_transit_feed_id(self):
         return self.transit_feed_combo.currentData() or ""
 
+    def selected_transit_access_mode(self):
+        return self.transit_access_mode_combo.currentData() or "walk"
+
+    def selected_transit_egress_mode(self):
+        if self.transit_separate_egress_check.isChecked():
+            return self.transit_egress_mode_combo.currentData() or "walk"
+        return self.selected_transit_access_mode()
+
+    def update_transit_egress_mode_state(self, *_args):
+        separate = self.transit_separate_egress_check.isChecked()
+        self.transit_egress_mode_combo.setEnabled(separate)
+        if not separate:
+            self.set_combo_by_data(
+                self.transit_egress_mode_combo, self.selected_transit_access_mode()
+            )
+
+    def sync_transit_access_mode_defaults(self, *_args):
+        mode = self.selected_transit_access_mode()
+        self.transit_max_access_distance_edit.setText(
+            self.STREET_MODE_DEFAULT_DISTANCES.get(mode, "1200")
+        )
+        if not self.transit_separate_egress_check.isChecked():
+            self.set_combo_by_data(self.transit_egress_mode_combo, mode)
+            self.transit_max_egress_distance_edit.setText(
+                self.STREET_MODE_DEFAULT_DISTANCES.get(mode, "1200")
+            )
+
+    def sync_transit_egress_mode_defaults(self, *_args):
+        if not self.transit_separate_egress_check.isChecked():
+            return
+        mode = self.transit_egress_mode_combo.currentData() or "walk"
+        self.transit_max_egress_distance_edit.setText(
+            self.STREET_MODE_DEFAULT_DISTANCES.get(mode, "1200")
+        )
+
+    def build_transit_street_modes(self):
+        """First/last-mile options shared by transit routes and service areas."""
+        access_mode = self.selected_transit_access_mode()
+        egress_mode = self.selected_transit_egress_mode()
+        modes = {
+            "access": [access_mode],
+            "egress": [egress_mode],
+            "walk_speed_kph": self.parse_float_with_default(
+                self.transit_walk_speed_edit.text(), "Walk speed", 4.8
+            ),
+            "bicycle_speed_kph": self.parse_float_with_default(
+                self.transit_bicycle_speed_edit.text(), "Cycling speed", 15.0
+            ),
+            "car_access_speed_kph": self.parse_float_with_default(
+                self.transit_car_speed_edit.text(), "Car access speed", 25.0
+            ),
+        }
+        if access_mode != egress_mode:
+            modes["mixed_access_egress"] = True
+        modes[self.STREET_MODE_ACCESS_DISTANCE_KEYS[access_mode]] = (
+            self.parse_float_with_default(
+                self.transit_max_access_distance_edit.text(),
+                "Max access distance",
+                float(self.STREET_MODE_DEFAULT_DISTANCES[access_mode]),
+            )
+        )
+        modes[self.STREET_MODE_EGRESS_DISTANCE_KEYS[egress_mode]] = (
+            self.parse_float_with_default(
+                self.transit_max_egress_distance_edit.text(),
+                "Max egress distance",
+                float(self.STREET_MODE_DEFAULT_DISTANCES[egress_mode]),
+            )
+        )
+        return modes
+
     def selected_transit_modes(self):
         modes = [
             mode
@@ -359,48 +495,34 @@ class TransitTabMixin:
                 )
                 or 7200,
             },
-            "modes": {
-                "access": ["walk"],
-                "egress": ["walk"],
-                "transit": self.selected_transit_modes(),
-                "walk_speed_kph": self.parse_float_with_default(
-                    self.transit_walk_speed_edit.text(), "Walk speed", 4.8
-                ),
-                "max_access_distance_m": self.parse_float_with_default(
-                    self.transit_max_access_distance_edit.text(),
-                    "Max access distance",
-                    1200.0,
-                ),
-                "max_egress_distance_m": self.parse_float_with_default(
-                    self.transit_max_egress_distance_edit.text(),
-                    "Max egress distance",
-                    1200.0,
-                ),
-                "max_transfer_distance_m": self.parse_float_with_default(
+            "modes": dict(
+                self.build_transit_street_modes(),
+                transit=self.selected_transit_modes(),
+                max_transfer_distance_m=self.parse_float_with_default(
                     self.transit_max_transfer_distance_edit.text(),
                     "Max transfer distance",
                     500.0,
                 ),
-                "board_slack_s": self.parse_int_with_default(
+                board_slack_s=self.parse_int_with_default(
                     self.transit_board_slack_edit.text(), "Board slack", 30
                 ),
-                "transfer_slack_s": self.parse_int_with_default(
+                transfer_slack_s=self.parse_int_with_default(
                     self.transit_transfer_slack_edit.text(), "Transfer slack", 120
                 ),
-                "max_transfers": self.parse_int_with_default(
+                max_transfers=self.parse_int_with_default(
                     self.transit_max_transfers_edit.text(), "Max transfers", 3
                 ),
-                "min_transit_leg_duration_s": self.parse_optional_int(
+                min_transit_leg_duration_s=self.parse_optional_int(
                     self.transit_min_leg_duration_edit.text(),
                     "Min transit leg duration",
                 )
                 or 0,
-                "min_transit_leg_distance_m": self.parse_optional_float(
+                min_transit_leg_distance_m=self.parse_optional_float(
                     self.transit_min_leg_distance_edit.text(),
                     "Min transit leg distance",
                 )
                 or 0.0,
-            },
+            ),
             "returns": {
                 "include_geometry": self.transit_include_geometry_check.isChecked(),
                 "walking_geometry": (
