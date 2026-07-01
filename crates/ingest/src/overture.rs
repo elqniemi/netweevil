@@ -532,15 +532,17 @@ fn ingest_segment(row: SegmentRow, line: &[(f64, f64)], state: &mut OvertureStat
         chunk_way_ids.push(way_id);
 
         let mut node_ids = Vec::with_capacity(end_vertex - start_vertex + 1);
-        for vertex in start_vertex..=end_vertex {
+        for (vertex, coord) in line
+            .iter()
+            .enumerate()
+            .take(end_vertex + 1)
+            .skip(start_vertex)
+        {
             let node = match vertex_nodes.get(&vertex) {
                 Some(&node) => node,
                 None => state.allocate_node(),
             };
-            state
-                .node_coords
-                .entry(node)
-                .or_insert((line[vertex].0, line[vertex].1));
+            state.node_coords.entry(node).or_insert((coord.0, coord.1));
             state.counts.nodes += 1;
             node_ids.push(node);
         }
