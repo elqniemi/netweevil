@@ -455,11 +455,24 @@ fn build_acceleration_graph(
     edge_count: usize,
 ) -> Result<Option<AccelerationGraph>> {
     let Some(acceleration) = metrics.acceleration.as_ref() else {
+        if dataset_acceleration.is_some() {
+            tracing::warn!(
+                profile = %metrics.profile_id,
+                "compiled profile has no CCH weights although the dataset has an acceleration \
+                 bundle; queries fall back to the exact engine. Recompile the profile to restore \
+                 accelerated routing"
+            );
+        }
         return Ok(None);
     };
     let Some(topology_source) = dataset_acceleration else {
         // Profiles compiled without a dataset CCH bundle in reach run on the
         // exact engine only.
+        tracing::warn!(
+            profile = %metrics.profile_id,
+            "dataset has no acceleration bundle; queries fall back to the exact engine. \
+             Re-import the dataset to build the CCH"
+        );
         return Ok(None);
     };
     if topology_source.source_topology_bundle_id != metrics.source_topology_bundle_id {

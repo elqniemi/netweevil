@@ -704,16 +704,22 @@ fn choose_batch_route_strategy(
     unique_origin_count: usize,
     unique_pair_count: usize,
 ) -> BatchRouteStrategy {
-    if routing_graph.has_restriction_sequences()
-        || routing_graph.acceleration.is_some()
-        || unique_origin_count == 0
-    {
+    if routing_graph.has_restriction_sequences() || unique_origin_count == 0 {
         return BatchRouteStrategy::Pairwise;
     }
 
     let average_destination_count =
         unique_pair_count.saturating_add(unique_origin_count - 1) / unique_origin_count;
-    let single_source_threshold = 8;
+    // A single-source tree costs one exhaustive Dijkstra per origin while a
+    // pairwise query costs one point-to-point search per pair. Both are exact
+    // on the same weights, so this is purely a cost crossover: CCH pairwise
+    // searches are roughly 45x faster than plain ones, so with acceleration
+    // available the tree only wins on much wider destination fan-outs.
+    let single_source_threshold = if routing_graph.acceleration.is_some() {
+        48
+    } else {
+        8
+    };
     if average_destination_count >= single_source_threshold {
         BatchRouteStrategy::SingleSource
     } else {
