@@ -162,16 +162,15 @@ impl PreparedRoutingEngine {
         mode: EngineMode,
     ) -> Result<RouteResult> {
         if has_failure_modes(&request.fallback) {
-            let (degraded_topology, degraded_metrics, degraded_routing_graph) =
-                build_failure_mode_bundle(
-                    self.topology.as_ref(),
-                    self.metrics.as_ref(),
-                    &request.fallback,
-                )?;
+            let degraded = cached_failure_mode_bundle(
+                self.topology.as_ref(),
+                self.metrics.as_ref(),
+                &request.fallback,
+            )?;
             return execute_route_with_graph(
-                &degraded_topology,
-                &degraded_metrics,
-                &degraded_routing_graph,
+                &degraded.topology,
+                &degraded.metrics,
+                &degraded.routing_graph,
                 request,
                 edge_names,
             );
@@ -196,16 +195,15 @@ impl PreparedRoutingEngine {
         mode: EngineMode,
     ) -> Result<OdResult> {
         if has_failure_modes(&document.fallback) {
-            let (degraded_topology, degraded_metrics, degraded_routing_graph) =
-                build_failure_mode_bundle(
-                    self.topology.as_ref(),
-                    self.metrics.as_ref(),
-                    &document.fallback,
-                )?;
+            let degraded = cached_failure_mode_bundle(
+                self.topology.as_ref(),
+                self.metrics.as_ref(),
+                &document.fallback,
+            )?;
             return execute_od_with_graph(
-                &degraded_topology,
-                &degraded_metrics,
-                &degraded_routing_graph,
+                &degraded.topology,
+                &degraded.metrics,
+                &degraded.routing_graph,
                 document,
             );
         }
@@ -234,16 +232,15 @@ impl PreparedRoutingEngine {
     ) -> Result<MatrixResult> {
         let fallback = merge_point_set_fallback_policy(&origins.fallback, &destinations.fallback);
         if has_failure_modes(&fallback) {
-            let (degraded_topology, degraded_metrics, degraded_routing_graph) =
-                build_failure_mode_bundle(
-                    self.topology.as_ref(),
-                    self.metrics.as_ref(),
-                    &fallback,
-                )?;
+            let degraded = cached_failure_mode_bundle(
+                self.topology.as_ref(),
+                self.metrics.as_ref(),
+                &fallback,
+            )?;
             return execute_matrix_with_graph(
-                &degraded_topology,
-                &degraded_metrics,
-                &degraded_routing_graph,
+                &degraded.topology,
+                &degraded.metrics,
+                &degraded.routing_graph,
                 origins,
                 destinations,
             );
@@ -271,16 +268,15 @@ impl PreparedRoutingEngine {
         mode: EngineMode,
     ) -> Result<AccessibilityResult> {
         if has_failure_modes(&request.origins.fallback) {
-            let (degraded_topology, degraded_metrics, degraded_routing_graph) =
-                build_failure_mode_bundle(
-                    self.topology.as_ref(),
-                    self.metrics.as_ref(),
-                    &request.origins.fallback,
-                )?;
+            let degraded = cached_failure_mode_bundle(
+                self.topology.as_ref(),
+                self.metrics.as_ref(),
+                &request.origins.fallback,
+            )?;
             return execute_accessibility_with_graph(
-                &degraded_topology,
-                &degraded_metrics,
-                &degraded_routing_graph,
+                &degraded.topology,
+                &degraded.metrics,
+                &degraded.routing_graph,
                 request,
             );
         }

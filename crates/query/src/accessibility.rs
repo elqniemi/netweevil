@@ -368,12 +368,11 @@ pub fn execute_accessibility(
 ) -> Result<AccessibilityResult> {
     if has_failure_modes(&request.origins.fallback) {
         validate_execution_inputs(topology, metrics)?;
-        let (degraded_topology, degraded_metrics, degraded_routing_graph) =
-            build_failure_mode_bundle(topology, metrics, &request.origins.fallback)?;
+        let degraded = cached_failure_mode_bundle(topology, metrics, &request.origins.fallback)?;
         return execute_accessibility_with_graph(
-            &degraded_topology,
-            &degraded_metrics,
-            &degraded_routing_graph,
+            &degraded.topology,
+            &degraded.metrics,
+            &degraded.routing_graph,
             request,
         );
     }
