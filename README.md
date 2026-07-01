@@ -499,8 +499,12 @@ The importer consumes road-subtype segments and maps:
 - `lanes` to per-direction lane counts on releases that still carry the
   column (it was removed from the GA schema)
 
-Posted speed limits cap the profile speed for motorized modes, and lane
-counts feed the traffic simulation; both also work for OSM sources via the
+Posted speed limits combine with profile speeds per the profile's
+`speeds.posted_limits` setting — `prefer` (the posted limit takes
+precedence over the profile speed wherever the data carries one), `cap`
+(the default: travel is never assumed faster than the posted limit, but
+lower profile speeds win), or `ignore` (profile speeds only). Lane counts
+feed the traffic simulation. Both also work for OSM sources via the
 `maxspeed` and `lanes` tags. `datasets/README.md` has download commands.
 
 ## Verification Checklist

@@ -10,6 +10,14 @@ cost:
   distance_weight: 0.0
   time_weight: 1.0
 
+# How posted speed limits from the source data (OSM maxspeed, Overture
+# speed_limits) combine with the speeds below for motorized modes:
+#   prefer — posted limit replaces the profile speed where present
+#   cap    — posted limit caps the profile speed (default)
+#   ignore — posted limits are ignored, profile speeds only
+speeds:
+  posted_limits: cap
+
 speed_rules:
   - match:
       highway: motorway

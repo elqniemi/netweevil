@@ -578,6 +578,7 @@ mod tests {
                 distance_weight: 0.0,
                 time_weight: 1.0,
             },
+            speeds: Default::default(),
             speed_rules: vec![SpeedRule {
                 r#match: tag_match([("highway", "residential")]),
                 speed_kph: 40.0,
@@ -647,6 +648,7 @@ mod tests {
                 extends: None,
             },
             cost: Default::default(),
+            speeds: Default::default(),
             speed_rules: vec![SpeedRule {
                 r#match: tag_match([("lanes", "2")]),
                 speed_kph: 50.0,
@@ -691,6 +693,7 @@ mod tests {
                 extends: None,
             },
             cost: Default::default(),
+            speeds: Default::default(),
             speed_rules: vec![],
             exclude_rules: vec![ExcludeRule {
                 r#match: tag_match([("highway", "primary")]),
@@ -959,6 +962,7 @@ mod tests {
                 distance_weight: 0.0,
                 time_weight: 1.0,
             },
+            speeds: Default::default(),
             speed_rules: vec![],
             exclude_rules: vec![],
             factors: vec![],

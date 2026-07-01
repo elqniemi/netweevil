@@ -18,6 +18,6 @@ pub use load::load_profile;
 pub use progress::{ProfileCompileProgress, ProfileCompileStage};
 pub use schema::{
     BreakdownMetric, CostConfig, DirectionConfig, ExcludeRule, FactorRule, FerryConfig, Objective,
-    PreferencesConfig, ProfileDocument, ProfileHeader, ReturnConfig, ReturnGeometry, SpeedRule,
-    TagMatch, TurnConfig,
+    PostedLimitPolicy, PreferencesConfig, ProfileDocument, ProfileHeader, ReturnConfig,
+    ReturnGeometry, SpeedRule, SpeedsConfig, TagMatch, TurnConfig,
 };
