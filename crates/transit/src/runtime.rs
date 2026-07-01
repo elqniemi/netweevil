@@ -97,11 +97,49 @@ impl StopSpatialIndex {
     }
 }
 
+/// Transfer expansion considers at most this many nearby stops per stop.
+pub(crate) const MAX_TRANSFER_CANDIDATES: usize = 32;
+
+/// Expanding-radius search beyond which a stop is considered to have no more
+/// transfer neighbours worth indexing.
+const MAX_TRANSFER_INDEX_RADIUS_M: f64 = 100_000.0;
+
+/// Precomputes, for every stop, its `MAX_TRANSFER_CANDIDATES` nearest stops
+/// (including itself) sorted by distance. Search-time transfer expansion
+/// filters this static list by the requested max transfer distance instead of
+/// re-querying and re-sorting the spatial index on every settled state.
+pub(crate) fn build_transfer_candidates(
+    bundle: &TransitBundle,
+    stop_index: &StopSpatialIndex,
+) -> Vec<Vec<StopCandidate>> {
+    use rayon::prelude::*;
+
+    bundle
+        .stops
+        .par_iter()
+        .map(|stop| {
+            let mut radius_m = 500.0_f64;
+            loop {
+                let mut candidates = stop_index.nearby_stops(bundle, stop.lon, stop.lat, radius_m);
+                if candidates.len() >= MAX_TRANSFER_CANDIDATES
+                    || radius_m >= MAX_TRANSFER_INDEX_RADIUS_M
+                {
+                    candidates.sort_by(|left, right| left.distance_m.total_cmp(&right.distance_m));
+                    candidates.truncate(MAX_TRANSFER_CANDIDATES);
+                    return candidates;
+                }
+                radius_m *= 2.0;
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug)]
 pub(crate) struct TransitRuntime<'a> {
     pub(crate) bundle: &'a TransitBundle,
     pub(crate) departures_by_stop: &'a [Vec<TransitConnection>],
     stop_index: &'a StopSpatialIndex,
+    transfer_candidates: &'a [Vec<StopCandidate>],
     pub(crate) allowed_routes: Vec<bool>,
 }
 
@@ -110,6 +148,7 @@ impl<'a> TransitRuntime<'a> {
         bundle: &'a TransitBundle,
         departures_by_stop: &'a [Vec<TransitConnection>],
         stop_index: &'a StopSpatialIndex,
+        transfer_candidates: &'a [Vec<StopCandidate>],
         modes: &TransitModeOptions,
     ) -> Self {
         let allowed_routes = bundle
@@ -121,6 +160,7 @@ impl<'a> TransitRuntime<'a> {
             bundle,
             departures_by_stop,
             stop_index,
+            transfer_candidates,
             allowed_routes,
         }
     }
@@ -155,37 +195,18 @@ impl<'a> TransitRuntime<'a> {
         lat: f64,
         max_distance_m: f64,
     ) -> Vec<StopCandidate> {
-        self.nearby_stops(lon, lat, max_distance_m, None)
-    }
-
-    fn nearby_transfer_stops(&self, lon: f64, lat: f64, max_distance_m: f64) -> Vec<StopCandidate> {
-        self.nearby_stops(lon, lat, max_distance_m, Some(32))
-    }
-
-    fn nearby_stops(
-        &self,
-        lon: f64,
-        lat: f64,
-        max_distance_m: f64,
-        limit: Option<usize>,
-    ) -> Vec<StopCandidate> {
         let mut candidates = self
             .stop_index
             .nearby_stops(self.bundle, lon, lat, max_distance_m);
         candidates.sort_by(|left, right| left.distance_m.total_cmp(&right.distance_m));
-        if let Some(limit) = limit {
-            candidates.truncate(limit);
-        }
         candidates
     }
 
-    pub(crate) fn nearby_stop_indexes(
-        &self,
-        stop_index: u32,
-        max_distance_m: f64,
-    ) -> Vec<StopCandidate> {
-        let stop = &self.bundle.stops[stop_index as usize];
-        self.nearby_transfer_stops(stop.lon, stop.lat, max_distance_m)
+    /// Precomputed nearest stops for transfer expansion, sorted by distance.
+    /// Callers filter with `take_while(distance_m <= max)` to apply the
+    /// request's transfer distance limit.
+    pub(crate) fn transfer_candidates(&self, stop_index: u32) -> &[StopCandidate] {
+        &self.transfer_candidates[stop_index as usize]
     }
 }
 

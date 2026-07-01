@@ -364,6 +364,37 @@ pub(crate) fn transit_connection_geometry(
     bundle: &TransitBundle,
     connection: TransitConnection,
 ) -> Vec<[f64; 2]> {
+    transit_connection_geometry_cached(bundle, connection, &mut ShapePointIndexCache::default())
+}
+
+/// Memoizes the nearest-shape-point search per (shape, stop) pair. Segment
+/// materialization touches the same trip shapes many times; without the cache
+/// every segment re-scans the full shape polyline twice.
+#[derive(Default)]
+pub(crate) struct ShapePointIndexCache {
+    indexes: HashMap<(u32, u32), usize>,
+}
+
+impl ShapePointIndexCache {
+    fn index(
+        &mut self,
+        shape: &TransitShape,
+        shape_index: u32,
+        stop_index: u32,
+        point: [f64; 2],
+    ) -> usize {
+        *self
+            .indexes
+            .entry((shape_index, stop_index))
+            .or_insert_with(|| nearest_shape_point_index(&shape.points, point))
+    }
+}
+
+pub(crate) fn transit_connection_geometry_cached(
+    bundle: &TransitBundle,
+    connection: TransitConnection,
+    cache: &mut ShapePointIndexCache,
+) -> Vec<[f64; 2]> {
     let from = &bundle.stops[connection.from_stop_index as usize];
     let to = &bundle.stops[connection.to_stop_index as usize];
     let from_point = [from.lon, from.lat];
@@ -374,19 +405,21 @@ pub(crate) fn transit_connection_geometry(
     let Some(shape) = bundle.shapes.get(shape_index as usize) else {
         return vec![from_point, to_point];
     };
-    shape_geometry_between_stops(shape, from_point, to_point)
+    if shape.points.len() < 2 {
+        return vec![from_point, to_point];
+    }
+    let from_index = cache.index(shape, shape_index, connection.from_stop_index, from_point);
+    let to_index = cache.index(shape, shape_index, connection.to_stop_index, to_point);
+    shape_geometry_between_stops(shape, from_point, to_point, from_index, to_index)
 }
 
 fn shape_geometry_between_stops(
     shape: &TransitShape,
     from: [f64; 2],
     to: [f64; 2],
+    from_index: usize,
+    to_index: usize,
 ) -> Vec<[f64; 2]> {
-    if shape.points.len() < 2 {
-        return vec![from, to];
-    }
-    let from_index = nearest_shape_point_index(&shape.points, from);
-    let to_index = nearest_shape_point_index(&shape.points, to);
     let mut geometry = Vec::new();
     push_unique_point(&mut geometry, from);
     if from_index <= to_index {

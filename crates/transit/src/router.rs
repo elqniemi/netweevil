@@ -14,8 +14,9 @@ use crate::model::{
     TransitServiceAreaRequest, TransitServiceAreaResult,
 };
 use crate::runtime::{
-    PrevStep, StateKey, StopSpatialIndex, TransitRuntime, best_street_candidates,
-    build_departures_by_stop, can_finish_with_egress, can_start_transfer_walk, relax_state,
+    PrevStep, StateKey, StopCandidate, StopSpatialIndex, TransitRuntime, best_street_candidates,
+    build_departures_by_stop, build_transfer_candidates, can_finish_with_egress,
+    can_start_transfer_walk, relax_state,
 };
 use crate::service_area::execute_transit_service_area_with_runtime;
 
@@ -33,16 +34,19 @@ pub struct PreparedTransitRouter {
     bundle: Arc<TransitBundle>,
     departures_by_stop: Vec<Vec<TransitConnection>>,
     stop_index: StopSpatialIndex,
+    transfer_candidates: Vec<Vec<StopCandidate>>,
 }
 
 impl PreparedTransitRouter {
     pub fn new(bundle: Arc<TransitBundle>) -> Self {
         let departures_by_stop = build_departures_by_stop(&bundle);
         let stop_index = StopSpatialIndex::new(&bundle.stops);
+        let transfer_candidates = build_transfer_candidates(&bundle, &stop_index);
         Self {
             bundle,
             departures_by_stop,
             stop_index,
+            transfer_candidates,
         }
     }
 
@@ -55,6 +59,7 @@ impl PreparedTransitRouter {
             self.bundle.as_ref(),
             &self.departures_by_stop,
             &self.stop_index,
+            &self.transfer_candidates,
             &request.modes,
         );
         execute_transit_route_with_runtime(&runtime, request)
@@ -68,6 +73,7 @@ impl PreparedTransitRouter {
             self.bundle.as_ref(),
             &self.departures_by_stop,
             &self.stop_index,
+            &self.transfer_candidates,
             &request.modes,
         );
         execute_transit_service_area_with_runtime(&runtime, request)
@@ -80,7 +86,14 @@ pub fn execute_transit_route(
 ) -> Result<TransitRouteResult> {
     let departures_by_stop = build_departures_by_stop(bundle);
     let stop_index = StopSpatialIndex::new(&bundle.stops);
-    let runtime = TransitRuntime::new(bundle, &departures_by_stop, &stop_index, &request.modes);
+    let transfer_candidates = build_transfer_candidates(bundle, &stop_index);
+    let runtime = TransitRuntime::new(
+        bundle,
+        &departures_by_stop,
+        &stop_index,
+        &transfer_candidates,
+        &request.modes,
+    );
     execute_transit_route_with_runtime(&runtime, request)
 }
 
@@ -232,10 +245,11 @@ fn execute_transit_route_with_runtime(
 
         if can_start_transfer_walk(entry.state) {
             let transfer_departure_s = entry.time_s.saturating_add(request.modes.transfer_slack_s);
-            for transfer in runtime.nearby_stop_indexes(
-                entry.state.stop_index,
-                request.modes.max_transfer_distance_m,
-            ) {
+            for transfer in runtime
+                .transfer_candidates(entry.state.stop_index)
+                .iter()
+                .take_while(|transfer| transfer.distance_m <= request.modes.max_transfer_distance_m)
+            {
                 if transfer.stop_index == entry.state.stop_index {
                     continue;
                 }
