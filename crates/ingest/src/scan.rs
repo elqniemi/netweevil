@@ -11,8 +11,8 @@ use osmpbfreader::{OsmObj, OsmPbfReader};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::classify::{
-    classify_directional_access, classify_smoothness, classify_surface, classify_toll,
-    classify_way, is_traffic_signal_node, parse_duration_from_tags, tag,
+    classify_directional_access, classify_smoothness, classify_speed_and_lanes, classify_surface,
+    classify_toll, classify_way, is_traffic_signal_node, parse_duration_from_tags, tag,
 };
 use crate::import::{
     CountingReader, DatasetImportProgress, DatasetImportStage, PercentReporter, emit_progress,
@@ -34,7 +34,23 @@ pub(crate) struct PendingWay {
     pub(crate) is_roundabout: bool,
     pub(crate) forward_extra_flags: u32,
     pub(crate) reverse_extra_flags: u32,
+    pub(crate) forward_max_speed_kph: Option<f32>,
+    pub(crate) reverse_max_speed_kph: Option<f32>,
+    pub(crate) forward_lanes: Option<u8>,
+    pub(crate) reverse_lanes: Option<u8>,
     pub(crate) name: Option<String>,
+}
+
+/// Source-agnostic scan result consumed by the topology build. The OSM and
+/// Overture scanners both produce this shape; ids are OSM object ids for PBF
+/// sources and synthetic ids for Overture sources.
+#[derive(Debug, Default)]
+pub(crate) struct ScanOutput {
+    pub(crate) pending_ways: Vec<PendingWay>,
+    pub(crate) restriction_candidates: Vec<TurnRestrictionCandidate>,
+    pub(crate) node_coords: FxHashMap<i64, (f64, f64)>,
+    pub(crate) traffic_signal_nodes: FxHashSet<i64>,
+    pub(crate) counts: ObjectCounts,
 }
 
 #[derive(Debug, Default)]
@@ -92,6 +108,7 @@ pub(crate) fn scan_routable_objects(
                 }
                 let directional_access =
                     classify_directional_access(&way.tags, highway, road_class, access_mask);
+                let speed_lanes = classify_speed_and_lanes(&way.tags, road_class);
 
                 let pending = PendingWay {
                     osm_way_id: way.id.0,
@@ -107,6 +124,10 @@ pub(crate) fn scan_routable_objects(
                     is_roundabout: tag(&way.tags, "junction") == Some("roundabout"),
                     forward_extra_flags: directional_access.forward_flags,
                     reverse_extra_flags: directional_access.reverse_flags,
+                    forward_max_speed_kph: speed_lanes.forward_max_speed_kph,
+                    reverse_max_speed_kph: speed_lanes.reverse_max_speed_kph,
+                    forward_lanes: speed_lanes.forward_lanes,
+                    reverse_lanes: speed_lanes.reverse_lanes,
                     name: way.tags.get("name").map(ToString::to_string),
                 };
 
@@ -223,4 +244,22 @@ pub(crate) fn load_node_coords(
     );
 
     Ok(coords)
+}
+
+/// Runs both PBF passes and packages the result for the topology build.
+pub(crate) fn scan_osm(
+    source_path: &Path,
+    source_size_bytes: u64,
+    progress: &mut impl FnMut(DatasetImportProgress),
+) -> Result<ScanOutput> {
+    let (pending_ways, restriction_candidates, needed_nodes, traffic_signal_nodes, counts) =
+        scan_routable_objects(source_path, source_size_bytes, progress)?;
+    let node_coords = load_node_coords(source_path, source_size_bytes, &needed_nodes, progress)?;
+    Ok(ScanOutput {
+        pending_ways,
+        restriction_candidates,
+        node_coords,
+        traffic_signal_nodes,
+        counts,
+    })
 }

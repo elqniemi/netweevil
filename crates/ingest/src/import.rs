@@ -7,7 +7,7 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result, bail};
-use netweevil_core::{BuildStage, CacheBundleId, DatasetId};
+use netweevil_core::{BuildStage, CacheBundleId, DatasetId, SourceFormat};
 use netweevil_manifest::{BundleRef, DatasetManifest, now_rfc3339};
 use netweevil_persist::{
     WorkspacePaths, write_acceleration_bundle, write_dataset_manifest, write_edge_name_bundle,
@@ -22,6 +22,26 @@ use crate::topology::build_topology_bundle;
 pub struct DatasetImportOptions {
     pub name: String,
     pub source: String,
+    /// Source file format; detected from the path when not set.
+    pub format: Option<SourceFormat>,
+}
+
+/// Infers the source format from the path: a directory or a
+/// `.parquet`/`.geoparquet` file is Overture GeoParquet, anything else is
+/// treated as an OSM PBF extract (the historical default).
+pub fn detect_source_format(source_path: &Path) -> SourceFormat {
+    if source_path.is_dir() {
+        return SourceFormat::OvertureParquet;
+    }
+    match source_path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("parquet") | Some("geoparquet") => SourceFormat::OvertureParquet,
+        _ => SourceFormat::OsmPbf,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,20 +99,17 @@ where
     if !source_path.exists() {
         bail!("dataset source does not exist: {}", source_path.display());
     }
+    let source_format = options
+        .format
+        .unwrap_or_else(|| detect_source_format(source_path));
 
-    let file = File::open(source_path)
-        .with_context(|| format!("opening dataset source {}", source_path.display()))?;
-    let size = file
-        .metadata()
-        .with_context(|| format!("reading metadata for {}", source_path.display()))?
-        .len();
     emit_progress(
         &mut progress,
         DatasetImportStage::HashSource,
         Some(0.0),
         format!("Hashing source {}", source_path.display()),
     );
-    let sha256 = sha256_file(file, size, &mut progress)?;
+    let (sha256, size) = sha256_source(source_path, &mut progress)?;
     let dataset_id = DatasetId::new(options.name);
     let bundle_id = CacheBundleId::new(format!("topology-{}-{}", dataset_id.0, &sha256[..12]));
     let bundle_path = paths
@@ -109,7 +126,7 @@ where
         .acceleration_bundles_dir
         .join(format!("{}.bin", acceleration_bundle_id.0));
     let (bundle, edge_name_bundle, topology_meta) =
-        build_topology_bundle(source_path, size, &sha256, &mut progress)?;
+        build_topology_bundle(source_path, size, &sha256, source_format, &mut progress)?;
     let acceleration_bundle =
         build_dataset_acceleration_bundle_with_progress(&bundle, bundle_id.clone(), &mut progress);
     emit_progress(
@@ -146,6 +163,7 @@ where
         source_path: source_path.display().to_string(),
         source_sha256: sha256,
         source_size_bytes: size,
+        source_format,
         imported_at: now_rfc3339()?,
         build_stage: BuildStage::TopologyReady,
         topology_bundle: Some(BundleRef {
@@ -191,6 +209,68 @@ where
         ),
     );
     Ok(manifest)
+}
+
+/// Hashes the dataset source: a single file directly, or every parquet file
+/// of a directory source (sorted by relative path, with the path mixed into
+/// the digest) so renames and content changes both change the hash.
+fn sha256_source<F>(source_path: &Path, progress: &mut F) -> Result<(String, u64)>
+where
+    F: FnMut(DatasetImportProgress),
+{
+    if source_path.is_file() {
+        let file = File::open(source_path)
+            .with_context(|| format!("opening dataset source {}", source_path.display()))?;
+        let size = file
+            .metadata()
+            .with_context(|| format!("reading metadata for {}", source_path.display()))?
+            .len();
+        return Ok((sha256_file(file, size, progress)?, size));
+    }
+
+    let mut files = Vec::new();
+    let mut stack = vec![source_path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("reading directory {}", dir.display()))?
+        {
+            let path = entry?.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+
+    let mut hasher = Sha256::new();
+    let mut total_size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    for path in files {
+        let relative = path.strip_prefix(source_path).unwrap_or(&path);
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        let file = File::open(&path).with_context(|| format!("opening {}", path.display()))?;
+        let mut reader = BufReader::new(file);
+        loop {
+            let read = reader
+                .read(&mut buffer)
+                .context("reading file for hashing")?;
+            if read == 0 {
+                break;
+            }
+            total_size += read as u64;
+            hasher.update(&buffer[..read]);
+        }
+    }
+    emit_progress(
+        progress,
+        DatasetImportStage::HashSource,
+        Some(100.0),
+        "Hashing source 100%".to_string(),
+    );
+    Ok((hex::encode(hasher.finalize()), total_size))
 }
 
 fn sha256_file<F>(file: File, source_size_bytes: u64, progress: &mut F) -> Result<String>

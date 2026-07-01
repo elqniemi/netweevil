@@ -51,6 +51,13 @@ cargo run -p netweevil-cli -- dataset import \
   datasets/groningen-260508-routing.osm.pbf \
   --name groningen_2026_05
 
+# Or import Overture Maps transportation segments instead of OSM
+# (a .parquet/.geoparquet file or a directory of them; format is detected
+# from the path, or force it with --format overture):
+# cargo run -p netweevil-cli -- dataset import \
+#   datasets/overture-groningen-segments.parquet \
+#   --name groningen_overture
+
 cargo run -p netweevil-cli -- profile validate \
   examples/profiles/car_research_v1.yml
 
@@ -94,13 +101,37 @@ Build the image:
 docker compose build
 ```
 
-Import the dataset into the persistent volume:
+Import the dataset into the persistent volume (works the same for an
+Overture parquet file or directory under `datasets/`):
 
 ```bash
 docker compose run --rm api dataset import \
   datasets/groningen-260508-routing.osm.pbf \
   --name osm
 ```
+
+Alternatively, provision the data at build time. The default and
+recommended flow is the runtime import above — it keeps images small and
+data out of layers — but a self-contained image is useful for
+reproducible deployments. Pass one of:
+
+```bash
+# Bake an OSM extract fetched at build time
+NETWEEVIL_FETCH_OSM_URL=https://download.geofabrik.de/europe/netherlands/groningen-latest.osm.pbf \
+docker compose build
+
+# Bake Overture transportation segments for a bounding box
+# (west,south,east,north; fetched with the official overturemaps CLI)
+NETWEEVIL_FETCH_OVERTURE_BBOX=6.4,53.1,6.7,53.3 \
+docker compose build
+```
+
+The build fetches the data in an intermediate stage, runs
+`dataset import --name $NETWEEVIL_DATASET` during the build, and copies
+only the imported `.netweevil` bundles into the final image — raw
+downloads never land in image layers. On the first `up`, Docker seeds the
+empty `netweevil-state` volume from the baked state, so the API serves
+immediately without a separate import step.
 
 Serve the API:
 
@@ -445,6 +476,32 @@ osmium tags-filter \
 ```
 
 Do not pass `-R` or `--omit-referenced`; netweevil needs referenced topology objects.
+
+## Importing Overture Maps Data
+
+`dataset import` also accepts Overture Maps transportation-theme
+GeoParquet — a single `.parquet`/`.geoparquet` file or a directory of them
+(only segment files are read; connector files in the same directory are
+skipped automatically). The format is detected from the path; use
+`--format overture` or `--format osm-pbf` to force it.
+
+The importer consumes road-subtype segments and maps:
+
+- `class`/`subclass` to the highway classification (including `link` ramps)
+- `connectors` to graph nodes — segments are split into
+  connector-to-connector chunks, so linearly scoped rules apply per chunk
+- `access_restrictions` to per-mode, per-direction access (heading-scoped
+  denies become oneways); time- or vehicle-conditional rules are skipped
+- `speed_limits` to per-direction posted limits (mph converted to km/h)
+- `road_surface` and `road_flags` (under-construction and abandoned
+  segments are dropped)
+- `prohibited_transitions` to turn restrictions
+- `lanes` to per-direction lane counts on releases that still carry the
+  column (it was removed from the GA schema)
+
+Posted speed limits cap the profile speed for motorized modes, and lane
+counts feed the traffic simulation; both also work for OSM sources via the
+`maxspeed` and `lanes` tags. `datasets/README.md` has download commands.
 
 ## Verification Checklist
 

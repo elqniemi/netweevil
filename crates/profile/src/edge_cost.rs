@@ -32,6 +32,16 @@ pub(crate) fn edge_travel_time_s(
     if let Some(rule_speed) = matching_speed(profile, edge, highway) {
         speed_kph = rule_speed;
     }
+    // A posted limit from the source data caps the class/profile speed for
+    // motorized modes; it never raises foot/bicycle speeds because the cap
+    // only lowers the value.
+    if matches!(
+        profile.profile.mode,
+        TravelMode::Car | TravelMode::Hgv | TravelMode::Transit
+    ) && let Some(max_speed_kph) = edge.max_speed_kph
+    {
+        speed_kph = speed_kph.min(max_speed_kph as f64);
+    }
 
     let effective_speed_kph = (speed_kph * matching_speed_factor(profile, edge, highway)).max(1.0);
     Some(edge.length_m as f64 / (effective_speed_kph * 1000.0 / 3600.0))

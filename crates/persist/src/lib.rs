@@ -242,7 +242,7 @@ struct LegacyTopologyBundle {
     source_path: String,
     source_sha256: String,
     nodes: Vec<netweevil_core::TopologyNode>,
-    edges: Vec<netweevil_core::DirectedEdge>,
+    edges: Vec<LegacyDirectedEdge>,
     #[serde(default)]
     turn_restrictions: Vec<netweevil_core::TurnRestriction>,
     #[serde(default)]
@@ -257,9 +257,59 @@ struct LegacyTopologyBundle {
     edge_component_ids: Vec<u32>,
 }
 
+/// Edge layout of AoS topology bundles written before schema 10 (no
+/// max_speed/lanes fields).
+#[derive(serde::Deserialize)]
+struct LegacyDirectedEdge {
+    edge_id: netweevil_core::EdgeId,
+    from: netweevil_core::NodeId,
+    to: netweevil_core::NodeId,
+    source_way_id: i64,
+    length_m: u32,
+    duration_s: Option<f64>,
+    road_class: netweevil_core::RoadClass,
+    surface: netweevil_core::SurfaceClass,
+    smoothness: netweevil_core::SmoothnessClass,
+    access_mask: netweevil_core::AccessMask,
+    is_toll: bool,
+    name_index: Option<u32>,
+    geometry_offset: u64,
+    geometry_len: u32,
+    flags: u32,
+}
+
+impl From<LegacyDirectedEdge> for netweevil_core::DirectedEdge {
+    fn from(value: LegacyDirectedEdge) -> Self {
+        Self {
+            edge_id: value.edge_id,
+            from: value.from,
+            to: value.to,
+            source_way_id: value.source_way_id,
+            length_m: value.length_m,
+            duration_s: value.duration_s,
+            road_class: value.road_class,
+            surface: value.surface,
+            smoothness: value.smoothness,
+            access_mask: value.access_mask,
+            is_toll: value.is_toll,
+            max_speed_kph: None,
+            lanes: None,
+            name_index: value.name_index,
+            geometry_offset: value.geometry_offset,
+            geometry_len: value.geometry_len,
+            flags: value.flags,
+        }
+    }
+}
+
 impl From<LegacyTopologyBundle> for TopologyBundle {
     fn from(value: LegacyTopologyBundle) -> Self {
-        let edge_layers = TopologyEdgeLayers::from_directed_edges(&value.edges);
+        let edges: Vec<netweevil_core::DirectedEdge> = value
+            .edges
+            .into_iter()
+            .map(netweevil_core::DirectedEdge::from)
+            .collect();
+        let edge_layers = TopologyEdgeLayers::from_directed_edges(&edges);
         Self {
             schema_version: value.schema_version,
             source_path: value.source_path,
@@ -395,6 +445,8 @@ mod tests {
                     smoothness: SmoothnessClass::Bad,
                     access_mask: AccessMask::new(AccessMask::FOOT),
                     is_toll: false,
+                    max_speed_kph: None,
+                    lanes: None,
                     name_index: Some(0),
                     geometry_offset: 0,
                     geometry_len: 0,
@@ -412,6 +464,8 @@ mod tests {
                     smoothness: SmoothnessClass::Good,
                     access_mask: AccessMask::new(AccessMask::CAR | AccessMask::FOOT),
                     is_toll: true,
+                    max_speed_kph: None,
+                    lanes: None,
                     name_index: None,
                     geometry_offset: 0,
                     geometry_len: 0,
@@ -612,6 +666,71 @@ mod sectioned_compat_tests {
             .expect("system clock should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("netweevil-persist-{label}-{unique}.bin"))
+    }
+
+    #[test]
+    fn round_trips_speed_and_lane_attributes_across_schema_versions() {
+        use netweevil_core::{
+            AccessMask, DirectedEdge, EdgeId, NodeId, RoadClass, SmoothnessClass, SurfaceClass,
+            TopologyBundle, TopologyNode,
+        };
+
+        let node = |id: u32, lon: f64| TopologyNode {
+            node_id: NodeId(id),
+            osm_node_id: id as i64,
+            lon,
+            lat: 53.2,
+        };
+        let edge = DirectedEdge {
+            edge_id: EdgeId(0),
+            from: NodeId(0),
+            to: NodeId(1),
+            source_way_id: 7,
+            length_m: 120,
+            duration_s: None,
+            road_class: RoadClass::Primary,
+            surface: SurfaceClass::Asphalt,
+            smoothness: SmoothnessClass::Unknown,
+            access_mask: AccessMask::new(AccessMask::CAR),
+            is_toll: false,
+            max_speed_kph: Some(70.0),
+            lanes: Some(2),
+            name_index: None,
+            geometry_offset: 0,
+            geometry_len: 0,
+            flags: 0,
+        };
+        let mut bundle = TopologyBundle {
+            schema_version: 10,
+            source_path: "segments.parquet".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes: vec![node(0, 6.5), node(1, 6.6)],
+            edge_layers: netweevil_core::TopologyEdgeLayers::from_directed_edges(&[edge]),
+            edges: Vec::new(),
+            turn_restrictions: Vec::new(),
+            names: Vec::new(),
+            edge_based_topology: Default::default(),
+            spatial_index: None,
+            node_component_ids: vec![0, 0],
+            edge_component_ids: vec![0],
+        };
+
+        let path = temp_path("topology-speed-lanes");
+        write_topology_bundle(&path, &bundle).expect("schema-10 bundle writes");
+        let round_tripped = read_topology_bundle(&path).expect("schema-10 bundle reads");
+        assert_eq!(round_tripped.edge_profile(0).max_speed_kph, Some(70.0));
+        assert_eq!(round_tripped.edge_profile(0).lanes, Some(2));
+        fs::remove_file(&path).expect("temporary bundle should be removed");
+
+        // Pre-10 bundles round-trip through the legacy profile layout and
+        // surface no speed/lane data.
+        bundle.schema_version = 9;
+        write_topology_bundle(&path, &bundle).expect("schema-9 bundle writes");
+        let legacy = read_topology_bundle(&path).expect("schema-9 bundle reads");
+        assert_eq!(legacy.edge_profile(0).max_speed_kph, None);
+        assert_eq!(legacy.edge_profile(0).lanes, None);
+        assert_eq!(legacy.edge_profile(0).road_class, RoadClass::Primary);
+        fs::remove_file(path).expect("temporary bundle should be removed");
     }
 
     #[test]

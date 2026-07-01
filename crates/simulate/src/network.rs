@@ -173,7 +173,11 @@ pub fn build_sim_network(
             bail!("edge {index} references a node outside the topology");
         }
         let length = (routing.length_m as f64).max(1.0);
-        let lanes = equivalent_lanes(profile.road_class);
+        // Real lane counts from the source data trump the class heuristic.
+        let lanes = profile
+            .lanes
+            .map(|lanes| lanes as f64)
+            .unwrap_or_else(|| equivalent_lanes(profile.road_class));
         edge_from.push(routing.from.0);
         edge_to.push(routing.to.0);
         edge_length_m.push(length as f32);

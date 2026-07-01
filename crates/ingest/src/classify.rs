@@ -365,6 +365,94 @@ fn is_ordinary_bicycle_contraflow_road(highway: HighwayClass) -> bool {
     )
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DirectionalSpeedLanes {
+    pub(crate) forward_max_speed_kph: Option<f32>,
+    pub(crate) reverse_max_speed_kph: Option<f32>,
+    pub(crate) forward_lanes: Option<u8>,
+    pub(crate) reverse_lanes: Option<u8>,
+}
+
+pub(crate) fn classify_speed_and_lanes(
+    tags: &Tags,
+    road_class: RoadClass,
+) -> DirectionalSpeedLanes {
+    let generic_direction = classify_direction(tags, road_class);
+    let shared_max_speed = tag(tags, "maxspeed").and_then(parse_maxspeed_kph);
+    let forward_max_speed_kph = tag(tags, "maxspeed:forward")
+        .and_then(parse_maxspeed_kph)
+        .or(shared_max_speed);
+    let reverse_max_speed_kph = tag(tags, "maxspeed:backward")
+        .and_then(parse_maxspeed_kph)
+        .or(shared_max_speed);
+
+    let explicit_forward_lanes = tag(tags, "lanes:forward").and_then(parse_lane_count);
+    let explicit_reverse_lanes = tag(tags, "lanes:backward").and_then(parse_lane_count);
+    let total_lanes = tag(tags, "lanes").and_then(parse_lane_count);
+    let (forward_lanes, reverse_lanes) = match (explicit_forward_lanes, explicit_reverse_lanes) {
+        (None, None) => split_total_lanes(total_lanes, generic_direction),
+        (forward, reverse) => (
+            forward.or_else(|| {
+                total_lanes.map(|total| total.saturating_sub(reverse.unwrap_or(0)).max(1))
+            }),
+            reverse.or_else(|| {
+                total_lanes.map(|total| total.saturating_sub(forward.unwrap_or(0)).max(1))
+            }),
+        ),
+    };
+
+    DirectionalSpeedLanes {
+        forward_max_speed_kph,
+        reverse_max_speed_kph,
+        forward_lanes,
+        reverse_lanes,
+    }
+}
+
+fn split_total_lanes(total: Option<u8>, direction: EdgeDirection) -> (Option<u8>, Option<u8>) {
+    let Some(total) = total else {
+        return (None, None);
+    };
+    match direction {
+        EdgeDirection::ForwardOnly => (Some(total), None),
+        EdgeDirection::ReverseOnly => (None, Some(total)),
+        EdgeDirection::Both => (Some(total.div_ceil(2)), Some((total / 2).max(1))),
+    }
+}
+
+pub(crate) fn parse_maxspeed_kph(value: &str) -> Option<f32> {
+    let value = value.trim();
+    if let Some(mph) = value
+        .strip_suffix("mph")
+        .map(str::trim)
+        .and_then(|number| number.parse::<f32>().ok())
+    {
+        return positive_speed(mph * 1.609_344);
+    }
+    if let Some(knots) = value
+        .strip_suffix("knots")
+        .map(str::trim)
+        .and_then(|number| number.parse::<f32>().ok())
+    {
+        return positive_speed(knots * 1.852);
+    }
+    // Non-numeric values ("none", "signals", "walk", zone refs) carry no
+    // usable posted limit.
+    value.parse::<f32>().ok().and_then(positive_speed)
+}
+
+fn positive_speed(kph: f32) -> Option<f32> {
+    (kph.is_finite() && kph > 0.0).then_some(kph)
+}
+
+fn parse_lane_count(value: &str) -> Option<u8> {
+    let lanes = value.trim().parse::<f32>().ok()?;
+    if !(lanes.is_finite() && lanes >= 1.0) {
+        return None;
+    }
+    Some(lanes.round().min(u8::MAX as f32) as u8)
+}
+
 pub(crate) fn parse_duration_from_tags(tags: &Tags) -> Option<f64> {
     tag(tags, "duration:seconds")
         .and_then(|value| value.parse::<f64>().ok())
@@ -511,7 +599,7 @@ pub(crate) fn tag<'a>(tags: &'a Tags, key: &str) -> Option<&'a str> {
 mod tests {
     use super::{
         EdgeDirection, classify_access, classify_direction, classify_directional_access,
-        classify_highway, parse_duration_seconds,
+        classify_highway, classify_speed_and_lanes, parse_duration_seconds, parse_maxspeed_kph,
     };
     use netweevil_core::{
         AccessMask, EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW, EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY,
@@ -631,6 +719,48 @@ mod tests {
         assert!(access.forward_access.contains(AccessMask::BICYCLE));
         assert!(!access.reverse_access.contains(AccessMask::BICYCLE));
         assert!(access.reverse_access.contains(AccessMask::FOOT));
+    }
+
+    #[test]
+    fn parses_maxspeed_values_with_units() {
+        assert_eq!(parse_maxspeed_kph("50"), Some(50.0));
+        assert_eq!(parse_maxspeed_kph("30 mph"), Some(30.0 * 1.609_344));
+        assert_eq!(parse_maxspeed_kph("10 knots"), Some(18.52));
+        assert_eq!(parse_maxspeed_kph("none"), None);
+        assert_eq!(parse_maxspeed_kph("walk"), None);
+        assert_eq!(parse_maxspeed_kph("DE:zone30"), None);
+    }
+
+    #[test]
+    fn splits_lanes_by_direction() {
+        let bidirectional = Tags::from_iter([
+            ("maxspeed".into(), "80".into()),
+            ("lanes".into(), "3".into()),
+        ]);
+        let speed_lanes = classify_speed_and_lanes(&bidirectional, RoadClass::Primary);
+        assert_eq!(speed_lanes.forward_max_speed_kph, Some(80.0));
+        assert_eq!(speed_lanes.reverse_max_speed_kph, Some(80.0));
+        assert_eq!(speed_lanes.forward_lanes, Some(2));
+        assert_eq!(speed_lanes.reverse_lanes, Some(1));
+
+        let oneway = Tags::from_iter([
+            ("oneway".into(), "yes".into()),
+            ("lanes".into(), "2".into()),
+            ("maxspeed:forward".into(), "100".into()),
+        ]);
+        let speed_lanes = classify_speed_and_lanes(&oneway, RoadClass::Primary);
+        assert_eq!(speed_lanes.forward_lanes, Some(2));
+        assert_eq!(speed_lanes.reverse_lanes, None);
+        assert_eq!(speed_lanes.forward_max_speed_kph, Some(100.0));
+        assert_eq!(speed_lanes.reverse_max_speed_kph, None);
+
+        let explicit = Tags::from_iter([
+            ("lanes".into(), "3".into()),
+            ("lanes:forward".into(), "1".into()),
+        ]);
+        let speed_lanes = classify_speed_and_lanes(&explicit, RoadClass::Primary);
+        assert_eq!(speed_lanes.forward_lanes, Some(1));
+        assert_eq!(speed_lanes.reverse_lanes, Some(2));
     }
 
     #[test]

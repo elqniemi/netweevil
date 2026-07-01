@@ -164,6 +164,14 @@ pub struct DirectedEdge {
     pub access_mask: AccessMask,
     #[serde(default)]
     pub is_toll: bool,
+    /// Posted speed limit in km/h for this travel direction, when the
+    /// source data carries one (OSM `maxspeed`, Overture `speed_limits`).
+    #[serde(default)]
+    pub max_speed_kph: Option<f32>,
+    /// Lane count for this travel direction, when the source data carries
+    /// one (OSM `lanes`, Overture `lanes` where present).
+    #[serde(default)]
+    pub lanes: Option<u8>,
     pub name_index: Option<u32>,
     pub geometry_offset: u64,
     pub geometry_len: u32,
@@ -193,6 +201,10 @@ pub struct EdgeProfileAttributes {
     pub access_mask: AccessMask,
     #[serde(default)]
     pub is_toll: bool,
+    #[serde(default)]
+    pub max_speed_kph: Option<f32>,
+    #[serde(default)]
+    pub lanes: Option<u8>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -234,6 +246,8 @@ impl TopologyEdgeLayers {
                 smoothness: edge.smoothness,
                 access_mask: edge.access_mask,
                 is_toll: edge.is_toll,
+                max_speed_kph: edge.max_speed_kph,
+                lanes: edge.lanes,
             });
             presentation.push(EdgePresentation {
                 name_index: edge.name_index,
@@ -417,6 +431,8 @@ impl TopologyBundle {
                 smoothness: edge.smoothness,
                 access_mask: edge.access_mask,
                 is_toll: edge.is_toll,
+                max_speed_kph: edge.max_speed_kph,
+                lanes: edge.lanes,
             }
         }
     }
@@ -453,6 +469,8 @@ impl TopologyBundle {
                 smoothness: profile.smoothness,
                 access_mask: profile.access_mask,
                 is_toll: profile.is_toll,
+                max_speed_kph: profile.max_speed_kph,
+                lanes: profile.lanes,
                 name_index: presentation.name_index,
                 geometry_offset: presentation.geometry_offset,
                 geometry_len: presentation.geometry_len,
@@ -482,6 +500,8 @@ impl TopologyBundle {
                 smoothness: edge.smoothness,
                 access_mask: edge.access_mask,
                 is_toll: edge.is_toll,
+                max_speed_kph: edge.max_speed_kph,
+                lanes: edge.lanes,
             });
             self.edge_layers.presentation.push(EdgePresentation {
                 name_index: edge.name_index,

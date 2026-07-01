@@ -1,18 +1,19 @@
-//! OSM import pipeline: scans `.osm.pbf` extracts, builds the routable
-//! topology (edge-based graph, turn restrictions, connected components,
-//! road classification), and preprocesses the CCH acceleration bundle used
-//! by the query engine.
+//! Dataset import pipeline: scans `.osm.pbf` extracts or Overture Maps
+//! transportation GeoParquet, builds the routable topology (edge-based
+//! graph, turn restrictions, connected components, road classification),
+//! and preprocesses the CCH acceleration bundle used by the query engine.
 
 mod acceleration;
 mod classify;
 mod import;
+mod overture;
 mod restrictions;
 mod scan;
 mod topology;
 
 pub use import::{
-    DatasetImportOptions, DatasetImportProgress, DatasetImportStage, import_dataset,
-    import_dataset_with_progress,
+    DatasetImportOptions, DatasetImportProgress, DatasetImportStage, detect_source_format,
+    import_dataset, import_dataset_with_progress,
 };
 
 #[cfg(test)]
@@ -37,6 +38,10 @@ pub(crate) mod test_util {
             is_roundabout: false,
             forward_extra_flags: 0,
             reverse_extra_flags: 0,
+            forward_max_speed_kph: None,
+            reverse_max_speed_kph: None,
+            forward_lanes: None,
+            reverse_lanes: None,
             name: None,
         }
     }
@@ -54,6 +59,8 @@ pub(crate) mod test_util {
             smoothness: Default::default(),
             access_mask: AccessMask::new(AccessMask::CAR),
             is_toll: false,
+            max_speed_kph: None,
+            lanes: None,
             name_index: None,
             geometry_offset: 0,
             geometry_len: 0,

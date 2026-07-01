@@ -1,5 +1,7 @@
 use std::path::Path;
 
+pub(crate) const TOPOLOGY_BUNDLE_SCHEMA_VERSION: u32 = 10;
+
 use anyhow::Result;
 use netweevil_core::{
     ConnectedComponentKind, ConnectedComponentsMeta, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
@@ -12,17 +14,38 @@ use rustc_hash::FxHashMap;
 
 use crate::import::{DatasetImportProgress, DatasetImportStage, PercentReporter, emit_progress};
 use crate::restrictions::build_turn_restrictions;
-use crate::scan::{PendingWay, load_node_coords, scan_routable_objects};
+use crate::scan::{PendingWay, ScanOutput, scan_osm};
+use netweevil_core::SourceFormat;
 
 pub(crate) fn build_topology_bundle(
     source_path: &Path,
     source_size_bytes: u64,
     source_sha256: &str,
+    source_format: SourceFormat,
     progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<(TopologyBundle, EdgeNameBundle, TopologyBundleMeta)> {
-    let (pending_ways, restriction_candidates, needed_nodes, traffic_signal_nodes, counts) =
-        scan_routable_objects(source_path, source_size_bytes, progress)?;
-    let node_coords = load_node_coords(source_path, source_size_bytes, &needed_nodes, progress)?;
+    let scan = match source_format {
+        SourceFormat::OsmPbf => scan_osm(source_path, source_size_bytes, progress)?,
+        SourceFormat::OvertureParquet => {
+            crate::overture::scan_overture(source_path, source_size_bytes, progress)?
+        }
+    };
+    build_topology_from_scan(source_path, source_sha256, scan, progress)
+}
+
+pub(crate) fn build_topology_from_scan(
+    source_path: &Path,
+    source_sha256: &str,
+    scan: ScanOutput,
+    progress: &mut impl FnMut(DatasetImportProgress),
+) -> Result<(TopologyBundle, EdgeNameBundle, TopologyBundleMeta)> {
+    let ScanOutput {
+        pending_ways,
+        restriction_candidates,
+        node_coords,
+        traffic_signal_nodes,
+        counts,
+    } = scan;
     let (nodes, node_lookup) = build_nodes(&node_coords);
     let name_lookup = build_name_lookup(&pending_ways);
 
@@ -107,6 +130,8 @@ pub(crate) fn build_topology_bundle(
                     smoothness: way.smoothness,
                     access_mask: way.forward_access_mask,
                     is_toll: way.is_toll,
+                    max_speed_kph: way.forward_max_speed_kph,
+                    lanes: way.forward_lanes,
                     name_index,
                     geometry_offset: 0,
                     geometry_len: 0,
@@ -128,6 +153,8 @@ pub(crate) fn build_topology_bundle(
                     smoothness: way.smoothness,
                     access_mask: way.reverse_access_mask,
                     is_toll: way.is_toll,
+                    max_speed_kph: way.reverse_max_speed_kph,
+                    lanes: way.reverse_lanes,
                     name_index,
                     geometry_offset: 0,
                     geometry_len: 0,
@@ -189,7 +216,7 @@ pub(crate) fn build_topology_bundle(
         profile.highway = highway;
     }
     let bundle = TopologyBundle {
-        schema_version: 9,
+        schema_version: TOPOLOGY_BUNDLE_SCHEMA_VERSION,
         source_path: source_path.display().to_string(),
         source_sha256: source_sha256.to_string(),
         nodes,

@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
+use netweevil_core::SourceFormat;
 use netweevil_ingest::{
     DatasetImportOptions, DatasetImportProgress, DatasetImportStage, import_dataset_with_progress,
 };
@@ -15,9 +16,29 @@ pub(crate) enum DatasetCommand {
 
 #[derive(Args, Debug)]
 pub(crate) struct DatasetImportArgs {
+    /// OSM `.osm.pbf` extract, an Overture transportation GeoParquet file,
+    /// or a directory of Overture parquet files.
     source: PathBuf,
     #[arg(long)]
     name: String,
+    /// Source format; detected from the path when omitted.
+    #[arg(long, value_enum)]
+    format: Option<SourceFormatArg>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub(crate) enum SourceFormatArg {
+    OsmPbf,
+    Overture,
+}
+
+impl From<SourceFormatArg> for SourceFormat {
+    fn from(value: SourceFormatArg) -> Self {
+        match value {
+            SourceFormatArg::OsmPbf => Self::OsmPbf,
+            SourceFormatArg::Overture => Self::OvertureParquet,
+        }
+    }
 }
 
 pub(crate) fn dataset_import(paths: &WorkspacePaths, args: DatasetImportArgs) -> Result<()> {
@@ -28,6 +49,7 @@ pub(crate) fn dataset_import(paths: &WorkspacePaths, args: DatasetImportArgs) ->
         DatasetImportOptions {
             name: args.name,
             source: args.source.display().to_string(),
+            format: args.format.map(SourceFormat::from),
         },
         |event| render_import_progress(&event, &mut progress_line_len),
     )?;
