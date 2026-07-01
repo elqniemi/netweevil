@@ -384,12 +384,7 @@ fn build_nodes(
             continue;
         };
         let node_id = NodeId(nodes.len() as u32);
-        nodes.push(TopologyNode {
-            node_id,
-            osm_node_id,
-            lon,
-            lat,
-        });
+        nodes.push(TopologyNode { node_id, lon, lat });
         lookup.insert(osm_node_id, (node_id, lon, lat));
     }
 

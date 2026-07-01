@@ -18,25 +18,21 @@ pub(super) fn disconnected_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 100,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 101,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 102,
                 lon: 6.01,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(3),
-                osm_node_id: 103,
                 lon: 6.011,
                 lat: 53.0,
             },
@@ -95,25 +91,21 @@ pub(super) fn hop_disconnected_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 200,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 201,
                 lon: 6.0005,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 202,
                 lon: 6.0010,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(3),
-                osm_node_id: 203,
                 lon: 6.0015,
                 lat: 53.0,
             },

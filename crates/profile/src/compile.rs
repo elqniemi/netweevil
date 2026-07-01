@@ -686,19 +686,16 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     node_id: NodeId(0),
-                    osm_node_id: 1,
                     lon: 0.0,
                     lat: 0.0,
                 },
                 TopologyNode {
                     node_id: NodeId(1),
-                    osm_node_id: 2,
                     lon: 1.0,
                     lat: 0.0,
                 },
                 TopologyNode {
                     node_id: NodeId(2),
-                    osm_node_id: 3,
                     lon: 2.0,
                     lat: 0.0,
                 },

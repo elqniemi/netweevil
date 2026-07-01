@@ -49,7 +49,6 @@ fn grid_engine_for(
         for x in 0..GRID {
             nodes.push(TopologyNode {
                 node_id: NodeId(node_index(x, y)),
-                osm_node_id: node_index(x, y) as i64,
                 lon: node_lon(x),
                 lat: node_lat(y),
             });

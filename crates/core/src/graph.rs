@@ -315,7 +315,6 @@ pub struct TopologyBounds {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TopologyNode {
     pub node_id: NodeId,
-    pub osm_node_id: i64,
     pub lon: f64,
     pub lat: f64,
 }

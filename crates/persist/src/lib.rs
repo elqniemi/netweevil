@@ -145,7 +145,10 @@ pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
         return sectioned::read_topology_sectioned(&mmap)
             .with_context(|| format!("parsing topology bundle {}", path.display()));
     }
-    bincode::deserialize(&mmap)
+    // Bincode-era files carry the old node layout (with import-only OSM
+    // ids), so they parse through mirror structs, never the live types.
+    bincode::deserialize::<BincodeTopologyBundle>(&mmap)
+        .map(TopologyBundle::from)
         .or_else(|_| bincode::deserialize::<LegacyTopologyBundle>(&mmap).map(TopologyBundle::from))
         .with_context(|| format!("parsing topology bundle {}", path.display()))
 }
@@ -236,12 +239,77 @@ fn read_binary_mmap<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
     bincode::deserialize(&mmap).with_context(|| format!("parsing binary bundle {}", path.display()))
 }
 
+/// Node layout used by every bincode-era bundle: the OSM node id was
+/// persisted although only the import pipeline reads it.
+#[derive(serde::Deserialize)]
+struct LegacyTopologyNode {
+    node_id: netweevil_core::NodeId,
+    #[allow(dead_code)]
+    osm_node_id: i64,
+    lon: f64,
+    lat: f64,
+}
+
+impl From<LegacyTopologyNode> for netweevil_core::TopologyNode {
+    fn from(value: LegacyTopologyNode) -> Self {
+        Self {
+            node_id: value.node_id,
+            lon: value.lon,
+            lat: value.lat,
+        }
+    }
+}
+
+/// Mirror of the pre-sectioned `TopologyBundle` bincode layout.
+#[derive(serde::Deserialize)]
+struct BincodeTopologyBundle {
+    schema_version: u32,
+    source_path: String,
+    source_sha256: String,
+    nodes: Vec<LegacyTopologyNode>,
+    #[serde(default)]
+    edge_layers: TopologyEdgeLayers,
+    #[serde(default)]
+    edges: Vec<netweevil_core::DirectedEdge>,
+    #[serde(default)]
+    turn_restrictions: Vec<netweevil_core::TurnRestriction>,
+    #[serde(default)]
+    names: Vec<String>,
+    #[serde(default)]
+    edge_based_topology: netweevil_core::EdgeBasedTopology,
+    #[serde(default)]
+    spatial_index: Option<netweevil_core::NodeSpatialIndex>,
+    #[serde(default)]
+    node_component_ids: Vec<u32>,
+    #[serde(default)]
+    edge_component_ids: Vec<u32>,
+}
+
+impl From<BincodeTopologyBundle> for TopologyBundle {
+    fn from(value: BincodeTopologyBundle) -> Self {
+        Self {
+            schema_version: value.schema_version,
+            source_path: value.source_path,
+            source_sha256: value.source_sha256,
+            nodes: value.nodes.into_iter().map(Into::into).collect(),
+            edge_layers: value.edge_layers,
+            edges: value.edges,
+            turn_restrictions: value.turn_restrictions,
+            names: value.names,
+            edge_based_topology: value.edge_based_topology,
+            spatial_index: value.spatial_index,
+            node_component_ids: value.node_component_ids,
+            edge_component_ids: value.edge_component_ids,
+        }
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct LegacyTopologyBundle {
     schema_version: u32,
     source_path: String,
     source_sha256: String,
-    nodes: Vec<netweevil_core::TopologyNode>,
+    nodes: Vec<LegacyTopologyNode>,
     edges: Vec<netweevil_core::DirectedEdge>,
     #[serde(default)]
     turn_restrictions: Vec<netweevil_core::TurnRestriction>,
@@ -264,7 +332,7 @@ impl From<LegacyTopologyBundle> for TopologyBundle {
             schema_version: value.schema_version,
             source_path: value.source_path,
             source_sha256: value.source_sha256,
-            nodes: value.nodes,
+            nodes: value.nodes.into_iter().map(Into::into).collect(),
             edge_layers,
             edges: Vec::new(),
             turn_restrictions: value.turn_restrictions,
@@ -370,13 +438,11 @@ mod tests {
             nodes: vec![
                 TopologyNode {
                     node_id: NodeId(0),
-                    osm_node_id: 100,
                     lon: 6.5,
                     lat: 53.2,
                 },
                 TopologyNode {
                     node_id: NodeId(1),
-                    osm_node_id: 101,
                     lon: 6.6,
                     lat: 53.3,
                 },

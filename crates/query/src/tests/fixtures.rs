@@ -13,19 +13,16 @@ pub(super) fn test_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.002,
                 lat: 53.0,
             },
@@ -130,19 +127,16 @@ pub(super) fn service_area_linear_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.002,
                 lat: 53.0,
             },
@@ -341,25 +335,21 @@ pub(super) fn restricted_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.002,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(3),
-                osm_node_id: 4,
                 lon: 6.003,
                 lat: 53.0,
             },
@@ -539,31 +529,26 @@ pub(super) fn turn_penalty_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.001,
                 lat: 53.001,
             },
             TopologyNode {
                 node_id: NodeId(3),
-                osm_node_id: 4,
                 lon: 6.002,
                 lat: 53.001,
             },
             TopologyNode {
                 node_id: NodeId(4),
-                osm_node_id: 5,
                 lon: 6.0,
                 lat: 53.001,
             },
@@ -690,25 +675,21 @@ pub(super) fn roundabout_entry_penalty_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.002,
                 lat: 53.001,
             },
             TopologyNode {
                 node_id: NodeId(3),
-                osm_node_id: 4,
                 lon: 6.0,
                 lat: 53.001,
             },
@@ -834,7 +815,6 @@ pub(super) fn snap_test_topology() -> TopologyBundle {
     let nodes = (0..10)
         .map(|index| TopologyNode {
             node_id: NodeId(index),
-            osm_node_id: (index + 1) as i64,
             lon: 6.0 + f64::from(index) * 0.0001,
             lat: 53.0,
         })
@@ -980,19 +960,16 @@ pub(super) fn one_way_dead_end_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.002,
                 lat: 53.0,
             },
@@ -1062,19 +1039,16 @@ pub(super) fn dead_node_snap_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 10,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 11,
                 lon: 6.0001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 12,
                 lon: 6.0002,
                 lat: 53.0,
             },
@@ -1114,25 +1088,21 @@ pub(super) fn ignored_restriction_only_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.002,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(3),
-                osm_node_id: 4,
                 lon: 6.003,
                 lat: 53.0,
             },
@@ -1213,19 +1183,16 @@ pub(super) fn forbidden_uturn_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.0,
                 lat: 53.001,
             },
@@ -1306,25 +1273,21 @@ pub(super) fn ferry_only_subnetwork_topology() -> TopologyBundle {
         nodes: vec![
             TopologyNode {
                 node_id: NodeId(0),
-                osm_node_id: 1,
                 lon: 6.0,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(1),
-                osm_node_id: 2,
                 lon: 6.001,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(2),
-                osm_node_id: 3,
                 lon: 6.01,
                 lat: 53.0,
             },
             TopologyNode {
                 node_id: NodeId(3),
-                osm_node_id: 4,
                 lon: 6.011,
                 lat: 53.0,
             },
