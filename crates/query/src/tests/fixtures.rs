@@ -233,48 +233,72 @@ pub(super) fn build_test_cch(
     let edge_count = topology.edge_count();
 
     // (tail, head) -> (weight, middle); identity order means rank == id.
-    let mut arcs = BTreeMap::<(u32, u32), (f64, u32)>::new();
-    for from_edge in 0..edge_count {
-        for transition_index in graph.transition_range(from_edge) {
-            let to_edge = graph.transition_edges[transition_index];
-            if to_edge as usize == from_edge {
-                continue;
-            }
-            let cost = graph.transition_costs[transition_index];
-            let entry = arcs
-                .entry((from_edge as u32, to_edge))
-                .or_insert((f64::INFINITY, NO_MIDDLE));
-            if cost < entry.0 {
-                *entry = (cost, NO_MIDDLE);
-            }
-        }
-    }
-    for middle in 0..edge_count as u32 {
-        let incoming = arcs
-            .range((0, 0)..(u32::MAX, 0))
-            .filter(|&(&(tail, head), _)| head == middle && tail > middle)
-            .map(|(&(tail, _), &(weight, _))| (tail, weight))
-            .collect::<Vec<_>>();
-        let outgoing = arcs
-            .range((middle, 0)..(middle + 1, 0))
-            .filter(|&(&(_, head), _)| head > middle)
-            .map(|(&(_, head), &(weight, _))| (head, weight))
-            .collect::<Vec<_>>();
-        for &(tail, incoming_weight) in &incoming {
-            for &(head, outgoing_weight) in &outgoing {
-                if tail == head {
+    // The same arc set (defined by the transitions) is customized for any
+    // base transition weight, mirroring the real compiler.
+    let customize = |base: &dyn Fn(usize, usize) -> f64| -> BTreeMap<(u32, u32), (f64, u32)> {
+        let mut arcs = BTreeMap::<(u32, u32), (f64, u32)>::new();
+        for from_edge in 0..edge_count {
+            for transition_index in graph.transition_range(from_edge) {
+                let to_edge = graph.transition_edges[transition_index];
+                if to_edge as usize == from_edge {
                     continue;
                 }
-                let candidate = incoming_weight + outgoing_weight;
+                let cost = base(from_edge, to_edge as usize);
                 let entry = arcs
-                    .entry((tail, head))
+                    .entry((from_edge as u32, to_edge))
                     .or_insert((f64::INFINITY, NO_MIDDLE));
-                if candidate < entry.0 {
-                    *entry = (candidate, middle);
+                if cost < entry.0 {
+                    *entry = (cost, NO_MIDDLE);
                 }
             }
         }
-    }
+        for middle in 0..edge_count as u32 {
+            let incoming = arcs
+                .range((0, 0)..(u32::MAX, 0))
+                .filter(|&(&(tail, head), _)| head == middle && tail > middle)
+                .map(|(&(tail, _), &(weight, _))| (tail, weight))
+                .collect::<Vec<_>>();
+            let outgoing = arcs
+                .range((middle, 0)..(middle + 1, 0))
+                .filter(|&(&(_, head), _)| head > middle)
+                .map(|(&(_, head), &(weight, _))| (head, weight))
+                .collect::<Vec<_>>();
+            for &(tail, incoming_weight) in &incoming {
+                for &(head, outgoing_weight) in &outgoing {
+                    if tail == head {
+                        continue;
+                    }
+                    if !incoming_weight.is_finite() || !outgoing_weight.is_finite() {
+                        continue;
+                    }
+                    let candidate = incoming_weight + outgoing_weight;
+                    let entry = arcs
+                        .entry((tail, head))
+                        .or_insert((f64::INFINITY, NO_MIDDLE));
+                    if candidate < entry.0 {
+                        *entry = (candidate, middle);
+                    }
+                }
+            }
+        }
+        arcs
+    };
+
+    let arcs = customize(&|from_edge, to_edge| {
+        graph
+            .transition_range(from_edge)
+            .filter(|&index| graph.transition_edges[index] as usize == to_edge)
+            .map(|index| graph.transition_costs[index])
+            .fold(f64::INFINITY, f64::min)
+    });
+    let time_arcs = customize(&|from_edge, to_edge| {
+        let Some(travel_time_s) = metrics.edge_metrics[to_edge].travel_time_s else {
+            return f64::INFINITY;
+        };
+        travel_time_s + crate::turn_penalty_seconds(topology, metrics, from_edge, to_edge)
+    });
+    let distance_arcs =
+        customize(&|_from_edge, to_edge| topology.routing_edge(to_edge).length_m as f64);
 
     let mut upward_first_out = vec![0_u32; edge_count + 1];
     let mut upward_head = Vec::new();
@@ -284,17 +308,30 @@ pub(super) fn build_test_cch(
     let mut downward_head = Vec::new();
     let mut downward_weight = Vec::new();
     let mut downward_middle = Vec::new();
+    let mut time_upward_weight = Vec::new();
+    let mut time_downward_weight = Vec::new();
+    let mut distance_upward_weight = Vec::new();
+    let mut distance_downward_weight = Vec::new();
+    let metric_weight = |arcs: &BTreeMap<(u32, u32), (f64, u32)>, tail: u32, head: u32| {
+        arcs.get(&(tail, head))
+            .map(|&(weight, _)| weight)
+            .unwrap_or(f64::INFINITY)
+    };
     for (&(tail, head), &(weight, middle)) in &arcs {
         if tail < head {
             upward_first_out[tail as usize + 1] += 1;
             upward_head.push(head);
             upward_weight.push(weight);
             upward_middle.push(middle);
+            time_upward_weight.push(metric_weight(&time_arcs, tail, head));
+            distance_upward_weight.push(metric_weight(&distance_arcs, tail, head));
         } else {
             downward_first_out[tail as usize + 1] += 1;
             downward_head.push(head);
             downward_weight.push(weight);
             downward_middle.push(middle);
+            time_downward_weight.push(metric_weight(&time_arcs, tail, head));
+            distance_downward_weight.push(metric_weight(&distance_arcs, tail, head));
         }
     }
     for edge_index in 0..edge_count {
@@ -323,6 +360,10 @@ pub(super) fn build_test_cch(
         upward_middle,
         downward_weight,
         downward_middle,
+        time_upward_weight,
+        time_downward_weight,
+        distance_upward_weight,
+        distance_downward_weight,
     });
     (bundle, metrics)
 }

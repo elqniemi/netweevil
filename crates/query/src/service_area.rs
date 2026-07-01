@@ -564,6 +564,40 @@ pub(crate) fn build_service_area_expansion(
     metric_kind: ServiceAreaMetricKind,
     max_cost: f64,
 ) -> Result<ServiceAreaOriginExpansion> {
+    build_service_area_expansion_with_settle_limit(
+        topology,
+        metrics,
+        routing_graph,
+        point,
+        candidates,
+        snap_max_distance_m,
+        connectivity,
+        metric_kind,
+        max_cost,
+        default_phast_settle_limit(topology.edge_count()),
+    )
+}
+
+/// Bounded Dijkstra beats a full hierarchy sweep while the reachable ball is
+/// small; once the ball grows past a fraction of the graph, the linear PHAST
+/// sweep wins. The limit is where the expansion aborts and switches (both
+/// algorithms are exact, so this is purely a cost crossover).
+fn default_phast_settle_limit(edge_count: usize) -> usize {
+    (edge_count / 8).max(10_000)
+}
+
+pub(crate) fn build_service_area_expansion_with_settle_limit(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    point: &LabeledPoint,
+    candidates: &[SnappedPoint],
+    snap_max_distance_m: f64,
+    connectivity: &ConnectivityPolicy,
+    metric_kind: ServiceAreaMetricKind,
+    max_cost: f64,
+    phast_settle_limit: usize,
+) -> Result<ServiceAreaOriginExpansion> {
     let resolution =
         resolve_service_area_origin(point, candidates, snap_max_distance_m, connectivity)?;
     let edge_count = topology.edge_count();
@@ -683,9 +717,19 @@ pub(crate) fn build_service_area_expansion(
             }
         }
     } else {
-        SINGLE_SOURCE_SEARCH_SCRATCH.with(|scratch| {
+        let phast_ready = routing_graph
+            .acceleration
+            .as_ref()
+            .is_some_and(|acceleration| acceleration.metric_weights(metric_kind).is_some());
+        let settle_limit = if phast_ready {
+            phast_settle_limit
+        } else {
+            usize::MAX
+        };
+        let aborted = SINGLE_SOURCE_SEARCH_SCRATCH.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
             scratch.prepare(edge_count);
+            let mut settled = 0_usize;
             for candidate in &resolution.seed_candidates {
                 for seed in service_area_seed_specs(
                     routing_graph,
@@ -734,6 +778,10 @@ pub(crate) fn build_service_area_expansion(
                 if cost > max_cost {
                     continue;
                 }
+                settled += 1;
+                if settled > settle_limit {
+                    return true;
+                }
 
                 for transition_index in routing_graph.transition_range(edge_index) {
                     let next_edge = routing_graph.transition_edges[transition_index] as usize;
@@ -777,7 +825,32 @@ pub(crate) fn build_service_area_expansion(
                     }
                 }
             }
+            false
         });
+
+        if aborted {
+            // The reachable ball outgrew the Dijkstra sweet spot: reset the
+            // partial recording and redo the expansion with the exact
+            // hierarchy sweep instead.
+            for &edge_index in &reached_edges {
+                edge_before_costs[edge_index as usize] = f64::INFINITY;
+                edge_end_costs[edge_index as usize] = f64::INFINITY;
+                edge_start_fractions[edge_index as usize] = 0.0;
+            }
+            reached_edges.clear();
+            phast_service_area_expansion(
+                topology,
+                metrics,
+                routing_graph,
+                &resolution.seed_candidates,
+                metric_kind,
+                max_cost,
+                &mut edge_before_costs,
+                &mut edge_end_costs,
+                &mut edge_start_fractions,
+                &mut reached_edges,
+            );
+        }
     }
 
     Ok(ServiceAreaOriginExpansion {
@@ -792,6 +865,141 @@ pub(crate) fn build_service_area_expansion(
         diagnostics: resolution.diagnostics,
         warnings: resolution.warnings,
     })
+}
+
+/// Exact bounded one-to-all over the customized hierarchy for a
+/// service-area metric: an upward Dijkstra from the seeds followed by a
+/// rank-descending sweep of the downward arcs. Every edge state receives its
+/// exact metric distance through its own up-down path, so no unpacking is
+/// needed. States whose distance exceeds `max_cost` are kept (they may
+/// still contribute a partially reachable edge) but never propagated —
+/// earlier edges on any within-bound path are themselves within bound, so
+/// the cutoff loses nothing.
+fn phast_service_area_expansion(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    seed_candidates: &[SnappedPoint],
+    metric_kind: ServiceAreaMetricKind,
+    max_cost: f64,
+    edge_before_costs: &mut [f64],
+    edge_end_costs: &mut [f64],
+    edge_start_fractions: &mut [f64],
+    reached_edges: &mut Vec<u32>,
+) {
+    let acceleration = routing_graph
+        .acceleration
+        .as_ref()
+        .expect("PHAST expansion requires acceleration");
+    let (upward_weight, downward_weight) = acceleration
+        .metric_weights(metric_kind)
+        .expect("PHAST expansion requires per-metric weights");
+    let edge_count = routing_graph.edge_costs.len();
+
+    let mut dist = vec![f64::INFINITY; edge_count];
+    let mut heap = BinaryHeap::new();
+    for candidate in seed_candidates {
+        for seed in
+            service_area_seed_specs(routing_graph, topology, metrics, candidate, metric_kind)
+        {
+            if seed.before_cost > max_cost {
+                continue;
+            }
+            update_service_area_edge_best(
+                edge_before_costs,
+                edge_end_costs,
+                edge_start_fractions,
+                reached_edges,
+                seed.edge_index,
+                seed.before_cost,
+                seed.end_cost,
+                seed.start_fraction,
+            );
+            if seed.end_cost < dist[seed.edge_index] {
+                dist[seed.edge_index] = seed.end_cost;
+                heap.push(State {
+                    edge_index: seed.edge_index,
+                    automaton_state: 0,
+                    cost: seed.end_cost,
+                    score: seed.end_cost,
+                });
+            }
+        }
+    }
+
+    // Upward phase: settle the hierarchy states reachable through upward
+    // arcs only.
+    while let Some(State {
+        edge_index, cost, ..
+    }) = heap.pop()
+    {
+        if cost > dist[edge_index] {
+            continue;
+        }
+        if cost > max_cost {
+            continue;
+        }
+        #[allow(clippy::needless_range_loop)]
+        for slot in acceleration.source.upward_first_out[edge_index] as usize
+            ..acceleration.source.upward_first_out[edge_index + 1] as usize
+        {
+            let next_edge = acceleration.source.upward_head[slot] as usize;
+            let next_cost = cost + upward_weight[slot];
+            if next_cost < dist[next_edge] {
+                dist[next_edge] = next_cost;
+                heap.push(State {
+                    edge_index: next_edge,
+                    automaton_state: 0,
+                    cost: next_cost,
+                    score: next_cost,
+                });
+            }
+        }
+    }
+
+    // Downward sweep in descending rank order: each state's distance is
+    // final before any of its downward arcs are relaxed.
+    for &state in acceleration.source.edge_order.iter().rev() {
+        let state = state as usize;
+        let cost = dist[state];
+        if !cost.is_finite() || cost > max_cost {
+            continue;
+        }
+        #[allow(clippy::needless_range_loop)]
+        for slot in acceleration.source.downward_first_out[state] as usize
+            ..acceleration.source.downward_first_out[state + 1] as usize
+        {
+            let head = acceleration.source.downward_head[slot] as usize;
+            let next_cost = cost + downward_weight[slot];
+            if next_cost < dist[head] {
+                dist[head] = next_cost;
+            }
+        }
+    }
+
+    for (edge_index, &end_cost) in dist.iter().enumerate() {
+        if !end_cost.is_finite() {
+            continue;
+        }
+        let Some(edge_cost) = service_area_edge_cost(topology, metrics, edge_index, metric_kind)
+        else {
+            continue;
+        };
+        let before_cost = (end_cost - edge_cost).max(0.0);
+        if before_cost > max_cost {
+            continue;
+        }
+        update_service_area_edge_best(
+            edge_before_costs,
+            edge_end_costs,
+            edge_start_fractions,
+            reached_edges,
+            edge_index,
+            before_cost,
+            end_cost,
+            0.0,
+        );
+    }
 }
 
 #[derive(Debug, Clone, Copy)]

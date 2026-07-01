@@ -1213,6 +1213,7 @@ dependencies = [
  "anyhow",
  "hex",
  "netweevil-core",
+ "rayon",
  "serde",
  "serde_yaml",
  "sha2",

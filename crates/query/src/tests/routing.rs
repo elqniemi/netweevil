@@ -1326,3 +1326,85 @@ fn accelerated_many_to_many_matrix_matches_pairwise_routes() {
         }
     }
 }
+
+#[test]
+fn phast_expansion_matches_bounded_dijkstra_expansion() {
+    use crate::service_area::{
+        ServiceAreaMetricKind, build_service_area_expansion_with_settle_limit,
+    };
+
+    let topology = test_topology();
+    let (bundle, accelerated_metrics) = build_test_cch(&topology, &test_metrics());
+    let metrics = std::sync::Arc::new(accelerated_metrics);
+    let routing_graph =
+        crate::build_routing_graph_from_shared(&topology, metrics.clone(), Some(bundle))
+            .expect("accelerated routing graph builds");
+    assert!(
+        routing_graph.acceleration.is_some(),
+        "fixture must produce an accelerated graph"
+    );
+
+    let origin = crate::LabeledPoint {
+        id: "origin".to_string(),
+        lon: 6.0,
+        lat: 53.0,
+    };
+    let candidates =
+        crate::snapping::snap_candidates(&topology, &routing_graph, &origin, 500.0, true)
+            .expect("origin snaps");
+
+    for metric_kind in [
+        ServiceAreaMetricKind::TravelTimeS,
+        ServiceAreaMetricKind::DistanceM,
+    ] {
+        for max_cost in [40.0_f64, 150.0, 1.0e9] {
+            let run = |settle_limit: usize| {
+                build_service_area_expansion_with_settle_limit(
+                    &topology,
+                    metrics.as_ref(),
+                    &routing_graph,
+                    &origin,
+                    &candidates,
+                    500.0,
+                    &Default::default(),
+                    metric_kind,
+                    max_cost,
+                    settle_limit,
+                )
+                .expect("expansion succeeds")
+            };
+            let dijkstra = run(usize::MAX);
+            let phast = run(0);
+
+            let mut dijkstra_reached = dijkstra.reached_edges.clone();
+            let mut phast_reached = phast.reached_edges.clone();
+            dijkstra_reached.sort_unstable();
+            phast_reached.sort_unstable();
+            assert_eq!(
+                dijkstra_reached, phast_reached,
+                "reached sets differ for {metric_kind:?} max_cost={max_cost}"
+            );
+            for &edge in &dijkstra_reached {
+                let edge = edge as usize;
+                assert!(
+                    (dijkstra.edge_end_costs[edge] - phast.edge_end_costs[edge]).abs() <= 1e-9,
+                    "end cost differs on edge {edge} for {metric_kind:?} max_cost={max_cost}: {} vs {}",
+                    dijkstra.edge_end_costs[edge],
+                    phast.edge_end_costs[edge]
+                );
+                assert!(
+                    (dijkstra.edge_before_costs[edge] - phast.edge_before_costs[edge]).abs()
+                        <= 1e-9,
+                    "before cost differs on edge {edge} for {metric_kind:?} max_cost={max_cost}: {} vs {}",
+                    dijkstra.edge_before_costs[edge],
+                    phast.edge_before_costs[edge]
+                );
+                assert!(
+                    (dijkstra.edge_start_fractions[edge] - phast.edge_start_fractions[edge]).abs()
+                        <= 1e-12,
+                    "start fraction differs on edge {edge} for {metric_kind:?}"
+                );
+            }
+        }
+    }
+}

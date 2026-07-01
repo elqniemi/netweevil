@@ -276,12 +276,20 @@ pub(crate) fn write_compiled_profile_sectioned(
             writer.write_raw(&acceleration.upward_middle)?;
             writer.write_raw(&acceleration.downward_weight)?;
             writer.write_raw(&acceleration.downward_middle)?;
+            writer.write_raw(&acceleration.time_upward_weight)?;
+            writer.write_raw(&acceleration.time_downward_weight)?;
+            writer.write_raw(&acceleration.distance_upward_weight)?;
+            writer.write_raw(&acceleration.distance_downward_weight)?;
         }
         None => {
             writer.write_raw(EMPTY_F64)?;
             writer.write_raw(EMPTY_U32)?;
             writer.write_raw(EMPTY_F64)?;
             writer.write_raw(EMPTY_U32)?;
+            writer.write_raw(EMPTY_F64)?;
+            writer.write_raw(EMPTY_F64)?;
+            writer.write_raw(EMPTY_F64)?;
+            writer.write_raw(EMPTY_F64)?;
         }
     }
     writer.finish()
@@ -318,6 +326,22 @@ pub(crate) fn read_compiled_profile_sectioned(bytes: &[u8]) -> Result<CompiledPr
     let upward_middle: Vec<u32> = reader.read_raw()?;
     let downward_weight: Vec<f64> = reader.read_raw()?;
     let downward_middle: Vec<u32> = reader.read_raw()?;
+    // Version 1 predates the per-metric weight sections.
+    let (
+        time_upward_weight,
+        time_downward_weight,
+        distance_upward_weight,
+        distance_downward_weight,
+    ) = if reader.version >= 2 {
+        (
+            reader.read_raw()?,
+            reader.read_raw()?,
+            reader.read_raw()?,
+            reader.read_raw()?,
+        )
+    } else {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    };
     let acceleration = header
         .acceleration
         .map(|acceleration| CompiledAcceleration {
@@ -328,6 +352,10 @@ pub(crate) fn read_compiled_profile_sectioned(bytes: &[u8]) -> Result<CompiledPr
             upward_middle,
             downward_weight,
             downward_middle,
+            time_upward_weight,
+            time_downward_weight,
+            distance_upward_weight,
+            distance_downward_weight,
         });
 
     Ok(CompiledProfileBundle {

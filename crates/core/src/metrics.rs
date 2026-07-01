@@ -50,6 +50,19 @@ pub struct CompiledAcceleration {
     pub downward_weight: Vec<f64>,
     #[serde(default)]
     pub downward_middle: Vec<u32>,
+    /// Optional travel-time weight sets (seconds, time-based turn penalties)
+    /// over the same arcs, used for exact one-to-all sweeps on time-limited
+    /// isochrones. Empty when the profile was compiled before these existed.
+    #[serde(default)]
+    pub time_upward_weight: Vec<f64>,
+    #[serde(default)]
+    pub time_downward_weight: Vec<f64>,
+    /// Optional distance weight sets (metres, no turn costs) over the same
+    /// arcs, for distance-limited isochrones.
+    #[serde(default)]
+    pub distance_upward_weight: Vec<f64>,
+    #[serde(default)]
+    pub distance_downward_weight: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

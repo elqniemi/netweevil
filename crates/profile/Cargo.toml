@@ -13,6 +13,7 @@ categories.workspace = true
 anyhow.workspace = true
 hex.workspace = true
 netweevil-core = { path = "../core" }
+rayon.workspace = true
 serde.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
