@@ -8,6 +8,7 @@
 
 pub mod acceleration;
 pub mod dataset;
+pub mod geo;
 pub mod graph;
 pub mod metrics;
 

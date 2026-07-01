@@ -533,10 +533,10 @@ mod tests {
         // from a higher-ranked x and outgoing arc to a higher-ranked y must
         // be closed by an arc between x and y. This is the invariant that
         // makes CCH queries exact with no follow-up search.
-        for v in 0..edge_count {
+        for (v, incoming) in incoming_from_higher.iter().enumerate() {
             let outgoing = &bundle.upward_head
                 [bundle.upward_first_out[v] as usize..bundle.upward_first_out[v + 1] as usize];
-            for &x in &incoming_from_higher[v] {
+            for &x in incoming {
                 for &y in outgoing {
                     if x == y {
                         continue;

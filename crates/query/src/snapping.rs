@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use netweevil_core::{TopologyBundle, TopologyNode};
 
 use crate::*;
@@ -81,10 +81,19 @@ pub(crate) fn snap_candidates(
     is_origin: bool,
 ) -> Result<Vec<SnappedPoint>> {
     const MAX_SNAP_CANDIDATES: usize = 8;
+    /// Linear-scan snapping fallbacks (no spatial index, or no nearby node)
+    /// are only acceptable on small graphs; on large datasets a full scan
+    /// per snapped point is a per-request O(network) cost.
+    const MAX_FULL_SCAN_ELEMENTS: usize = 250_000;
 
     let nearby_nodes = if let Some(spatial_index) = topology.spatial_index.as_ref() {
         spatial_snap_nodes(topology, spatial_index, point, max_distance_m)
     } else {
+        if topology.nodes.len() > MAX_FULL_SCAN_ELEMENTS {
+            bail!(
+                "topology bundle has no spatial index and is too large to snap by linear scan; re-import the dataset to build one"
+            );
+        }
         topology
             .nodes
             .iter()
@@ -134,9 +143,14 @@ pub(crate) fn snap_candidates(
         candidate_edges.extend_from_slice(routing_graph.incoming_edges(node_id as usize));
     }
     if candidate_edges.is_empty() {
-        for edge_index in 0..topology.edge_count() {
-            if routing_graph.edge_costs[edge_index].is_finite() {
-                candidate_edges.push(edge_index as u32);
+        // No node landed within range: the point may still project onto the
+        // middle of a long edge whose endpoints are far away. A full edge
+        // scan finds it, but is only tolerable on small graphs.
+        if topology.edge_count() <= MAX_FULL_SCAN_ELEMENTS {
+            for edge_index in 0..topology.edge_count() {
+                if routing_graph.edge_costs[edge_index].is_finite() {
+                    candidate_edges.push(edge_index as u32);
+                }
             }
         }
     } else {

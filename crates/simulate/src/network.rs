@@ -10,17 +10,7 @@ use netweevil_core::{
     TopologyBundle,
 };
 
-pub const EARTH_RADIUS_M: f64 = 6_371_000.0;
-
-pub fn haversine_m(lon_a: f64, lat_a: f64, lon_b: f64, lat_b: f64) -> f64 {
-    let lat_a_rad = lat_a.to_radians();
-    let lat_b_rad = lat_b.to_radians();
-    let d_lat = (lat_b - lat_a).to_radians();
-    let d_lon = (lon_b - lon_a).to_radians();
-    let a = (d_lat / 2.0).sin().powi(2)
-        + lat_a_rad.cos() * lat_b_rad.cos() * (d_lon / 2.0).sin().powi(2);
-    2.0 * EARTH_RADIUS_M * a.sqrt().asin()
-}
+pub use netweevil_core::geo::haversine_meters as haversine_m;
 
 /// Average passenger-car jam spacing used for edge storage capacity.
 const JAM_SPACING_M_PER_PCU: f64 = 7.5;

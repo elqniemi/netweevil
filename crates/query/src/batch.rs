@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 use netweevil_profile::ReturnConfig;
 
@@ -185,6 +185,18 @@ pub(crate) fn execute_matrix_with_graph(
     origins: &PointSetDocument,
     destinations: &PointSetDocument,
 ) -> Result<MatrixResult> {
+    // Cells are fully materialized in memory; refuse unbounded results
+    // instead of exhausting memory on oversized requests.
+    const MAX_MATRIX_CELLS: usize = 4_000_000;
+    let requested_cells = origins
+        .points
+        .len()
+        .saturating_mul(destinations.points.len());
+    if requested_cells > MAX_MATRIX_CELLS {
+        bail!(
+            "matrix request would produce {requested_cells} cells (origins x destinations), above the {MAX_MATRIX_CELLS} safety limit; split the request into chunks"
+        );
+    }
     let snap_max_distance_m = origins
         .snap
         .max_distance_m

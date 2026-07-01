@@ -523,17 +523,7 @@ fn apportioned_duration_s(
     None
 }
 
-fn haversine_meters(from_lon: f64, from_lat: f64, to_lon: f64, to_lat: f64) -> f64 {
-    let earth_radius_m = 6_371_000.0_f64;
-    let d_lat = (to_lat - from_lat).to_radians();
-    let d_lon = (to_lon - from_lon).to_radians();
-    let from_lat = from_lat.to_radians();
-    let to_lat = to_lat.to_radians();
-    let a =
-        (d_lat / 2.0).sin().powi(2) + from_lat.cos() * to_lat.cos() * (d_lon / 2.0).sin().powi(2);
-    let c = 2.0 * a.sqrt().asin();
-    earth_radius_m * c
-}
+use netweevil_core::geo::haversine_meters;
 
 #[cfg(test)]
 mod tests {

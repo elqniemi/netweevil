@@ -114,13 +114,4 @@ fn classify_turn(
     }
 }
 
-fn projected_delta_x(from_lon: f64, reference_lat: f64, to_lon: f64) -> f64 {
-    let earth_radius_m = 6_371_000.0_f64;
-    let lon_delta = (to_lon - from_lon).to_radians();
-    lon_delta * reference_lat.to_radians().cos() * earth_radius_m
-}
-
-fn projected_delta_y(from_lat: f64, to_lat: f64) -> f64 {
-    let earth_radius_m = 6_371_000.0_f64;
-    (to_lat - from_lat).to_radians() * earth_radius_m
-}
+use netweevil_core::geo::{projected_delta_x, projected_delta_y};

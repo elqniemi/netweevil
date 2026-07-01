@@ -538,7 +538,6 @@ mod tests {
     use crate::test_util::{edge, pending_way};
     use netweevil_core::{AccessMask, EdgeId, NodeId, TurnRestrictionKind};
     use osmpbfreader::{NodeId as OsmNodeId, OsmId, Ref, Relation, RelationId, Tags, WayId};
-    use std::collections::HashMap;
 
     #[test]
     fn parses_node_based_turn_restriction_relations() {
