@@ -1,9 +1,8 @@
-use std::collections::HashSet;
-
 use netweevil_core::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, AccelerationBundleStats, CCH_ALGORITHM, CacheBundleId,
     DatasetAccelerationBundle, TopologyBundle,
 };
+use rayon::prelude::*;
 
 use crate::import::{DatasetImportProgress, DatasetImportStage, PercentReporter, emit_progress};
 
@@ -65,27 +64,30 @@ pub(crate) fn build_dataset_acceleration_bundle_with_progress(
         format!("Building CCH 0% ({edge_count} edge states)"),
     );
 
-    // Arc store: (tail, head). Pending lists hold the arcs each still-active
-    // state will consume when it is contracted; an arc is owned by its
-    // lower-ranked endpoint, so each list is final by contraction time.
-    let mut arcs = Vec::<(u32, u32)>::new();
-    let mut seen_arc_pairs = HashSet::<u64>::new();
-    let mut out_to_higher = vec![Vec::<u32>::new(); edge_count];
-    let mut in_from_higher = vec![Vec::<u32>::new(); edge_count];
+    // Pending adjacency: every arc is owned by its lower-ranked endpoint and
+    // consumed when that state is contracted. Each pending list is a sorted
+    // vector of `(other_endpoint << 1) | outgoing` keys, so duplicate arcs
+    // (multi-edges, shortcut pairs proposed by several middles) dedup with a
+    // binary search per insertion instead of a global hash set over every
+    // arc, and arcs are emitted straight into the upward/downward stores
+    // instead of a third arc table.
+    let mut pending: Vec<Vec<u64>> = vec![Vec::new(); edge_count];
+    let mut upward = Vec::<(u32, u32)>::new();
+    let mut downward = Vec::<(u32, u32)>::new();
+    let mut base_arc_count = 0_u64;
+    let mut shortcut_arc_count = 0_u64;
 
-    let push_arc = |tail: u32,
-                    head: u32,
-                    arcs: &mut Vec<(u32, u32)>,
-                    out_to_higher: &mut [Vec<u32>],
-                    in_from_higher: &mut [Vec<u32>]| {
-        let arc_id = arcs.len() as u32;
-        arcs.push((tail, head));
-        if edge_rank[tail as usize] < edge_rank[head as usize] {
-            out_to_higher[tail as usize].push(arc_id);
-        } else {
-            in_from_higher[head as usize].push(arc_id);
+    fn insert_pending(pending: &mut [Vec<u64>], owner: usize, other: u32, outgoing: bool) -> bool {
+        let key = ((other as u64) << 1) | outgoing as u64;
+        let list = &mut pending[owner];
+        match list.binary_search(&key) {
+            Ok(_) => false,
+            Err(position) => {
+                list.insert(position, key);
+                true
+            }
         }
-    };
+    }
 
     if has_transitions {
         for edge_index in 0..edge_count {
@@ -95,43 +97,61 @@ pub(crate) fn build_dataset_acceleration_bundle_with_progress(
                 if next_edge as usize == edge_index || next_edge as usize >= edge_count {
                     continue;
                 }
-                if !seen_arc_pairs.insert(arc_pair_key(edge_index as u32, next_edge)) {
-                    continue;
+                let (owner, other, outgoing) =
+                    if edge_rank[edge_index] < edge_rank[next_edge as usize] {
+                        (edge_index, next_edge, true)
+                    } else {
+                        (next_edge as usize, edge_index as u32, false)
+                    };
+                if insert_pending(&mut pending, owner, other, outgoing) {
+                    base_arc_count += 1;
                 }
-                push_arc(
-                    edge_index as u32,
-                    next_edge,
-                    &mut arcs,
-                    &mut out_to_higher,
-                    &mut in_from_higher,
-                );
             }
         }
     }
-    let base_arc_count = arcs.len();
 
     let mut reporter = PercentReporter::starting_at_zero();
+    let mut incoming = Vec::<u32>::new();
+    let mut outgoing = Vec::<u32>::new();
     for (order_index, &contracted_edge) in edge_order.iter().enumerate() {
         let contracted_edge = contracted_edge as usize;
-        let incoming = std::mem::take(&mut in_from_higher[contracted_edge]);
-        let outgoing = std::mem::take(&mut out_to_higher[contracted_edge]);
-        for &incoming_arc in &incoming {
-            let tail = arcs[incoming_arc as usize].0;
-            for &outgoing_arc in &outgoing {
-                let head = arcs[outgoing_arc as usize].1;
+        let owned = std::mem::take(&mut pending[contracted_edge]);
+        incoming.clear();
+        outgoing.clear();
+        for &key in &owned {
+            let other = (key >> 1) as u32;
+            if key & 1 == 1 {
+                outgoing.push(other);
+            } else {
+                incoming.push(other);
+            }
+        }
+        drop(owned);
+
+        // The contracted state is the lower endpoint of everything it owns:
+        // `contracted -> y` is an upward arc, `x -> contracted` a downward
+        // arc. Emitting here visits every arc exactly once.
+        for &head in &outgoing {
+            upward.push((contracted_edge as u32, head));
+        }
+        for &tail in &incoming {
+            downward.push((tail, contracted_edge as u32));
+        }
+
+        for &tail in &incoming {
+            for &head in &outgoing {
                 if tail == head {
                     continue;
                 }
-                if !seen_arc_pairs.insert(arc_pair_key(tail, head)) {
-                    continue;
+                let (owner, other, is_outgoing) =
+                    if edge_rank[tail as usize] < edge_rank[head as usize] {
+                        (tail as usize, head, true)
+                    } else {
+                        (head as usize, tail, false)
+                    };
+                if insert_pending(&mut pending, owner, other, is_outgoing) {
+                    shortcut_arc_count += 1;
                 }
-                push_arc(
-                    tail,
-                    head,
-                    &mut arcs,
-                    &mut out_to_higher,
-                    &mut in_from_higher,
-                );
             }
         }
         reporter.emit_if_needed(
@@ -144,49 +164,36 @@ pub(crate) fn build_dataset_acceleration_bundle_with_progress(
                     "Building CCH {percent:.0}% ({}/{}) with {} arcs ({} base, {} shortcuts)",
                     order_index + 1,
                     edge_order.len(),
-                    arcs.len(),
+                    base_arc_count + shortcut_arc_count,
                     base_arc_count,
-                    arcs.len() - base_arc_count
+                    shortcut_arc_count
                 )
             },
         );
     }
-    drop(seen_arc_pairs);
-    drop(out_to_higher);
-    drop(in_from_higher);
+    drop(pending);
 
+    let total_arc_count = base_arc_count + shortcut_arc_count;
     emit_progress(
         progress,
         DatasetImportStage::BuildAcceleration,
         Some(100.0),
         format!(
             "Building CCH 100% ({} arcs: {} base, {} shortcuts)",
-            arcs.len(),
-            base_arc_count,
-            arcs.len() - base_arc_count
+            total_arc_count, base_arc_count, shortcut_arc_count
         ),
     );
 
     let stats = AccelerationBundleStats {
-        base_arc_count: base_arc_count as u64,
-        shortcut_arc_count: (arcs.len() - base_arc_count) as u64,
-        total_arc_count: arcs.len() as u64,
+        base_arc_count,
+        shortcut_arc_count,
+        total_arc_count,
     };
 
-    let mut upward = Vec::new();
-    let mut downward = Vec::new();
-    for &(tail, head) in &arcs {
-        if edge_rank[tail as usize] < edge_rank[head as usize] {
-            upward.push((tail, head));
-        } else {
-            downward.push((tail, head));
-        }
-    }
-    drop(arcs);
     // Rows sorted by head id enable binary-search arc lookup during
     // customization and unpacking.
-    upward.sort_unstable();
-    downward.sort_unstable();
+    upward.par_sort_unstable();
+    downward.par_sort_unstable();
 
     let (upward_first_out, upward_head) = arcs_to_csr(&upward, edge_count);
     let (downward_first_out, downward_head) = arcs_to_csr(&downward, edge_count);
@@ -216,10 +223,6 @@ fn arcs_to_csr(sorted_arcs: &[(u32, u32)], edge_count: usize) -> (Vec<u32>, Vec<
         first_out[edge_index + 1] += first_out[edge_index];
     }
     (first_out, heads)
-}
-
-fn arc_pair_key(tail: u32, head: u32) -> u64 {
-    ((tail as u64) << 32) | head as u64
 }
 
 fn build_recursive_spatial_edge_order(
@@ -312,8 +315,22 @@ fn build_recursive_spatial_edge_order(
             return;
         }
 
-        recurse(topology, in_degree, out_degree, &mut left, output);
-        recurse(topology, in_degree, out_degree, &mut right, output);
+        // The two halves are independent; order them in parallel and append
+        // left, right, separator to keep the sequential order deterministic.
+        let (mut left_output, mut right_output) = rayon::join(
+            || {
+                let mut out = Vec::with_capacity(left.len());
+                recurse(topology, in_degree, out_degree, &mut left, &mut out);
+                out
+            },
+            || {
+                let mut out = Vec::with_capacity(right.len());
+                recurse(topology, in_degree, out_degree, &mut right, &mut out);
+                out
+            },
+        );
+        output.append(&mut left_output);
+        output.append(&mut right_output);
         sort_small_block(&mut separator, topology, in_degree, out_degree);
         output.extend(separator);
     }
@@ -437,6 +454,99 @@ mod tests {
             let row = &bundle.downward_head[bundle.downward_first_out[edge_index] as usize
                 ..bundle.downward_first_out[edge_index + 1] as usize];
             assert!(row.windows(2).all(|pair| pair[0] < pair[1]));
+        }
+    }
+
+    #[test]
+    fn contraction_is_complete_on_a_grid() {
+        // 4x4 grid with edges in both directions between neighbours.
+        let side = 4_u32;
+        let mut edges = Vec::new();
+        let mut edge_id = 0_u32;
+        let mut connect = |a: u32, b: u32, edges: &mut Vec<netweevil_core::DirectedEdge>| {
+            edges.push(edge(edge_id, a, b, 1000 + edge_id as i64));
+            edge_id += 1;
+            edges.push(edge(edge_id, b, a, 1000 + edge_id as i64));
+            edge_id += 1;
+        };
+        for row in 0..side {
+            for col in 0..side {
+                let node = row * side + col;
+                if col + 1 < side {
+                    connect(node, node + 1, &mut edges);
+                }
+                if row + 1 < side {
+                    connect(node, node + side, &mut edges);
+                }
+            }
+        }
+        let nodes = (0..side * side)
+            .map(|node| TopologyNode {
+                node_id: NodeId(node),
+                osm_node_id: node as i64,
+                lon: (node % side) as f64 * 0.001,
+                lat: (node / side) as f64 * 0.001,
+            })
+            .collect::<Vec<_>>();
+        let node_count = nodes.len();
+        let edge_count = edges.len();
+        let topology = TopologyBundle {
+            schema_version: 1,
+            source_path: "test".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes,
+            edge_layers: Default::default(),
+            edges: edges.clone(),
+            turn_restrictions: vec![],
+            names: vec![],
+            edge_based_topology: build_edge_based_topology(node_count, &edges),
+            spatial_index: None,
+            node_component_ids: vec![0; node_count],
+            edge_component_ids: vec![0; edge_count],
+        };
+
+        let bundle =
+            build_dataset_acceleration_bundle(&topology, CacheBundleId::new("topology-test"));
+
+        // Reverse index of downward arcs: incoming higher-ranked tails per state.
+        let mut incoming_from_higher: Vec<Vec<u32>> = vec![Vec::new(); edge_count];
+        for tail in 0..edge_count {
+            for slot in bundle.downward_first_out[tail] as usize
+                ..bundle.downward_first_out[tail + 1] as usize
+            {
+                incoming_from_higher[bundle.downward_head[slot] as usize].push(tail as u32);
+            }
+        }
+
+        let has_arc = |from: usize, to: u32| -> bool {
+            let (first_out, heads) = if bundle.edge_rank[from] < bundle.edge_rank[to as usize] {
+                (&bundle.upward_first_out, &bundle.upward_head)
+            } else {
+                (&bundle.downward_first_out, &bundle.downward_head)
+            };
+            heads[first_out[from] as usize..first_out[from + 1] as usize]
+                .binary_search(&to)
+                .is_ok()
+        };
+
+        // Lower-triangle completeness: for every state v, every incoming arc
+        // from a higher-ranked x and outgoing arc to a higher-ranked y must
+        // be closed by an arc between x and y. This is the invariant that
+        // makes CCH queries exact with no follow-up search.
+        for v in 0..edge_count {
+            let outgoing = &bundle.upward_head
+                [bundle.upward_first_out[v] as usize..bundle.upward_first_out[v + 1] as usize];
+            for &x in &incoming_from_higher[v] {
+                for &y in outgoing {
+                    if x == y {
+                        continue;
+                    }
+                    assert!(
+                        has_arc(x as usize, y),
+                        "missing closure arc {x} -> {y} for contracted state {v}"
+                    );
+                }
+            }
         }
     }
 }

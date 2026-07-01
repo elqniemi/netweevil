@@ -1173,6 +1173,7 @@ dependencies = [
  "netweevil-manifest",
  "netweevil-persist",
  "osmpbfreader",
+ "rayon",
  "sha2",
 ]
 
