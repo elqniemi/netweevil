@@ -1490,51 +1490,48 @@ fn service_area_polygon_geometry(
     segments: &[ReachableEdgeInterval],
     options: &ServiceAreaPolygonOptions,
 ) -> serde_json::Value {
-    let buffer_width_m = (25.0 * options.hull_aggressiveness.max(0.25)).max(5.0);
-    let mut per_component = BTreeMap::<u32, Vec<[f64; 2]>>::new();
+    // Trace a concave boundary around the reachable network on a metric
+    // grid instead of a convex hull: the polygon hugs the roads that are
+    // actually reachable, and enclosed unreachable pockets (water,
+    // restricted areas, missing network) become holes.
+    let cell_size_m = options
+        .cell_size_m
+        .unwrap_or(25.0 * options.hull_aggressiveness.max(0.25))
+        .max(10.0);
+    let tolerance = options.simplification_tolerance_m.unwrap_or(0.0);
 
-    for segment in segments {
-        let component_id = topology
-            .edge_component_id(segment.edge_index as u32)
-            .unwrap_or_default();
-        let coords = service_area_segment_coords(topology, segment);
-        let midpoint_lat = (coords[0][1] + coords[1][1]) / 2.0;
-        per_component
-            .entry(component_id)
-            .or_default()
-            .extend(buffered_segment_corners(
-                coords[0],
-                coords[1],
-                buffer_width_m,
-                midpoint_lat,
-            ));
-    }
+    let subsegments = segments
+        .iter()
+        .map(|segment| {
+            let coords = service_area_segment_coords(topology, segment);
+            (coords[0], coords[1])
+        })
+        .collect::<Vec<_>>();
+    let polygons =
+        crate::isochrone_polygon::trace_reachable_polygons(&subsegments, cell_size_m, tolerance);
 
-    if per_component.is_empty() {
+    if polygons.is_empty() {
         return serde_json::json!({
             "type": "MultiPolygon",
             "coordinates": Vec::<Vec<Vec<[f64; 2]>>>::new(),
         });
     }
 
-    let tolerance = options.simplification_tolerance_m.unwrap_or(0.0);
-    let polygons = per_component
-        .into_values()
-        .filter_map(|points| {
-            let hull = convex_hull(points);
-            simplify_polygon_ring(hull, tolerance)
-        })
-        .collect::<Vec<_>>();
+    let rings_of = |polygon: &crate::isochrone_polygon::TracedPolygon| -> Vec<Vec<[f64; 2]>> {
+        let mut rings = vec![polygon.exterior.clone()];
+        rings.extend(polygon.holes.iter().cloned());
+        rings
+    };
 
     if polygons.len() == 1 {
         serde_json::json!({
             "type": "Polygon",
-            "coordinates": [polygons[0].clone()],
+            "coordinates": rings_of(&polygons[0]),
         })
     } else {
         serde_json::json!({
             "type": "MultiPolygon",
-            "coordinates": polygons.into_iter().map(|ring| vec![ring]).collect::<Vec<_>>(),
+            "coordinates": polygons.iter().map(rings_of).collect::<Vec<_>>(),
         })
     }
 }
