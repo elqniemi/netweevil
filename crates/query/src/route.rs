@@ -385,18 +385,16 @@ pub(crate) fn execute_route_with_candidates(
             if matches!(
                 connectivity.disconnected,
                 DisconnectedNetworkMode::IgnoreUnreachable
-            ) {
-                if let Some(failure) = analysis_failure(&error) {
-                    if matches!(failure.outcome, AnalysisOutcome::Unreachable) {
-                        return Ok(ignored_unreachable_route_result(
-                            route_id,
-                            origin_candidates,
-                            destination_candidates,
-                            failure.clone(),
-                            execution_warnings(metrics),
-                        ));
-                    }
-                }
+            ) && let Some(failure) = analysis_failure(&error)
+                && matches!(failure.outcome, AnalysisOutcome::Unreachable)
+            {
+                return Ok(ignored_unreachable_route_result(
+                    route_id,
+                    origin_candidates,
+                    destination_candidates,
+                    failure.clone(),
+                    execution_warnings(metrics),
+                ));
             }
             return Err(error);
         }
@@ -419,16 +417,16 @@ pub(crate) fn execute_route_with_candidates(
                 DisconnectedNetworkMode::IgnoreUnreachable
             ) =>
         {
-            if let Some(failure) = analysis_failure(&error) {
-                if matches!(failure.outcome, AnalysisOutcome::Unreachable) {
-                    return Ok(ignored_unreachable_route_result(
-                        route_id,
-                        origin_candidates,
-                        destination_candidates,
-                        failure.clone(),
-                        execution_warnings(metrics),
-                    ));
-                }
+            if let Some(failure) = analysis_failure(&error)
+                && matches!(failure.outcome, AnalysisOutcome::Unreachable)
+            {
+                return Ok(ignored_unreachable_route_result(
+                    route_id,
+                    origin_candidates,
+                    destination_candidates,
+                    failure.clone(),
+                    execution_warnings(metrics),
+                ));
             }
             return Err(error);
         }
@@ -816,9 +814,10 @@ pub(crate) fn analyze_route_path(
         .filter(|violation| violation.violation_type == RouteViolationType::ReverseOneway)
         .filter_map(|violation| violation.distance_m)
         .sum::<f64>();
-    if let Some(max_illegal_distance_m) = fallback.max_illegal_distance_m {
-        if reverse_distance_m > max_illegal_distance_m + f64::EPSILON {
-            return Err(AnalysisFailure::new(
+    if let Some(max_illegal_distance_m) = fallback.max_illegal_distance_m
+        && reverse_distance_m > max_illegal_distance_m + f64::EPSILON
+    {
+        return Err(AnalysisFailure::new(
                 format!(
                     "degraded route exceeds fallback.max_illegal_distance_m ({:.1} m > {:.1} m)",
                     reverse_distance_m, max_illegal_distance_m
@@ -840,7 +839,6 @@ pub(crate) fn analyze_route_path(
                 }],
             )
             .into());
-        }
     }
     if let Some(max_illegal_turns) = fallback.max_illegal_turns {
         let illegal_turn_count = violations

@@ -204,7 +204,6 @@ fn execute_transit_route_with_runtime(
                 from_name: request.origin.id.clone(),
                 from_lon: request.origin.lon,
                 from_lat: request.origin.lat,
-                distance_m: candidate.distance_m,
                 departure_s,
                 time_s: candidate.time_s,
                 mode: candidate.mode,
@@ -230,10 +229,10 @@ fn execute_transit_route_with_runtime(
             continue;
         }
         if !collect_alternatives {
-            if let Some(found) = best_final {
-                if entry.time_s >= found.arrival_s {
-                    continue;
-                }
+            if let Some(found) = best_final
+                && entry.time_s >= found.arrival_s
+            {
+                continue;
             }
         } else if let Some(found) = best_final {
             let max_arrival_s =
@@ -246,26 +245,25 @@ fn execute_transit_route_with_runtime(
             continue;
         }
 
-        if can_finish_with_egress(entry.state) {
-            if let Some((egress_time_s, egress_mode)) =
+        if can_finish_with_egress(entry.state)
+            && let Some((egress_time_s, egress_mode)) =
                 egress_by_stop.get(&entry.state.stop_index).copied()
+        {
+            let arrival_s = entry.time_s.saturating_add(egress_time_s);
+            let candidate = FinalCandidate {
+                arrival_s,
+                state: entry.state,
+                egress_time_s,
+                egress_mode,
+            };
+            if collect_final_candidates {
+                final_candidates.push(candidate);
+            }
+            if best_final
+                .as_ref()
+                .is_none_or(|found| arrival_s < found.arrival_s)
             {
-                let arrival_s = entry.time_s.saturating_add(egress_time_s);
-                let candidate = FinalCandidate {
-                    arrival_s,
-                    state: entry.state,
-                    egress_time_s,
-                    egress_mode,
-                };
-                if collect_final_candidates {
-                    final_candidates.push(candidate);
-                }
-                if best_final
-                    .as_ref()
-                    .is_none_or(|found| arrival_s < found.arrival_s)
-                {
-                    best_final = Some(candidate);
-                }
+                best_final = Some(candidate);
             }
         }
 

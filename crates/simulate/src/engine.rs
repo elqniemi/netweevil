@@ -540,7 +540,7 @@ impl SimulationRunner {
             }
 
             // Move active agents.
-            let check_reroutes = tick % reroute_check_ticks == 0;
+            let check_reroutes = tick.is_multiple_of(reroute_check_ticks);
             still_active.clear();
             still_active.reserve(active.len());
             for &agent_index in &active {

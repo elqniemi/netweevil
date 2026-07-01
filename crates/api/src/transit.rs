@@ -86,10 +86,8 @@ pub(crate) async fn transit_route_handler(
                 .as_ref()
                 .map(|estimator| estimator as &dyn StreetTimeEstimator),
         )?;
-        if replace_geometry {
-            if let Some(engines) = street_engines.as_ref() {
-                replace_transit_street_leg_geometries(&mut result, engines);
-            }
+        if replace_geometry && let Some(engines) = street_engines.as_ref() {
+            replace_transit_street_leg_geometries(&mut result, engines);
         }
         Ok(result)
     })

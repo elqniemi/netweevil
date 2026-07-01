@@ -529,15 +529,15 @@ fn run_route_batch_analysis(
     let route_count = requests.requests.len();
 
     for (index, entry) in requests.requests.iter().enumerate() {
-        if let Some(profile_id) = entry.profile_id.as_deref() {
-            if profile_id != profile.profile.id {
-                anyhow::bail!(
-                    "route '{}' requests profile_id '{}' but CLI batch is using profile '{}'",
-                    entry.request.route_id,
-                    profile_id,
-                    profile.profile.id
-                );
-            }
+        if let Some(profile_id) = entry.profile_id.as_deref()
+            && profile_id != profile.profile.id
+        {
+            anyhow::bail!(
+                "route '{}' requests profile_id '{}' but CLI batch is using profile '{}'",
+                entry.request.route_id,
+                profile_id,
+                profile.profile.id
+            );
         }
 
         let execution = if let Some(edge_names) = edge_names.as_ref() {

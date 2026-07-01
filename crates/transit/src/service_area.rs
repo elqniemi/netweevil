@@ -260,7 +260,6 @@ fn search_service_area_origin(
                 from_name: origin.id.clone(),
                 from_lon: origin.lon,
                 from_lat: origin.lat,
-                distance_m: candidate.distance_m,
                 departure_s,
                 time_s: candidate.time_s,
                 mode: candidate.mode,

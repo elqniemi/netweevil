@@ -258,7 +258,6 @@ pub(crate) struct StopCandidate {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct StreetCandidate {
     pub(crate) stop_index: u32,
-    pub(crate) distance_m: f64,
     pub(crate) time_s: u32,
     pub(crate) mode: AccessMode,
 }
@@ -301,7 +300,6 @@ pub(crate) fn best_street_candidates(
                 .unwrap_or(straight_line_time_s);
             let entry = StreetCandidate {
                 stop_index: candidate.stop_index,
-                distance_m: candidate.distance_m,
                 time_s,
                 mode,
             };
@@ -368,7 +366,6 @@ pub(crate) enum PrevStep {
         from_name: String,
         from_lon: f64,
         from_lat: f64,
-        distance_m: f64,
         departure_s: u32,
         /// Access leg travel time as priced by the search (straight-line or
         /// network); leg reconstruction must reuse it, not re-derive it.

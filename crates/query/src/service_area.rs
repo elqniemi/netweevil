@@ -1108,15 +1108,14 @@ fn normalize_service_area_segments(
 
     let mut merged: Vec<ReachableEdgeInterval> = Vec::new();
     for segment in segments {
-        if let Some(previous) = merged.last_mut() {
-            if previous.edge_index == segment.edge_index
-                && segment.start_fraction <= previous.end_fraction + 1e-9
-            {
-                previous.end_fraction = previous.end_fraction.max(segment.end_fraction);
-                previous.end_cost = previous.end_cost.max(segment.end_cost);
-                previous.midpoint_cost = previous.midpoint_cost.min(segment.midpoint_cost);
-                continue;
-            }
+        if let Some(previous) = merged.last_mut()
+            && previous.edge_index == segment.edge_index
+            && segment.start_fraction <= previous.end_fraction + 1e-9
+        {
+            previous.end_fraction = previous.end_fraction.max(segment.end_fraction);
+            previous.end_cost = previous.end_cost.max(segment.end_cost);
+            previous.midpoint_cost = previous.midpoint_cost.min(segment.midpoint_cost);
+            continue;
         }
         merged.push(segment);
     }

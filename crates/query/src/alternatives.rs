@@ -104,8 +104,8 @@ pub(crate) fn build_route_alternatives(
                 expanded_bans.insert(edge_index);
             }
         }
-        if !expanded_bans.is_empty() {
-            if let Some((origin, destination, path, hop_info)) =
+        if !expanded_bans.is_empty()
+            && let Some((origin, destination, path, hop_info)) =
                 route_between_candidates_with_banned_edges(
                     topology,
                     metrics,
@@ -118,39 +118,38 @@ pub(crate) fn build_route_alternatives(
                     &expanded_bans,
                     max_generalized_cost,
                 )?
+        {
+            let duplicate = accepted_paths.contains(&path.edge_indexes);
+            let analysis = analyze_route_path(
+                topology,
+                metrics,
+                routing_graph,
+                fallback,
+                &path,
+                &origin,
+                &destination,
+            )?;
+            if !duplicate
+                && alternative_within_limits(&analysis.summary, best_summary, alternatives)
+                && alternative_is_diverse(
+                    &path.edge_indexes,
+                    &accepted_paths,
+                    alternatives.min_jaccard_distance,
+                )
             {
-                let duplicate = accepted_paths.contains(&path.edge_indexes);
-                let analysis = analyze_route_path(
+                let rank = accepted.len() as u32 + 1;
+                accepted.push(materialize_route_alternative(
                     topology,
                     metrics,
-                    routing_graph,
-                    fallback,
-                    &path,
+                    returns,
+                    edge_names,
+                    rank,
                     &origin,
                     &destination,
-                )?;
-                if !duplicate
-                    && alternative_within_limits(&analysis.summary, best_summary, alternatives)
-                    && alternative_is_diverse(
-                        &path.edge_indexes,
-                        &accepted_paths,
-                        alternatives.min_jaccard_distance,
-                    )
-                {
-                    let rank = accepted.len() as u32 + 1;
-                    accepted.push(materialize_route_alternative(
-                        topology,
-                        metrics,
-                        returns,
-                        edge_names,
-                        rank,
-                        &origin,
-                        &destination,
-                        path,
-                        hop_info,
-                        analysis,
-                    )?);
-                }
+                    path,
+                    hop_info,
+                    analysis,
+                )?);
             }
         }
     }
@@ -186,15 +185,15 @@ fn alternative_within_limits(
     if summary.total_generalized_cost > best_cost * alternatives.max_cost_ratio {
         return false;
     }
-    if let Some(max_extra_time_s) = alternatives.max_extra_time_s {
-        if summary.total_travel_time_s > best.total_travel_time_s + max_extra_time_s {
-            return false;
-        }
+    if let Some(max_extra_time_s) = alternatives.max_extra_time_s
+        && summary.total_travel_time_s > best.total_travel_time_s + max_extra_time_s
+    {
+        return false;
     }
-    if let Some(max_extra_distance_m) = alternatives.max_extra_distance_m {
-        if summary.total_distance_m > best.total_distance_m.saturating_add(max_extra_distance_m) {
-            return false;
-        }
+    if let Some(max_extra_distance_m) = alternatives.max_extra_distance_m
+        && summary.total_distance_m > best.total_distance_m.saturating_add(max_extra_distance_m)
+    {
+        return false;
     }
     true
 }

@@ -7,18 +7,11 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result};
-use netweevil_core::{
-    AccelerationBundleStats, BuildStage, CacheBundleId, DatasetId, TopologyBundleMeta, TravelMode,
-};
-use netweevil_profile::ProfileDocument;
 use netweevil_query::{
-    AccessibilityResult, AnalysisOutcome, ConnectivityPolicy, FallbackPolicy, MatrixResult,
-    OdResult, RouteBatchResult, RouteResult, ServiceAreaBandMode, ServiceAreaMultiOriginMode,
-    ServiceAreaOutputMode, ServiceAreaResult,
+    AccessibilityResult, AnalysisOutcome, MatrixResult, OdResult, RouteBatchResult, RouteResult,
+    ServiceAreaBandMode, ServiceAreaMultiOriginMode, ServiceAreaOutputMode, ServiceAreaResult,
 };
-use serde::{Deserialize, Serialize};
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use uuid::Uuid;
+use serde::Serialize;
 
 pub use output::{
     write_matrix_result, write_od_result, write_route_batch_result, write_route_result,

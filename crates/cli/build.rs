@@ -7,10 +7,9 @@ fn main() {
     if let Ok(output) = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            println!("cargo:rustc-env=NETWEEVIL_GIT_COMMIT={commit}");
-        }
+        let commit = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        println!("cargo:rustc-env=NETWEEVIL_GIT_COMMIT={commit}");
     }
 }

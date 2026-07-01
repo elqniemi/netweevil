@@ -48,7 +48,6 @@ pub(crate) fn reconstruct_legs(
                 from_name,
                 from_lon,
                 from_lat,
-                distance_m: _,
                 departure_s,
                 time_s,
                 mode,
@@ -147,18 +146,17 @@ pub(crate) fn reconstruct_legs(
 pub(crate) fn coalesce_transit_legs(legs: &mut Vec<TransitLeg>) {
     let mut coalesced = Vec::<TransitLeg>::new();
     for leg in legs.drain(..) {
-        if let Some(last) = coalesced.last_mut() {
-            if last.leg_type == TransitLegType::Transit
-                && leg.leg_type == TransitLegType::Transit
-                && last.trip_id == leg.trip_id
-                && last.to_id == leg.from_id
-            {
-                last.to_id = leg.to_id;
-                last.to_name = leg.to_name;
-                last.arrival_s = leg.arrival_s;
-                last.geometry.extend(leg.geometry.into_iter().skip(1));
-                continue;
-            }
+        if let Some(last) = coalesced.last_mut()
+            && last.leg_type == TransitLegType::Transit
+            && leg.leg_type == TransitLegType::Transit
+            && last.trip_id == leg.trip_id
+            && last.to_id == leg.from_id
+        {
+            last.to_id = leg.to_id;
+            last.to_name = leg.to_name;
+            last.arrival_s = leg.arrival_s;
+            last.geometry.extend(leg.geometry.into_iter().skip(1));
+            continue;
         }
         coalesced.push(leg);
     }
