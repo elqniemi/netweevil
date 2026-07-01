@@ -104,6 +104,14 @@ pub(crate) fn simulate_run(paths: &WorkspacePaths, args: SimulateRunArgs) -> Res
                 .map(Arc::new)
         })
         .transpose()?;
+    if acceleration.is_none() {
+        eprintln!(
+            "warning: dataset '{}' has no acceleration bundle; agent dispatch will fall back to \
+             plain bidirectional Dijkstra and can be orders of magnitude slower. Re-import the \
+             dataset with `netweevil dataset import` to build one.",
+            args.dataset
+        );
+    }
 
     let compiled_manifests = read_compiled_profile_manifests(paths)?;
     let mut engines: BTreeMap<String, Arc<PreparedRoutingEngine>> = BTreeMap::new();

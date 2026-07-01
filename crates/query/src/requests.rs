@@ -49,6 +49,11 @@ pub struct AlternativeRouteOptions {
     pub max_extra_distance_m: Option<u64>,
     #[serde(default = "default_alternative_min_jaccard_distance")]
     pub min_jaccard_distance: f64,
+    /// Upper bound on banned-edge searches while collecting alternatives.
+    /// Each attempt is a full unaccelerated route query, so long best paths
+    /// would otherwise trigger thousands of searches.
+    #[serde(default = "default_alternative_max_search_attempts")]
+    pub max_search_attempts: usize,
 }
 
 impl Default for AlternativeRouteOptions {
@@ -59,6 +64,7 @@ impl Default for AlternativeRouteOptions {
             max_extra_time_s: None,
             max_extra_distance_m: None,
             min_jaccard_distance: default_alternative_min_jaccard_distance(),
+            max_search_attempts: default_alternative_max_search_attempts(),
         }
     }
 }
@@ -73,6 +79,10 @@ fn default_alternative_max_cost_ratio() -> f64 {
 
 fn default_alternative_min_jaccard_distance() -> f64 {
     0.2
+}
+
+fn default_alternative_max_search_attempts() -> usize {
+    24
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

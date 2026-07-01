@@ -8,20 +8,25 @@
 //! jammed agents reroute with live congested costs. The whole run is
 //! deterministic for a given scenario seed.
 
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
+use rustc_hash::FxHashMap;
+
 use anyhow::{Context, Result, bail};
 use netweevil_core::TopologyBundle;
 use netweevil_query::PreparedRoutingEngine;
+use rayon::prelude::*;
 
 use crate::control::{
     EdgeBin, EdgeBinStat, FleetStatus, Frame, SharedSimState, SimRunState, SimulationCommand,
     SimulationHandle, SimulationStatus,
 };
-use crate::demand::{DispatchReport, DispatchedAgent, dispatch_fleet};
+use crate::demand::{
+    AgentDraft, DispatchReport, DispatchedAgent, dispatch_fleet, plan_fleet, route_drafts,
+};
 use crate::network::{SimNetwork, build_sim_network, haversine_m, network_bounds_bbox};
 use crate::output::{
     AgentTrajectory, EdgeUsage, FleetSummary, SimulationResult, SimulationSummary,
@@ -34,6 +39,13 @@ const SPEED_FLOOR_MPS: f32 = 0.1;
 const MAX_EDGE_CROSSINGS_PER_TICK: usize = 256;
 const REROUTE_CHECK_INTERVAL_S: f64 = 5.0;
 const ASTAR_MAX_SETTLED: usize = 120_000;
+/// Sim-time window of departures routed ahead of the clock. Agents are
+/// planned up front (cheap sampling) but routed lazily in these windows so
+/// the simulation starts immediately instead of routing the whole demand
+/// before tick 0.
+const DISPATCH_HORIZON_S: f64 = 300.0;
+/// How often the dispatcher routes the next departure window.
+const DISPATCH_INTERVAL_S: f64 = 60.0;
 /// Backoff between repeated forced reroute attempts (blocked next edge),
 /// so permanently stuck agents don't burn an A* search every check round.
 const FORCED_REROUTE_RETRY_S: f64 = 20.0;
@@ -109,6 +121,40 @@ impl Agent {
         }
     }
 
+    /// Inert placeholder for a planned agent whose departure never fell
+    /// inside the simulated window, so it was never routed.
+    fn never_departed(fleet: u16, draft: &AgentDraft) -> Self {
+        Self {
+            fleet,
+            obey_signals: false,
+            no_collision: false,
+            desired_mult: 1.0,
+            max_speed_mps: f32::INFINITY,
+            overtake: 0.0,
+            reroute_eagerness: 0.0,
+            jam_threshold: 0.0,
+            reroute_cooldown_s: 0.0,
+            pcu: 0.0,
+            depart_s: draft.depart_s,
+            origin: draft.origin,
+            destination: draft.destination,
+            route: Vec::new(),
+            route_pos: 0,
+            pos_m: 0.0,
+            speed_mps: 0.0,
+            wait_s: 0.0,
+            last_reroute_s: f64::NEG_INFINITY,
+            force_reroute: false,
+            arrive_s: f64::NAN,
+            status: AgentStatus::NeverDeparted,
+            reroutes: 0,
+            freeflow_time_s: 0.0,
+            distance_m: 0.0,
+            traj_edges: Vec::new(),
+            traj_enter_s: Vec::new(),
+        }
+    }
+
     fn current_edge(&self) -> u32 {
         self.route[self.route_pos as usize]
     }
@@ -149,7 +195,9 @@ struct EdgeDynamics {
     vehicle_seconds: Vec<f32>,
     congested_seconds: Vec<f32>,
     signal_offset_s: Vec<f32>,
-    bin_acc: HashMap<u32, BinAcc>,
+    bin_acc: Vec<BinAcc>,
+    /// Edges with activity in the current stat bin (each pushed once).
+    bin_touched: Vec<u32>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -186,8 +234,22 @@ impl EdgeDynamics {
             vehicle_seconds: vec![0.0; edges],
             congested_seconds: vec![0.0; edges],
             signal_offset_s,
-            bin_acc: HashMap::new(),
+            bin_acc: vec![BinAcc::default(); edges],
+            bin_touched: Vec::new(),
         }
+    }
+
+    /// Dense per-edge bin accumulator; records first-touch per bin so the
+    /// flush only visits edges with activity.
+    fn bin_acc_mut(&mut self, edge: usize) -> &mut BinAcc {
+        let untouched = {
+            let acc = &self.bin_acc[edge];
+            acc.ticks == 0 && acc.entered == 0
+        };
+        if untouched {
+            self.bin_touched.push(edge as u32);
+        }
+        &mut self.bin_acc[edge]
     }
 
     fn apply_zones(
@@ -313,32 +375,36 @@ impl SimulationRunner {
 
         self.update_status(|status| {
             status.state = SimRunState::Dispatching;
-            status.message = "dispatching agents".to_string();
+            status.message = "planning demand".to_string();
         });
 
-        // Initial dispatch: route every fleet's agents (parallel inside).
-        let mut agents: Vec<Agent> = Vec::new();
-        for fleet_index in 0..self.fleets.len() {
-            let (dispatched, report) = {
-                let fleet = &self.fleets[fleet_index];
-                dispatch_fleet(
-                    &fleet.config,
-                    fleet_index as u16,
-                    &fleet.engine,
-                    bbox,
-                    &self.zones,
-                    seed,
-                    agents.len() as u32,
-                    0.0,
-                )
-                .with_context(|| format!("dispatching fleet '{}'", fleet.config.fleet_id))?
-            };
-            self.fleets[fleet_index].report = report;
-            agents.extend(dispatched.into_iter().map(Agent::from_dispatch));
-            if self.shared.cancelled.load(Ordering::Relaxed) {
-                break;
-            }
+        // Plan every fleet's demand up front (cheap sampling only); the
+        // expensive routing happens lazily in departure-time windows so the
+        // simulation starts immediately.
+        let mut draft_queues: Vec<Vec<AgentDraft>> = Vec::with_capacity(self.fleets.len());
+        let mut next_agent_id: u32 = 0;
+        for (fleet_index, fleet) in self.fleets.iter().enumerate() {
+            let mut drafts = plan_fleet(
+                &fleet.config,
+                fleet_index as u16,
+                &fleet.engine,
+                bbox,
+                &self.zones,
+                seed,
+                next_agent_id,
+                0.0,
+            )
+            .with_context(|| format!("planning fleet '{}'", fleet.config.fleet_id))?;
+            next_agent_id = next_agent_id.saturating_add(drafts.len() as u32);
+            // Latest departures first so routed windows split off the back.
+            drafts.sort_by(|a, b| {
+                b.depart_s
+                    .partial_cmp(&a.depart_s)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            draft_queues.push(drafts);
         }
+        let planned_total: usize = draft_queues.iter().map(Vec::len).sum();
 
         let mut dynamics =
             EdgeDynamics::new(&self.network, self.scenario.traffic.signal_cycle_s, seed);
@@ -349,16 +415,24 @@ impl SimulationRunner {
         );
 
         // Pending agents sorted by departure (latest first so we pop the back).
-        let mut pending: Vec<u32> = (0..agents.len() as u32).collect();
-        pending.sort_by(|a, b| {
-            agents[*b as usize]
-                .depart_s
-                .partial_cmp(&agents[*a as usize].depart_s)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                .then(b.cmp(a))
-        });
+        let mut agents: Vec<Agent> = Vec::new();
+        let mut pending: Vec<u32> = Vec::new();
         let mut spawn_retry: Vec<u32> = Vec::new();
         let mut active: Vec<u32> = Vec::new();
+
+        // Route the first departure window before tick 0.
+        self.update_status(|status| {
+            status.state = SimRunState::Dispatching;
+            status.message = format!("routing initial departures ({planned_total} agents planned)");
+        });
+        self.dispatch_window(
+            DISPATCH_HORIZON_S,
+            &mut draft_queues,
+            &mut agents,
+            &mut pending,
+            bbox,
+        )?;
+        let mut next_dispatch_t = DISPATCH_INTERVAL_S;
 
         let mut global_speed_factor = 1.0f64;
         let mut event_rng = SimRng::derive(seed, 0xE7E27);
@@ -376,7 +450,7 @@ impl SimulationRunner {
 
         self.update_status(|status| {
             status.state = SimRunState::Running;
-            status.agents_total = agents.len() as u32;
+            status.agents_total = planned_total as u32;
             status.message = "running".to_string();
         });
         self.publish_fleet_status(&agents, &active);
@@ -384,6 +458,7 @@ impl SimulationRunner {
         let total_ticks = (duration_s / tick_s).ceil() as u64;
         let mut tick: u64 = 0;
         let mut last_status_update = Instant::now();
+        let mut still_active: Vec<u32> = Vec::new();
 
         while tick <= total_ticks {
             let t = tick as f64 * tick_s;
@@ -425,6 +500,18 @@ impl SimulationRunner {
                 break;
             }
 
+            // Route the next departure window of planned agents.
+            if t + 1e-9 >= next_dispatch_t && draft_queues.iter().any(|queue| !queue.is_empty()) {
+                self.dispatch_window(
+                    t + DISPATCH_HORIZON_S,
+                    &mut draft_queues,
+                    &mut agents,
+                    &mut pending,
+                    bbox,
+                )?;
+                next_dispatch_t = t + DISPATCH_INTERVAL_S;
+            }
+
             // Spawn agents whose departure time has come.
             let mut retry = std::mem::take(&mut spawn_retry);
             for agent_index in retry.drain(..) {
@@ -454,7 +541,8 @@ impl SimulationRunner {
 
             // Move active agents.
             let check_reroutes = tick % reroute_check_ticks == 0;
-            let mut still_active: Vec<u32> = Vec::with_capacity(active.len());
+            still_active.clear();
+            still_active.reserve(active.len());
             for &agent_index in &active {
                 let arrived = self.move_agent(
                     agent_index,
@@ -480,20 +568,18 @@ impl SimulationRunner {
                     still_active.push(agent_index);
                 }
             }
-            active = still_active;
+            std::mem::swap(&mut active, &mut still_active);
 
             // Reroute jammed agents with live congested costs (budgeted).
             if check_reroutes && !reroute_candidates.is_empty() {
-                let mut processed = 0usize;
                 let candidates = std::mem::take(&mut reroute_candidates);
-                for agent_index in candidates {
-                    if processed >= reroute_budget_per_round {
-                        break;
-                    }
-                    if self.try_reroute(agent_index, t, &mut agents, &dynamics) {
-                        processed += 1;
-                    }
-                }
+                self.process_reroutes(
+                    t,
+                    candidates,
+                    reroute_budget_per_round,
+                    &mut agents,
+                    &dynamics,
+                );
             }
 
             // Frames.
@@ -521,7 +607,8 @@ impl SimulationRunner {
             // Status heartbeat.
             if last_status_update.elapsed().as_millis() >= 200 {
                 let active_count = active.len() as u32;
-                let pending_count = (pending.len() + spawn_retry.len()) as u32;
+                let unrouted: usize = draft_queues.iter().map(Vec::len).sum();
+                let pending_count = (pending.len() + spawn_retry.len() + unrouted) as u32;
                 let arrived: u32 = self.fleets.iter().map(|fleet| fleet.arrived).sum();
                 let wall = wall_start.elapsed().as_millis() as u64;
                 self.update_status(|status| {
@@ -540,6 +627,7 @@ impl SimulationRunner {
                 && active.is_empty()
                 && pending.is_empty()
                 && spawn_retry.is_empty()
+                && draft_queues.iter().all(Vec::is_empty)
                 && tick > 0
             {
                 break;
@@ -560,6 +648,15 @@ impl SimulationRunner {
         // Pending agents never made it onto the network.
         for agent_index in pending.iter().chain(spawn_retry.iter()) {
             agents[*agent_index as usize].status = AgentStatus::NeverDeparted;
+        }
+
+        // Planned agents whose departure window never arrived were never
+        // routed; record them as never-departed without paying for routing.
+        for (fleet_index, queue) in draft_queues.into_iter().enumerate() {
+            self.fleets[fleet_index].report.requested += queue.len() as u32;
+            for draft in queue {
+                agents.push(Agent::never_departed(fleet_index as u16, &draft));
+            }
         }
 
         let result = self.build_result(
@@ -673,6 +770,7 @@ impl SimulationRunner {
                             t,
                         ) {
                             Ok((dispatched, report)) => {
+                                let added = report.requested;
                                 runtime.report = report;
                                 let mut new_indices: Vec<u32> = Vec::new();
                                 for dispatch in dispatched {
@@ -688,8 +786,7 @@ impl SimulationRunner {
                                         .then(b.cmp(a))
                                 });
                                 self.fleets.push(runtime);
-                                let total = agents.len() as u32;
-                                self.update_status(|status| status.agents_total = total);
+                                self.update_status(|status| status.agents_total += added);
                             }
                             Err(error) => {
                                 self.update_status(|status| {
@@ -707,6 +804,56 @@ impl SimulationRunner {
                 }
             }
         }
+    }
+
+    /// Route every planned draft departing before `horizon_end_s` and queue
+    /// the resulting agents for spawning. Draft queues are sorted with the
+    /// latest departure first, so each window splits off the queue tail.
+    fn dispatch_window(
+        &mut self,
+        horizon_end_s: f64,
+        draft_queues: &mut [Vec<AgentDraft>],
+        agents: &mut Vec<Agent>,
+        pending: &mut Vec<u32>,
+        bbox: [f64; 4],
+    ) -> Result<()> {
+        let mut appended = false;
+        for (fleet_index, queue) in draft_queues.iter_mut().enumerate() {
+            if self.shared.cancelled.load(Ordering::Relaxed) {
+                break;
+            }
+            let split = queue.partition_point(|draft| draft.depart_s > horizon_end_s);
+            if split == queue.len() {
+                continue;
+            }
+            let mut window = queue.split_off(split);
+            let fleet = &self.fleets[fleet_index];
+            let (dispatched, report) = route_drafts(
+                &fleet.config,
+                fleet_index as u16,
+                &fleet.engine,
+                bbox,
+                &self.zones,
+                &mut window,
+            )
+            .with_context(|| format!("dispatching fleet '{}'", fleet.config.fleet_id))?;
+            merge_dispatch_report(&mut self.fleets[fleet_index].report, report);
+            for dispatch in dispatched {
+                pending.push(agents.len() as u32);
+                agents.push(Agent::from_dispatch(dispatch));
+                appended = true;
+            }
+        }
+        if appended {
+            pending.sort_by(|a, b| {
+                agents[*b as usize]
+                    .depart_s
+                    .partial_cmp(&agents[*a as usize].depart_s)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then(b.cmp(a))
+            });
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -741,11 +888,7 @@ impl SimulationRunner {
         }
         dynamics.occupancy_pcu[first_edge] += agent.pcu;
         dynamics.traversals[first_edge] += 1;
-        dynamics
-            .bin_acc
-            .entry(first_edge as u32)
-            .or_default()
-            .entered += 1;
+        dynamics.bin_acc_mut(first_edge).entered += 1;
         agent.status = AgentStatus::Active;
         agent.route_pos = 0;
         agent.pos_m = 0.0;
@@ -884,7 +1027,7 @@ impl SimulationRunner {
                 dynamics.exits_pcu[edge] = agent.pcu;
             }
             dynamics.traversals[next] += 1;
-            dynamics.bin_acc.entry(next as u32).or_default().entered += 1;
+            dynamics.bin_acc_mut(next).entered += 1;
             agent.distance_m += distance_to_end;
             if speed_table[edge] > 0.0 {
                 agent.freeflow_time_s += length / speed_table[edge];
@@ -960,72 +1103,100 @@ impl SimulationRunner {
         false
     }
 
-    /// Recompute the rest of the route from the end of the agent's current
-    /// edge using live congested costs. Returns true if a search ran.
-    fn try_reroute(
+    /// Recompute routes for jammed agents using live congested costs. The
+    /// searches only read `dynamics`, so they run in parallel; route swaps
+    /// are applied sequentially in candidate order to stay deterministic.
+    fn process_reroutes(
         &mut self,
-        agent_index: u32,
         t: f64,
+        candidates: Vec<u32>,
+        budget: usize,
         agents: &mut [Agent],
         dynamics: &EdgeDynamics,
-    ) -> bool {
-        let agent = &mut agents[agent_index as usize];
-        if agent.status != AgentStatus::Active || agent.on_last_edge() {
-            agent.force_reroute = false;
-            return false;
+    ) {
+        struct RerouteJob {
+            agent_index: u32,
+            current: u32,
+            goal: u32,
+            speed_table: usize,
+            mode_bit: u16,
+            forced: bool,
         }
-        let fleet = &self.fleets[agent.fleet as usize];
-        let current = agent.current_edge();
-        let goal = *agent.route.last().expect("route not empty");
-        let forced = agent.force_reroute;
 
-        let new_path = astar_route(
-            &self.network,
-            dynamics,
-            &self.scenario.traffic,
-            fleet.speed_table,
-            fleet.mode_bit,
-            current,
-            goal,
-        );
-        agent.force_reroute = false;
-        agent.last_reroute_s = t;
-
-        let Some(new_path) = new_path else {
-            return true;
-        };
-
-        // Keep the old route unless the new one is meaningfully better
-        // (forced reroutes always switch — the old route is blocked).
-        if !forced {
-            let old_cost = remaining_route_cost(
-                &self.network,
-                dynamics,
-                &self.scenario.traffic,
-                fleet.speed_table,
-                &agent.route[agent.route_pos as usize..],
-            );
-            let new_cost = remaining_route_cost(
-                &self.network,
-                dynamics,
-                &self.scenario.traffic,
-                fleet.speed_table,
-                &new_path,
-            );
-            if new_cost >= old_cost * 0.95 {
-                return true;
+        let mut jobs: Vec<RerouteJob> = Vec::new();
+        for agent_index in candidates {
+            if jobs.len() >= budget {
+                break;
             }
+            let agent = &mut agents[agent_index as usize];
+            if agent.status != AgentStatus::Active || agent.on_last_edge() {
+                agent.force_reroute = false;
+                continue;
+            }
+            let fleet = &self.fleets[agent.fleet as usize];
+            jobs.push(RerouteJob {
+                agent_index,
+                current: agent.current_edge(),
+                goal: *agent.route.last().expect("route not empty"),
+                speed_table: fleet.speed_table,
+                mode_bit: fleet.mode_bit,
+                forced: agent.force_reroute,
+            });
         }
 
-        // new_path starts at the current edge.
-        let mut route = Vec::with_capacity(agent.route_pos as usize + new_path.len());
-        route.extend_from_slice(&agent.route[..agent.route_pos as usize]);
-        route.extend_from_slice(&new_path);
-        agent.route_pos = agent.route_pos.min((route.len() - 1) as u32);
-        agent.route = route;
-        agent.reroutes += 1;
-        self.fleets[agent.fleet as usize].reroutes += 1;
-        true
+        let network = &self.network;
+        let traffic = &self.scenario.traffic;
+        let new_paths: Vec<Option<Vec<u32>>> = jobs
+            .par_iter()
+            .map_init(AstarScratch::default, |scratch, job| {
+                astar_route(
+                    network,
+                    dynamics,
+                    traffic,
+                    job.speed_table,
+                    job.mode_bit,
+                    job.current,
+                    job.goal,
+                    scratch,
+                )
+            })
+            .collect();
+
+        for (job, new_path) in jobs.into_iter().zip(new_paths) {
+            let agent = &mut agents[job.agent_index as usize];
+            agent.force_reroute = false;
+            agent.last_reroute_s = t;
+
+            let Some(new_path) = new_path else {
+                continue;
+            };
+
+            // Keep the old route unless the new one is meaningfully better
+            // (forced reroutes always switch — the old route is blocked).
+            if !job.forced {
+                let old_cost = remaining_route_cost(
+                    network,
+                    dynamics,
+                    traffic,
+                    job.speed_table,
+                    &agent.route[agent.route_pos as usize..],
+                );
+                let new_cost =
+                    remaining_route_cost(network, dynamics, traffic, job.speed_table, &new_path);
+                if new_cost >= old_cost * 0.95 {
+                    continue;
+                }
+            }
+
+            // new_path starts at the current edge.
+            let mut route = Vec::with_capacity(agent.route_pos as usize + new_path.len());
+            route.extend_from_slice(&agent.route[..agent.route_pos as usize]);
+            route.extend_from_slice(&new_path);
+            agent.route_pos = agent.route_pos.min((route.len() - 1) as u32);
+            agent.route = route;
+            agent.reroutes += 1;
+            self.fleets[agent.fleet as usize].reroutes += 1;
+        }
     }
 
     fn capture_frame(&self, t: f64, agents: &[Agent], active: &[u32]) -> Frame {
@@ -1183,6 +1354,18 @@ impl SimulationRunner {
     }
 }
 
+fn merge_dispatch_report(into: &mut DispatchReport, report: DispatchReport) {
+    into.requested += report.requested;
+    into.dispatched += report.dispatched;
+    into.failed += report.failed;
+    for error in report.sample_errors {
+        if into.sample_errors.len() >= 5 {
+            break;
+        }
+        into.sample_errors.push(error);
+    }
+}
+
 fn make_fleet_runtime(
     config: FleetConfig,
     profiles: &BTreeMap<String, Arc<PreparedRoutingEngine>>,
@@ -1243,7 +1426,7 @@ fn edge_factor(
     if factor < 0.5 {
         dynamics.congested_seconds[edge] += dt as f32;
     }
-    let acc = dynamics.bin_acc.entry(edge as u32).or_default();
+    let acc = dynamics.bin_acc_mut(edge);
     acc.occ_sum += load;
     acc.factor_sum += factor;
     acc.ticks += 1;
@@ -1344,8 +1527,18 @@ impl PartialOrd for HeapEntry {
     }
 }
 
+/// Search state reused across A* calls on the same worker thread so repeated
+/// reroutes don't reallocate (and rehash) fresh maps every time.
+#[derive(Default)]
+struct AstarScratch {
+    best: FxHashMap<u32, f32>,
+    parent: FxHashMap<u32, u32>,
+    heap: BinaryHeap<HeapEntry>,
+}
+
 /// A* over the edge graph with live congested costs. Returns the edge path
 /// starting at `start_edge` and ending at `goal_edge` (inclusive).
+#[allow(clippy::too_many_arguments)]
 fn astar_route(
     network: &SimNetwork,
     dynamics: &EdgeDynamics,
@@ -1354,6 +1547,7 @@ fn astar_route(
     mode_bit: u16,
     start_edge: u32,
     goal_edge: u32,
+    scratch: &mut AstarScratch,
 ) -> Option<Vec<u32>> {
     if start_edge == goal_edge {
         return Some(vec![start_edge]);
@@ -1373,9 +1567,10 @@ fn astar_route(
         ) / max_speed) as f32
     };
 
-    let mut best: HashMap<u32, f32> = HashMap::new();
-    let mut parent: HashMap<u32, u32> = HashMap::new();
-    let mut heap: BinaryHeap<HeapEntry> = BinaryHeap::new();
+    let AstarScratch { best, parent, heap } = scratch;
+    best.clear();
+    parent.clear();
+    heap.clear();
     best.insert(start_edge, 0.0);
     heap.push(HeapEntry {
         estimate: heuristic(start_edge),
@@ -1431,21 +1626,24 @@ fn astar_route(
 
 fn flush_bin(dynamics: &mut EdgeDynamics, start_s: f64, end_s: f64, tick_s: f64) -> EdgeBin {
     let ticks_in_bin = (((end_s - start_s) / tick_s).round() as u32).max(1);
-    let mut stats: Vec<EdgeBinStat> = dynamics
-        .bin_acc
-        .drain()
-        .map(|(edge, acc)| EdgeBinStat {
-            edge,
-            mean_occupancy_pcu: acc.occ_sum / ticks_in_bin as f32,
-            mean_speed_factor: if acc.ticks > 0 {
-                acc.factor_sum / acc.ticks as f32
-            } else {
-                1.0
-            },
-            entered: acc.entered,
+    let mut touched = std::mem::take(&mut dynamics.bin_touched);
+    touched.sort_unstable();
+    let stats: Vec<EdgeBinStat> = touched
+        .into_iter()
+        .map(|edge| {
+            let acc = std::mem::take(&mut dynamics.bin_acc[edge as usize]);
+            EdgeBinStat {
+                edge,
+                mean_occupancy_pcu: acc.occ_sum / ticks_in_bin as f32,
+                mean_speed_factor: if acc.ticks > 0 {
+                    acc.factor_sum / acc.ticks as f32
+                } else {
+                    1.0
+                },
+                entered: acc.entered,
+            }
         })
         .collect();
-    stats.sort_by_key(|stat| stat.edge);
     EdgeBin {
         start_s,
         end_s,

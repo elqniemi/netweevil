@@ -56,9 +56,11 @@ pub struct DispatchReport {
     pub sample_errors: Vec<String>,
 }
 
-struct AgentDraft {
+/// Sampled-but-unrouted agent. Planning is cheap (sampling only); routing is
+/// the expensive step and happens in departure-time windows during the run.
+pub(crate) struct AgentDraft {
     agent_id: u32,
-    depart_s: f64,
+    pub(crate) depart_s: f64,
     rng: SimRng,
     overtake: f32,
     reroute: f32,
@@ -67,8 +69,8 @@ struct AgentDraft {
     pcu: f32,
     cooldown: f32,
     wants_alternative: bool,
-    origin: [f64; 2],
-    destination: [f64; 2],
+    pub(crate) origin: [f64; 2],
+    pub(crate) destination: [f64; 2],
 }
 
 /// Quantized coordinate key (1e-7 deg ~ 1 cm) for snap/pair deduplication.
@@ -297,10 +299,10 @@ fn choose_path(paths: &[Vec<u32>], wants_alternative: bool, rng: &mut SimRng) ->
     }
 }
 
-/// Generate and route every agent of a fleet. `id_offset` keeps agent ids
-/// globally unique and deterministic across fleets and mid-run spawns.
-#[allow(clippy::too_many_arguments)]
-pub fn dispatch_fleet(
+/// Sample departures, behavior, and OD pairs for every agent of a fleet
+/// without routing anything. `id_offset` keeps agent ids globally unique and
+/// deterministic across fleets and mid-run spawns.
+pub(crate) fn plan_fleet(
     fleet: &FleetConfig,
     fleet_index: u16,
     engine: &Arc<PreparedRoutingEngine>,
@@ -309,7 +311,7 @@ pub fn dispatch_fleet(
     seed: u64,
     id_offset: u32,
     depart_offset_s: f64,
-) -> Result<(Vec<DispatchedAgent>, DispatchReport)> {
+) -> Result<Vec<AgentDraft>> {
     let mode = engine.metrics().mode;
     let pcu_default = default_pcu_for_mode(mode);
 
@@ -336,7 +338,6 @@ pub fn dispatch_fleet(
     );
     let mut sequence_t = 0.0f64;
 
-    // Phase 1: draw departures, behavior, and first-attempt OD per agent.
     let mut drafts = Vec::with_capacity(fleet.agent_count as usize);
     for index in 0..fleet.agent_count {
         let agent_id = id_offset + index;
@@ -367,6 +368,62 @@ pub fn dispatch_fleet(
             destination,
         });
     }
+    Ok(drafts)
+}
+
+/// Generate and route every agent of a fleet in one call (used for mid-run
+/// fleet spawns; the initial dispatch routes drafts lazily in departure
+/// windows instead).
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_fleet(
+    fleet: &FleetConfig,
+    fleet_index: u16,
+    engine: &Arc<PreparedRoutingEngine>,
+    network_bbox: [f64; 4],
+    zones: &[PreparedZone],
+    seed: u64,
+    id_offset: u32,
+    depart_offset_s: f64,
+) -> Result<(Vec<DispatchedAgent>, DispatchReport)> {
+    let mut drafts = plan_fleet(
+        fleet,
+        fleet_index,
+        engine,
+        network_bbox,
+        zones,
+        seed,
+        id_offset,
+        depart_offset_s,
+    )?;
+    route_drafts(fleet, fleet_index, engine, network_bbox, zones, &mut drafts)
+}
+
+/// Route a batch of drafts (phases 2-4 of dispatch): snap unique endpoints,
+/// route unique (origin, destination, alternatives) pairs, then assign paths.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn route_drafts(
+    fleet: &FleetConfig,
+    fleet_index: u16,
+    engine: &Arc<PreparedRoutingEngine>,
+    network_bbox: [f64; 4],
+    zones: &[PreparedZone],
+    drafts: &mut [AgentDraft],
+) -> Result<(Vec<DispatchedAgent>, DispatchReport)> {
+    let use_explicit_pairs = !fleet.demand.od_pairs.is_empty();
+    let origins = prepare_distribution(
+        &fleet.demand.origins,
+        network_bbox,
+        zones,
+        true,
+        &fleet.fleet_id,
+    )?;
+    let destinations = prepare_distribution(
+        &fleet.demand.destinations,
+        network_bbox,
+        zones,
+        false,
+        &fleet.fleet_id,
+    )?;
 
     // Phase 2: snap every unique endpoint once (origin and destination
     // snapping differ, so they are cached separately).
@@ -393,7 +450,7 @@ pub fn dispatch_fleet(
     };
     let mut unique_origins: BTreeMap<CoordKey, [f64; 2]> = BTreeMap::new();
     let mut unique_destinations: BTreeMap<CoordKey, [f64; 2]> = BTreeMap::new();
-    for draft in &drafts {
+    for draft in drafts.iter() {
         unique_origins.insert(coord_key(draft.origin), draft.origin);
         unique_destinations.insert(coord_key(draft.destination), draft.destination);
     }
@@ -404,7 +461,7 @@ pub fn dispatch_fleet(
     // once against the shared snap candidates.
     type PairKey = (CoordKey, CoordKey, bool);
     let mut unique_pairs: BTreeMap<PairKey, ([f64; 2], [f64; 2])> = BTreeMap::new();
-    for draft in &drafts {
+    for draft in drafts.iter() {
         unique_pairs.insert(
             (
                 coord_key(draft.origin),
@@ -532,7 +589,7 @@ pub fn dispatch_fleet(
 
     let mut agents = Vec::with_capacity(results.len());
     let mut report = DispatchReport {
-        requested: fleet.agent_count,
+        requested: drafts.len() as u32,
         ..DispatchReport::default()
     };
     for result in results {

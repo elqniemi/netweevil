@@ -29,7 +29,11 @@ pub(crate) fn build_route_alternatives(
     let mut accepted = Vec::new();
     let mut tried_bans = HashSet::new();
     let max_generalized_cost = alternative_max_generalized_cost(best_summary, alternatives);
-    for &banned_edge in &best_path.edge_indexes {
+    // Ban edges sampled evenly along the best path instead of scanning it
+    // front-to-back: adjacent bans produce near-identical detours, and each
+    // attempt is a full route search that must stay bounded.
+    let max_attempts = alternatives.max_search_attempts.max(1);
+    for banned_edge in evenly_spaced(&best_path.edge_indexes, max_attempts) {
         if accepted.len() + 1 >= alternatives.max_routes {
             break;
         }
@@ -152,6 +156,17 @@ pub(crate) fn build_route_alternatives(
     }
 
     Ok(accepted)
+}
+
+/// Up to `count` elements sampled at even intervals across `items`,
+/// preserving order and starting from the first element.
+fn evenly_spaced(items: &[usize], count: usize) -> Vec<usize> {
+    if items.len() <= count {
+        return items.to_vec();
+    }
+    (0..count)
+        .map(|slot| items[slot * items.len() / count])
+        .collect()
 }
 
 fn alternative_max_generalized_cost(

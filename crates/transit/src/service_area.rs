@@ -193,7 +193,6 @@ impl OriginSearchScratch {
     }
 }
 
-#[expect(clippy::too_many_arguments)]
 fn search_service_area_origin(
     runtime: &TransitRuntime<'_>,
     request: &TransitServiceAreaRequest,
