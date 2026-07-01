@@ -30,7 +30,7 @@ The production surface is the `netweevil` CLI plus a preloadable HTTP API. The Q
 
 ## Requirements
 
-- Rust toolchain with edition 2024 support. The crates declare `rust-version = 1.85`; the Docker build uses Rust `1.88`.
+- Rust toolchain with edition 2024 support. The crates declare `rust-version = 1.96.1`; the Docker build uses Rust `1.96.1`.
 - Docker and Docker Compose for the containerized API path.
 - QGIS `3.28` through `4.99` for the plugin.
 - `curl` for API smoke tests.

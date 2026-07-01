@@ -57,7 +57,7 @@ docker compose up -d api
 
 ## Coding Notes
 
-- This is a Rust 2024 workspace with `rust-version = 1.85`.
+- This is a Rust 2024 workspace with `rust-version = 1.96.1`.
 - Prefer existing crate boundaries and request/result models over introducing cross-crate shortcuts.
 - Keep persisted state under `.netweevil/`; do not commit generated local state, imported datasets, or large derived bundles.
 - For CLI/API behavior changes, update examples or README snippets when user-facing commands or payloads change.
@@ -70,4 +70,3 @@ docker compose up -d api
 - For routing/profile/query changes, include fixture-based coverage using `examples/` data when practical.
 - For API changes, check health/readiness and at least one affected endpoint against a local `api serve` run when feasible.
 - For QGIS plugin changes, package the plugin and do static import/compatibility checks where a full QGIS runtime is unavailable.
-
