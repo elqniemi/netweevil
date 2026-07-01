@@ -6,7 +6,9 @@ use netweevil_core::{
     EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId, EdgeNameBundle, NodeId,
     SpatialIndexCell, TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyNode,
 };
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
+
+use rustc_hash::FxHashMap;
 
 use crate::import::{DatasetImportProgress, DatasetImportStage, PercentReporter, emit_progress};
 use crate::restrictions::build_turn_restrictions;
@@ -332,11 +334,19 @@ fn label_weak_components(node_count: usize, edges: &[DirectedEdge]) -> WeakCompo
 }
 
 fn find_component_root(parent: &mut [u32], index: usize) -> u32 {
-    let parent_index = parent[index] as usize;
-    if parent_index != index {
-        parent[index] = find_component_root(parent, parent_index);
+    // Iterative two-pass find with full path compression: long parent
+    // chains on continent graphs would overflow the stack recursively.
+    let mut root = index as u32;
+    while parent[root as usize] != root {
+        root = parent[root as usize];
     }
-    parent[index]
+    let mut cursor = index as u32;
+    while parent[cursor as usize] != root {
+        let next = parent[cursor as usize];
+        parent[cursor as usize] = root;
+        cursor = next;
+    }
+    root
 }
 
 fn union_components(parent: &mut [u32], rank: &mut [u8], left: usize, right: usize) {
@@ -362,13 +372,13 @@ fn union_components(parent: &mut [u32], rank: &mut [u8], left: usize, right: usi
 }
 
 fn build_nodes(
-    node_coords: &HashMap<i64, (f64, f64)>,
-) -> (Vec<TopologyNode>, HashMap<i64, (NodeId, f64, f64)>) {
+    node_coords: &FxHashMap<i64, (f64, f64)>,
+) -> (Vec<TopologyNode>, FxHashMap<i64, (NodeId, f64, f64)>) {
     let mut used_nodes = node_coords.keys().copied().collect::<Vec<_>>();
     used_nodes.sort_unstable();
 
     let mut nodes = Vec::with_capacity(used_nodes.len());
-    let mut lookup = HashMap::with_capacity(used_nodes.len());
+    let mut lookup = FxHashMap::with_capacity_and_hasher(used_nodes.len(), Default::default());
     for osm_node_id in used_nodes {
         let Some(&(lon, lat)) = node_coords.get(&osm_node_id) else {
             continue;

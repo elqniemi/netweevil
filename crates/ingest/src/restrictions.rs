@@ -4,6 +4,8 @@ use netweevil_core::{
 use osmpbfreader::{OsmId, Relation, Tags};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
+use rustc_hash::FxHashMap;
+
 use crate::classify::tag;
 use crate::scan::PendingWay;
 
@@ -32,7 +34,7 @@ pub(crate) enum ViaSpec {
 pub(crate) fn build_turn_restrictions(
     candidates: &[TurnRestrictionCandidate],
     ways: &[PendingWay],
-    node_lookup: &HashMap<i64, (NodeId, f64, f64)>,
+    node_lookup: &FxHashMap<i64, (NodeId, f64, f64)>,
     edges: &[DirectedEdge],
 ) -> Vec<TurnRestriction> {
     let mut incoming_by_way_and_node: HashMap<(i64, NodeId), Vec<EdgeId>> = HashMap::new();
@@ -319,7 +321,7 @@ fn way_edge_sequence_between(
     way: &PendingWay,
     start_osm_node_id: i64,
     end_osm_node_id: i64,
-    node_lookup: &HashMap<i64, (NodeId, f64, f64)>,
+    node_lookup: &FxHashMap<i64, (NodeId, f64, f64)>,
     edge_by_way_and_nodes: &HashMap<(i64, NodeId, NodeId), EdgeId>,
 ) -> Option<Vec<EdgeId>> {
     if start_osm_node_id == end_osm_node_id {
@@ -585,7 +587,7 @@ mod tests {
             mode_mask: AccessMask::new(AccessMask::CAR),
         }];
         let ways = vec![];
-        let node_lookup = HashMap::from([(100_i64, (NodeId(1), 0.0, 0.0))]);
+        let node_lookup = super::FxHashMap::from_iter([(100_i64, (NodeId(1), 0.0, 0.0))]);
         let edges = vec![edge(0, 0, 1, 10), edge(1, 1, 2, 11), edge(2, 1, 3, 12)];
 
         let restrictions = build_turn_restrictions(&candidates, &ways, &node_lookup, &edges);
@@ -643,7 +645,7 @@ mod tests {
             pending_way(20, &[2, 3, 4]),
             pending_way(30, &[4, 5]),
         ];
-        let node_lookup = HashMap::from([
+        let node_lookup = super::FxHashMap::from_iter([
             (1_i64, (NodeId(0), 0.0, 0.0)),
             (2_i64, (NodeId(1), 0.0, 0.0)),
             (3_i64, (NodeId(2), 0.0, 0.0)),

@@ -1174,6 +1174,7 @@ dependencies = [
  "netweevil-persist",
  "osmpbfreader",
  "rayon",
+ "rustc-hash",
  "sha2",
 ]
 

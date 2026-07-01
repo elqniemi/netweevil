@@ -17,6 +17,7 @@ netweevil-persist = { path = "../persist" }
 netweevil-manifest = { path = "../manifest" }
 osmpbfreader.workspace = true
 rayon.workspace = true
+rustc-hash.workspace = true
 sha2.workspace = true
 
 [lints]

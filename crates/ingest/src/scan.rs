@@ -8,7 +8,7 @@ use std::sync::{
 use anyhow::{Context, Result};
 use netweevil_core::{AccessMask, HighwayClass, RoadClass, SmoothnessClass, SurfaceClass};
 use osmpbfreader::{OsmObj, OsmPbfReader};
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::classify::{
     classify_directional_access, classify_smoothness, classify_surface, classify_toll,
@@ -51,8 +51,8 @@ pub(crate) fn scan_routable_objects(
 ) -> Result<(
     Vec<PendingWay>,
     Vec<TurnRestrictionCandidate>,
-    HashSet<i64>,
-    HashSet<i64>,
+    FxHashSet<i64>,
+    FxHashSet<i64>,
     ObjectCounts,
 )> {
     let file = File::open(source_path)
@@ -62,8 +62,8 @@ pub(crate) fn scan_routable_objects(
     let mut reader = OsmPbfReader::new(counting_file);
     let mut ways = Vec::new();
     let mut restriction_candidates = Vec::new();
-    let mut node_ids = HashSet::new();
-    let mut traffic_signal_nodes = HashSet::new();
+    let mut node_ids = FxHashSet::default();
+    let mut traffic_signal_nodes = FxHashSet::default();
     let mut counts = ObjectCounts::default();
     let mut reporter = PercentReporter::starting_at_zero();
 
@@ -165,15 +165,15 @@ pub(crate) fn scan_routable_objects(
 pub(crate) fn load_node_coords(
     source_path: &Path,
     _source_size_bytes: u64,
-    needed_nodes: &HashSet<i64>,
+    needed_nodes: &FxHashSet<i64>,
     progress: &mut impl FnMut(DatasetImportProgress),
-) -> Result<HashMap<i64, (f64, f64)>> {
+) -> Result<FxHashMap<i64, (f64, f64)>> {
     let file = File::open(source_path)
         .with_context(|| format!("opening dataset source {}", source_path.display()))?;
     let bytes_read = Arc::new(AtomicU64::new(0));
     let counting_file = CountingReader::new(file, Arc::clone(&bytes_read));
     let mut reader = OsmPbfReader::new(counting_file);
-    let mut coords = HashMap::with_capacity(needed_nodes.len());
+    let mut coords = FxHashMap::with_capacity_and_hasher(needed_nodes.len(), Default::default());
     let mut reporter = PercentReporter::new();
 
     emit_progress(
