@@ -27,6 +27,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bundle persistence: topology, acceleration, and compiled-profile bundles
+  use a sectioned fast-load format whose large primitive arrays are read
+  with one memcpy per array from the memory-mapped file; bundles written
+  by earlier versions still load via the bincode fallback.
+- CCH preprocessing: the contraction now stores arcs in per-state sorted
+  pending lists (no global hash set, no arc table), cutting peak memory
+  roughly 4x, and the recursive-bisection ordering and CSR sorts run in
+  parallel.
 - Transit service areas: static per-stop transfer adjacency (built once per
   prepared router), parallel per-origin searches, and memoized shape-point
   lookups replace per-state spatial scans.
@@ -49,4 +57,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   graph per request.
 - Missing CCH halves (dataset bundle or compiled profile weights) now log a
   warning instead of silently falling back to the exact engine.
+- One shared geodesic implementation in `netweevil_core::geo` replaces the
+  per-crate haversine copies; ingest node tables use FxHash and the
+  component union-find is iterative (no stack overflow on long chains).
+- Snapping refuses full linear-scan fallbacks on large graphs, and matrix
+  requests refuse to materialize more than 4M cells.
+- CI denies clippy warnings and adds MSRV, macOS, and rustdoc jobs; all
+  crates carry crates.io metadata and crate-level documentation.
 - Workspace toolchain aligned on Rust 1.96.1.

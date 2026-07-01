@@ -1,7 +1,7 @@
 //! Local state layout and IO for the `.netweevil/` directory: dataset,
 //! profile, and run manifests plus binary bundle reading and writing.
 //!
-//! Large bundles use a sectioned fast-load format (see [`sectioned`]) whose
+//! Large bundles use a sectioned fast-load format whose
 //! big primitive arrays load with one memcpy per array from the mapped
 //! file; bundles written by earlier versions fall back to bincode parsing.
 

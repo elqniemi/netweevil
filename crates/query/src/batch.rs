@@ -167,7 +167,7 @@ pub(crate) fn execute_od_with_graph(
         diagnostics: Vec::new(),
         warnings: {
             let mut warnings = vec![
-                "Batch OD execution now reuses exact single-source search trees and duplicate snapped solves within the batch; multi-edge restriction cases still fall back to per-pair automaton search.".to_string(),
+                "Batch OD execution reuses exact CCH search spaces (or single-source search trees without acceleration) and duplicate snapped solves within the batch; multi-edge restriction cases still fall back to per-pair automaton search.".to_string(),
             ];
             if ignored_count > 0 {
                 warnings.push(batch_ignored_unreachable_warning("OD", ignored_count));
@@ -345,7 +345,7 @@ pub(crate) fn execute_matrix_with_graph(
         diagnostics: Vec::new(),
         warnings: {
             let mut warnings = vec![
-                "Matrix execution now reuses exact single-source search trees and duplicate snapped solves within the batch; multi-edge restriction cases still fall back to per-cell automaton search.".to_string(),
+                "Matrix execution reuses exact CCH search spaces (or single-source search trees without acceleration) and duplicate snapped solves within the batch; multi-edge restriction cases still fall back to per-cell automaton search.".to_string(),
             ];
             if ignored_count > 0 {
                 warnings.push(batch_ignored_unreachable_warning("matrix", ignored_count));

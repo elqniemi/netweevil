@@ -223,6 +223,13 @@ first/last mile, for example cycle to the station but walk from the final
 stop, set `modes.mixed_access_egress: true` (see
 `examples/requests/transit_bike_access_groningen.json`).
 
+Access and egress legs are priced by straight-line distance over the mode
+speed by default. Set `modes.street_access: "network"` to price them with
+real street-network travel times instead; the API resolves a loaded street
+profile per access mode (walk requires a foot profile), and candidates fall
+back to the straight-line estimate when no matching profile is loaded.
+Transit service areas accept the same option.
+
 Preload a transit feed into the API:
 
 ```bash
