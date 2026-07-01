@@ -1204,6 +1204,7 @@ dependencies = [
  "anyhow",
  "netweevil-core",
  "netweevil-profile",
+ "rayon",
  "serde",
  "serde_json",
  "serde_yaml",

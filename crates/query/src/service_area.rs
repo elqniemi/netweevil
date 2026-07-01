@@ -4,6 +4,7 @@ use anyhow::{Context, Result, bail};
 use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 
 use crate::*;
+use rayon::prelude::*;
 
 pub fn execute_service_area(
     topology: &TopologyBundle,
@@ -49,6 +50,9 @@ pub(crate) struct ServiceAreaOriginExpansion {
     pub(crate) edge_before_costs: Vec<f64>,
     pub(crate) edge_end_costs: Vec<f64>,
     pub(crate) edge_start_fractions: Vec<f64>,
+    /// Edges reached by the expansion, so downstream consumers iterate the
+    /// reachable ball instead of every edge in the dataset.
+    pub(crate) reached_edges: Vec<u32>,
     pub(crate) diagnostics: Vec<AnalysisDiagnostic>,
     pub(crate) warnings: Vec<String>,
 }
@@ -105,10 +109,56 @@ pub(crate) fn execute_service_area_with_graph(
         .collect::<Vec<_>>();
     let (origin_refs, unique_origin_candidates) = intern_candidate_sets(origin_candidate_sets);
 
-    let mut expansion_cache = HashMap::<
+    // Expansions are independent per unique (origin, metric) pair; build
+    // them in parallel up front and share them afterwards instead of cloning
+    // the per-edge cost arrays per origin.
+    let mut expansion_jobs: Vec<((usize, ServiceAreaMetricKind), (&LabeledPoint, f64))> =
+        Vec::new();
+    let mut seen_expansions = std::collections::HashSet::new();
+    for (origin, origin_ref) in request.origins.iter().zip(&origin_refs) {
+        let Ok(origin_set_id) = origin_ref else {
+            continue;
+        };
+        for (metric_kind, thresholds) in &thresholds_by_metric {
+            let max_threshold = thresholds
+                .last()
+                .map(|threshold| threshold.limit)
+                .unwrap_or_default();
+            if seen_expansions.insert((*origin_set_id, *metric_kind)) {
+                expansion_jobs.push(((*origin_set_id, *metric_kind), (origin, max_threshold)));
+            }
+        }
+    }
+    let expansion_cache: HashMap<
         (usize, ServiceAreaMetricKind),
-        std::result::Result<ServiceAreaOriginExpansion, AnalysisFailure>,
-    >::new();
+        std::result::Result<std::sync::Arc<ServiceAreaOriginExpansion>, AnalysisFailure>,
+    > = expansion_jobs
+        .into_par_iter()
+        .map(|((origin_set_id, metric_kind), (origin, max_threshold))| {
+            let expansion = build_service_area_expansion(
+                topology,
+                metrics,
+                routing_graph,
+                origin,
+                &unique_origin_candidates[origin_set_id],
+                request.snap.max_distance_m,
+                &request.connectivity,
+                metric_kind,
+                max_threshold,
+            )
+            .map(std::sync::Arc::new)
+            .map_err(|error| {
+                analysis_failure(&error).cloned().unwrap_or_else(|| {
+                    AnalysisFailure::new(
+                        error.to_string(),
+                        AnalysisOutcome::Unreachable,
+                        Vec::new(),
+                    )
+                })
+            });
+            ((origin_set_id, metric_kind), expansion)
+        })
+        .collect();
     let mut diagnostics = Vec::new();
     let mut warnings = execution_warnings(metrics);
     let mut threshold_summaries = Vec::new();
@@ -142,34 +192,9 @@ pub(crate) fn execute_service_area_with_graph(
         let mut origin_skipped = false;
 
         for (metric_kind, thresholds) in &thresholds_by_metric {
-            let max_threshold = thresholds
-                .last()
-                .map(|threshold| threshold.limit)
-                .unwrap_or_default();
             let expansion = expansion_cache
-                .entry((origin_set_id, *metric_kind))
-                .or_insert_with(|| {
-                    build_service_area_expansion(
-                        topology,
-                        metrics,
-                        routing_graph,
-                        origin,
-                        &unique_origin_candidates[origin_set_id],
-                        request.snap.max_distance_m,
-                        &request.connectivity,
-                        *metric_kind,
-                        max_threshold,
-                    )
-                    .map_err(|error| {
-                        analysis_failure(&error).cloned().unwrap_or_else(|| {
-                            AnalysisFailure::new(
-                                error.to_string(),
-                                AnalysisOutcome::Unreachable,
-                                Vec::new(),
-                            )
-                        })
-                    })
-                })
+                .get(&(origin_set_id, *metric_kind))
+                .expect("expansion precomputed for every snapped origin/metric")
                 .clone();
 
             let expansion = match expansion {
@@ -206,7 +231,7 @@ pub(crate) fn execute_service_area_with_graph(
                     let segments = service_area_intervals_for_threshold(
                         topology,
                         metrics,
-                        &expansion,
+                        expansion.as_ref(),
                         *metric_kind,
                         threshold.limit,
                         request.boundary_mode,
@@ -251,7 +276,7 @@ pub(crate) fn execute_service_area_with_graph(
                     let cumulative = service_area_intervals_for_threshold(
                         topology,
                         metrics,
-                        &expansion,
+                        expansion.as_ref(),
                         *metric_kind,
                         threshold.limit,
                         request.boundary_mode,
@@ -261,7 +286,7 @@ pub(crate) fn execute_service_area_with_graph(
                             service_area_intervals_for_threshold(
                                 topology,
                                 metrics,
-                                &expansion,
+                                expansion.as_ref(),
                                 *metric_kind,
                                 limit,
                                 request.boundary_mode,
@@ -545,6 +570,7 @@ pub(crate) fn build_service_area_expansion(
     let mut edge_before_costs = vec![f64::INFINITY; edge_count];
     let mut edge_end_costs = vec![f64::INFINITY; edge_count];
     let mut edge_start_fractions = vec![0.0_f64; edge_count];
+    let mut reached_edges = Vec::new();
 
     if routing_graph.has_restriction_sequences() {
         let mut dist = HashMap::<SearchStateKey, f64>::new();
@@ -570,6 +596,7 @@ pub(crate) fn build_service_area_expansion(
                     &mut edge_before_costs,
                     &mut edge_end_costs,
                     &mut edge_start_fractions,
+                    &mut reached_edges,
                     seed.edge_index,
                     seed.before_cost,
                     seed.end_cost,
@@ -639,6 +666,7 @@ pub(crate) fn build_service_area_expansion(
                     &mut edge_before_costs,
                     &mut edge_end_costs,
                     &mut edge_start_fractions,
+                    &mut reached_edges,
                     next_edge,
                     next_before,
                     next_end,
@@ -676,6 +704,7 @@ pub(crate) fn build_service_area_expansion(
                         &mut edge_before_costs,
                         &mut edge_end_costs,
                         &mut edge_start_fractions,
+                        &mut reached_edges,
                         seed.edge_index,
                         seed.before_cost,
                         seed.end_cost,
@@ -732,6 +761,7 @@ pub(crate) fn build_service_area_expansion(
                         &mut edge_before_costs,
                         &mut edge_end_costs,
                         &mut edge_start_fractions,
+                        &mut reached_edges,
                         next_edge,
                         next_before,
                         next_end,
@@ -758,6 +788,7 @@ pub(crate) fn build_service_area_expansion(
         edge_before_costs,
         edge_end_costs,
         edge_start_fractions,
+        reached_edges,
         diagnostics: resolution.diagnostics,
         warnings: resolution.warnings,
     })
@@ -819,12 +850,16 @@ fn update_service_area_edge_best(
     edge_before_costs: &mut [f64],
     edge_end_costs: &mut [f64],
     edge_start_fractions: &mut [f64],
+    reached_edges: &mut Vec<u32>,
     edge_index: usize,
     before_cost: f64,
     end_cost: f64,
     start_fraction: f64,
 ) {
     if end_cost + f64::EPSILON < edge_end_costs[edge_index] {
+        if !edge_end_costs[edge_index].is_finite() {
+            reached_edges.push(edge_index as u32);
+        }
         edge_before_costs[edge_index] = before_cost;
         edge_end_costs[edge_index] = end_cost;
         edge_start_fractions[edge_index] = start_fraction;
@@ -963,8 +998,10 @@ fn service_area_intervals_for_threshold(
     threshold_limit: f64,
     boundary_mode: ServiceAreaBoundaryMode,
 ) -> Vec<ReachableEdgeInterval> {
+    let _ = topology;
     let mut segments = Vec::new();
-    for edge_index in 0..topology.edge_count() {
+    for &edge_index in &expansion.reached_edges {
+        let edge_index = edge_index as usize;
         let before_cost = expansion.edge_before_costs[edge_index];
         let end_cost = expansion.edge_end_costs[edge_index];
         if !before_cost.is_finite() || !end_cost.is_finite() || threshold_limit <= before_cost {

@@ -4,6 +4,7 @@ use anyhow::{Result, bail};
 use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 
 use crate::*;
+use rayon::prelude::*;
 
 pub(crate) fn execute_accessibility_with_graph(
     topology: &TopologyBundle,
@@ -75,8 +76,49 @@ pub(crate) fn execute_accessibility_with_graph(
         })
         .collect::<Vec<_>>();
 
-    let mut expansion_cache =
-        HashMap::<usize, std::result::Result<ServiceAreaOriginExpansion, AnalysisFailure>>::new();
+    // Expansions are independent per unique snapped origin; build them in
+    // parallel up front and share them afterwards instead of cloning the
+    // per-edge cost arrays per origin.
+    let mut expansion_jobs: Vec<(usize, &LabeledPoint)> = Vec::new();
+    let mut seen_expansions = std::collections::HashSet::new();
+    for (origin, origin_ref) in request.origins.points.iter().zip(&origin_refs) {
+        let Ok(origin_set_id) = origin_ref else {
+            continue;
+        };
+        if seen_expansions.insert(*origin_set_id) {
+            expansion_jobs.push((*origin_set_id, origin));
+        }
+    }
+    let expansion_cache: HashMap<
+        usize,
+        std::result::Result<std::sync::Arc<ServiceAreaOriginExpansion>, AnalysisFailure>,
+    > = expansion_jobs
+        .into_par_iter()
+        .map(|(origin_set_id, origin)| {
+            let expansion = build_service_area_expansion(
+                topology,
+                metrics,
+                routing_graph,
+                origin,
+                &unique_origin_candidates[origin_set_id],
+                request.origins.snap.max_distance_m,
+                &request.origins.connectivity,
+                ServiceAreaMetricKind::TravelTimeS,
+                request.max_travel_time_s,
+            )
+            .map(std::sync::Arc::new)
+            .map_err(|error| {
+                analysis_failure(&error).cloned().unwrap_or_else(|| {
+                    AnalysisFailure::new(
+                        error.to_string(),
+                        AnalysisOutcome::Unreachable,
+                        Vec::new(),
+                    )
+                })
+            });
+            (origin_set_id, expansion)
+        })
+        .collect();
     let mut rows = Vec::new();
     let mut diagnostics = Vec::new();
     let mut warnings = execution_warnings(metrics);
@@ -103,29 +145,8 @@ pub(crate) fn execute_accessibility_with_graph(
         };
 
         let expansion = expansion_cache
-            .entry(origin_set_id)
-            .or_insert_with(|| {
-                build_service_area_expansion(
-                    topology,
-                    metrics,
-                    routing_graph,
-                    origin,
-                    &unique_origin_candidates[origin_set_id],
-                    request.origins.snap.max_distance_m,
-                    &request.origins.connectivity,
-                    ServiceAreaMetricKind::TravelTimeS,
-                    request.max_travel_time_s,
-                )
-                .map_err(|error| {
-                    analysis_failure(&error).cloned().unwrap_or_else(|| {
-                        AnalysisFailure::new(
-                            error.to_string(),
-                            AnalysisOutcome::Unreachable,
-                            Vec::new(),
-                        )
-                    })
-                })
-            })
+            .get(&origin_set_id)
+            .expect("expansion precomputed for every snapped origin")
             .clone();
 
         let expansion = match expansion {
@@ -155,7 +176,7 @@ pub(crate) fn execute_accessibility_with_graph(
                 topology,
                 metrics,
                 routing_graph,
-                &expansion,
+                expansion.as_ref(),
                 category,
                 &thresholds,
                 request.max_travel_time_s,
