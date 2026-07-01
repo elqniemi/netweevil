@@ -905,3 +905,98 @@ fn shape_fixture_files() -> GtfsFiles {
         );
     files
 }
+
+#[test]
+fn network_street_access_prices_legs_with_the_estimator() {
+    struct FixedEstimator;
+    impl crate::StreetTimeEstimator for FixedEstimator {
+        fn street_time_s(
+            &self,
+            _mode: AccessMode,
+            _egress: bool,
+            _from_lon: f64,
+            _from_lat: f64,
+            _to_lon: f64,
+            _to_lat: f64,
+        ) -> Option<u32> {
+            Some(300)
+        }
+    }
+
+    let bundle = Arc::new(
+        build_bundle_from_files(
+            fixture_files(),
+            "abc".to_string(),
+            TransitImportOptions {
+                name: "fixture".to_string(),
+                source_label: "fixture".to_string(),
+                service_start_date: "2026-05-11".to_string(),
+                service_days: 7,
+            },
+        )
+        .expect("fixture imports"),
+    );
+    let router = PreparedTransitRouter::new(bundle);
+    let request = |street_access: TransitStreetAccessModel| TransitRouteRequest {
+        route_id: "r1".to_string(),
+        origin: TransitPoint {
+            id: "origin".to_string(),
+            lon: 6.0,
+            lat: 53.0,
+        },
+        destination: TransitPoint {
+            id: "dest".to_string(),
+            lon: 6.02,
+            lat: 53.0,
+        },
+        time: TransitQueryTime {
+            datetime: "2026-05-11T08:00:00+02:00".to_string(),
+            arrive_by: false,
+            search_window_s: 3600,
+        },
+        modes: TransitModeOptions {
+            max_access_distance_m: 100.0,
+            max_egress_distance_m: 100.0,
+            street_access,
+            ..TransitModeOptions::default()
+        },
+        returns: TransitReturnOptions::default(),
+        alternatives: TransitAlternativeOptions::default(),
+    };
+
+    // Straight-line pricing is unchanged even when an estimator is present.
+    let straight = router
+        .execute_route_with_street_estimator(
+            &request(TransitStreetAccessModel::StraightLine),
+            Some(&FixedEstimator),
+        )
+        .expect("straight-line route executes");
+    assert_eq!(straight.summary.total_travel_time_s, Some(1201));
+
+    // Network pricing uses the estimator's times for access and egress.
+    let network = router
+        .execute_route_with_street_estimator(
+            &request(TransitStreetAccessModel::Network),
+            Some(&FixedEstimator),
+        )
+        .expect("network route executes");
+    assert_eq!(network.outcome, TransitOutcome::Scheduled);
+    let access_leg = network
+        .legs
+        .iter()
+        .find(|leg| leg.leg_type == TransitLegType::Access)
+        .expect("access leg present");
+    assert_eq!(access_leg.arrival_s - access_leg.departure_s, 300);
+    let egress_leg = network
+        .legs
+        .iter()
+        .find(|leg| leg.leg_type == TransitLegType::Egress)
+        .expect("egress leg present");
+    assert_eq!(egress_leg.arrival_s - egress_leg.departure_s, 300);
+
+    // Without an estimator the network request falls back to straight-line.
+    let fallback = router
+        .execute_route(&request(TransitStreetAccessModel::Network))
+        .expect("fallback route executes");
+    assert_eq!(fallback.summary.total_travel_time_s, Some(1201));
+}

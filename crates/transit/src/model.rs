@@ -340,6 +340,20 @@ pub struct TransitModeOptions {
     pub min_transit_leg_duration_s: u32,
     #[serde(default)]
     pub min_transit_leg_distance_m: f64,
+    /// How access and egress leg travel times are estimated. `network` uses
+    /// a street routing engine when the host provides one (API/CLI with a
+    /// matching street profile loaded) and falls back to straight-line
+    /// estimates per candidate otherwise.
+    #[serde(default)]
+    pub street_access: TransitStreetAccessModel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitStreetAccessModel {
+    #[default]
+    StraightLine,
+    Network,
 }
 
 impl Default for TransitModeOptions {
@@ -364,6 +378,7 @@ impl Default for TransitModeOptions {
             max_transfers: default_max_transfers(),
             min_transit_leg_duration_s: 0,
             min_transit_leg_distance_m: 0.0,
+            street_access: TransitStreetAccessModel::default(),
         }
     }
 }

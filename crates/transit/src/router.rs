@@ -14,9 +14,9 @@ use crate::model::{
     TransitServiceAreaRequest, TransitServiceAreaResult,
 };
 use crate::runtime::{
-    PrevStep, StateKey, StopCandidate, StopSpatialIndex, TransitRuntime, best_street_candidates,
-    build_departures_by_stop, build_transfer_candidates, can_finish_with_egress,
-    can_start_transfer_walk, relax_state,
+    PrevStep, StateKey, StopCandidate, StopSpatialIndex, StreetTimeEstimator, TransitRuntime,
+    best_street_candidates, build_departures_by_stop, build_transfer_candidates,
+    can_finish_with_egress, can_start_transfer_walk, relax_state,
 };
 use crate::service_area::execute_transit_service_area_with_runtime;
 
@@ -55,12 +55,24 @@ impl PreparedTransitRouter {
     }
 
     pub fn execute_route(&self, request: &TransitRouteRequest) -> Result<TransitRouteResult> {
+        self.execute_route_with_street_estimator(request, None)
+    }
+
+    /// Route with an optional network street-time oracle for access/egress
+    /// legs; it is consulted only when the request opts into
+    /// `modes.street_access = "network"`.
+    pub fn execute_route_with_street_estimator(
+        &self,
+        request: &TransitRouteRequest,
+        street_estimator: Option<&dyn StreetTimeEstimator>,
+    ) -> Result<TransitRouteResult> {
         let runtime = TransitRuntime::new(
             self.bundle.as_ref(),
             &self.departures_by_stop,
             &self.stop_index,
             &self.transfer_candidates,
             &request.modes,
+            street_estimator,
         );
         execute_transit_route_with_runtime(&runtime, request)
     }
@@ -69,12 +81,24 @@ impl PreparedTransitRouter {
         &self,
         request: &TransitServiceAreaRequest,
     ) -> Result<TransitServiceAreaResult> {
+        self.execute_service_area_with_street_estimator(request, None)
+    }
+
+    /// Service area with an optional network street-time oracle for access
+    /// legs; consulted only when the request opts into
+    /// `modes.street_access = "network"`.
+    pub fn execute_service_area_with_street_estimator(
+        &self,
+        request: &TransitServiceAreaRequest,
+        street_estimator: Option<&dyn StreetTimeEstimator>,
+    ) -> Result<TransitServiceAreaResult> {
         let runtime = TransitRuntime::new(
             self.bundle.as_ref(),
             &self.departures_by_stop,
             &self.stop_index,
             &self.transfer_candidates,
             &request.modes,
+            street_estimator,
         );
         execute_transit_service_area_with_runtime(&runtime, request)
     }
@@ -93,6 +117,7 @@ pub fn execute_transit_route(
         &stop_index,
         &transfer_candidates,
         &request.modes,
+        None,
     );
     execute_transit_route_with_runtime(&runtime, request)
 }
@@ -181,6 +206,7 @@ fn execute_transit_route_with_runtime(
                 from_lat: request.origin.lat,
                 distance_m: candidate.distance_m,
                 departure_s,
+                time_s: candidate.time_s,
                 mode: candidate.mode,
             },
         );

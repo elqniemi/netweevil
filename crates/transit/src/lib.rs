@@ -13,10 +13,11 @@ pub use model::{
     TransitReturnOptions, TransitRoute, TransitRouteAlternative, TransitRouteRequest,
     TransitRouteResult, TransitRouteStop, TransitRouteStopSegment, TransitRouteSummary,
     TransitServiceAreaRequest, TransitServiceAreaResult, TransitServiceAreaReturnOptions,
-    TransitServiceAreaSegment, TransitServiceAreaStop, TransitShape, TransitStop, TransitTrip,
-    TransitWalkingGeometry, load_transit_request,
+    TransitServiceAreaSegment, TransitServiceAreaStop, TransitShape, TransitStop,
+    TransitStreetAccessModel, TransitTrip, TransitWalkingGeometry, load_transit_request,
 };
 pub use router::{PreparedTransitRouter, execute_transit_route};
+pub use runtime::StreetTimeEstimator;
 pub use service_area::execute_transit_service_area;
 
 #[cfg(test)]

@@ -134,13 +134,32 @@ pub(crate) fn build_transfer_candidates(
         .collect()
 }
 
-#[derive(Debug)]
+/// Network street-time oracle for access and egress legs. Hosts with street
+/// routing engines loaded (the API, the CLI) inject an implementation so the
+/// transit crate can price legs with real network times while staying
+/// decoupled from the street router.
+pub trait StreetTimeEstimator: Send + Sync {
+    /// Network travel time in seconds between two points for a street mode,
+    /// or `None` when no engine covers the mode or the pair is unreachable
+    /// (callers fall back to the straight-line estimate).
+    fn street_time_s(
+        &self,
+        mode: AccessMode,
+        egress: bool,
+        from_lon: f64,
+        from_lat: f64,
+        to_lon: f64,
+        to_lat: f64,
+    ) -> Option<u32>;
+}
+
 pub(crate) struct TransitRuntime<'a> {
     pub(crate) bundle: &'a TransitBundle,
     pub(crate) departures_by_stop: &'a [Vec<TransitConnection>],
     stop_index: &'a StopSpatialIndex,
     transfer_candidates: &'a [Vec<StopCandidate>],
     pub(crate) allowed_routes: Vec<bool>,
+    pub(crate) street_estimator: Option<&'a dyn StreetTimeEstimator>,
 }
 
 impl<'a> TransitRuntime<'a> {
@@ -150,6 +169,7 @@ impl<'a> TransitRuntime<'a> {
         stop_index: &'a StopSpatialIndex,
         transfer_candidates: &'a [Vec<StopCandidate>],
         modes: &TransitModeOptions,
+        street_estimator: Option<&'a dyn StreetTimeEstimator>,
     ) -> Self {
         let allowed_routes = bundle
             .routes
@@ -162,6 +182,7 @@ impl<'a> TransitRuntime<'a> {
             stop_index,
             transfer_candidates,
             allowed_routes,
+            street_estimator,
         }
     }
 
@@ -250,6 +271,12 @@ pub(crate) fn best_street_candidates(
     options: &TransitModeOptions,
     egress: bool,
 ) -> Vec<StreetCandidate> {
+    let network_estimator = matches!(
+        options.street_access,
+        crate::model::TransitStreetAccessModel::Network
+    )
+    .then_some(runtime.street_estimator)
+    .flatten();
     let mut best = HashMap::<u32, StreetCandidate>::new();
     for &mode in street_modes {
         let max_distance_m = if egress {
@@ -258,7 +285,20 @@ pub(crate) fn best_street_candidates(
             mode.max_access_distance_m(options)
         };
         for candidate in runtime.nearby_access_stops(lon, lat, max_distance_m) {
-            let time_s = seconds_for_distance(candidate.distance_m, mode.speed_kph(options));
+            let straight_line_time_s =
+                seconds_for_distance(candidate.distance_m, mode.speed_kph(options));
+            // Candidates are pre-filtered by straight-line distance (a lower
+            // bound on network distance); the estimator refines the time.
+            let time_s = network_estimator
+                .and_then(|estimator| {
+                    let stop = &runtime.bundle.stops[candidate.stop_index as usize];
+                    if egress {
+                        estimator.street_time_s(mode, true, stop.lon, stop.lat, lon, lat)
+                    } else {
+                        estimator.street_time_s(mode, false, lon, lat, stop.lon, stop.lat)
+                    }
+                })
+                .unwrap_or(straight_line_time_s);
             let entry = StreetCandidate {
                 stop_index: candidate.stop_index,
                 distance_m: candidate.distance_m,
@@ -330,6 +370,9 @@ pub(crate) enum PrevStep {
         from_lat: f64,
         distance_m: f64,
         departure_s: u32,
+        /// Access leg travel time as priced by the search (straight-line or
+        /// network); leg reconstruction must reuse it, not re-derive it.
+        time_s: u32,
         mode: AccessMode,
     },
     Transfer {

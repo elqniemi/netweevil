@@ -8,8 +8,8 @@ use netweevil_core::TravelMode;
 use netweevil_profile::{ReturnConfig, ReturnGeometry};
 use netweevil_query::{LabeledPoint, PreparedRoutingEngine, RouteRequest};
 use netweevil_transit::{
-    AccessMode, TransitLeg, TransitLegType, TransitModeOptions, TransitRouteResult,
-    TransitWalkingGeometry,
+    AccessMode, StreetTimeEstimator, TransitLeg, TransitLegType, TransitModeOptions,
+    TransitRouteResult, TransitStreetAccessModel, TransitWalkingGeometry,
 };
 use tracing::{info, warn};
 
@@ -43,18 +43,25 @@ pub(crate) async fn transit_route_handler(
     );
     let mut request = payload.request;
     let walking_geometry = request.returns.walking_geometry;
-    let street_engines = if matches!(walking_geometry, TransitWalkingGeometry::Network) {
-        request.returns.include_geometry = true;
-        Some(resolve_transit_street_engines(
-            state.service.as_ref(),
-            payload.pedestrian_profile_id.as_deref(),
-            payload.access_profile_id.as_deref(),
-            payload.egress_profile_id.as_deref(),
-            &request.modes,
-        )?)
-    } else {
-        None
-    };
+    let network_street_access = matches!(
+        request.modes.street_access,
+        TransitStreetAccessModel::Network
+    );
+    let street_engines =
+        if matches!(walking_geometry, TransitWalkingGeometry::Network) || network_street_access {
+            if matches!(walking_geometry, TransitWalkingGeometry::Network) {
+                request.returns.include_geometry = true;
+            }
+            Some(resolve_transit_street_engines(
+                state.service.as_ref(),
+                payload.pedestrian_profile_id.as_deref(),
+                payload.access_profile_id.as_deref(),
+                payload.egress_profile_id.as_deref(),
+                &request.modes,
+            )?)
+        } else {
+            None
+        };
     let router = Arc::clone(&feed.router);
     let manifest = feed.manifest.clone();
     let route_id = request.route_id.clone();
@@ -67,10 +74,22 @@ pub(crate) async fn transit_route_handler(
     let egress_profile_id = street_engines
         .as_ref()
         .and_then(|engines| side_profile_ids(&engines.egress));
+    let replace_geometry = matches!(walking_geometry, TransitWalkingGeometry::Network);
     let result = execute_on_routing_worker(state.service.as_ref(), move || {
-        let mut result = router.execute_route(&request)?;
-        if let Some(engines) = street_engines.as_ref() {
-            replace_transit_street_leg_geometries(&mut result, engines);
+        let estimator = street_engines
+            .as_ref()
+            .filter(|_| network_street_access)
+            .map(|engines| StreetEngineTimeEstimator { engines });
+        let mut result = router.execute_route_with_street_estimator(
+            &request,
+            estimator
+                .as_ref()
+                .map(|estimator| estimator as &dyn StreetTimeEstimator),
+        )?;
+        if replace_geometry {
+            if let Some(engines) = street_engines.as_ref() {
+                replace_transit_street_leg_geometries(&mut result, engines);
+            }
         }
         Ok(result)
     })
@@ -120,8 +139,31 @@ pub(crate) async fn transit_service_area_handler(
     );
     let manifest = feed.manifest.clone();
     let router = Arc::clone(&feed.router);
+    let network_street_access = matches!(
+        payload.request.modes.street_access,
+        TransitStreetAccessModel::Network
+    );
+    let street_engines = if network_street_access {
+        Some(resolve_transit_street_engines(
+            state.service.as_ref(),
+            None,
+            None,
+            None,
+            &payload.request.modes,
+        )?)
+    } else {
+        None
+    };
     let result = execute_on_routing_worker(state.service.as_ref(), move || {
-        router.execute_service_area(&payload.request)
+        let estimator = street_engines
+            .as_ref()
+            .map(|engines| StreetEngineTimeEstimator { engines });
+        router.execute_service_area_with_street_estimator(
+            &payload.request,
+            estimator
+                .as_ref()
+                .map(|estimator| estimator as &dyn StreetTimeEstimator),
+        )
     })
     .await
     .map_err(|error| {
@@ -294,6 +336,55 @@ fn resolve_street_side_engines(
         }
     }
     Ok(engines)
+}
+
+/// Prices transit access/egress legs with real network travel times using
+/// the loaded street engines, for requests that opt into
+/// `modes.street_access = "network"`. Unreachable pairs or modes without a
+/// loaded profile return `None`, which the transit search treats as a
+/// straight-line fallback per candidate.
+struct StreetEngineTimeEstimator<'a> {
+    engines: &'a TransitStreetEngines,
+}
+
+impl StreetTimeEstimator for StreetEngineTimeEstimator<'_> {
+    fn street_time_s(
+        &self,
+        mode: AccessMode,
+        egress: bool,
+        from_lon: f64,
+        from_lat: f64,
+        to_lon: f64,
+        to_lat: f64,
+    ) -> Option<u32> {
+        let (_, engine) = if mode == AccessMode::Walk {
+            &self.engines.walk
+        } else if egress {
+            self.engines.egress.get(&mode)?
+        } else {
+            self.engines.access.get(&mode)?
+        };
+        let request = RouteRequest {
+            route_id: "transit_street_access".to_string(),
+            origin: LabeledPoint {
+                id: "from".to_string(),
+                lon: from_lon,
+                lat: from_lat,
+            },
+            destination: LabeledPoint {
+                id: "to".to_string(),
+                lon: to_lon,
+                lat: to_lat,
+            },
+            snap: Default::default(),
+            connectivity: Default::default(),
+            fallback: Default::default(),
+            returns: ReturnConfig::default(),
+            alternatives: Default::default(),
+        };
+        let route = engine.execute_route(&request).ok()?;
+        Some((route.summary.total_travel_time_s.ceil() as u32).max(1))
+    }
 }
 
 fn replace_transit_street_leg_geometries(

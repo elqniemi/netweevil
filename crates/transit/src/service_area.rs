@@ -55,6 +55,7 @@ pub fn execute_transit_service_area(
         &stop_index,
         &transfer_candidates,
         &request.modes,
+        None,
     );
     execute_transit_service_area_with_runtime(&runtime, request)
 }
@@ -261,6 +262,7 @@ fn search_service_area_origin(
                 from_lat: origin.lat,
                 distance_m: candidate.distance_m,
                 departure_s,
+                time_s: candidate.time_s,
                 mode: candidate.mode,
             },
         );

@@ -48,12 +48,13 @@ pub(crate) fn reconstruct_legs(
                 from_name,
                 from_lon,
                 from_lat,
-                distance_m,
+                distance_m: _,
                 departure_s,
+                time_s,
                 mode,
             } => {
                 let stop = &bundle.stops[cursor.stop_index as usize];
-                let access_s = seconds_for_distance(*distance_m, mode.speed_kph(&request.modes));
+                let access_s = *time_s;
                 legs.push(TransitLeg {
                     leg_type: TransitLegType::Access,
                     from_id: from_id.clone(),
