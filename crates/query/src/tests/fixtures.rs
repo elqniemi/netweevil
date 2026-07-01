@@ -232,25 +232,49 @@ pub(super) fn build_test_cch(
     let graph = crate::build_routing_graph(topology, metrics).expect("routing graph builds");
     let edge_count = topology.edge_count();
 
-    // (tail, head) -> (weight, middle); identity order means rank == id.
-    // The same arc set (defined by the transitions) is customized for any
-    // base transition weight, mirroring the real compiler.
-    let customize = |base: &dyn Fn(usize, usize) -> f64| -> BTreeMap<(u32, u32), (f64, u32)> {
-        let mut arcs = BTreeMap::<(u32, u32), (f64, u32)>::new();
-        for from_edge in 0..edge_count {
-            for transition_index in graph.transition_range(from_edge) {
-                let to_edge = graph.transition_edges[transition_index];
-                if to_edge as usize == from_edge {
-                    continue;
-                }
-                let cost = base(from_edge, to_edge as usize);
-                let entry = arcs
-                    .entry((from_edge as u32, to_edge))
-                    .or_insert((f64::INFINITY, NO_MIDDLE));
-                if cost < entry.0 {
-                    *entry = (cost, NO_MIDDLE);
+    // Arc topology mirrors the real preprocessor: arcs exist for every
+    // TOPOLOGICAL transition (restrictions included) plus their elimination
+    // closure; weights decide traversability. Identity order: rank == id.
+    let mut arc_set = std::collections::BTreeSet::<(u32, u32)>::new();
+    let transition_topology = &topology.edge_based_topology;
+    for from_edge in 0..edge_count {
+        let start = transition_topology.edge_transition_first_out[from_edge] as usize;
+        let end = transition_topology.edge_transition_first_out[from_edge + 1] as usize;
+        for &to_edge in &transition_topology.edge_transition_edges[start..end] {
+            if to_edge as usize != from_edge && (to_edge as usize) < edge_count {
+                arc_set.insert((from_edge as u32, to_edge));
+            }
+        }
+    }
+    for middle in 0..edge_count as u32 {
+        let incoming = arc_set
+            .iter()
+            .filter(|&&(tail, head)| head == middle && tail > middle)
+            .map(|&(tail, _)| tail)
+            .collect::<Vec<_>>();
+        let outgoing = arc_set
+            .range((middle, 0)..(middle + 1, 0))
+            .filter(|&&(_, head)| head > middle)
+            .map(|&(_, head)| head)
+            .collect::<Vec<_>>();
+        for &tail in &incoming {
+            for &head in &outgoing {
+                if tail != head {
+                    arc_set.insert((tail, head));
                 }
             }
+        }
+    }
+
+    // Customize the fixed arc set for any base transition weight, mirroring
+    // the real compiler.
+    let customize = |base: &dyn Fn(usize, usize) -> f64| -> BTreeMap<(u32, u32), (f64, u32)> {
+        let mut arcs = BTreeMap::<(u32, u32), (f64, u32)>::new();
+        for &(tail, head) in &arc_set {
+            arcs.insert(
+                (tail, head),
+                (base(tail as usize, head as usize), NO_MIDDLE),
+            );
         }
         for middle in 0..edge_count as u32 {
             let incoming = arcs
@@ -284,21 +308,30 @@ pub(super) fn build_test_cch(
         arcs
     };
 
-    let arcs = customize(&|from_edge, to_edge| {
+    let routing_transition_weight = |from_edge: usize, to_edge: usize| -> f64 {
         graph
             .transition_range(from_edge)
             .filter(|&index| graph.transition_edges[index] as usize == to_edge)
             .map(|index| graph.transition_costs[index])
             .fold(f64::INFINITY, f64::min)
-    });
+    };
+
+    let arcs = customize(&routing_transition_weight);
     let time_arcs = customize(&|from_edge, to_edge| {
+        if !routing_transition_weight(from_edge, to_edge).is_finite() {
+            return f64::INFINITY;
+        }
         let Some(travel_time_s) = metrics.edge_metrics[to_edge].travel_time_s else {
             return f64::INFINITY;
         };
         travel_time_s + crate::turn_penalty_seconds(topology, metrics, from_edge, to_edge)
     });
-    let distance_arcs =
-        customize(&|_from_edge, to_edge| topology.routing_edge(to_edge).length_m as f64);
+    let distance_arcs = customize(&|from_edge, to_edge| {
+        if !routing_transition_weight(from_edge, to_edge).is_finite() {
+            return f64::INFINITY;
+        }
+        topology.routing_edge(to_edge).length_m as f64
+    });
 
     let mut upward_first_out = vec![0_u32; edge_count + 1];
     let mut upward_head = Vec::new();

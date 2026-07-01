@@ -363,10 +363,10 @@ pub fn execute_od(
 ) -> Result<OdResult> {
     if has_failure_modes(&document.fallback) {
         validate_execution_inputs(topology, metrics)?;
-        let degraded = cached_failure_mode_bundle(topology, metrics, &document.fallback)?;
+        let degraded = cached_failure_mode_bundle(topology, metrics, &document.fallback, None)?;
         return execute_od_with_graph(
             &degraded.topology,
-            &degraded.metrics,
+            degraded.metrics.as_ref(),
             &degraded.routing_graph,
             document,
         );
@@ -385,10 +385,10 @@ pub fn execute_matrix(
     let fallback = merge_point_set_fallback_policy(&origins.fallback, &destinations.fallback);
     if has_failure_modes(&fallback) {
         validate_execution_inputs(topology, metrics)?;
-        let degraded = cached_failure_mode_bundle(topology, metrics, &fallback)?;
+        let degraded = cached_failure_mode_bundle(topology, metrics, &fallback, None)?;
         return execute_matrix_with_graph(
             &degraded.topology,
-            &degraded.metrics,
+            degraded.metrics.as_ref(),
             &degraded.routing_graph,
             origins,
             destinations,

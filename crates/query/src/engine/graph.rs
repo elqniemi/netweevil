@@ -24,6 +24,10 @@ pub(crate) struct RoutingGraph {
     pub(crate) reverse_transition_edges: Vec<u32>,
     pub(crate) reverse_transition_costs: Vec<f64>,
     pub(crate) acceleration: Option<AccelerationGraph>,
+    /// True when the attached acceleration weights were customized with the
+    /// request's failure-mode penalties baked in (degraded graphs only);
+    /// plain acceleration weights must never serve failure-mode searches.
+    pub(crate) acceleration_includes_failure_penalties: bool,
     pub(crate) automaton: RestrictionAutomaton,
     pub(crate) virtual_reverse_of: Vec<Option<usize>>,
 }
@@ -465,13 +469,14 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
         reverse_transition_edges,
         reverse_transition_costs,
         acceleration: build_acceleration_graph(metrics, acceleration, edge_count)?,
+        acceleration_includes_failure_penalties: false,
         automaton: RestrictionAutomaton::build(&restricted_sequences),
         virtual_reverse_of: vec![None; edge_count],
     })
 }
 
 #[allow(clippy::needless_range_loop)]
-fn build_acceleration_graph(
+pub(crate) fn build_acceleration_graph(
     metrics: Arc<CompiledProfileBundle>,
     dataset_acceleration: Option<Arc<DatasetAccelerationBundle>>,
     edge_count: usize,
