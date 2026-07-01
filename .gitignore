@@ -10,10 +10,6 @@
 # Local project analyses live outside the versioned engine workspace.
 /projects-analyses/
 
-# Local agent and assistant workspace files
-/AGENTS.md
-/CLAUDE.md
-
 # Local dataset/extracts
 /datasets/*
 !/datasets/.gitkeep
