@@ -4,7 +4,7 @@ qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99.0
 supportsQt6=True
 description=Run netweevil API route, transit, OD, matrix, service-area, and agent-based traffic simulation analyses with live playback, congestion layers, and grouped output layers directly in QGIS 3 and QGIS 4.
-version=1.0.0
+version=1.1.0
 icon=logo.svg
 author=Elmeri Niemi
 email=elmeri.niemi@gmail.com
@@ -16,6 +16,14 @@ homepage=https://github.com/elqniemi/netweevil
 tracker=https://github.com/elqniemi/netweevil/issues
 repository=https://github.com/elqniemi/netweevil
 changelog=
+  1.1.0
+  - Transit first/last-mile modes: routes and transit service areas can reach
+    transit by walking, cycling, or car (walking+transit, cycling+transit,
+    car+transit)
+  - Advanced first/last-mile option to plan access and egress with different
+    street modes (off by default)
+  - Transit service areas gained dedicated access mode, distance, and speed
+    controls; reachable stops report the access mode used
   1.0.0
   - QGIS 4 / Qt 6 support (supportsQt6, scoped-enum-safe compatibility layer)
   - Plugin split into focused modules instead of one 6000-line file

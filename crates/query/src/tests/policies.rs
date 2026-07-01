@@ -678,6 +678,46 @@ fn executes_unbanded_service_area_with_segment_costs() {
 }
 
 #[test]
+fn rejects_service_area_output_above_geometry_point_limit() {
+    let request = crate::ServiceAreaRequest {
+        analysis_id: "service-area-output-limit".to_string(),
+        origins: vec![crate::LabeledPoint {
+            id: "origin".to_string(),
+            lon: 6.0,
+            lat: 53.0,
+        }],
+        thresholds: vec![ServiceAreaThreshold {
+            id: Some("thirty_s".to_string()),
+            limit: 30.0,
+            metric: ServiceAreaThresholdMetric::TravelTimeS,
+        }],
+        snap: SnapOptions {
+            max_distance_m: 500.0,
+        },
+        connectivity: Default::default(),
+        fallback: Default::default(),
+        output_mode: ServiceAreaOutputMode::Network,
+        band_mode: ServiceAreaBandMode::Cumulative,
+        boundary_mode: ServiceAreaBoundaryMode::Overlap,
+        multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+        polygon: Default::default(),
+        returns: ServiceAreaReturnOptions {
+            max_geometry_points: 1,
+            ..ServiceAreaReturnOptions::default()
+        },
+    };
+
+    let error = execute_service_area(
+        &service_area_linear_topology(),
+        &service_area_linear_metrics(),
+        &request,
+    )
+    .expect_err("geometry point cap should reject large output");
+
+    assert!(error.to_string().contains("max_geometry_points"));
+}
+
+#[test]
 fn executes_service_area_ring_bands() {
     let request = crate::ServiceAreaRequest {
         analysis_id: "service-area-ring".to_string(),

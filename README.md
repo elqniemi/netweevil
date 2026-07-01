@@ -16,7 +16,7 @@ The production surface is the `netweevil` CLI plus a preloadable HTTP API. The Q
 - `crates/query`: routing, route batches, OD, matrix, service areas, accessibility, alternatives, snapping, and request/result models
 - `crates/persist`: `.netweevil/` state layout, manifests, binary bundle IO, and cache reads
 - `crates/report`: manifests, report rendering, and local exports
-- `crates/transit`: GTFS import and pedestrian+transit routing
+- `crates/transit`: GTFS import and street-access (walk/bicycle/car) + transit routing
 - `crates/simulate`: agent-based traffic simulation with congestion and temporal outputs
 - `crates/api`: Axum HTTP API for loaded datasets, profiles, transit feeds, and simulations
 - `crates/cli`: the `netweevil` binary
@@ -206,6 +206,20 @@ cargo run -p netweevil-cli -- analyze transit-route \
   --request examples/requests/transit_openov_groningen.json \
   --out .netweevil/runs/example-transit-route.json
 ```
+
+First and last miles are not limited to walking: `modes.access` and
+`modes.egress` accept `walk`, `bicycle`, or `car`, each with its own speed
+(`walk_speed_kph`, `bicycle_speed_kph`, `car_access_speed_kph`) and distance
+limits (`max_access_distance_m`/`max_egress_distance_m` for walking,
+`max_bicycle_*` and `max_car_*` variants for the other modes). Transit service
+areas accept the same `modes` block, so cycling+transit or car+transit
+catchments work out of the box (see
+`examples/requests/transit_service_area_car_access.json`).
+
+By default the access and egress mode lists must match. To plan an asymmetric
+first/last mile, for example cycle to the station but walk from the final
+stop, set `modes.mixed_access_egress: true` (see
+`examples/requests/transit_bike_access_groningen.json`).
 
 Preload a transit feed into the API:
 

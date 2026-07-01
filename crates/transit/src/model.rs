@@ -139,6 +139,40 @@ pub enum AccessMode {
     Car,
 }
 
+impl AccessMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Walk => "walk",
+            Self::Bicycle => "bicycle",
+            Self::Car => "car",
+        }
+    }
+
+    pub fn speed_kph(self, modes: &TransitModeOptions) -> f64 {
+        match self {
+            Self::Walk => modes.walk_speed_kph,
+            Self::Bicycle => modes.bicycle_speed_kph,
+            Self::Car => modes.car_access_speed_kph,
+        }
+    }
+
+    pub fn max_access_distance_m(self, modes: &TransitModeOptions) -> f64 {
+        match self {
+            Self::Walk => modes.max_access_distance_m,
+            Self::Bicycle => modes.max_bicycle_access_distance_m,
+            Self::Car => modes.max_car_access_distance_m,
+        }
+    }
+
+    pub fn max_egress_distance_m(self, modes: &TransitModeOptions) -> f64 {
+        match self {
+            Self::Walk => modes.max_egress_distance_m,
+            Self::Bicycle => modes.max_bicycle_egress_distance_m,
+            Self::Car => modes.max_car_egress_distance_m,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitRouteRequest {
     pub route_id: String,
@@ -179,6 +213,12 @@ pub struct TransitServiceAreaReturnOptions {
     pub include_stop_segments: bool,
     #[serde(default = "default_true")]
     pub include_geometry: bool,
+    #[serde(default = "default_transit_service_area_max_stops")]
+    pub max_stops: usize,
+    #[serde(default = "default_transit_service_area_max_stop_segments")]
+    pub max_stop_segments: usize,
+    #[serde(default = "default_transit_service_area_max_geometry_points")]
+    pub max_geometry_points: usize,
 }
 
 impl Default for TransitServiceAreaReturnOptions {
@@ -187,12 +227,27 @@ impl Default for TransitServiceAreaReturnOptions {
             include_stops: true,
             include_stop_segments: true,
             include_geometry: true,
+            max_stops: default_transit_service_area_max_stops(),
+            max_stop_segments: default_transit_service_area_max_stop_segments(),
+            max_geometry_points: default_transit_service_area_max_geometry_points(),
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_transit_service_area_max_stops() -> usize {
+    100_000
+}
+
+fn default_transit_service_area_max_stop_segments() -> usize {
+    200_000
+}
+
+fn default_transit_service_area_max_geometry_points() -> usize {
+    1_000_000
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -249,6 +304,10 @@ pub struct TransitModeOptions {
     pub access: Vec<AccessMode>,
     #[serde(default = "default_access_modes")]
     pub egress: Vec<AccessMode>,
+    /// Advanced first/last-mile support: must be set to allow access and
+    /// egress mode lists that differ from each other.
+    #[serde(default)]
+    pub mixed_access_egress: bool,
     #[serde(default = "default_transit_modes")]
     pub transit: Vec<TransitMode>,
     #[serde(default = "default_walk_speed_kph")]
@@ -261,6 +320,14 @@ pub struct TransitModeOptions {
     pub max_access_distance_m: f64,
     #[serde(default = "default_access_distance_m")]
     pub max_egress_distance_m: f64,
+    #[serde(default = "default_bicycle_access_distance_m")]
+    pub max_bicycle_access_distance_m: f64,
+    #[serde(default = "default_bicycle_access_distance_m")]
+    pub max_bicycle_egress_distance_m: f64,
+    #[serde(default = "default_car_access_distance_m")]
+    pub max_car_access_distance_m: f64,
+    #[serde(default = "default_car_access_distance_m")]
+    pub max_car_egress_distance_m: f64,
     #[serde(default = "default_transfer_distance_m")]
     pub max_transfer_distance_m: f64,
     #[serde(default = "default_board_slack_s")]
@@ -280,12 +347,17 @@ impl Default for TransitModeOptions {
         Self {
             access: default_access_modes(),
             egress: default_access_modes(),
+            mixed_access_egress: false,
             transit: default_transit_modes(),
             walk_speed_kph: default_walk_speed_kph(),
             bicycle_speed_kph: default_bicycle_speed_kph(),
             car_access_speed_kph: default_car_access_speed_kph(),
             max_access_distance_m: default_access_distance_m(),
             max_egress_distance_m: default_access_distance_m(),
+            max_bicycle_access_distance_m: default_bicycle_access_distance_m(),
+            max_bicycle_egress_distance_m: default_bicycle_access_distance_m(),
+            max_car_access_distance_m: default_car_access_distance_m(),
+            max_car_egress_distance_m: default_car_access_distance_m(),
             max_transfer_distance_m: default_transfer_distance_m(),
             board_slack_s: default_board_slack_s(),
             transfer_slack_s: default_transfer_slack_s(),
@@ -294,6 +366,51 @@ impl Default for TransitModeOptions {
             min_transit_leg_distance_m: 0.0,
         }
     }
+}
+
+impl TransitModeOptions {
+    /// Deduplicated access modes; errors when the list is empty.
+    pub fn validated_access_modes(&self) -> Result<Vec<AccessMode>> {
+        let modes = dedup_access_modes(&self.access);
+        if modes.is_empty() {
+            bail!("modes.access must contain at least one access mode");
+        }
+        Ok(modes)
+    }
+
+    /// Deduplicated egress modes; errors when the list is empty or differs
+    /// from the access list without `mixed_access_egress` enabled.
+    pub fn validated_egress_modes(&self) -> Result<Vec<AccessMode>> {
+        let egress = dedup_access_modes(&self.egress);
+        if egress.is_empty() {
+            bail!("modes.egress must contain at least one egress mode");
+        }
+        if !self.mixed_access_egress {
+            let access = dedup_access_modes(&self.access);
+            let mut access_sorted = access.clone();
+            let mut egress_sorted = egress.clone();
+            access_sorted.sort_by_key(|mode| mode.label());
+            egress_sorted.sort_by_key(|mode| mode.label());
+            if access_sorted != egress_sorted {
+                bail!(
+                    "access modes {:?} and egress modes {:?} differ; set modes.mixed_access_egress to true to plan different first- and last-mile modes",
+                    access.iter().map(|mode| mode.label()).collect::<Vec<_>>(),
+                    egress.iter().map(|mode| mode.label()).collect::<Vec<_>>()
+                );
+            }
+        }
+        Ok(egress)
+    }
+}
+
+fn dedup_access_modes(modes: &[AccessMode]) -> Vec<AccessMode> {
+    let mut deduped = Vec::new();
+    for &mode in modes {
+        if !deduped.contains(&mode) {
+            deduped.push(mode);
+        }
+    }
+    deduped
 }
 
 fn default_access_modes() -> Vec<AccessMode> {
@@ -328,6 +445,14 @@ fn default_car_access_speed_kph() -> f64 {
 
 fn default_access_distance_m() -> f64 {
     1_000.0
+}
+
+fn default_bicycle_access_distance_m() -> f64 {
+    5_000.0
+}
+
+fn default_car_access_distance_m() -> f64 {
+    15_000.0
 }
 
 fn default_transfer_distance_m() -> f64 {
@@ -418,6 +543,8 @@ pub struct TransitServiceAreaStop {
     pub arrival_s: u32,
     pub travel_time_s: u32,
     pub boarding_count: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access_mode: Option<AccessMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -487,6 +614,9 @@ pub struct TransitLeg {
     pub arrival_s: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode: Option<TransitMode>,
+    /// Street mode used for access, transfer, and egress legs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub street_mode: Option<AccessMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub route_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

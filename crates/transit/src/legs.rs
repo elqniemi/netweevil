@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::Result;
 
 use crate::model::{
-    TransitBundle, TransitConnection, TransitLeg, TransitLegType, TransitModeOptions,
+    AccessMode, TransitBundle, TransitConnection, TransitLeg, TransitLegType, TransitModeOptions,
     TransitRouteRequest, TransitRouteStop, TransitRouteStopSegment, TransitRouteSummary,
     TransitShape,
 };
@@ -16,7 +16,8 @@ pub(crate) fn reconstruct_legs(
     prev: &HashMap<StateKey, PrevStep>,
     final_state: StateKey,
     arrival_s: u32,
-    egress_walk_s: u32,
+    egress_time_s: u32,
+    egress_mode: AccessMode,
 ) -> Result<Vec<TransitLeg>> {
     let final_stop = &bundle.stops[final_state.stop_index as usize];
     let mut legs = vec![TransitLeg {
@@ -25,9 +26,10 @@ pub(crate) fn reconstruct_legs(
         to_id: request.destination.id.clone(),
         from_name: final_stop.name.clone(),
         to_name: request.destination.id.clone(),
-        departure_s: arrival_s.saturating_sub(egress_walk_s),
+        departure_s: arrival_s.saturating_sub(egress_time_s),
         arrival_s,
         mode: None,
+        street_mode: Some(egress_mode),
         route_id: None,
         route_short_name: None,
         trip_id: None,
@@ -48,9 +50,10 @@ pub(crate) fn reconstruct_legs(
                 from_lat,
                 distance_m,
                 departure_s,
+                mode,
             } => {
                 let stop = &bundle.stops[cursor.stop_index as usize];
-                let walk_s = seconds_for_distance(*distance_m, request.modes.walk_speed_kph);
+                let access_s = seconds_for_distance(*distance_m, mode.speed_kph(&request.modes));
                 legs.push(TransitLeg {
                     leg_type: TransitLegType::Access,
                     from_id: from_id.clone(),
@@ -58,8 +61,9 @@ pub(crate) fn reconstruct_legs(
                     from_name: from_name.clone(),
                     to_name: stop.name.clone(),
                     departure_s: *departure_s,
-                    arrival_s: departure_s.saturating_add(walk_s),
+                    arrival_s: departure_s.saturating_add(access_s),
                     mode: None,
+                    street_mode: Some(*mode),
                     route_id: None,
                     route_short_name: None,
                     trip_id: None,
@@ -89,6 +93,7 @@ pub(crate) fn reconstruct_legs(
                     departure_s: *departure_s,
                     arrival_s: departure_s.saturating_add(walk_s),
                     mode: None,
+                    street_mode: Some(AccessMode::Walk),
                     route_id: None,
                     route_short_name: None,
                     trip_id: None,
@@ -119,6 +124,7 @@ pub(crate) fn reconstruct_legs(
                     departure_s: connection.departure_s,
                     arrival_s: connection.arrival_s,
                     mode: Some(route.mode),
+                    street_mode: None,
                     route_id: Some(route.route_id.clone()),
                     route_short_name: Some(route.short_name.clone()),
                     trip_id: Some(trip.trip_id.clone()),

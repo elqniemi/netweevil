@@ -1,6 +1,6 @@
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::legs::{seconds_for_distance, transit_connection_geometry};
 use crate::model::{
@@ -9,9 +9,34 @@ use crate::model::{
     TransitServiceAreaStop,
 };
 use crate::runtime::{
-    PrevStep, StateKey, StopSpatialIndex, TransitRuntime, build_departures_by_stop,
-    can_start_transfer_walk, relax_state,
+    PrevStep, StateKey, StopSpatialIndex, TransitRuntime, best_street_candidates,
+    build_departures_by_stop, can_start_transfer_walk, relax_state,
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct TransitServiceAreaSegmentRef {
+    origin_index: usize,
+    trip_index: u32,
+    route_index: u32,
+    from_stop_index: u32,
+    to_stop_index: u32,
+    connection_departure_s: u32,
+    connection_arrival_s: u32,
+    boarding_count: u8,
+}
+
+impl TransitServiceAreaSegmentRef {
+    fn connection(self) -> TransitConnection {
+        TransitConnection {
+            trip_index: self.trip_index,
+            route_index: self.route_index,
+            from_stop_index: self.from_stop_index,
+            to_stop_index: self.to_stop_index,
+            departure_s: self.connection_departure_s,
+            arrival_s: self.connection_arrival_s,
+        }
+    }
+}
 
 pub fn execute_transit_service_area(
     bundle: &TransitBundle,
@@ -43,42 +68,41 @@ pub(crate) fn execute_transit_service_area_with_runtime(
             ],
         });
     }
-    if !request.modes.access.contains(&AccessMode::Walk) {
-        return Ok(TransitServiceAreaResult {
-            analysis_id: request.analysis_id.clone(),
-            outcome: TransitOutcome::NotImplemented,
-            origin_count: request.origins.len(),
-            processed_origin_count: 0,
-            skipped_origin_count: request.origins.len(),
-            max_travel_time_s: request.max_travel_time_s,
-            stops: Vec::new(),
-            stop_segments: Vec::new(),
-            diagnostics: vec![
-                "only pedestrian access is implemented for transit service areas".to_string(),
-            ],
-        });
-    }
+    let access_modes = request.modes.validated_access_modes()?;
+    let max_access_distance_m = access_modes
+        .iter()
+        .map(|mode| mode.max_access_distance_m(&request.modes))
+        .fold(0.0_f64, f64::max);
 
     let departure_s = runtime.request_departure_seconds(&request.time.datetime)?;
     let search_end_s = departure_s.saturating_add(request.time.search_window_s);
     let time_limit_s = departure_s.saturating_add(request.max_travel_time_s);
     let mut all_stops = Vec::new();
-    let mut all_segments = Vec::new();
+    let mut all_segment_refs = Vec::new();
+    let mut seen_segment_refs = HashSet::new();
     let mut diagnostics = Vec::new();
     let mut processed_origin_count = 0_usize;
     let mut skipped_origin_count = 0_usize;
 
-    for origin in &request.origins {
-        let access = runtime.nearby_access_stops(
+    for (origin_index, origin) in request.origins.iter().enumerate() {
+        let access = best_street_candidates(
+            runtime,
             origin.lon,
             origin.lat,
-            request.modes.max_access_distance_m,
+            &access_modes,
+            &request.modes,
+            false,
         );
         if access.is_empty() {
             skipped_origin_count += 1;
             diagnostics.push(format!(
-                "origin '{}' had no transit stop within {:.0} m",
-                origin.id, request.modes.max_access_distance_m
+                "origin '{}' had no transit stop within {:.0} m for access modes {:?}",
+                origin.id,
+                max_access_distance_m,
+                access_modes
+                    .iter()
+                    .map(|mode| mode.label())
+                    .collect::<Vec<_>>()
             ));
             continue;
         }
@@ -89,9 +113,7 @@ pub(crate) fn execute_transit_service_area_with_runtime(
         let mut prev = HashMap::<StateKey, PrevStep>::new();
 
         for candidate in access {
-            let access_time_s =
-                seconds_for_distance(candidate.distance_m, request.modes.walk_speed_kph);
-            let arrival_s = departure_s.saturating_add(access_time_s);
+            let arrival_s = departure_s.saturating_add(candidate.time_s);
             if arrival_s > time_limit_s {
                 continue;
             }
@@ -113,6 +135,7 @@ pub(crate) fn execute_transit_service_area_with_runtime(
                     from_lat: origin.lat,
                     distance_m: candidate.distance_m,
                     departure_s,
+                    mode: candidate.mode,
                 },
             );
         }
@@ -220,34 +243,54 @@ pub(crate) fn execute_transit_service_area_with_runtime(
                         },
                     );
                     if request.returns.include_stop_segments {
-                        all_segments.push(transit_service_area_segment(
-                            runtime.bundle,
-                            origin,
-                            departure_s,
-                            next_boardings,
-                            *connection,
-                            request.returns.include_geometry,
-                        ));
+                        let segment_ref = TransitServiceAreaSegmentRef {
+                            origin_index,
+                            trip_index: connection.trip_index,
+                            route_index: connection.route_index,
+                            from_stop_index: connection.from_stop_index,
+                            to_stop_index: connection.to_stop_index,
+                            connection_departure_s: connection.departure_s,
+                            connection_arrival_s: connection.arrival_s,
+                            boarding_count: next_boardings,
+                        };
+                        if seen_segment_refs.insert(segment_ref) {
+                            ensure_transit_service_area_output_room(
+                                all_segment_refs.len(),
+                                request.returns.max_stop_segments,
+                                "stop segments",
+                                "disable returns.include_stop_segments, reduce max_travel_time_s/search_window_s, or raise returns.max_stop_segments explicitly",
+                            )?;
+                            all_segment_refs.push(segment_ref);
+                        }
                     }
                 }
             }
         }
 
         if request.returns.include_stops {
-            let mut stop_best = BTreeMap::<u32, (u32, u8)>::new();
-            for (state, arrival_s) in best {
+            let mut stop_best = BTreeMap::<u32, (u32, u8, StateKey)>::new();
+            for (state, arrival_s) in &best {
+                let (state, arrival_s) = (*state, *arrival_s);
                 if arrival_s > time_limit_s {
                     continue;
                 }
-                let entry = stop_best
-                    .entry(state.stop_index)
-                    .or_insert((arrival_s, state.boardings));
+                let entry = stop_best.entry(state.stop_index).or_insert((
+                    arrival_s,
+                    state.boardings,
+                    state,
+                ));
                 if arrival_s < entry.0 || (arrival_s == entry.0 && state.boardings < entry.1) {
-                    *entry = (arrival_s, state.boardings);
+                    *entry = (arrival_s, state.boardings, state);
                 }
             }
-            for (stop_index, (arrival_s, boardings)) in stop_best {
+            for (stop_index, (arrival_s, boardings, state)) in stop_best {
                 let stop = &runtime.bundle.stops[stop_index as usize];
+                ensure_transit_service_area_output_room(
+                    all_stops.len(),
+                    request.returns.max_stops,
+                    "stops",
+                    "disable returns.include_stops, reduce max_travel_time_s/search_window_s, or raise returns.max_stops explicitly",
+                )?;
                 all_stops.push(TransitServiceAreaStop {
                     origin_id: origin.id.clone(),
                     stop_id: stop.stop_id.clone(),
@@ -257,10 +300,18 @@ pub(crate) fn execute_transit_service_area_with_runtime(
                     arrival_s,
                     travel_time_s: arrival_s.saturating_sub(departure_s),
                     boarding_count: boardings,
+                    access_mode: access_mode_for_state(&prev, state),
                 });
             }
         }
     }
+
+    let all_segments = materialize_transit_service_area_segments(
+        runtime.bundle,
+        request,
+        departure_s,
+        all_segment_refs,
+    )?;
 
     let outcome = if processed_origin_count == 0 {
         TransitOutcome::Unreachable
@@ -278,6 +329,72 @@ pub(crate) fn execute_transit_service_area_with_runtime(
         stop_segments: all_segments,
         diagnostics,
     })
+}
+
+fn ensure_transit_service_area_output_room(
+    current_len: usize,
+    max_len: usize,
+    label: &str,
+    advice: &str,
+) -> Result<()> {
+    if current_len >= max_len {
+        bail!(
+            "transit service-area output exceeded returns.max_{}={}; {}",
+            label.replace(' ', "_"),
+            max_len,
+            advice
+        );
+    }
+    Ok(())
+}
+
+fn materialize_transit_service_area_segments(
+    bundle: &TransitBundle,
+    request: &TransitServiceAreaRequest,
+    query_departure_s: u32,
+    segment_refs: Vec<TransitServiceAreaSegmentRef>,
+) -> Result<Vec<TransitServiceAreaSegment>> {
+    if !request.returns.include_stop_segments {
+        return Ok(Vec::new());
+    }
+
+    let mut geometry_point_count = 0_usize;
+    let mut segments = Vec::with_capacity(segment_refs.len());
+    for segment_ref in segment_refs {
+        let origin = &request.origins[segment_ref.origin_index];
+        let segment = transit_service_area_segment(
+            bundle,
+            origin,
+            query_departure_s,
+            segment_ref.boarding_count,
+            segment_ref.connection(),
+            request.returns.include_geometry,
+        );
+        if request.returns.include_geometry {
+            geometry_point_count = geometry_point_count.saturating_add(segment.geometry.len());
+            if geometry_point_count > request.returns.max_geometry_points {
+                bail!(
+                    "transit service-area output exceeded returns.max_geometry_points={}; disable returns.include_geometry, reduce max_travel_time_s/search_window_s, or raise returns.max_geometry_points explicitly",
+                    request.returns.max_geometry_points
+                );
+            }
+        }
+        segments.push(segment);
+    }
+    Ok(segments)
+}
+
+fn access_mode_for_state(
+    prev: &HashMap<StateKey, PrevStep>,
+    mut state: StateKey,
+) -> Option<AccessMode> {
+    loop {
+        match prev.get(&state)? {
+            PrevStep::Access { mode, .. } => return Some(*mode),
+            PrevStep::Transfer { previous, .. } => state = *previous,
+            PrevStep::Transit { previous, .. } => state = *previous,
+        }
+    }
 }
 
 fn transit_service_area_segment(

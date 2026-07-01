@@ -1,6 +1,7 @@
 """Connection bar, settings tab, service discovery, and HTTP client."""
 
 import json
+import shutil
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -338,36 +339,65 @@ class ConnectionMixin:
             with urllib.request.urlopen(request, timeout=self.timeout_seconds()) as response:
                 return response.headers.get_content_type(), response.read()
         except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")
-            try:
-                parsed = json.loads(error_body)
-                message = parsed.get("error") or error_body
-                diagnostics = parsed.get("diagnostics") or []
-                if diagnostics:
-                    detail_lines = []
-                    for diagnostic in diagnostics:
-                        detail_lines.append(
-                            "{}: {}".format(
-                                diagnostic.get("code", "diagnostic"),
-                                diagnostic.get("message", ""),
-                            ).strip()
-                        )
-                        for action in diagnostic.get("suggested_actions") or []:
-                            detail_lines.append("next: {}".format(action))
-                    message = "{}\n{}".format(message, "\n".join(detail_lines))
-            except Exception:
-                message = error_body or str(exc)
-            raise RuntimeError(message)
+            self.raise_http_error(exc)
 
-    def save_response(self, output_path, content_type, body):
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+    def http_post_json_to_file(self, url, payload, output_path):
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/geo+json, application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout_seconds()) as response:
+                content_type = response.headers.get_content_type()
+                saved_path = self.response_output_path(output_path, content_type)
+                saved_path.parent.mkdir(parents=True, exist_ok=True)
+                with saved_path.open("wb") as target:
+                    shutil.copyfileobj(response, target, length=1024 * 1024)
+                return content_type, saved_path
+        except urllib.error.HTTPError as exc:
+            self.raise_http_error(exc)
+
+    def raise_http_error(self, exc):
+        error_body = exc.read().decode("utf-8", errors="replace")
+        try:
+            parsed = json.loads(error_body)
+            message = parsed.get("error") or error_body
+            diagnostics = parsed.get("diagnostics") or []
+            if diagnostics:
+                detail_lines = []
+                for diagnostic in diagnostics:
+                    detail_lines.append(
+                        "{}: {}".format(
+                            diagnostic.get("code", "diagnostic"),
+                            diagnostic.get("message", ""),
+                        ).strip()
+                    )
+                    for action in diagnostic.get("suggested_actions") or []:
+                        detail_lines.append("next: {}".format(action))
+                message = "{}\n{}".format(message, "\n".join(detail_lines))
+        except Exception:
+            message = error_body or str(exc)
+        raise RuntimeError(message)
+
+    def response_output_path(self, output_path, content_type):
+        output_path = Path(output_path)
         if "geo+json" in content_type:
             if output_path.suffix.lower() != ".geojson":
-                output_path = output_path.with_suffix(".geojson")
-            output_path.write_bytes(body)
+                return output_path.with_suffix(".geojson")
             return output_path
 
         if output_path.suffix.lower() != ".json":
-            output_path = output_path.with_suffix(".json")
+            return output_path.with_suffix(".json")
+        return output_path
+
+    def save_response(self, output_path, content_type, body):
+        output_path = self.response_output_path(output_path, content_type)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(body)
         return output_path

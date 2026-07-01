@@ -121,6 +121,49 @@ fn executes_transit_service_area_to_reachable_stops_and_segments() {
 }
 
 #[test]
+fn rejects_transit_service_area_above_stop_segment_limit() {
+    let bundle = build_bundle_from_files(
+        fixture_files(),
+        "abc".to_string(),
+        TransitImportOptions {
+            name: "fixture".to_string(),
+            source_label: "fixture".to_string(),
+            service_start_date: "2026-05-11".to_string(),
+            service_days: 7,
+        },
+    )
+    .expect("fixture imports");
+    let request = TransitServiceAreaRequest {
+        analysis_id: "sa-output-limit".to_string(),
+        origins: vec![TransitPoint {
+            id: "origin".to_string(),
+            lon: 6.0,
+            lat: 53.0,
+        }],
+        time: TransitQueryTime {
+            datetime: "2026-05-11T08:00:00+02:00".to_string(),
+            arrive_by: false,
+            search_window_s: 3600,
+        },
+        modes: TransitModeOptions {
+            max_access_distance_m: 100.0,
+            max_transfer_distance_m: 100.0,
+            ..TransitModeOptions::default()
+        },
+        max_travel_time_s: 1800,
+        returns: TransitServiceAreaReturnOptions {
+            max_stop_segments: 0,
+            ..TransitServiceAreaReturnOptions::default()
+        },
+    };
+
+    let error = execute_transit_service_area(&bundle, &request)
+        .expect_err("stop segment cap should reject large output");
+
+    assert!(error.to_string().contains("max_stop_segments"));
+}
+
+#[test]
 fn prepared_router_reuses_departures_and_spatial_index() {
     let bundle = Arc::new(
         build_bundle_from_files(
@@ -508,6 +551,222 @@ fn uses_gtfs_shapes_for_transit_geometry() {
             .iter()
             .any(|segment| segment.geometry.len() > 2)
     );
+}
+
+#[test]
+fn routes_bicycle_access_with_walk_egress_when_mixed_modes_enabled() {
+    let bundle = build_bundle_from_files(
+        fixture_files(),
+        "abc".to_string(),
+        TransitImportOptions {
+            name: "fixture".to_string(),
+            source_label: "fixture".to_string(),
+            service_start_date: "2026-05-11".to_string(),
+            service_days: 1,
+        },
+    )
+    .expect("fixture imports");
+    // Origin is ~2 km from stop A: outside the walking access limit but
+    // well inside the default bicycle access limit.
+    let request = TransitRouteRequest {
+        route_id: "bike_first_mile".to_string(),
+        origin: TransitPoint {
+            id: "origin".to_string(),
+            lon: 5.97,
+            lat: 53.0,
+        },
+        destination: TransitPoint {
+            id: "dest".to_string(),
+            lon: 6.02,
+            lat: 53.0,
+        },
+        time: TransitQueryTime {
+            datetime: "2026-05-11T08:00:00+02:00".to_string(),
+            arrive_by: false,
+            search_window_s: 3600,
+        },
+        modes: TransitModeOptions {
+            access: vec![AccessMode::Bicycle],
+            egress: vec![AccessMode::Walk],
+            mixed_access_egress: true,
+            max_access_distance_m: 100.0,
+            max_egress_distance_m: 100.0,
+            ..TransitModeOptions::default()
+        },
+        returns: TransitReturnOptions::default(),
+        alternatives: TransitAlternativeOptions::default(),
+    };
+
+    let result = execute_transit_route(&bundle, &request).expect("route executes");
+
+    assert_eq!(result.outcome, TransitOutcome::Scheduled);
+    let access_leg = result
+        .legs
+        .iter()
+        .find(|leg| leg.leg_type == TransitLegType::Access)
+        .expect("access leg");
+    assert_eq!(access_leg.street_mode, Some(AccessMode::Bicycle));
+    let egress_leg = result
+        .legs
+        .iter()
+        .find(|leg| leg.leg_type == TransitLegType::Egress)
+        .expect("egress leg");
+    assert_eq!(egress_leg.street_mode, Some(AccessMode::Walk));
+}
+
+#[test]
+fn rejects_mixed_access_egress_modes_without_opt_in() {
+    let bundle = build_bundle_from_files(
+        fixture_files(),
+        "abc".to_string(),
+        TransitImportOptions {
+            name: "fixture".to_string(),
+            source_label: "fixture".to_string(),
+            service_start_date: "2026-05-11".to_string(),
+            service_days: 1,
+        },
+    )
+    .expect("fixture imports");
+    let request = TransitRouteRequest {
+        route_id: "mixed_without_flag".to_string(),
+        origin: TransitPoint {
+            id: "origin".to_string(),
+            lon: 5.97,
+            lat: 53.0,
+        },
+        destination: TransitPoint {
+            id: "dest".to_string(),
+            lon: 6.02,
+            lat: 53.0,
+        },
+        time: TransitQueryTime {
+            datetime: "2026-05-11T08:00:00+02:00".to_string(),
+            arrive_by: false,
+            search_window_s: 3600,
+        },
+        modes: TransitModeOptions {
+            access: vec![AccessMode::Bicycle],
+            egress: vec![AccessMode::Walk],
+            ..TransitModeOptions::default()
+        },
+        returns: TransitReturnOptions::default(),
+        alternatives: TransitAlternativeOptions::default(),
+    };
+
+    let error = execute_transit_route(&bundle, &request).expect_err("mixed modes rejected");
+    assert!(error.to_string().contains("mixed_access_egress"));
+}
+
+#[test]
+fn routes_with_matching_bicycle_access_and_egress_without_opt_in() {
+    let bundle = build_bundle_from_files(
+        fixture_files(),
+        "abc".to_string(),
+        TransitImportOptions {
+            name: "fixture".to_string(),
+            source_label: "fixture".to_string(),
+            service_start_date: "2026-05-11".to_string(),
+            service_days: 1,
+        },
+    )
+    .expect("fixture imports");
+    let request = TransitRouteRequest {
+        route_id: "bike_both_miles".to_string(),
+        origin: TransitPoint {
+            id: "origin".to_string(),
+            lon: 5.97,
+            lat: 53.0,
+        },
+        destination: TransitPoint {
+            id: "dest".to_string(),
+            lon: 6.05,
+            lat: 53.0,
+        },
+        time: TransitQueryTime {
+            datetime: "2026-05-11T08:00:00+02:00".to_string(),
+            arrive_by: false,
+            search_window_s: 3600,
+        },
+        modes: TransitModeOptions {
+            access: vec![AccessMode::Bicycle],
+            egress: vec![AccessMode::Bicycle],
+            max_access_distance_m: 100.0,
+            max_egress_distance_m: 100.0,
+            ..TransitModeOptions::default()
+        },
+        returns: TransitReturnOptions::default(),
+        alternatives: TransitAlternativeOptions::default(),
+    };
+
+    let result = execute_transit_route(&bundle, &request).expect("route executes");
+
+    assert_eq!(result.outcome, TransitOutcome::Scheduled);
+    assert!(
+        result
+            .legs
+            .iter()
+            .filter(|leg| matches!(
+                leg.leg_type,
+                TransitLegType::Access | TransitLegType::Egress
+            ))
+            .all(|leg| leg.street_mode == Some(AccessMode::Bicycle))
+    );
+}
+
+#[test]
+fn car_access_extends_transit_service_area_reach() {
+    let bundle = build_bundle_from_files(
+        fixture_files(),
+        "abc".to_string(),
+        TransitImportOptions {
+            name: "fixture".to_string(),
+            source_label: "fixture".to_string(),
+            service_start_date: "2026-05-11".to_string(),
+            service_days: 1,
+        },
+    )
+    .expect("fixture imports");
+    // Origin is ~10 km from stop A: only car access can bridge the first mile.
+    let origin = TransitPoint {
+        id: "park_and_ride".to_string(),
+        lon: 5.85,
+        lat: 53.0,
+    };
+    let walk_request = TransitServiceAreaRequest {
+        analysis_id: "sa_walk".to_string(),
+        origins: vec![origin.clone()],
+        time: TransitQueryTime {
+            datetime: "2026-05-11T08:00:00+02:00".to_string(),
+            arrive_by: false,
+            search_window_s: 3600,
+        },
+        modes: TransitModeOptions::default(),
+        max_travel_time_s: 3600,
+        returns: TransitServiceAreaReturnOptions::default(),
+    };
+    let car_request = TransitServiceAreaRequest {
+        analysis_id: "sa_car".to_string(),
+        modes: TransitModeOptions {
+            access: vec![AccessMode::Car],
+            egress: vec![AccessMode::Car],
+            ..TransitModeOptions::default()
+        },
+        ..walk_request.clone()
+    };
+
+    let walk_result = execute_transit_service_area(&bundle, &walk_request).expect("walk run");
+    assert_eq!(walk_result.outcome, TransitOutcome::Unreachable);
+    assert_eq!(walk_result.skipped_origin_count, 1);
+
+    let car_result = execute_transit_service_area(&bundle, &car_request).expect("car run");
+    assert_eq!(car_result.outcome, TransitOutcome::Scheduled);
+    assert_eq!(car_result.processed_origin_count, 1);
+    let stop_a = car_result
+        .stops
+        .iter()
+        .find(|stop| stop.stop_id == "A")
+        .expect("stop A reachable by car access");
+    assert_eq!(stop_a.access_mode, Some(AccessMode::Car));
 }
 
 fn fixture_files() -> GtfsFiles {

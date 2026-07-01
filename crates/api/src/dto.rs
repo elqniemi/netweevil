@@ -109,6 +109,14 @@ pub struct TransitRouteExecutionRequest {
     pub feed_id: String,
     #[serde(default)]
     pub pedestrian_profile_id: Option<String>,
+    /// Profile used to draw network geometry for non-walk access legs
+    /// (bicycle or car first mile).
+    #[serde(default)]
+    pub access_profile_id: Option<String>,
+    /// Profile used to draw network geometry for non-walk egress legs
+    /// (bicycle or car last mile).
+    #[serde(default)]
+    pub egress_profile_id: Option<String>,
     pub request: TransitRouteRequest,
 }
 
@@ -184,4 +192,8 @@ pub struct TransitExecutionContext {
     pub(crate) walking_geometry: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pedestrian_profile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) access_profile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) egress_profile_id: Option<String>,
 }

@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 
 use crate::*;
@@ -322,6 +322,8 @@ pub(crate) fn execute_service_area_with_graph(
         ServiceAreaMultiOriginMode::Cut => cut_service_area_bands(origin_bands),
     };
 
+    ensure_service_area_output_limits(request, &origin_bands)?;
+
     let segments =
         if request.returns.segments || matches!(request.band_mode, ServiceAreaBandMode::Unbanded) {
             build_service_area_segments(topology, metrics, request, &origin_bands)
@@ -363,6 +365,141 @@ pub(crate) fn execute_service_area_with_graph(
         diagnostics,
         warnings,
     })
+}
+
+fn ensure_service_area_output_limits(
+    request: &ServiceAreaRequest,
+    bands: &[ServiceAreaOriginBand],
+) -> Result<()> {
+    let source_segment_count = bands.iter().map(|band| band.segments.len()).sum::<usize>();
+    let result_segment_count =
+        if request.returns.segments || matches!(request.band_mode, ServiceAreaBandMode::Unbanded) {
+            source_segment_count
+        } else {
+            0
+        };
+    ensure_service_area_limit(
+        result_segment_count,
+        request.returns.max_segments,
+        "segments",
+        "disable returns.segments, avoid band_mode=none, reduce thresholds/origins, or raise returns.max_segments explicitly",
+    )?;
+
+    let feature_count = if request.returns.geometry || request.returns.attributes {
+        estimate_service_area_feature_count(request, bands)
+    } else {
+        0
+    };
+    ensure_service_area_limit(
+        feature_count,
+        request.returns.max_features,
+        "features",
+        "request polygon-only output, reduce thresholds/origins, avoid band_mode=none, or raise returns.max_features explicitly",
+    )?;
+
+    if request.returns.geometry {
+        let geometry_point_count = estimate_service_area_geometry_points(request, bands);
+        ensure_service_area_limit(
+            geometry_point_count,
+            request.returns.max_geometry_points,
+            "geometry_points",
+            "request polygon-only output, disable returns.geometry, reduce thresholds/origins, or raise returns.max_geometry_points explicitly",
+        )?;
+    }
+
+    Ok(())
+}
+
+fn ensure_service_area_limit(
+    count: usize,
+    max_count: usize,
+    label: &str,
+    advice: &str,
+) -> Result<()> {
+    if count > max_count {
+        bail!(
+            "service-area output would contain {} {} but returns.max_{} is {}; {}",
+            count,
+            label,
+            label,
+            max_count,
+            advice
+        );
+    }
+    Ok(())
+}
+
+fn estimate_service_area_feature_count(
+    request: &ServiceAreaRequest,
+    bands: &[ServiceAreaOriginBand],
+) -> usize {
+    if matches!(request.band_mode, ServiceAreaBandMode::Unbanded) {
+        if matches!(
+            request.output_mode,
+            ServiceAreaOutputMode::Network | ServiceAreaOutputMode::Both
+        ) {
+            return bands.iter().map(|band| band.segments.len()).sum();
+        }
+        return 0;
+    }
+
+    bands
+        .iter()
+        .map(|_| {
+            let mut count = 0_usize;
+            if matches!(
+                request.output_mode,
+                ServiceAreaOutputMode::Network | ServiceAreaOutputMode::Both
+            ) {
+                count += 1;
+            }
+            if matches!(
+                request.output_mode,
+                ServiceAreaOutputMode::Polygon | ServiceAreaOutputMode::Both
+            ) {
+                count += 1;
+            }
+            count
+        })
+        .sum()
+}
+
+fn estimate_service_area_geometry_points(
+    request: &ServiceAreaRequest,
+    bands: &[ServiceAreaOriginBand],
+) -> usize {
+    let source_segment_count = bands.iter().map(|band| band.segments.len()).sum::<usize>();
+    let mut point_count = 0_usize;
+
+    if matches!(request.band_mode, ServiceAreaBandMode::Unbanded) {
+        if matches!(
+            request.output_mode,
+            ServiceAreaOutputMode::Network | ServiceAreaOutputMode::Both
+        ) {
+            point_count = point_count.saturating_add(source_segment_count.saturating_mul(2));
+        }
+    } else {
+        for band in bands {
+            if matches!(
+                request.output_mode,
+                ServiceAreaOutputMode::Network | ServiceAreaOutputMode::Both
+            ) {
+                point_count = point_count.saturating_add(band.segments.len().saturating_mul(2));
+            }
+            if matches!(
+                request.output_mode,
+                ServiceAreaOutputMode::Polygon | ServiceAreaOutputMode::Both
+            ) {
+                point_count = point_count.saturating_add(band.segments.len().saturating_mul(4) + 1);
+            }
+        }
+    }
+
+    if request.returns.segments || matches!(request.band_mode, ServiceAreaBandMode::Unbanded) {
+        point_count = point_count.saturating_add(source_segment_count.saturating_mul(2));
+    }
+
+    point_count
 }
 
 fn thresholds_for_service_area(

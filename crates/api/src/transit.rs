@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -6,7 +7,10 @@ use axum::response::{IntoResponse, Response};
 use netweevil_core::TravelMode;
 use netweevil_profile::{ReturnConfig, ReturnGeometry};
 use netweevil_query::{LabeledPoint, PreparedRoutingEngine, RouteRequest};
-use netweevil_transit::{TransitLeg, TransitLegType, TransitRouteResult, TransitWalkingGeometry};
+use netweevil_transit::{
+    AccessMode, TransitLeg, TransitLegType, TransitModeOptions, TransitRouteResult,
+    TransitWalkingGeometry,
+};
 use tracing::{info, warn};
 
 use crate::dto::{
@@ -39,11 +43,14 @@ pub(crate) async fn transit_route_handler(
     );
     let mut request = payload.request;
     let walking_geometry = request.returns.walking_geometry;
-    let pedestrian_profile = if matches!(walking_geometry, TransitWalkingGeometry::Network) {
+    let street_engines = if matches!(walking_geometry, TransitWalkingGeometry::Network) {
         request.returns.include_geometry = true;
-        Some(resolve_transit_pedestrian_profile(
+        Some(resolve_transit_street_engines(
             state.service.as_ref(),
             payload.pedestrian_profile_id.as_deref(),
+            payload.access_profile_id.as_deref(),
+            payload.egress_profile_id.as_deref(),
+            &request.modes,
         )?)
     } else {
         None
@@ -51,18 +58,19 @@ pub(crate) async fn transit_route_handler(
     let router = Arc::clone(&feed.router);
     let manifest = feed.manifest.clone();
     let route_id = request.route_id.clone();
-    let pedestrian_profile_id =
-        pedestrian_profile.map(|profile| profile.document.profile.id.clone());
-    let walk_engine = pedestrian_profile.map(|profile| {
-        (
-            profile.document.profile.id.clone(),
-            Arc::clone(&profile.engine),
-        )
-    });
+    let pedestrian_profile_id = street_engines
+        .as_ref()
+        .map(|engines| engines.walk.0.clone());
+    let access_profile_id = street_engines
+        .as_ref()
+        .and_then(|engines| side_profile_ids(&engines.access));
+    let egress_profile_id = street_engines
+        .as_ref()
+        .and_then(|engines| side_profile_ids(&engines.egress));
     let result = execute_on_routing_worker(state.service.as_ref(), move || {
         let mut result = router.execute_route(&request)?;
-        if let Some((profile_id, engine)) = walk_engine.as_ref() {
-            replace_transit_walking_leg_geometries(&mut result, engine, profile_id);
+        if let Some(engines) = street_engines.as_ref() {
+            replace_transit_street_leg_geometries(&mut result, engines);
         }
         Ok(result)
     })
@@ -76,12 +84,14 @@ pub(crate) async fn transit_route_handler(
             feed_id: manifest.feed_id,
             service_start_date: manifest.service_start_date,
             service_days: manifest.service_days,
-            route_engine: "scheduled_connection_scan_pedestrian_transit".to_string(),
+            route_engine: "scheduled_connection_scan_street_transit".to_string(),
             walking_geometry: match walking_geometry {
                 TransitWalkingGeometry::StraightLine => "straight_line".to_string(),
                 TransitWalkingGeometry::Network => "network".to_string(),
             },
             pedestrian_profile_id,
+            access_profile_id,
+            egress_profile_id,
         },
         result,
     }))
@@ -125,6 +135,8 @@ pub(crate) async fn transit_service_area_handler(
         route_engine: "scheduled_connection_scan_transit_service_area".to_string(),
         walking_geometry: "straight_line".to_string(),
         pedestrian_profile_id: None,
+        access_profile_id: None,
+        egress_profile_id: None,
     };
     info!(
         endpoint = "transit_service_area",
@@ -165,35 +177,150 @@ fn resolve_transit_pedestrian_profile<'a>(
         })
 }
 
-fn replace_transit_walking_leg_geometries(
+/// Routing engines used to replace straight-line street legs with network
+/// geometry: a foot engine for walking legs and transfers, plus optional
+/// per-mode engines for non-walk access and egress legs.
+struct TransitStreetEngines {
+    walk: (String, Arc<PreparedRoutingEngine>),
+    access: HashMap<AccessMode, (String, Arc<PreparedRoutingEngine>)>,
+    egress: HashMap<AccessMode, (String, Arc<PreparedRoutingEngine>)>,
+}
+
+fn street_travel_mode(mode: AccessMode) -> TravelMode {
+    match mode {
+        AccessMode::Walk => TravelMode::Foot,
+        AccessMode::Bicycle => TravelMode::Bicycle,
+        AccessMode::Car => TravelMode::Car,
+    }
+}
+
+fn side_profile_ids(
+    engines: &HashMap<AccessMode, (String, Arc<PreparedRoutingEngine>)>,
+) -> Option<String> {
+    let mut ids = engines
+        .values()
+        .map(|(profile_id, _)| profile_id.clone())
+        .collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    if ids.is_empty() {
+        None
+    } else {
+        Some(ids.join(","))
+    }
+}
+
+fn resolve_transit_street_engines(
+    service: &ServiceRuntime,
+    pedestrian_profile_id: Option<&str>,
+    access_profile_id: Option<&str>,
+    egress_profile_id: Option<&str>,
+    modes: &TransitModeOptions,
+) -> Result<TransitStreetEngines, ApiError> {
+    let walk_profile = resolve_transit_pedestrian_profile(service, pedestrian_profile_id)?;
+    let access_modes = modes
+        .validated_access_modes()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let egress_modes = modes
+        .validated_egress_modes()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    Ok(TransitStreetEngines {
+        walk: (
+            walk_profile.document.profile.id.clone(),
+            Arc::clone(&walk_profile.engine),
+        ),
+        access: resolve_street_side_engines(
+            service,
+            access_profile_id,
+            &access_modes,
+            "access_profile_id",
+        )?,
+        egress: resolve_street_side_engines(
+            service,
+            egress_profile_id,
+            &egress_modes,
+            "egress_profile_id",
+        )?,
+    })
+}
+
+fn resolve_street_side_engines(
+    service: &ServiceRuntime,
+    explicit_profile_id: Option<&str>,
+    side_modes: &[AccessMode],
+    field: &str,
+) -> Result<HashMap<AccessMode, (String, Arc<PreparedRoutingEngine>)>, ApiError> {
+    let mut engines = HashMap::new();
+    if let Some(profile_id) = explicit_profile_id {
+        let profile = resolve_profile(service, Some(profile_id))?;
+        let matched = side_modes.iter().copied().find(|mode| {
+            *mode != AccessMode::Walk && street_travel_mode(*mode) == profile.document.profile.mode
+        });
+        let Some(mode) = matched else {
+            return Err(ApiError::bad_request(format!(
+                "{field} '{}' uses mode {:?}, which does not match any non-walk mode in the request ({:?})",
+                profile_id,
+                profile.document.profile.mode,
+                side_modes
+                    .iter()
+                    .map(|mode| mode.label())
+                    .collect::<Vec<_>>()
+            )));
+        };
+        engines.insert(
+            mode,
+            (
+                profile.document.profile.id.clone(),
+                Arc::clone(&profile.engine),
+            ),
+        );
+    }
+    for &mode in side_modes {
+        if mode == AccessMode::Walk || engines.contains_key(&mode) {
+            continue;
+        }
+        if let Some(profile) = service
+            .profiles
+            .values()
+            .find(|profile| profile.document.profile.mode == street_travel_mode(mode))
+        {
+            engines.insert(
+                mode,
+                (
+                    profile.document.profile.id.clone(),
+                    Arc::clone(&profile.engine),
+                ),
+            );
+        }
+    }
+    Ok(engines)
+}
+
+fn replace_transit_street_leg_geometries(
     result: &mut TransitRouteResult,
-    pedestrian_engine: &PreparedRoutingEngine,
-    pedestrian_profile_id: &str,
+    engines: &TransitStreetEngines,
 ) {
-    replace_transit_walking_leg_geometries_for_legs(
+    replace_transit_street_leg_geometries_for_legs(
         &result.route_id,
         &mut result.legs,
         &mut result.diagnostics,
-        pedestrian_engine,
-        pedestrian_profile_id,
+        engines,
     );
     for alternative in &mut result.alternatives {
-        replace_transit_walking_leg_geometries_for_legs(
+        replace_transit_street_leg_geometries_for_legs(
             &format!("{}_alternative_{}", result.route_id, alternative.rank),
             &mut alternative.legs,
             &mut result.diagnostics,
-            pedestrian_engine,
-            pedestrian_profile_id,
+            engines,
         );
     }
 }
 
-fn replace_transit_walking_leg_geometries_for_legs(
+fn replace_transit_street_leg_geometries_for_legs(
     route_id: &str,
     legs: &mut [TransitLeg],
     diagnostics: &mut Vec<String>,
-    pedestrian_engine: &PreparedRoutingEngine,
-    pedestrian_profile_id: &str,
+    engines: &TransitStreetEngines,
 ) {
     for (index, leg) in legs.iter_mut().enumerate() {
         if !matches!(
@@ -202,17 +329,34 @@ fn replace_transit_walking_leg_geometries_for_legs(
         ) {
             continue;
         }
+        let street_mode = leg.street_mode.unwrap_or(AccessMode::Walk);
+        let engine_entry = if street_mode == AccessMode::Walk {
+            Some(&engines.walk)
+        } else if leg.leg_type == TransitLegType::Access {
+            engines.access.get(&street_mode)
+        } else {
+            engines.egress.get(&street_mode)
+        };
+        let Some((profile_id, engine)) = engine_entry else {
+            diagnostics.push(format!(
+                "no loaded {:?} profile for {} leg {}; keeping straight-line geometry (load one with --profile or pass access_profile_id/egress_profile_id)",
+                street_travel_mode(street_mode),
+                street_mode.label(),
+                index + 1
+            ));
+            continue;
+        };
         let (Some(first), Some(last)) =
             (leg.geometry.first().copied(), leg.geometry.last().copied())
         else {
             diagnostics.push(format!(
-                "network walking geometry skipped for leg {} because straight-line endpoints were not returned",
+                "network street geometry skipped for leg {} because straight-line endpoints were not returned",
                 index + 1
             ));
             continue;
         };
         let route_request = RouteRequest {
-            route_id: format!("{}_walk_leg_{}", route_id, index + 1),
+            route_id: format!("{}_street_leg_{}", route_id, index + 1),
             origin: LabeledPoint {
                 id: leg.from_id.clone(),
                 lon: first[0],
@@ -232,7 +376,7 @@ fn replace_transit_walking_leg_geometries_for_legs(
             },
             alternatives: Default::default(),
         };
-        match pedestrian_engine.execute_route(&route_request) {
+        match engine.execute_route(&route_request) {
             Ok(route) => {
                 if let Some(geometry) = route.geometry {
                     leg.geometry = geometry;
@@ -240,9 +384,9 @@ fn replace_transit_walking_leg_geometries_for_legs(
             }
             Err(error) => {
                 diagnostics.push(format!(
-                    "network walking geometry failed for leg {} using profile '{}': {}",
+                    "network street geometry failed for leg {} using profile '{}': {}",
                     index + 1,
-                    pedestrian_profile_id,
+                    profile_id,
                     error
                 ));
             }
