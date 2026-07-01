@@ -9,7 +9,7 @@ use netweevil_core::{
     CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, DatasetAccelerationBundle,
     EdgeNameBundle, TopologyBundle, TopologyEdgeLayers, TravelMode,
 };
-use netweevil_report::{CompiledProfileManifest, DatasetManifest, RunManifest};
+use netweevil_manifest::{CompiledProfileManifest, DatasetManifest, RunManifest};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 

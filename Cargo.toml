@@ -4,6 +4,7 @@ members = [
     "crates/cli",
     "crates/core",
     "crates/ingest",
+    "crates/manifest",
     "crates/persist",
     "crates/profile",
     "crates/query",

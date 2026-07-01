@@ -8,11 +8,11 @@ use std::sync::{
 
 use anyhow::{Context, Result, bail};
 use netweevil_core::{BuildStage, CacheBundleId, DatasetId};
+use netweevil_manifest::{BundleRef, DatasetManifest, now_rfc3339};
 use netweevil_persist::{
     WorkspacePaths, write_acceleration_bundle, write_dataset_manifest, write_edge_name_bundle,
     write_topology_bundle,
 };
-use netweevil_report::{BundleRef, DatasetManifest, now_rfc3339};
 use sha2::{Digest, Sha256};
 
 use crate::acceleration::build_dataset_acceleration_bundle_with_progress;

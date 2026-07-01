@@ -1164,10 +1164,23 @@ dependencies = [
  "anyhow",
  "hex",
  "netweevil-core",
+ "netweevil-manifest",
  "netweevil-persist",
- "netweevil-report",
  "osmpbfreader",
  "sha2",
+]
+
+[[package]]
+name = "netweevil-manifest"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "netweevil-core",
+ "netweevil-profile",
+ "netweevil-query",
+ "serde",
+ "time",
+ "uuid",
 ]
 
 [[package]]
@@ -1179,7 +1192,7 @@ dependencies = [
  "flate2",
  "memmap2",
  "netweevil-core",
- "netweevil-report",
+ "netweevil-manifest",
  "serde",
  "serde_json",
 ]
@@ -1220,6 +1233,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "netweevil-core",
+ "netweevil-manifest",
  "netweevil-profile",
  "netweevil-query",
  "parquet",

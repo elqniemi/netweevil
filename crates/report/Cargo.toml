@@ -10,6 +10,7 @@ anyhow.workspace = true
 arrow-array.workspace = true
 arrow-schema.workspace = true
 netweevil-core = { path = "../core" }
+netweevil-manifest = { path = "../manifest" }
 netweevil-profile = { path = "../profile" }
 netweevil-query = { path = "../query" }
 parquet.workspace = true

@@ -1,5 +1,5 @@
 [package]
-name = "netweevil-ingest"
+name = "netweevil-manifest"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,12 +7,12 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-hex.workspace = true
 netweevil-core = { path = "../core" }
-netweevil-persist = { path = "../persist" }
-netweevil-manifest = { path = "../manifest" }
-osmpbfreader.workspace = true
-sha2.workspace = true
+netweevil-profile = { path = "../profile" }
+netweevil-query = { path = "../query" }
+serde.workspace = true
+time.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true
