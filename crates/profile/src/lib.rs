@@ -1,3 +1,8 @@
+//! Routing profile schema and compiler. Profiles are YAML documents
+//! describing mode, access rules, speeds, turn costs, and generalized-cost
+//! weights; compilation turns them into per-edge metrics and customized CCH
+//! weights for a specific dataset.
+
 mod compile;
 mod edge_cost;
 mod load;

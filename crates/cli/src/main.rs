@@ -1,3 +1,8 @@
+//! `netweevil` — the command-line interface for OSM routing research:
+//! dataset import, profile compilation, analyses (route/OD/matrix/service
+//! areas/accessibility), GTFS transit, traffic simulation, reports, and the
+//! local HTTP API server.
+
 mod analyze;
 mod api;
 mod cache;

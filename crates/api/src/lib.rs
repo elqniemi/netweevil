@@ -1,3 +1,7 @@
+//! Local Axum HTTP API exposing datasets, profiles, routing analyses, GTFS
+//! transit queries, and simulation control to local tools and the QGIS
+//! plugin.
+
 use std::sync::Arc;
 
 use anyhow::{Context, Result};

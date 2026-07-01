@@ -1,3 +1,6 @@
+//! Run manifests, report rendering (Markdown/HTML), and local result
+//! exports (GeoJSON, CSV, Parquet, GeoPackage) for analysis runs.
+
 mod output;
 
 use std::fs;

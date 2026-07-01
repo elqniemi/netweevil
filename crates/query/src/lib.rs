@@ -1,3 +1,12 @@
+//! The NetWeevil routing engine: exact point-to-point routes, alternatives,
+//! OD batches, travel-time matrices, service areas (isochrones), and
+//! accessibility over an edge-based graph with turn costs and restrictions.
+//!
+//! Every surface is exact — accelerated paths (customizable contraction
+//! hierarchies) return the same costs as the exact engine, with no budgets
+//! or heuristics. `PreparedRoutingEngine` is the shared, thread-safe entry
+//! point used by the CLI, the HTTP API, and the simulation.
+
 mod accessibility;
 mod alternatives;
 mod batch;

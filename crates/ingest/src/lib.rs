@@ -1,3 +1,8 @@
+//! OSM import pipeline: scans `.osm.pbf` extracts, builds the routable
+//! topology (edge-based graph, turn restrictions, connected components,
+//! road classification), and preprocesses the CCH acceleration bundle used
+//! by the query engine.
+
 mod acceleration;
 mod classify;
 mod import;

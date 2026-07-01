@@ -1,3 +1,6 @@
+//! Local state layout and IO for the `.netweevil/` directory: dataset,
+//! profile, and run manifests plus binary bundle reading and writing.
+
 use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};

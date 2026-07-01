@@ -1,3 +1,11 @@
+//! Core data types shared across the NetWeevil workspace: graph primitives
+//! (nodes, directed edges, edge-based topology), persisted topology bundles,
+//! compiled profile metrics, and the customizable contraction hierarchy
+//! (CCH) acceleration structures.
+//!
+//! This crate holds plain data and invariants only; import logic lives in
+//! `netweevil-ingest` and search algorithms in `netweevil-query`.
+
 pub mod acceleration;
 pub mod dataset;
 pub mod graph;

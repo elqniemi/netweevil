@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+description = "NetWeevil local HTTP API used by tools and the QGIS plugin"
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
 
 [dependencies]
 anyhow.workspace = true
