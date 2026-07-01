@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "OSM import, topology build, turn restrictions, and preprocessing for NetWeevil"
+description = "OSM and Overture Maps import, topology build, turn restrictions, and preprocessing for NetWeevil"
 repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
@@ -15,9 +15,15 @@ hex.workspace = true
 netweevil-core = { path = "../core" }
 netweevil-persist = { path = "../persist" }
 netweevil-manifest = { path = "../manifest" }
+arrow-array.workspace = true
+arrow-json.workspace = true
+arrow-schema.workspace = true
 osmpbfreader.workspace = true
+parquet.workspace = true
 rayon.workspace = true
 rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 sha2.workspace = true
 
 [lints]

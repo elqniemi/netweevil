@@ -339,6 +339,8 @@ fn build_failure_mode_bundle(
                 smoothness: edge.smoothness,
                 access_mask: edge.access_mask,
                 is_toll: edge.is_toll,
+                max_speed_kph: edge.max_speed_kph,
+                lanes: edge.lanes,
                 name_index: edge.name_index,
                 geometry_offset: edge.geometry_offset,
                 geometry_len: edge.geometry_len,

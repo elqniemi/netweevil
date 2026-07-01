@@ -9,7 +9,8 @@
 
 use anyhow::{Context, Result};
 use netweevil_core::{
-    AccelerationBundleStats, BuildStage, CacheBundleId, DatasetId, TopologyBundleMeta, TravelMode,
+    AccelerationBundleStats, BuildStage, CacheBundleId, DatasetId, SourceFormat,
+    TopologyBundleMeta, TravelMode,
 };
 use netweevil_profile::ProfileDocument;
 use netweevil_query::{ConnectivityPolicy, FallbackPolicy};
@@ -24,6 +25,8 @@ pub struct DatasetManifest {
     pub source_path: String,
     pub source_sha256: String,
     pub source_size_bytes: u64,
+    #[serde(default)]
+    pub source_format: SourceFormat,
     pub imported_at: String,
     pub build_stage: BuildStage,
     #[serde(default)]

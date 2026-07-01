@@ -85,6 +85,8 @@ fn grid_engine_for(
                 smoothness: SmoothnessClass::Good,
                 access_mask: AccessMask::new(AccessMask::CAR | AccessMask::BICYCLE),
                 is_toll: false,
+                max_speed_kph: None,
+                lanes: None,
                 name_index: None,
                 geometry_offset: 0,
                 geometry_len: 0,

@@ -41,6 +41,27 @@ impl TravelMode {
     }
 }
 
+/// File format of an imported dataset source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceFormat {
+    /// OpenStreetMap protobuf extract (`.osm.pbf`).
+    #[default]
+    OsmPbf,
+    /// Overture Maps transportation theme GeoParquet (a `.parquet` /
+    /// `.geoparquet` file or a directory of them).
+    OvertureParquet,
+}
+
+impl SourceFormat {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::OsmPbf => "osm-pbf",
+            Self::OvertureParquet => "overture-parquet",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BuildStage {

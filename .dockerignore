@@ -9,3 +9,5 @@ qgis_plugin
 README.pdf
 *.osm.pbf
 *.zip
+*.parquet
+*.geoparquet

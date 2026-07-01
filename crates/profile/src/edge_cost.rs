@@ -6,7 +6,7 @@ use netweevil_core::{
     HighwayClass, RoadClass, SmoothnessClass, SurfaceClass, TravelMode,
 };
 
-use crate::schema::ProfileDocument;
+use crate::schema::{PostedLimitPolicy, ProfileDocument};
 
 pub(crate) fn edge_travel_time_s(
     profile: &ProfileDocument,
@@ -31,6 +31,21 @@ pub(crate) fn edge_travel_time_s(
     let mut speed_kph = default_speed_kph(edge.road_class);
     if let Some(rule_speed) = matching_speed(profile, edge, highway) {
         speed_kph = rule_speed;
+    }
+    // Posted limits from the source data (OSM maxspeed, Overture
+    // speed_limits) only apply to motorized modes — a 50 km/h zone must not
+    // speed up pedestrians — and combine per the profile's
+    // `speeds.posted_limits` policy.
+    if matches!(
+        profile.profile.mode,
+        TravelMode::Car | TravelMode::Hgv | TravelMode::Transit
+    ) && let Some(max_speed_kph) = edge.max_speed_kph
+    {
+        match profile.speeds.posted_limits {
+            PostedLimitPolicy::Prefer => speed_kph = max_speed_kph as f64,
+            PostedLimitPolicy::Cap => speed_kph = speed_kph.min(max_speed_kph as f64),
+            PostedLimitPolicy::Ignore => {}
+        }
     }
 
     let effective_speed_kph = (speed_kph * matching_speed_factor(profile, edge, highway)).max(1.0);
@@ -258,4 +273,80 @@ fn is_major_highway(road_class: RoadClass) -> bool {
         road_class,
         RoadClass::Motorway | RoadClass::Trunk | RoadClass::Primary
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::edge_travel_time_s;
+    use crate::schema::ProfileDocument;
+    use netweevil_core::{
+        AccessMask, DirectedEdge, EdgeId, HighwayClass, NodeId, RoadClass, SmoothnessClass,
+        SurfaceClass,
+    };
+
+    fn car_profile(posted_limits: &str) -> ProfileDocument {
+        serde_yaml::from_str(&format!(
+            "profile:\n  id: test\n  label: test\n  mode: car\n  defaults_pack: test\nspeeds:\n  posted_limits: {posted_limits}\nspeed_rules:\n  - match:\n      highway: primary\n    speed_kph: 80\n"
+        ))
+        .expect("profile parses")
+    }
+
+    fn primary_edge(max_speed_kph: Option<f32>) -> DirectedEdge {
+        DirectedEdge {
+            edge_id: EdgeId(0),
+            from: NodeId(0),
+            to: NodeId(1),
+            source_way_id: 1,
+            length_m: 1_000,
+            duration_s: None,
+            road_class: RoadClass::Primary,
+            surface: SurfaceClass::Asphalt,
+            smoothness: SmoothnessClass::Unknown,
+            access_mask: AccessMask::new(AccessMask::CAR),
+            is_toll: false,
+            max_speed_kph,
+            lanes: None,
+            name_index: None,
+            geometry_offset: 0,
+            geometry_len: 0,
+            flags: 0,
+        }
+    }
+
+    fn speed_kph(profile: &ProfileDocument, edge: &DirectedEdge) -> f64 {
+        let time_s = edge_travel_time_s(profile, edge, HighwayClass::Primary).expect("travel time");
+        edge.length_m as f64 / time_s * 3.6
+    }
+
+    #[test]
+    fn combines_posted_limits_per_policy() {
+        // Posted limit below the 80 km/h profile speed.
+        let slow_zone = primary_edge(Some(50.0));
+        // Posted limit above the profile speed.
+        let fast_road = primary_edge(Some(100.0));
+        let unposted = primary_edge(None);
+
+        let cap = car_profile("cap");
+        assert!((speed_kph(&cap, &slow_zone) - 50.0).abs() < 1e-6);
+        assert!((speed_kph(&cap, &fast_road) - 80.0).abs() < 1e-6);
+
+        let prefer = car_profile("prefer");
+        assert!((speed_kph(&prefer, &slow_zone) - 50.0).abs() < 1e-6);
+        assert!((speed_kph(&prefer, &fast_road) - 100.0).abs() < 1e-6);
+        assert!((speed_kph(&prefer, &unposted) - 80.0).abs() < 1e-6);
+
+        let ignore = car_profile("ignore");
+        assert!((speed_kph(&ignore, &slow_zone) - 80.0).abs() < 1e-6);
+        assert!((speed_kph(&ignore, &fast_road) - 80.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn posted_limits_never_apply_to_foot_profiles() {
+        let mut profile = car_profile("prefer");
+        profile.profile.mode = netweevil_core::TravelMode::Foot;
+        profile.speed_rules.clear();
+        let edge = primary_edge(Some(100.0));
+        // Foot speed comes from the road-class default, not the limit.
+        assert!(speed_kph(&profile, &edge) < 100.0);
+    }
 }

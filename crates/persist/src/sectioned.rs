@@ -23,8 +23,9 @@ use anyhow::{Context, Result, bail};
 use bytemuck::Pod;
 use memmap2::Mmap;
 use netweevil_core::{
-    CacheBundleId, CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle,
-    CompiledTurnCostConfig, DatasetAccelerationBundle, EdgeId, NodeId, RoutingEdge, TopologyBundle,
+    AccessMask, CacheBundleId, CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle,
+    CompiledTurnCostConfig, DatasetAccelerationBundle, EdgeId, EdgeProfileAttributes, HighwayClass,
+    NodeId, RoadClass, RoutingEdge, SmoothnessClass, SurfaceClass, TopologyBundle,
     TopologyEdgeLayers, TopologyNode, TravelMode,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -370,6 +371,48 @@ pub(crate) fn read_compiled_profile_sectioned(bytes: &[u8]) -> Result<CompiledPr
     })
 }
 
+/// Profile-layer layout of topology bundles written before schema 10.
+#[derive(Serialize, Deserialize)]
+struct LegacyEdgeProfileAttributes {
+    duration_s: Option<f64>,
+    road_class: RoadClass,
+    highway: HighwayClass,
+    surface: SurfaceClass,
+    smoothness: SmoothnessClass,
+    access_mask: AccessMask,
+    is_toll: bool,
+}
+
+impl From<&EdgeProfileAttributes> for LegacyEdgeProfileAttributes {
+    fn from(value: &EdgeProfileAttributes) -> Self {
+        Self {
+            duration_s: value.duration_s,
+            road_class: value.road_class,
+            highway: value.highway,
+            surface: value.surface,
+            smoothness: value.smoothness,
+            access_mask: value.access_mask,
+            is_toll: value.is_toll,
+        }
+    }
+}
+
+impl From<LegacyEdgeProfileAttributes> for EdgeProfileAttributes {
+    fn from(value: LegacyEdgeProfileAttributes) -> Self {
+        Self {
+            duration_s: value.duration_s,
+            road_class: value.road_class,
+            highway: value.highway,
+            surface: value.surface,
+            smoothness: value.smoothness,
+            access_mask: value.access_mask,
+            is_toll: value.is_toll,
+            max_speed_kph: None,
+            lanes: None,
+        }
+    }
+}
+
 // --- Topology bundle --------------------------------------------------------
 
 #[derive(Serialize, Deserialize)]
@@ -432,8 +475,19 @@ pub(crate) fn write_topology_sectioned(path: &Path, bundle: &TopologyBundle) -> 
     writer.write_raw(&flags)?;
 
     // Attribute layers stay bincode: they are enum-heavy and comparatively
-    // small next to the numeric arrays.
-    writer.write_bincode(&layers.profile)?;
+    // small next to the numeric arrays. Bundles carrying a pre-10 schema
+    // version keep the pre-10 field layout so version-gated reads stay
+    // consistent.
+    if bundle.schema_version >= 10 {
+        writer.write_bincode(&layers.profile)?;
+    } else {
+        let legacy: Vec<LegacyEdgeProfileAttributes> = layers
+            .profile
+            .iter()
+            .map(LegacyEdgeProfileAttributes::from)
+            .collect();
+        writer.write_bincode(&legacy)?;
+    }
     writer.write_bincode(&layers.presentation)?;
 
     writer.write_raw(&bundle.edge_based_topology.node_first_out)?;
@@ -507,7 +561,18 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8]) -> Result<TopologyBundle> {
         )
         .collect();
 
-    let profile = reader.read_bincode()?;
+    // Schema 10 added max_speed/lanes to the profile layer; bincode is not
+    // self-describing, so bundles written before that decode through the old
+    // field layout.
+    let profile: Vec<EdgeProfileAttributes> = if header.schema_version >= 10 {
+        reader.read_bincode()?
+    } else {
+        reader
+            .read_bincode::<Vec<LegacyEdgeProfileAttributes>>()?
+            .into_iter()
+            .map(EdgeProfileAttributes::from)
+            .collect()
+    };
     let presentation = reader.read_bincode()?;
 
     Ok(TopologyBundle {

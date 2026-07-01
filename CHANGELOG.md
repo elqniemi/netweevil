@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Overture Maps support: `dataset import` reads transportation-theme
+  GeoParquet (a file or a directory of files) alongside OSM PBF, detected
+  from the path or forced with `--format`. Segments are split into
+  connector-to-connector chunks; classes, access restrictions (including
+  heading-scoped oneways), speed limits, surfaces, prohibited transitions,
+  and — on releases that carry the column — lanes are mapped into the
+  shared topology model. Dataset manifests record the source format.
+- Per-direction `max_speed_kph` and `lanes` edge attributes (topology
+  schema 10; older bundles still load, without the new attributes). OSM
+  imports fill them from `maxspeed`/`lanes` tags, Overture imports from
+  `speed_limits`/`lanes`. Real lane counts drive simulation capacity.
+- Profile setting `speeds.posted_limits` (`prefer` | `cap` | `ignore`,
+  default `cap`) controlling how posted limits combine with profile
+  speeds for motorized modes: take precedence over them, cap them, or be
+  ignored.
+- Docker build-time data provisioning: `NETWEEVIL_FETCH_OSM_URL` or
+  `NETWEEVIL_FETCH_OVERTURE_BBOX` compose build args fetch and import the
+  data during the image build, baking only the imported `.netweevil`
+  bundles into the image (they seed the state volume on first mount). The
+  default flow — runtime import from the `./datasets` mount — is unchanged.
+
 - Exact CCH many-to-many engine for OD and matrix batches: each unique
   endpoint pays for one complete upward search space and every combination
   is answered by a merge-join, preserving pairwise exactness.

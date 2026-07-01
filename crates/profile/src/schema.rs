@@ -11,6 +11,8 @@ pub struct ProfileDocument {
     #[serde(default)]
     pub cost: CostConfig,
     #[serde(default)]
+    pub speeds: SpeedsConfig,
+    #[serde(default)]
     pub speed_rules: Vec<SpeedRule>,
     #[serde(default)]
     pub exclude_rules: Vec<ExcludeRule>,
@@ -110,6 +112,30 @@ pub enum Objective {
     Fastest,
     Shortest,
     Generalized,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SpeedsConfig {
+    /// How posted speed limits from the source data (OSM `maxspeed`,
+    /// Overture `speed_limits`) combine with class/profile speeds for
+    /// motorized modes.
+    #[serde(default)]
+    pub posted_limits: PostedLimitPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PostedLimitPolicy {
+    /// The posted limit replaces the class/profile speed wherever the
+    /// source data carries one; profile speeds fill the gaps.
+    Prefer,
+    /// The posted limit caps the class/profile speed (default): travel is
+    /// never assumed faster than the legal limit, but profile speeds that
+    /// are already lower win.
+    #[default]
+    Cap,
+    /// Posted limits are ignored; only class/profile speeds apply.
+    Ignore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

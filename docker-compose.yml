@@ -1,6 +1,17 @@
 services:
   api:
-    build: .
+    build:
+      context: .
+      # Optional build-time data provisioning (leave unset to provision at
+      # runtime by importing from the ./datasets bind mount instead):
+      #   NETWEEVIL_FETCH_OSM_URL      — bake an OSM extract fetched at build
+      #   NETWEEVIL_FETCH_OVERTURE_BBOX — bake Overture segments for a bbox
+      #                                   (west,south,east,north)
+      # Baked state seeds the netweevil-state volume on its first mount.
+      args:
+        DATA_SOURCE_URL: "${NETWEEVIL_FETCH_OSM_URL:-}"
+        OVERTURE_BBOX: "${NETWEEVIL_FETCH_OVERTURE_BBOX:-}"
+        DATASET_NAME: "${NETWEEVIL_DATASET:-osm}"
     image: netweevil:latest
     command:
       [
