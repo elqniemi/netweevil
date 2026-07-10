@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use netweevil_profile::ReturnConfig;
@@ -35,6 +36,97 @@ pub struct RouteRequest {
     pub returns: ReturnConfig,
     #[serde(default)]
     pub alternatives: AlternativeRouteOptions,
+    /// Exact time-dependent routing options. Flattening keeps request files
+    /// ergonomic (`departure_time: ...`, `scenario: ...`) while grouping the
+    /// runtime contract in Rust.
+    #[serde(default, flatten)]
+    pub temporal: TemporalRequestOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TemporalRequestOptions {
+    #[serde(default)]
+    pub departure_time: Option<String>,
+    #[serde(default)]
+    pub arrive_by: Option<String>,
+    #[serde(default)]
+    pub scenario: Option<PathBuf>,
+    #[serde(default)]
+    pub holiday_calendar: Option<PathBuf>,
+    #[serde(default, rename = "overlay")]
+    pub overlays: Vec<PathBuf>,
+    /// Per-state nondominated label guard for temporal/generalized searches.
+    #[serde(default = "default_max_temporal_labels_per_state")]
+    pub max_labels_per_state: usize,
+    #[serde(default = "default_arrive_by_lookback_s")]
+    pub arrive_by_lookback_s: f64,
+    /// Hard budgets on named compiled cost components. These requests use
+    /// exact label-setting rather than CCH.
+    #[serde(default)]
+    pub constraints: Vec<ComponentConstraint>,
+    /// Optional generalized-cost/component Pareto frontier.
+    #[serde(default)]
+    pub pareto: Option<ParetoRouteOptions>,
+}
+
+impl Default for TemporalRequestOptions {
+    fn default() -> Self {
+        Self {
+            departure_time: None,
+            arrive_by: None,
+            scenario: None,
+            holiday_calendar: None,
+            overlays: Vec::new(),
+            max_labels_per_state: default_max_temporal_labels_per_state(),
+            arrive_by_lookback_s: default_arrive_by_lookback_s(),
+            constraints: Vec::new(),
+            pareto: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComponentConstraint {
+    pub component: String,
+    pub max_value: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ParetoRouteOptions {
+    pub component: String,
+    #[serde(default = "default_pareto_max_routes")]
+    pub max_routes: usize,
+    #[serde(default = "default_pareto_max_labels_per_state")]
+    pub max_labels_per_state: usize,
+}
+
+fn default_pareto_max_routes() -> usize {
+    16
+}
+
+fn default_pareto_max_labels_per_state() -> usize {
+    64
+}
+
+impl TemporalRequestOptions {
+    pub fn is_temporal(&self) -> bool {
+        self.departure_time.is_some()
+            || self.arrive_by.is_some()
+            || self.scenario.is_some()
+            || !self.overlays.is_empty()
+    }
+
+    pub fn requires_exact_labels(&self) -> bool {
+        self.is_temporal() || !self.constraints.is_empty() || self.pareto.is_some()
+    }
+}
+
+fn default_max_temporal_labels_per_state() -> usize {
+    16
+}
+
+fn default_arrive_by_lookback_s() -> f64 {
+    86_400.0
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -90,18 +182,31 @@ pub struct LabeledPoint {
     pub id: String,
     pub lon: f64,
     pub lat: f64,
+    /// Optional elevation in the dataset's vertical datum, in metres.
+    #[serde(default)]
+    pub z: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnapOptions {
     #[serde(default = "default_snap_distance")]
     pub max_distance_m: f64,
+    /// When the input point has Z, reject network positions farther away in
+    /// elevation. This prevents street-level points snapping to stacked
+    /// tunnels, footbridges, or station levels.
+    #[serde(default)]
+    pub z_window_m: Option<f64>,
+    /// Semantic/source feature attributes that candidate edges must match.
+    #[serde(default)]
+    pub attribute_filters: BTreeMap<String, String>,
 }
 
 impl Default for SnapOptions {
     fn default() -> Self {
         Self {
             max_distance_m: default_snap_distance(),
+            z_window_m: None,
+            attribute_filters: BTreeMap::new(),
         }
     }
 }
@@ -327,6 +432,8 @@ pub struct ServiceAreaRequest {
     pub polygon: ServiceAreaPolygonOptions,
     #[serde(default)]
     pub returns: ServiceAreaReturnOptions,
+    #[serde(default, flatten)]
+    pub temporal: TemporalRequestOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

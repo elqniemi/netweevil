@@ -51,6 +51,7 @@ fn grid_engine_for(
                 node_id: NodeId(node_index(x, y)),
                 lon: node_lon(x),
                 lat: node_lat(y),
+                z: 0.0,
             });
         }
     }
@@ -68,17 +69,24 @@ fn grid_engine_for(
         spatial_index: None,
         node_component_ids: Vec::new(),
         edge_component_ids: Vec::new(),
+        feature_attributes: Default::default(),
+        temporal_rule_sets: Vec::new(),
     };
 
     let mut edge_count = 0u32;
     let mut push_pair = |bundle: &mut TopologyBundle, a: u32, b: u32, length: u32| {
-        for (from, to) in [(a, b), (b, a)] {
+        for (from, to, source_direction) in [(a, b, 1), (b, a, -1)] {
             bundle.push_edge(DirectedEdge {
                 edge_id: EdgeId(edge_count),
                 from: NodeId(from),
                 to: NodeId(to),
                 source_way_id: edge_count as i64,
                 length_m: length,
+                ascent_m: 0.0,
+                descent_m: 0.0,
+                feature_row: netweevil_core::NO_FEATURE_ROW,
+                source_direction,
+                temporal_rule_id: None,
                 duration_s: None,
                 road_class: RoadClass::Residential,
                 surface: SurfaceClass::Asphalt,
@@ -125,6 +133,8 @@ fn grid_engine_for(
         profile_hash: "synthetic".to_string(),
         mode,
         turn_costs: Default::default(),
+        components: Vec::new(),
+        temporal: Default::default(),
         source_topology_bundle_id: CacheBundleId::new("synthetic"),
         acceleration: None,
         edge_metrics,

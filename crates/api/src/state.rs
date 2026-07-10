@@ -13,7 +13,9 @@ use netweevil_persist::{
 use netweevil_profile::{ProfileDocument, compile_profile_bundle_with_acceleration, load_profile};
 use netweevil_query::PreparedRoutingEngine;
 use netweevil_report::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
-use netweevil_transit::{PreparedTransitRouter, TransitFeedManifest, read_transit_bundle};
+use netweevil_transit::{
+    PreparedTransitRouter, TransitFeedManifest, read_transit_bundle, read_transit_transfer_table,
+};
 use serde::Serialize;
 use tokio::sync::Semaphore;
 use tracing::info;
@@ -75,6 +77,40 @@ pub(crate) struct ServiceCapabilities {
     breakdown_metrics: Vec<&'static str>,
     connectivity_policies: Vec<&'static str>,
     failure_modes: Vec<&'static str>,
+}
+
+fn service_capabilities() -> ServiceCapabilities {
+    ServiceCapabilities {
+        analyses: vec![
+            "route",
+            "od",
+            "matrix",
+            "accessibility",
+            "service_area",
+            "service_area_sequence",
+            "betweenness",
+            "scenario_batch",
+            "transit_route",
+            "transit_service_area",
+            "simulation",
+        ],
+        geometry: vec!["none", "full", "segments"],
+        breakdown_metrics: vec!["time_s", "distance_m"],
+        connectivity_policies: vec![
+            "strict",
+            "ignore_unreachable",
+            "hop_origin_to_nearest_reachable_component",
+            "hop_destination_to_nearest_reachable_component",
+            "hop_either_end",
+        ],
+        failure_modes: vec![
+            "auto_relax_unreachable",
+            "allow_reverse_oneway",
+            "allow_illegal_turn",
+            "ignore_turn_restrictions",
+            "allow_uturn_where_normally_forbidden",
+        ],
+    }
 }
 
 pub(crate) fn load_service_runtime(
@@ -177,11 +213,46 @@ pub(crate) fn load_service_runtime(
             read_transit_bundle(&manifest.bundle_path)
                 .with_context(|| format!("reading transit bundle {}", manifest.bundle_path))?,
         );
-        let router = Arc::new(PreparedTransitRouter::new(bundle));
+        let transfer_tables = manifest
+            .transfer_tables
+            .iter()
+            .filter(|entry| entry.dataset_id == options.dataset_id)
+            .map(|entry| {
+                if let Some(profile) = loaded_profiles.get(&entry.profile_id)
+                    && profile.manifest.profile_hash != entry.profile_hash
+                {
+                    bail!(
+                        "transit transfer table '{}' uses stale profile hash {}; loaded profile hash is {}",
+                        entry.path,
+                        entry.profile_hash,
+                        profile.manifest.profile_hash
+                    );
+                }
+                let table = read_transit_transfer_table(&entry.path)
+                    .with_context(|| format!("reading transit transfer table {}", entry.path))?;
+                if table.dataset_id != options.dataset_id
+                    || table.profile_hash != entry.profile_hash
+                    || table.profile_id != entry.profile_id
+                {
+                    bail!(
+                        "transit transfer table '{}' metadata does not match its feed manifest registration",
+                        entry.path
+                    );
+                }
+                Ok(table)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let router = Arc::new(if transfer_tables.is_empty() {
+            PreparedTransitRouter::new(bundle)
+        } else {
+            PreparedTransitRouter::new_with_transfer_tables(bundle, transfer_tables)?
+        });
         info!(
             feed_id = %manifest.feed_id,
             stop_count = manifest.stop_count,
             connection_count = manifest.connection_count,
+            bound_stop_count = manifest.bound_stop_count,
+            transfer_profiles = ?router.transfer_profile_ids(),
             "transit feed ready"
         );
         loaded_transit_feeds.insert(
@@ -207,33 +278,7 @@ pub(crate) fn load_service_runtime(
         default_profile_id,
         profiles: loaded_profiles,
         transit_feeds: loaded_transit_feeds,
-        capabilities: ServiceCapabilities {
-            analyses: vec![
-                "route",
-                "od",
-                "matrix",
-                "service_area",
-                "transit_route",
-                "transit_service_area",
-                "simulation",
-            ],
-            geometry: vec!["none", "full", "segments"],
-            breakdown_metrics: vec!["time_s", "distance_m"],
-            connectivity_policies: vec![
-                "strict",
-                "ignore_unreachable",
-                "hop_origin_to_nearest_reachable_component",
-                "hop_destination_to_nearest_reachable_component",
-                "hop_either_end",
-            ],
-            failure_modes: vec![
-                "auto_relax_unreachable",
-                "allow_reverse_oneway",
-                "allow_illegal_turn",
-                "ignore_turn_restrictions",
-                "allow_uturn_where_normally_forbidden",
-            ],
-        },
+        capabilities: service_capabilities(),
         engine,
     })
 }
@@ -424,7 +469,7 @@ pub(crate) fn engine_description(topology: &TopologyBundle) -> EngineDescription
 
 #[cfg(test)]
 mod tests {
-    use super::{EngineDescription, engine_description};
+    use super::{EngineDescription, engine_description, service_capabilities};
     use netweevil_core::{EdgeBasedTopology, TopologyBundle};
 
     #[test]
@@ -433,6 +478,8 @@ mod tests {
             schema_version: 1,
             source_path: "test".to_string(),
             source_sha256: "abc".to_string(),
+            feature_attributes: Default::default(),
+            temporal_rule_sets: Vec::new(),
             nodes: vec![],
             edge_layers: Default::default(),
             edges: vec![],
@@ -454,5 +501,10 @@ mod tests {
             }
             .route_engine
         );
+    }
+
+    #[test]
+    fn advertises_accessibility_analysis() {
+        assert!(service_capabilities().analyses.contains(&"accessibility"));
     }
 }

@@ -23,6 +23,8 @@ pub struct DatasetManifest {
     pub dataset_id: DatasetId,
     pub label: String,
     pub source_path: String,
+    #[serde(default)]
+    pub source_paths: Vec<String>,
     pub source_sha256: String,
     pub source_size_bytes: u64,
     #[serde(default)]
@@ -74,6 +76,10 @@ pub struct RunManifest {
     #[serde(default)]
     pub compiled_profile_bundle_id: Option<String>,
     pub request_source: String,
+    /// Fully resolved request executed by the CLI after command-line
+    /// overrides. Older manifests omit this field and remain readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effective_request: Option<serde_json::Value>,
     #[serde(default)]
     pub result_path: Option<String>,
     #[serde(default)]
@@ -97,6 +103,9 @@ pub enum RunKind {
     Matrix,
     Accessibility,
     ServiceArea,
+    ServiceAreaSequence,
+    Betweenness,
+    ScenarioBatch,
     Experiment,
     Simulation,
 }
@@ -158,6 +167,7 @@ pub fn new_run_manifest(
         profile_id: profile.profile.id.clone(),
         compiled_profile_bundle_id,
         request_source: request_source.into(),
+        effective_request: None,
         result_path: None,
         report_path: None,
         software,
@@ -175,4 +185,59 @@ pub fn new_run_manifest(
         fallback_policy: None,
         message: message.into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_run_manifest_without_effective_request_still_deserializes() {
+        let raw = r#"{
+            "run_id":"legacy",
+            "run_kind":"route",
+            "status":"succeeded",
+            "created_at":"2026-07-10T00:00:00Z",
+            "dataset_id":"dataset",
+            "profile_id":"profile",
+            "request_source":"request.json",
+            "software":{"executable":"netweevil","version":"0.1.0","git_commit":null},
+            "algorithm":{"engine":"exact","graph_model":"directed_edge_graph","acceleration":"none"},
+            "methods_summary":{"plain_language":"legacy"},
+            "message":"ok"
+        }"#;
+        let manifest: RunManifest = serde_json::from_str(raw).expect("legacy manifest parses");
+        assert!(manifest.effective_request.is_none());
+        assert!(
+            !serde_json::to_string(&manifest)
+                .expect("manifest serializes")
+                .contains("effective_request")
+        );
+    }
+
+    #[test]
+    fn structured_effective_request_round_trips() {
+        let mut manifest: RunManifest = serde_json::from_value(serde_json::json!({
+            "run_id": "run",
+            "run_kind": "matrix",
+            "status": "succeeded",
+            "created_at": "2026-07-10T00:00:00Z",
+            "dataset_id": "dataset",
+            "profile_id": "profile",
+            "request_source": "origins.json | destinations.json",
+            "software": {"executable":"netweevil","version":"0.1.0","git_commit":null},
+            "algorithm": {"engine":"exact","graph_model":"directed_edge_graph","acceleration":"none"},
+            "methods_summary": {"plain_language":"test"},
+            "message": "ok"
+        }))
+        .expect("manifest parses");
+        manifest.effective_request = Some(serde_json::json!({
+            "origins": {"departure_time":"2026-07-10T09:00:00+08:00"},
+            "destinations": {"points":[]}
+        }));
+        let decoded: RunManifest =
+            serde_json::from_str(&serde_json::to_string(&manifest).expect("manifest serializes"))
+                .expect("manifest re-parses");
+        assert_eq!(decoded.effective_request, manifest.effective_request);
+    }
 }

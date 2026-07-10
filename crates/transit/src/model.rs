@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -5,6 +6,9 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
 pub const OPENOV_GTFS_URL: &str = "https://gtfs.openov.nl/gtfs-rt/gtfs-openov-nl.zip";
+pub const TRANSIT_BUNDLE_SCHEMA_VERSION: u32 = 3;
+pub const TRANSIT_STOP_BINDING_SCHEMA_VERSION: u32 = 1;
+pub const TRANSIT_TRANSFER_TABLE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitImportOptions {
@@ -41,6 +45,25 @@ pub struct TransitFeedManifest {
     pub trip_count: u64,
     pub connection_count: u64,
     pub bundle_path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_binding_source_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_binding_sha256: Option<String>,
+    #[serde(default)]
+    pub bound_stop_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transfer_tables: Vec<TransitTransferTableManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitTransferTableManifest {
+    pub profile_id: String,
+    pub profile_hash: String,
+    pub dataset_id: String,
+    pub path: String,
+    pub created_at: String,
+    pub transfer_count: u64,
+    pub max_transfer_distance_m: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -49,6 +72,8 @@ pub struct TransitBundle {
     pub feed_id: String,
     pub source_label: String,
     pub source_sha256: String,
+    #[serde(default)]
+    pub stop_binding_sha256: Option<String>,
     pub service_dates: Vec<String>,
     pub stops: Vec<TransitStop>,
     pub routes: Vec<TransitRoute>,
@@ -63,6 +88,155 @@ pub struct TransitStop {
     pub name: String,
     pub lon: f64,
     pub lat: f64,
+    /// Optional explicit location on the street/indoor graph. Network-routing
+    /// hosts consume this target; straight-line transit routing continues to
+    /// use the GTFS stop coordinate.
+    #[serde(default)]
+    pub binding: Option<TransitStopBindingTarget>,
+}
+
+/// One stop-to-graph binding file. Bindings are intentionally feed-scoped so
+/// stop identifiers from multiple imported feeds cannot be mixed silently.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitStopBindingTable {
+    #[serde(default = "default_stop_binding_schema_version")]
+    pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_id: Option<String>,
+    pub bindings: Vec<TransitStopBinding>,
+}
+
+fn default_stop_binding_schema_version() -> u32 {
+    TRANSIT_STOP_BINDING_SCHEMA_VERSION
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitStopBinding {
+    pub stop_id: String,
+    #[serde(flatten)]
+    pub target: TransitStopBindingTarget,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitStopBindingSummary {
+    pub feed_id: String,
+    pub supplied_binding_count: usize,
+    pub bound_stop_count: usize,
+    pub unbound_stop_count: usize,
+}
+
+/// A stable graph target for a transit stop. Coordinate bindings retain an
+/// open attribute filter so multilayer snaps can distinguish platforms
+/// from geometrically coincident tunnels, concourses, or surface links.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitStopBindingTarget {
+    Node {
+        node_id: u32,
+    },
+    Edge {
+        edge_id: u32,
+        #[serde(default)]
+        fraction: Option<f64>,
+    },
+    Coordinate {
+        lon: f64,
+        lat: f64,
+        #[serde(default)]
+        z: Option<f64>,
+        /// Optional vertical tolerance used while resolving the coordinate to
+        /// graph candidates. Without one, candidates nearest the requested Z
+        /// are retained.
+        #[serde(default)]
+        z_window_m: Option<f64>,
+        #[serde(default)]
+        attribute_filter: BTreeMap<String, String>,
+    },
+}
+
+/// Rich network path returned by a street/indoor router. This is persisted in
+/// transfer tables and exposed on access, transfer, and egress legs so an
+/// in-station walk is auditable instead of appearing as a teleport.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitStreetPath {
+    pub travel_time_s: u32,
+    #[serde(default)]
+    pub distance_m: Option<f64>,
+    #[serde(default)]
+    pub edge_path: Vec<u32>,
+    #[serde(default)]
+    pub geometry: Vec<[f64; 3]>,
+    #[serde(default)]
+    pub components: BTreeMap<String, f64>,
+}
+
+impl TransitStreetPath {
+    pub fn time_only(travel_time_s: u32) -> Self {
+        Self {
+            travel_time_s,
+            distance_m: None,
+            edge_path: Vec::new(),
+            geometry: Vec::new(),
+            components: BTreeMap::new(),
+        }
+    }
+}
+
+/// Directed, profile-specific stop-to-stop network transfer table.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitTransferTable {
+    #[serde(default = "default_transfer_table_schema_version")]
+    pub schema_version: u32,
+    pub feed_id: String,
+    pub source_sha256: String,
+    #[serde(default)]
+    pub stop_binding_sha256: Option<String>,
+    pub dataset_id: String,
+    pub profile_id: String,
+    pub profile_hash: String,
+    pub max_transfer_distance_m: f64,
+    pub transfers: Vec<TransitNetworkTransfer>,
+}
+
+fn default_transfer_table_schema_version() -> u32 {
+    TRANSIT_TRANSFER_TABLE_SCHEMA_VERSION
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitNetworkTransfer {
+    pub from_stop_id: String,
+    pub to_stop_id: String,
+    /// Straight-line separation used to enforce request transfer limits. The
+    /// actual network distance, when available, lives in `path.distance_m`.
+    pub straight_line_distance_m: f64,
+    pub path: TransitStreetPath,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitTransferBuildOptions {
+    pub dataset_id: String,
+    pub profile_id: String,
+    pub profile_hash: String,
+    #[serde(default = "default_transfer_distance_m")]
+    pub max_transfer_distance_m: f64,
+    #[serde(default = "default_transfer_build_candidates")]
+    pub max_candidates_per_stop: usize,
+}
+
+impl Default for TransitTransferBuildOptions {
+    fn default() -> Self {
+        Self {
+            dataset_id: String::new(),
+            profile_id: "walk".to_string(),
+            profile_hash: String::new(),
+            max_transfer_distance_m: default_transfer_distance_m(),
+            max_candidates_per_stop: default_transfer_build_candidates(),
+        }
+    }
+}
+
+fn default_transfer_build_candidates() -> usize {
+    32
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,9 +305,10 @@ impl TransitMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessMode {
+    #[default]
     Walk,
     Bicycle,
     Car,
@@ -330,6 +505,10 @@ pub struct TransitModeOptions {
     pub max_car_egress_distance_m: f64,
     #[serde(default = "default_transfer_distance_m")]
     pub max_transfer_distance_m: f64,
+    /// Selects a precomputed, profile-specific network transfer table. When
+    /// absent, the legacy straight-line transfer expansion remains active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_profile_id: Option<String>,
     #[serde(default = "default_board_slack_s")]
     pub board_slack_s: u32,
     #[serde(default = "default_transfer_slack_s")]
@@ -342,8 +521,8 @@ pub struct TransitModeOptions {
     pub min_transit_leg_distance_m: f64,
     /// How access and egress leg travel times are estimated. `network` uses
     /// a street routing engine when the host provides one (API/CLI with a
-    /// matching street profile loaded) and falls back to straight-line
-    /// estimates per candidate otherwise.
+    /// matching street profile loaded). Candidates without a network path are
+    /// unreachable; straight-line estimates are used only by `straight_line`.
     #[serde(default)]
     pub street_access: TransitStreetAccessModel,
 }
@@ -373,6 +552,7 @@ impl Default for TransitModeOptions {
             max_car_access_distance_m: default_car_access_distance_m(),
             max_car_egress_distance_m: default_car_access_distance_m(),
             max_transfer_distance_m: default_transfer_distance_m(),
+            transfer_profile_id: None,
             board_slack_s: default_board_slack_s(),
             transfer_slack_s: default_transfer_slack_s(),
             max_transfers: default_max_transfers(),
@@ -641,7 +821,11 @@ pub struct TransitLeg {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headsign: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub geometry: Vec<[f64; 2]>,
+    pub geometry: Vec<[f64; 3]>,
+    /// Exact street/indoor path details when the host or a precomputed
+    /// transfer table supplied them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_path: Option<TransitStreetPath>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -688,7 +872,7 @@ pub struct TransitRouteStopSegment {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headsign: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub geometry: Vec<[f64; 2]>,
+    pub geometry: Vec<[f64; 3]>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

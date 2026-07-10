@@ -368,21 +368,25 @@ mod tests {
                     node_id: NodeId(0),
                     lon: 0.0,
                     lat: 0.0,
+                    z: 0.0,
                 },
                 TopologyNode {
                     node_id: NodeId(1),
                     lon: 1.0,
                     lat: 0.0,
+                    z: 0.0,
                 },
                 TopologyNode {
                     node_id: NodeId(2),
                     lon: 2.0,
                     lat: 0.0,
+                    z: 0.0,
                 },
                 TopologyNode {
                     node_id: NodeId(3),
                     lon: 3.0,
                     lat: 0.0,
+                    z: 0.0,
                 },
             ],
             edge_layers: Default::default(),
@@ -393,6 +397,8 @@ mod tests {
             spatial_index: None,
             node_component_ids: vec![0, 0, 0, 0],
             edge_component_ids: vec![0, 0, 0, 0],
+            feature_attributes: Default::default(),
+            temporal_rule_sets: Vec::new(),
         }
     }
 
@@ -481,6 +487,7 @@ mod tests {
                 node_id: NodeId(node),
                 lon: (node % side) as f64 * 0.001,
                 lat: (node / side) as f64 * 0.001,
+                z: 0.0,
             })
             .collect::<Vec<_>>();
         let node_count = nodes.len();
@@ -498,6 +505,8 @@ mod tests {
             spatial_index: None,
             node_component_ids: vec![0; node_count],
             edge_component_ids: vec![0; edge_count],
+            feature_attributes: Default::default(),
+            temporal_rule_sets: Vec::new(),
         };
 
         let bundle =

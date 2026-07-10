@@ -186,6 +186,11 @@ class ServiceAreaTabMixin:
         road_form.addRow("Multi-origin mode", self.service_area_multi_origin_mode_combo)
         layout.addWidget(self.service_area_road_group)
 
+        self.service_area_temporal_group = self._build_street_temporal_group(
+            "service_area"
+        )
+        layout.addWidget(self.service_area_temporal_group)
+
         self.service_area_polygon_group = QGroupBox("Polygon generation")
         polygon_form = QFormLayout(self.service_area_polygon_group)
         self.service_area_hull_preset_combo = QComboBox()
@@ -289,6 +294,7 @@ class ServiceAreaTabMixin:
         self.service_area_transit_group.setVisible(is_transit)
         self.service_area_threshold_group.setVisible(not is_transit)
         self.service_area_road_group.setVisible(not is_transit)
+        self.service_area_temporal_group.setVisible(not is_transit)
         self.service_area_polygon_group.setVisible(not is_transit)
         self.service_area_advanced_toggle.setVisible(not is_transit)
         self.service_area_advanced_widget.setVisible(
@@ -653,6 +659,16 @@ class ServiceAreaTabMixin:
         )
         if simplification_tolerance is not None:
             request["polygon"]["simplification_tolerance_m"] = simplification_tolerance
+        temporal_options = self.build_street_temporal_options("service_area")
+        if (
+            temporal_options
+            and self.service_area_threshold_metric_combo.currentData()
+            != "travel_time_s"
+        ):
+            raise ValueError(
+                "time-dependent service areas require travel-time thresholds"
+            )
+        request.update(temporal_options)
         return request
 
     def write_service_area_request(self):

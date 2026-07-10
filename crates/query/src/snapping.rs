@@ -1,15 +1,18 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 use anyhow::{Result, bail};
 use netweevil_core::{TopologyBundle, TopologyNode};
 
 use crate::*;
 
+type SnapPointCacheKey = (bool, u64, u64, u64, u64, u64);
+
 pub(crate) fn presnap_point_set(
     topology: &TopologyBundle,
     routing_graph: &RoutingGraph,
     points: &[LabeledPoint],
-    max_distance_m: f64,
+    options: &SnapOptions,
     is_origin: bool,
 ) -> Vec<std::result::Result<Vec<SnappedPoint>, AnalysisFailure>> {
     let mut snap_cache = HashMap::new();
@@ -21,7 +24,7 @@ pub(crate) fn presnap_point_set(
                 topology,
                 routing_graph,
                 point,
-                max_distance_m,
+                options,
                 is_origin,
             )
         })
@@ -29,23 +32,20 @@ pub(crate) fn presnap_point_set(
 }
 
 pub(crate) fn cached_snap_candidates(
-    cache: &mut HashMap<
-        (bool, u64, u64, u64),
-        std::result::Result<Vec<SnappedPoint>, AnalysisFailure>,
-    >,
+    cache: &mut HashMap<SnapPointCacheKey, std::result::Result<Vec<SnappedPoint>, AnalysisFailure>>,
     topology: &TopologyBundle,
     routing_graph: &RoutingGraph,
     point: &LabeledPoint,
-    max_distance_m: f64,
+    options: &SnapOptions,
     is_origin: bool,
 ) -> std::result::Result<Vec<SnappedPoint>, AnalysisFailure> {
-    let key = snap_point_cache_key(point, max_distance_m, is_origin);
+    let key = snap_point_cache_key(point, options, is_origin);
     let value = cache.entry(key).or_insert_with(|| {
-        snap_candidates(topology, routing_graph, point, max_distance_m, is_origin).map_err(
+        snap_candidates_with_options(topology, routing_graph, point, options, is_origin).map_err(
             |error| {
                 analysis_failure(&error)
                     .cloned()
-                    .unwrap_or_else(|| route_snap_failure(point, max_distance_m))
+                    .unwrap_or_else(|| route_snap_failure(point, options.max_distance_m))
             },
         )
     });
@@ -54,14 +54,21 @@ pub(crate) fn cached_snap_candidates(
 
 fn snap_point_cache_key(
     point: &LabeledPoint,
-    max_distance_m: f64,
+    options: &SnapOptions,
     is_origin: bool,
-) -> (bool, u64, u64, u64) {
+) -> SnapPointCacheKey {
+    let mut filter_hasher = std::collections::hash_map::DefaultHasher::new();
+    for (name, value) in &options.attribute_filters {
+        name.hash(&mut filter_hasher);
+        value.hash(&mut filter_hasher);
+    }
     (
         is_origin,
         point.lon.to_bits(),
         point.lat.to_bits(),
-        max_distance_m.to_bits(),
+        point.z.map(f64::to_bits).unwrap_or(u64::MAX),
+        options.max_distance_m.to_bits() ^ options.z_window_m.map(f64::to_bits).unwrap_or_default(),
+        filter_hasher.finish(),
     )
 }
 
@@ -80,6 +87,37 @@ pub(crate) fn snap_candidates(
     max_distance_m: f64,
     is_origin: bool,
 ) -> Result<Vec<SnappedPoint>> {
+    snap_candidates_with_options(
+        topology,
+        routing_graph,
+        point,
+        &SnapOptions {
+            max_distance_m,
+            ..SnapOptions::default()
+        },
+        is_origin,
+    )
+}
+
+pub(crate) fn snap_candidates_with_options(
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    point: &LabeledPoint,
+    options: &SnapOptions,
+    is_origin: bool,
+) -> Result<Vec<SnappedPoint>> {
+    if options.max_distance_m < 0.0 || !options.max_distance_m.is_finite() {
+        bail!("snap max_distance_m must be a finite non-negative value");
+    }
+    if options
+        .z_window_m
+        .is_some_and(|window| window < 0.0 || !window.is_finite())
+    {
+        bail!("snap z_window_m must be a finite non-negative value");
+    }
+    if point.z.is_some_and(|z| !z.is_finite()) {
+        bail!("snap point elevation must be finite when provided");
+    }
     const MAX_SNAP_CANDIDATES: usize = 8;
     /// Linear-scan snapping fallbacks (no spatial index, or no nearby node)
     /// are only acceptable on small graphs; on large datasets a full scan
@@ -87,7 +125,7 @@ pub(crate) fn snap_candidates(
     const MAX_FULL_SCAN_ELEMENTS: usize = 250_000;
 
     let nearby_nodes = if let Some(spatial_index) = topology.spatial_index.as_ref() {
-        spatial_snap_nodes(topology, spatial_index, point, max_distance_m)
+        spatial_snap_nodes(topology, spatial_index, point, options.max_distance_m)
     } else {
         if topology.nodes.len() > MAX_FULL_SCAN_ELEMENTS {
             bail!(
@@ -103,13 +141,22 @@ pub(crate) fn snap_candidates(
                     haversine_meters(point.lon, point.lat, node.lon, node.lat),
                 )
             })
-            .filter(|(_, distance_m)| *distance_m <= max_distance_m)
+            .filter(|(_, distance_m)| *distance_m <= options.max_distance_m)
             .collect()
     };
 
     let mut candidates = Vec::with_capacity(MAX_SNAP_CANDIDATES * 2);
     for &(node_id, distance_m) in &nearby_nodes {
-        if !node_is_traversable_for_snap(routing_graph, node_id as usize, is_origin) {
+        let node = &topology.nodes[node_id as usize];
+        if !elevation_is_eligible(point, node.elevation_m(), options.z_window_m)
+            || !node_is_traversable_for_snap(
+                topology,
+                routing_graph,
+                node_id as usize,
+                is_origin,
+                &options.attribute_filters,
+            )
+        {
             continue;
         }
         push_best_snap_candidate(
@@ -121,6 +168,7 @@ pub(crate) fn snap_candidates(
                 snapped_node_id: node_id,
                 snapped_lon: topology.nodes[node_id as usize].lon,
                 snapped_lat: topology.nodes[node_id as usize].lat,
+                snapped_z: finite_elevation(topology.nodes[node_id as usize].z),
                 snap_distance_m: distance_m,
                 snapped_edge_id: None,
                 snapped_edge_fraction: None,
@@ -163,7 +211,14 @@ pub(crate) fn snap_candidates(
         let from = &topology.nodes[edge.from.0 as usize];
         let to = &topology.nodes[edge.to.0 as usize];
         let projection = project_point_onto_segment(point.lon, point.lat, from, to);
-        if projection.distance_m > max_distance_m {
+        if projection.distance_m > options.max_distance_m
+            || !edge_matches_filters(topology, edge_index as usize, &options.attribute_filters)
+            || !elevation_is_eligible(
+                point,
+                (from.z.is_finite() && to.z.is_finite()).then_some(projection.z),
+                options.z_window_m,
+            )
+        {
             continue;
         }
         if projection.fraction <= 1.0e-6 || projection.fraction >= 1.0 - 1.0e-6 {
@@ -183,6 +238,7 @@ pub(crate) fn snap_candidates(
                 snapped_node_id,
                 snapped_lon: projection.lon,
                 snapped_lat: projection.lat,
+                snapped_z: projection.z,
                 snap_distance_m: projection.distance_m,
                 snapped_edge_id: Some(edge_index),
                 snapped_edge_fraction: Some(projection.fraction),
@@ -195,7 +251,7 @@ pub(crate) fn snap_candidates(
     }
 
     if candidates.is_empty() {
-        return Err(route_snap_failure(point, max_distance_m).into());
+        return Err(route_snap_failure(point, options.max_distance_m).into());
     }
 
     candidates.sort_by(|left, right| left.snap_distance_m.total_cmp(&right.snap_distance_m));
@@ -205,14 +261,46 @@ pub(crate) fn snap_candidates(
 }
 
 fn node_is_traversable_for_snap(
+    topology: &TopologyBundle,
     routing_graph: &RoutingGraph,
     node_index: usize,
     is_origin: bool,
+    filters: &std::collections::BTreeMap<String, String>,
 ) -> bool {
-    if is_origin {
-        !routing_graph.outgoing_edges(node_index).is_empty()
+    let edges = if is_origin {
+        routing_graph.outgoing_edges(node_index)
     } else {
-        !routing_graph.incoming_edges(node_index).is_empty()
+        routing_graph.incoming_edges(node_index)
+    };
+    edges
+        .iter()
+        .any(|edge| edge_matches_filters(topology, *edge as usize, filters))
+}
+
+fn edge_matches_filters(
+    topology: &TopologyBundle,
+    edge_index: usize,
+    filters: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    filters
+        .iter()
+        .all(|(name, expected)| topology.edge_attribute_matches(edge_index, name, expected))
+}
+
+fn elevation_is_eligible(
+    point: &LabeledPoint,
+    candidate_z: Option<f64>,
+    z_window_m: Option<f64>,
+) -> bool {
+    match (point.z, candidate_z, z_window_m) {
+        (_, _, None) | (None, _, Some(_)) => true,
+        (Some(point_z), Some(candidate_z), Some(window)) => {
+            point_z.is_finite()
+                && candidate_z.is_finite()
+                && window >= 0.0
+                && (point_z - candidate_z).abs() <= window
+        }
+        (Some(_), None, Some(_)) => false,
     }
 }
 
@@ -236,6 +324,7 @@ struct SegmentProjection {
     fraction: f64,
     lon: f64,
     lat: f64,
+    z: f64,
     distance_m: f64,
 }
 
@@ -264,8 +353,17 @@ fn project_point_onto_segment(
         fraction,
         lon: from.lon + (to.lon - from.lon) * fraction,
         lat: from.lat + (to.lat - from.lat) * fraction,
+        z: if from.z.is_finite() && to.z.is_finite() {
+            from.z + (to.z - from.z) * fraction
+        } else {
+            0.0
+        },
         distance_m,
     }
+}
+
+fn finite_elevation(z: f64) -> f64 {
+    if z.is_finite() { z } else { 0.0 }
 }
 
 fn snap_candidate_key(candidate: &SnappedPoint) -> (u32, u64, u64) {

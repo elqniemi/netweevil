@@ -209,6 +209,8 @@ impl From<LegacyCompiledProfileBundle> for CompiledProfileBundle {
             profile_hash: value.profile_hash,
             mode: value.mode,
             turn_costs: Default::default(),
+            components: Vec::new(),
+            temporal: Default::default(),
             source_topology_bundle_id: value.source_topology_bundle_id,
             acceleration: None,
             edge_metrics: value.edge_metrics,
@@ -256,6 +258,7 @@ impl From<LegacyTopologyNode> for netweevil_core::TopologyNode {
             node_id: value.node_id,
             lon: value.lon,
             lat: value.lat,
+            z: 0.0,
         }
     }
 }
@@ -268,9 +271,9 @@ struct BincodeTopologyBundle {
     source_sha256: String,
     nodes: Vec<LegacyTopologyNode>,
     #[serde(default)]
-    edge_layers: TopologyEdgeLayers,
+    edge_layers: BincodeTopologyEdgeLayers,
     #[serde(default)]
-    edges: Vec<netweevil_core::DirectedEdge>,
+    edges: Vec<BincodeDirectedEdge>,
     #[serde(default)]
     turn_restrictions: Vec<netweevil_core::TurnRestriction>,
     #[serde(default)]
@@ -287,19 +290,150 @@ struct BincodeTopologyBundle {
 
 impl From<BincodeTopologyBundle> for TopologyBundle {
     fn from(value: BincodeTopologyBundle) -> Self {
+        let edges = value.edges.into_iter().map(Into::into).collect();
         Self {
             schema_version: value.schema_version,
             source_path: value.source_path,
             source_sha256: value.source_sha256,
             nodes: value.nodes.into_iter().map(Into::into).collect(),
-            edge_layers: value.edge_layers,
-            edges: value.edges,
+            edge_layers: value.edge_layers.into(),
+            edges,
             turn_restrictions: value.turn_restrictions,
             names: value.names,
             edge_based_topology: value.edge_based_topology,
             spatial_index: value.spatial_index,
             node_component_ids: value.node_component_ids,
             edge_component_ids: value.edge_component_ids,
+            feature_attributes: Default::default(),
+            temporal_rule_sets: Vec::new(),
+        }
+    }
+}
+
+/// Mirrors the final pre-sectioned columnar topology layout. Keeping these
+/// types separate from the live structs lets new raw columns be added
+/// without breaking fallback reads of bincode-era datasets.
+#[derive(serde::Deserialize, Default)]
+struct BincodeTopologyEdgeLayers {
+    #[serde(default)]
+    routing: Vec<BincodeRoutingEdge>,
+    #[serde(default)]
+    profile: Vec<BincodeEdgeProfileAttributes>,
+    #[serde(default)]
+    presentation: Vec<netweevil_core::EdgePresentation>,
+}
+
+#[derive(serde::Deserialize)]
+struct BincodeRoutingEdge {
+    edge_id: netweevil_core::EdgeId,
+    from: netweevil_core::NodeId,
+    to: netweevil_core::NodeId,
+    source_way_id: i64,
+    length_m: u32,
+    flags: u32,
+}
+
+#[derive(serde::Deserialize)]
+struct BincodeEdgeProfileAttributes {
+    duration_s: Option<f64>,
+    road_class: netweevil_core::RoadClass,
+    highway: netweevil_core::HighwayClass,
+    surface: netweevil_core::SurfaceClass,
+    smoothness: netweevil_core::SmoothnessClass,
+    access_mask: netweevil_core::AccessMask,
+    is_toll: bool,
+    max_speed_kph: Option<f32>,
+    lanes: Option<u8>,
+}
+
+#[derive(serde::Deserialize)]
+struct BincodeDirectedEdge {
+    edge_id: netweevil_core::EdgeId,
+    from: netweevil_core::NodeId,
+    to: netweevil_core::NodeId,
+    source_way_id: i64,
+    length_m: u32,
+    duration_s: Option<f64>,
+    road_class: netweevil_core::RoadClass,
+    surface: netweevil_core::SurfaceClass,
+    smoothness: netweevil_core::SmoothnessClass,
+    access_mask: netweevil_core::AccessMask,
+    is_toll: bool,
+    max_speed_kph: Option<f32>,
+    lanes: Option<u8>,
+    name_index: Option<u32>,
+    geometry_offset: u64,
+    geometry_len: u32,
+    flags: u32,
+}
+
+impl From<BincodeTopologyEdgeLayers> for TopologyEdgeLayers {
+    fn from(value: BincodeTopologyEdgeLayers) -> Self {
+        Self {
+            routing: value
+                .routing
+                .into_iter()
+                .map(|edge| netweevil_core::RoutingEdge {
+                    edge_id: edge.edge_id,
+                    from: edge.from,
+                    to: edge.to,
+                    source_way_id: edge.source_way_id,
+                    length_m: edge.length_m,
+                    ascent_m: 0.0,
+                    descent_m: 0.0,
+                    feature_row: netweevil_core::NO_FEATURE_ROW,
+                    source_direction: 0,
+                    temporal_rule_id: None,
+                    flags: edge.flags,
+                })
+                .collect(),
+            profile: value.profile.into_iter().map(Into::into).collect(),
+            presentation: value.presentation,
+        }
+    }
+}
+
+impl From<BincodeEdgeProfileAttributes> for netweevil_core::EdgeProfileAttributes {
+    fn from(value: BincodeEdgeProfileAttributes) -> Self {
+        Self {
+            duration_s: value.duration_s,
+            road_class: value.road_class,
+            highway: value.highway,
+            surface: value.surface,
+            smoothness: value.smoothness,
+            access_mask: value.access_mask,
+            is_toll: value.is_toll,
+            max_speed_kph: value.max_speed_kph,
+            lanes: value.lanes,
+        }
+    }
+}
+
+impl From<BincodeDirectedEdge> for netweevil_core::DirectedEdge {
+    fn from(value: BincodeDirectedEdge) -> Self {
+        Self {
+            edge_id: value.edge_id,
+            from: value.from,
+            to: value.to,
+            source_way_id: value.source_way_id,
+            length_m: value.length_m,
+            ascent_m: 0.0,
+            descent_m: 0.0,
+            feature_row: netweevil_core::NO_FEATURE_ROW,
+            source_direction: 0,
+            temporal_rule_id: None,
+            duration_s: value.duration_s,
+            road_class: value.road_class,
+            surface: value.surface,
+            smoothness: value.smoothness,
+            access_mask: value.access_mask,
+            is_toll: value.is_toll,
+            max_speed_kph: value.max_speed_kph,
+            lanes: value.lanes,
+            name_index: value.name_index,
+            geometry_offset: value.geometry_offset,
+            geometry_len: value.geometry_len,
+            flags: value.flags,
         }
     }
 }
@@ -354,6 +488,11 @@ impl From<LegacyDirectedEdge> for netweevil_core::DirectedEdge {
             to: value.to,
             source_way_id: value.source_way_id,
             length_m: value.length_m,
+            ascent_m: 0.0,
+            descent_m: 0.0,
+            feature_row: netweevil_core::NO_FEATURE_ROW,
+            source_direction: 0,
+            temporal_rule_id: None,
             duration_s: value.duration_s,
             road_class: value.road_class,
             surface: value.surface,
@@ -391,6 +530,8 @@ impl From<LegacyTopologyBundle> for TopologyBundle {
             spatial_index: value.spatial_index,
             node_component_ids: value.node_component_ids,
             edge_component_ids: value.edge_component_ids,
+            feature_attributes: Default::default(),
+            temporal_rule_sets: Vec::new(),
         }
     }
 }
@@ -472,9 +613,11 @@ mod tests {
     use netweevil_core::DatasetAccelerationBundle;
     use netweevil_core::{
         AccessMask, CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle,
-        CompiledTurnCostConfig, DirectedEdge, EdgeId, EdgeNameBundle, NodeId, RoadClass,
-        SmoothnessClass, SurfaceClass, TopologyBundle, TopologyNode, TravelMode, TurnRestriction,
-        TurnRestrictionKind,
+        CompiledTurnCostConfig, DirectedEdge, EdgeId, EdgeNameBundle, FeatureAttributeColumn,
+        FeatureAttributeColumnData, FeatureAttributeDefinition, FeatureAttributeTable,
+        FeatureAttributeType, MinuteInterval, NodeId, RoadClass, SmoothnessClass, SurfaceClass,
+        TemporalEffect, TemporalRule, TemporalRuleSet, TopologyBundle, TopologyNode, TravelMode,
+        TurnRestriction, TurnRestrictionKind,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -482,7 +625,7 @@ mod tests {
     #[test]
     fn round_trips_topology_bundle_binary() {
         let bundle = TopologyBundle {
-            schema_version: 4,
+            schema_version: 12,
             source_path: "dataset.osm.pbf".to_string(),
             source_sha256: "abc123".to_string(),
             nodes: vec![
@@ -490,11 +633,13 @@ mod tests {
                     node_id: NodeId(0),
                     lon: 6.5,
                     lat: 53.2,
+                    z: 12.5,
                 },
                 TopologyNode {
                     node_id: NodeId(1),
                     lon: 6.6,
                     lat: 53.3,
+                    z: 18.0,
                 },
             ],
             edge_layers: Default::default(),
@@ -505,6 +650,11 @@ mod tests {
                     to: NodeId(1),
                     source_way_id: 200,
                     length_m: 123,
+                    ascent_m: 5.5,
+                    descent_m: 0.0,
+                    feature_row: 0,
+                    source_direction: 1,
+                    temporal_rule_id: Some(0),
                     duration_s: None,
                     road_class: RoadClass::Path,
                     surface: SurfaceClass::Gravel,
@@ -524,6 +674,11 @@ mod tests {
                     to: NodeId(0),
                     source_way_id: 201,
                     length_m: 456,
+                    ascent_m: 0.0,
+                    descent_m: 5.5,
+                    feature_row: 1,
+                    source_direction: -1,
+                    temporal_rule_id: None,
                     duration_s: Some(45.0),
                     road_class: RoadClass::Residential,
                     surface: SurfaceClass::Paved,
@@ -549,6 +704,40 @@ mod tests {
             spatial_index: None,
             node_component_ids: vec![0, 0],
             edge_component_ids: vec![0, 0],
+            feature_attributes: FeatureAttributeTable {
+                row_count: 2,
+                strings: vec!["outdoor".to_string(), "paid".to_string()],
+                columns: vec![
+                    FeatureAttributeColumn {
+                        definition: FeatureAttributeDefinition {
+                            name: "feature_id".to_string(),
+                            semantic_role: Some("feature_id".to_string()),
+                            value_type: FeatureAttributeType::Integer,
+                            domain: Default::default(),
+                        },
+                        data: FeatureAttributeColumnData::Integer(vec![Some(200), Some(201)]),
+                    },
+                    FeatureAttributeColumn {
+                        definition: FeatureAttributeDefinition {
+                            name: "Location".to_string(),
+                            semantic_role: Some("indoor_location".to_string()),
+                            value_type: FeatureAttributeType::String,
+                            domain: Default::default(),
+                        },
+                        data: FeatureAttributeColumnData::String(vec![Some(0), Some(1)]),
+                    },
+                ],
+            },
+            temporal_rule_sets: vec![TemporalRuleSet {
+                rules: vec![TemporalRule {
+                    day_mask: netweevil_core::EVERY_DAY,
+                    intervals: vec![MinuteInterval {
+                        start_minute: 9 * 60,
+                        end_minute: 18 * 60,
+                    }],
+                    effect: TemporalEffect::OpenOnly,
+                }],
+            }],
         };
 
         let unique = SystemTime::now()
@@ -564,7 +753,19 @@ mod tests {
         assert_eq!(round_tripped.source_path, bundle.source_path);
         assert_eq!(round_tripped.source_sha256, bundle.source_sha256);
         assert_eq!(round_tripped.nodes.len(), bundle.nodes.len());
+        assert_eq!(round_tripped.nodes[0].z, 12.5);
         assert_eq!(round_tripped.edge_count(), bundle.edge_count());
+        assert_eq!(round_tripped.routing_edge(0).ascent_m, 5.5);
+        assert_eq!(round_tripped.routing_edge(1).descent_m, 5.5);
+        assert_eq!(round_tripped.routing_edge(0).feature_row, 0);
+        assert_eq!(round_tripped.routing_edge(0).source_direction, 1);
+        assert_eq!(round_tripped.routing_edge(0).temporal_rule_id, Some(0));
+        assert!(
+            round_tripped
+                .feature_attributes
+                .value_matches(1, "indoor_location", "paid")
+        );
+        assert_eq!(round_tripped.temporal_rule_sets.len(), 1);
         assert_eq!(
             round_tripped.turn_restrictions.len(),
             bundle.turn_restrictions.len()
@@ -693,6 +894,8 @@ mod tests {
                 roundabout_entry_penalty_s: 2.0,
                 cost_time_weight: 1.5,
             },
+            components: Vec::new(),
+            temporal: Default::default(),
             source_topology_bundle_id: CacheBundleId::new("topology-test"),
             acceleration: None,
             edge_metrics: vec![CompiledEdgeMetric {
@@ -745,6 +948,7 @@ mod sectioned_compat_tests {
             node_id: NodeId(id),
             lon,
             lat: 53.2,
+            z: id as f64 * 4.0,
         };
         let edge = DirectedEdge {
             edge_id: EdgeId(0),
@@ -752,6 +956,11 @@ mod sectioned_compat_tests {
             to: NodeId(1),
             source_way_id: 7,
             length_m: 120,
+            ascent_m: 4.0,
+            descent_m: 0.0,
+            feature_row: netweevil_core::NO_FEATURE_ROW,
+            source_direction: 0,
+            temporal_rule_id: None,
             duration_s: None,
             road_class: RoadClass::Primary,
             surface: SurfaceClass::Asphalt,
@@ -769,6 +978,8 @@ mod sectioned_compat_tests {
             schema_version: 10,
             source_path: "segments.parquet".to_string(),
             source_sha256: "abc".to_string(),
+            feature_attributes: Default::default(),
+            temporal_rule_sets: Vec::new(),
             nodes: vec![node(0, 6.5), node(1, 6.6)],
             edge_layers: netweevil_core::TopologyEdgeLayers::from_directed_edges(&[edge]),
             edges: Vec::new(),
@@ -785,6 +996,8 @@ mod sectioned_compat_tests {
         let round_tripped = read_topology_bundle(&path).expect("schema-10 bundle reads");
         assert_eq!(round_tripped.edge_profile(0).max_speed_kph, Some(70.0));
         assert_eq!(round_tripped.edge_profile(0).lanes, Some(2));
+        assert_eq!(round_tripped.nodes[1].z, 4.0);
+        assert_eq!(round_tripped.routing_edge(0).ascent_m, 4.0);
         fs::remove_file(&path).expect("temporary bundle should be removed");
 
         // Pre-10 bundles round-trip through the legacy profile layout and

@@ -18,6 +18,7 @@ pub(crate) fn reconstruct_legs(
     arrival_s: u32,
     egress_time_s: u32,
     egress_mode: AccessMode,
+    egress_network_path: Option<crate::model::TransitStreetPath>,
 ) -> Result<Vec<TransitLeg>> {
     let final_stop = &bundle.stops[final_state.stop_index as usize];
     let mut legs = vec![TransitLeg {
@@ -34,11 +35,13 @@ pub(crate) fn reconstruct_legs(
         route_short_name: None,
         trip_id: None,
         headsign: None,
-        geometry: geometry_if_requested(
+        geometry: street_geometry_if_requested(
             request,
+            egress_network_path.as_ref(),
             [final_stop.lon, final_stop.lat],
             [request.destination.lon, request.destination.lat],
         ),
+        network_path: egress_network_path,
     }];
     let mut cursor = final_state;
     while let Some(step) = prev.get(&cursor) {
@@ -51,6 +54,7 @@ pub(crate) fn reconstruct_legs(
                 departure_s,
                 time_s,
                 mode,
+                network_path,
             } => {
                 let stop = &bundle.stops[cursor.stop_index as usize];
                 let access_s = *time_s;
@@ -68,22 +72,25 @@ pub(crate) fn reconstruct_legs(
                     route_short_name: None,
                     trip_id: None,
                     headsign: None,
-                    geometry: geometry_if_requested(
+                    geometry: street_geometry_if_requested(
                         request,
+                        network_path.as_ref(),
                         [*from_lon, *from_lat],
                         [stop.lon, stop.lat],
                     ),
+                    network_path: network_path.clone(),
                 });
                 break;
             }
             PrevStep::Transfer {
                 previous,
-                distance_m,
                 departure_s,
+                travel_time_s,
+                network_path,
             } => {
                 let from = &bundle.stops[previous.stop_index as usize];
                 let to = &bundle.stops[cursor.stop_index as usize];
-                let walk_s = seconds_for_distance(*distance_m, request.modes.walk_speed_kph);
+                let walk_s = *travel_time_s;
                 legs.push(TransitLeg {
                     leg_type: TransitLegType::Transfer,
                     from_id: from.stop_id.clone(),
@@ -98,11 +105,13 @@ pub(crate) fn reconstruct_legs(
                     route_short_name: None,
                     trip_id: None,
                     headsign: None,
-                    geometry: geometry_if_requested(
+                    geometry: street_geometry_if_requested(
                         request,
+                        network_path.as_ref(),
                         [from.lon, from.lat],
                         [to.lon, to.lat],
                     ),
+                    network_path: network_path.clone(),
                 });
                 cursor = *previous;
             }
@@ -134,6 +143,7 @@ pub(crate) fn reconstruct_legs(
                         bundle,
                         *connection,
                     ),
+                    network_path: None,
                 });
                 cursor = *previous;
             }
@@ -290,7 +300,7 @@ fn transit_leg_distance_m(bundle: &TransitBundle, leg: &TransitLeg) -> Option<f6
     Some(haversine_m(from.lon, from.lat, to.lon, to.lat))
 }
 
-fn linestring_distance_m(points: &[[f64; 2]]) -> f64 {
+fn linestring_distance_m(points: &[[f64; 3]]) -> f64 {
     points
         .windows(2)
         .map(|window| haversine_m(window[0][0], window[0][1], window[1][0], window[1][1]))
@@ -333,21 +343,39 @@ fn geometry_if_requested(
     request: &TransitRouteRequest,
     from: [f64; 2],
     to: [f64; 2],
-) -> Vec<[f64; 2]> {
+) -> Vec<[f64; 3]> {
     if transit_geometry_requested(request) {
-        vec![from, to]
+        vec![[from[0], from[1], 0.0], [to[0], to[1], 0.0]]
     } else {
         Vec::new()
     }
+}
+
+fn street_geometry_if_requested(
+    request: &TransitRouteRequest,
+    path: Option<&crate::model::TransitStreetPath>,
+    from: [f64; 2],
+    to: [f64; 2],
+) -> Vec<[f64; 3]> {
+    if transit_geometry_requested(request)
+        && let Some(path) = path
+        && !path.geometry.is_empty()
+    {
+        return path.geometry.clone();
+    }
+    geometry_if_requested(request, from, to)
 }
 
 fn transit_connection_geometry_if_requested(
     request: &TransitRouteRequest,
     bundle: &TransitBundle,
     connection: TransitConnection,
-) -> Vec<[f64; 2]> {
+) -> Vec<[f64; 3]> {
     if transit_geometry_requested(request) {
         transit_connection_geometry(bundle, connection)
+            .into_iter()
+            .map(|point| [point[0], point[1], 0.0])
+            .collect()
     } else {
         Vec::new()
     }

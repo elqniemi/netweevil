@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::fusion::index_transit_transfer_table;
 use crate::legs::{
     build_transit_route_stop_segments, build_transit_route_stops, coalesce_transit_legs,
     reconstruct_legs, seconds_for_distance, summarize_legs, transit_leg_minimums_enabled,
@@ -11,7 +12,7 @@ use crate::legs::{
 use crate::model::{
     AccessMode, TransitBundle, TransitConnection, TransitLeg, TransitOutcome,
     TransitRouteAlternative, TransitRouteRequest, TransitRouteResult, TransitRouteSummary,
-    TransitServiceAreaRequest, TransitServiceAreaResult,
+    TransitServiceAreaRequest, TransitServiceAreaResult, TransitStreetPath, TransitTransferTable,
 };
 use crate::runtime::{
     PrevStep, StateKey, StopCandidate, StopSpatialIndex, StreetTimeEstimator, TransitRuntime,
@@ -22,12 +23,13 @@ use crate::service_area::execute_transit_service_area_with_runtime;
 
 /// Completed journey candidate: a transit state plus the egress leg that
 /// finishes it at the requested destination.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct FinalCandidate {
     arrival_s: u32,
     state: StateKey,
     egress_time_s: u32,
     egress_mode: AccessMode,
+    egress_network_path: Option<TransitStreetPath>,
 }
 
 pub struct PreparedTransitRouter {
@@ -35,6 +37,7 @@ pub struct PreparedTransitRouter {
     departures_by_stop: Vec<Vec<TransitConnection>>,
     stop_index: StopSpatialIndex,
     transfer_candidates: Vec<Vec<StopCandidate>>,
+    network_transfer_candidates: HashMap<String, Vec<Vec<StopCandidate>>>,
 }
 
 impl PreparedTransitRouter {
@@ -47,7 +50,67 @@ impl PreparedTransitRouter {
             departures_by_stop,
             stop_index,
             transfer_candidates,
+            network_transfer_candidates: HashMap::new(),
         }
+    }
+
+    /// Prepares a router with one or more directed, profile-specific network
+    /// transfer tables. Requests select a table through
+    /// `modes.transfer_profile_id`.
+    pub fn new_with_transfer_tables(
+        bundle: Arc<TransitBundle>,
+        tables: Vec<TransitTransferTable>,
+    ) -> Result<Self> {
+        let departures_by_stop = build_departures_by_stop(&bundle);
+        let stop_index = StopSpatialIndex::new(&bundle.stops);
+        let transfer_candidates = build_transfer_candidates(&bundle, &stop_index);
+        let mut network_transfer_candidates = HashMap::new();
+        for table in tables {
+            let profile_id = table.profile_id.clone();
+            let candidates = index_transit_transfer_table(&bundle, &table)?;
+            if network_transfer_candidates
+                .insert(profile_id.clone(), candidates)
+                .is_some()
+            {
+                anyhow::bail!("duplicate transit transfer table profile_id '{profile_id}'");
+            }
+        }
+        Ok(Self {
+            bundle,
+            departures_by_stop,
+            stop_index,
+            transfer_candidates,
+            network_transfer_candidates,
+        })
+    }
+
+    pub fn transfer_profile_ids(&self) -> Vec<&str> {
+        let mut ids = self
+            .network_transfer_candidates
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        ids.sort_unstable();
+        ids
+    }
+
+    fn transfer_candidates_for(
+        &self,
+        modes: &crate::model::TransitModeOptions,
+    ) -> Result<&[Vec<StopCandidate>]> {
+        let Some(profile_id) = modes.transfer_profile_id.as_deref() else {
+            return Ok(&self.transfer_candidates);
+        };
+        self.network_transfer_candidates
+            .get(profile_id)
+            .map(Vec::as_slice)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "transit transfer profile '{}' is not loaded; available profiles: {:?}",
+                    profile_id,
+                    self.transfer_profile_ids()
+                )
+            })
     }
 
     pub fn bundle(&self) -> &TransitBundle {
@@ -60,17 +123,19 @@ impl PreparedTransitRouter {
 
     /// Route with an optional network street-time oracle for access/egress
     /// legs; it is consulted only when the request opts into
-    /// `modes.street_access = "network"`.
+    /// `modes.street_access = "network"`. Missing estimates make candidates
+    /// unreachable rather than falling back to straight-line time.
     pub fn execute_route_with_street_estimator(
         &self,
         request: &TransitRouteRequest,
         street_estimator: Option<&dyn StreetTimeEstimator>,
     ) -> Result<TransitRouteResult> {
+        let transfer_candidates = self.transfer_candidates_for(&request.modes)?;
         let runtime = TransitRuntime::new(
             self.bundle.as_ref(),
             &self.departures_by_stop,
             &self.stop_index,
-            &self.transfer_candidates,
+            transfer_candidates,
             &request.modes,
             street_estimator,
         );
@@ -86,17 +151,19 @@ impl PreparedTransitRouter {
 
     /// Service area with an optional network street-time oracle for access
     /// legs; consulted only when the request opts into
-    /// `modes.street_access = "network"`.
+    /// `modes.street_access = "network"`. Missing estimates make candidates
+    /// unreachable rather than falling back to straight-line time.
     pub fn execute_service_area_with_street_estimator(
         &self,
         request: &TransitServiceAreaRequest,
         street_estimator: Option<&dyn StreetTimeEstimator>,
     ) -> Result<TransitServiceAreaResult> {
+        let transfer_candidates = self.transfer_candidates_for(&request.modes)?;
         let runtime = TransitRuntime::new(
             self.bundle.as_ref(),
             &self.departures_by_stop,
             &self.stop_index,
-            &self.transfer_candidates,
+            transfer_candidates,
             &request.modes,
             street_estimator,
         );
@@ -108,6 +175,12 @@ pub fn execute_transit_route(
     bundle: &TransitBundle,
     request: &TransitRouteRequest,
 ) -> Result<TransitRouteResult> {
+    if let Some(profile_id) = request.modes.transfer_profile_id.as_deref() {
+        anyhow::bail!(
+            "transit transfer profile '{}' requires PreparedTransitRouter::new_with_transfer_tables",
+            profile_id
+        );
+    }
     let departures_by_stop = build_departures_by_stop(bundle);
     let stop_index = StopSpatialIndex::new(&bundle.stops);
     let transfer_candidates = build_transfer_candidates(bundle, &stop_index);
@@ -207,13 +280,14 @@ fn execute_transit_route_with_runtime(
                 departure_s,
                 time_s: candidate.time_s,
                 mode: candidate.mode,
+                network_path: candidate.network_path,
             },
         );
     }
 
     let egress_by_stop = egress
         .into_iter()
-        .map(|candidate| (candidate.stop_index, (candidate.time_s, candidate.mode)))
+        .map(|candidate| (candidate.stop_index, candidate))
         .collect::<HashMap<_, _>>();
     let mut best_final: Option<FinalCandidate> = None;
     let mut final_candidates = Vec::<FinalCandidate>::new();
@@ -229,12 +303,12 @@ fn execute_transit_route_with_runtime(
             continue;
         }
         if !collect_alternatives {
-            if let Some(found) = best_final
+            if let Some(found) = best_final.as_ref()
                 && entry.time_s >= found.arrival_s
             {
                 continue;
             }
-        } else if let Some(found) = best_final {
+        } else if let Some(found) = best_final.as_ref() {
             let max_arrival_s =
                 transit_alternative_arrival_limit(departure_s, found.arrival_s, request);
             if entry.time_s > max_arrival_s {
@@ -246,18 +320,18 @@ fn execute_transit_route_with_runtime(
         }
 
         if can_finish_with_egress(entry.state)
-            && let Some((egress_time_s, egress_mode)) =
-                egress_by_stop.get(&entry.state.stop_index).copied()
+            && let Some(egress) = egress_by_stop.get(&entry.state.stop_index)
         {
-            let arrival_s = entry.time_s.saturating_add(egress_time_s);
+            let arrival_s = entry.time_s.saturating_add(egress.time_s);
             let candidate = FinalCandidate {
                 arrival_s,
                 state: entry.state,
-                egress_time_s,
-                egress_mode,
+                egress_time_s: egress.time_s,
+                egress_mode: egress.mode,
+                egress_network_path: egress.network_path.clone(),
             };
             if collect_final_candidates {
-                final_candidates.push(candidate);
+                final_candidates.push(candidate.clone());
             }
             if best_final
                 .as_ref()
@@ -277,8 +351,9 @@ fn execute_transit_route_with_runtime(
                 if transfer.stop_index == entry.state.stop_index {
                     continue;
                 }
-                let walk_s =
-                    seconds_for_distance(transfer.distance_m, request.modes.walk_speed_kph);
+                let walk_s = transfer.transfer_time_s.unwrap_or_else(|| {
+                    seconds_for_distance(transfer.distance_m, request.modes.walk_speed_kph)
+                });
                 let next_state = StateKey {
                     stop_index: transfer.stop_index,
                     boardings: entry.state.boardings,
@@ -292,8 +367,9 @@ fn execute_transit_route_with_runtime(
                     transfer_departure_s.saturating_add(walk_s),
                     PrevStep::Transfer {
                         previous: entry.state,
-                        distance_m: transfer.distance_m,
                         departure_s: transfer_departure_s,
+                        travel_time_s: walk_s,
+                        network_path: transfer.network_path.clone(),
                     },
                 );
             }
@@ -445,12 +521,13 @@ fn select_transit_final_candidate(
             candidate.arrival_s,
             candidate.egress_time_s,
             candidate.egress_mode,
+            candidate.egress_network_path,
         )?;
         return Ok(Some((candidate.arrival_s, legs)));
     }
 
     final_candidates.sort_by_key(|candidate| (candidate.arrival_s, candidate.state.boardings));
-    for &candidate in final_candidates.iter() {
+    for candidate in final_candidates.iter() {
         let legs = reconstruct_legs(
             bundle,
             runtime,
@@ -460,6 +537,7 @@ fn select_transit_final_candidate(
             candidate.arrival_s,
             candidate.egress_time_s,
             candidate.egress_mode,
+            candidate.egress_network_path.clone(),
         )?;
         let mut coalesced = legs.clone();
         coalesce_transit_legs(&mut coalesced);
@@ -521,6 +599,7 @@ fn build_transit_alternatives(
             arrival_s,
             candidate.egress_time_s,
             candidate.egress_mode,
+            candidate.egress_network_path,
         )?;
         coalesce_transit_legs(&mut legs);
         if !transit_legs_satisfy_minimums(bundle, &legs, &request.modes) {

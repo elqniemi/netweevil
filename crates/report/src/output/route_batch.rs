@@ -26,62 +26,94 @@ pub(super) fn write_route_batch_gpkg(
         .filter_map(|item| item.route.as_ref())
         .map(route_coords)
         .collect::<Result<Vec<_>>>()?;
+    let route_component_columns = component_columns(
+        result
+            .items
+            .iter()
+            .filter_map(|item| item.route.as_ref())
+            .map(|route| &route.summary.components),
+    );
+    let segment_component_columns = component_columns(
+        result
+            .items
+            .iter()
+            .filter_map(|item| item.route.as_ref())
+            .filter_map(|route| route.segments.as_ref())
+            .flatten()
+            .map(|segment| &segment.components),
+    );
 
     let mut gpkg = GeoPackageWriter::create(path)?;
-    gpkg.create_feature_table(
+    let mut route_columns = vec![
+        ("request_index", "INTEGER NOT NULL"),
+        ("route_id", "TEXT NOT NULL"),
+        ("origin_id", "TEXT NOT NULL"),
+        ("destination_id", "TEXT NOT NULL"),
+        ("outcome", "TEXT NOT NULL"),
+        ("fallback_used", "INTEGER NOT NULL"),
+        ("origin_component_id", "INTEGER"),
+        ("destination_component_id", "INTEGER"),
+        ("origin_hop_distance_m", "REAL"),
+        ("destination_hop_distance_m", "REAL"),
+        ("origin_snap_distance_m", "REAL NOT NULL"),
+        ("destination_snap_distance_m", "REAL NOT NULL"),
+        ("total_distance_m", "INTEGER NOT NULL"),
+        ("total_travel_time_s", "REAL NOT NULL"),
+        ("total_generalized_cost", "REAL NOT NULL"),
+        ("waiting_time_s", "REAL NOT NULL"),
+        ("departure_time", "TEXT"),
+        ("arrival_time", "TEXT"),
+        ("scenario_id", "TEXT"),
+        ("illegal_movement_penalty_s", "REAL NOT NULL"),
+        ("illegal_movement_penalty_cost", "REAL NOT NULL"),
+        ("violation_count", "INTEGER NOT NULL"),
+        ("violation_types_json", "TEXT NOT NULL"),
+        ("violations_json", "TEXT NOT NULL"),
+        ("segment_count", "INTEGER NOT NULL"),
+        ("node_path_json", "TEXT NOT NULL"),
+        ("edge_path_json", "TEXT NOT NULL"),
+        ("road_breakdowns_json", "TEXT"),
+        ("surface_breakdowns_json", "TEXT"),
+        ("diagnostics_json", "TEXT NOT NULL"),
+        ("warnings_json", "TEXT NOT NULL"),
+    ];
+    route_columns.extend(
+        route_component_columns
+            .iter()
+            .map(|column| (column.column_name.as_str(), "REAL")),
+    );
+    gpkg.create_feature_table_3d(
         "routes",
-        &[
-            ("request_index", "INTEGER NOT NULL"),
-            ("route_id", "TEXT NOT NULL"),
-            ("origin_id", "TEXT NOT NULL"),
-            ("destination_id", "TEXT NOT NULL"),
-            ("outcome", "TEXT NOT NULL"),
-            ("fallback_used", "INTEGER NOT NULL"),
-            ("origin_component_id", "INTEGER"),
-            ("destination_component_id", "INTEGER"),
-            ("origin_hop_distance_m", "REAL"),
-            ("destination_hop_distance_m", "REAL"),
-            ("origin_snap_distance_m", "REAL NOT NULL"),
-            ("destination_snap_distance_m", "REAL NOT NULL"),
-            ("total_distance_m", "INTEGER NOT NULL"),
-            ("total_travel_time_s", "REAL NOT NULL"),
-            ("total_generalized_cost", "REAL NOT NULL"),
-            ("illegal_movement_penalty_s", "REAL NOT NULL"),
-            ("illegal_movement_penalty_cost", "REAL NOT NULL"),
-            ("violation_count", "INTEGER NOT NULL"),
-            ("violation_types_json", "TEXT NOT NULL"),
-            ("violations_json", "TEXT NOT NULL"),
-            ("segment_count", "INTEGER NOT NULL"),
-            ("node_path_json", "TEXT NOT NULL"),
-            ("edge_path_json", "TEXT NOT NULL"),
-            ("road_breakdowns_json", "TEXT"),
-            ("surface_breakdowns_json", "TEXT"),
-            ("diagnostics_json", "TEXT NOT NULL"),
-            ("warnings_json", "TEXT NOT NULL"),
-        ],
+        &route_columns,
         "LINESTRING",
         (!successful_extents.is_empty())
-            .then(|| extent_for_features(successful_extents.iter().map(Vec::as_slice))),
+            .then(|| extent_for_features_z(successful_extents.iter().map(Vec::as_slice))),
     )?;
-    gpkg.create_attribute_table(
-        "route_segments",
-        &[
-            ("request_index", "INTEGER NOT NULL"),
-            ("route_id", "TEXT NOT NULL"),
-            ("segment_index", "INTEGER NOT NULL"),
-            ("edge_id", "INTEGER NOT NULL"),
-            ("from_node_id", "INTEGER NOT NULL"),
-            ("to_node_id", "INTEGER NOT NULL"),
-            ("source_way_id", "INTEGER NOT NULL"),
-            ("length_m", "INTEGER NOT NULL"),
-            ("travel_time_s", "REAL NOT NULL"),
-            ("generalized_cost", "REAL NOT NULL"),
-            ("road_class", "TEXT NOT NULL"),
-            ("surface", "TEXT NOT NULL"),
-            ("name", "TEXT"),
-            ("violation_type", "TEXT"),
-        ],
-    )?;
+    let mut segment_columns = vec![
+        ("request_index", "INTEGER NOT NULL"),
+        ("route_id", "TEXT NOT NULL"),
+        ("segment_index", "INTEGER NOT NULL"),
+        ("edge_id", "INTEGER NOT NULL"),
+        ("from_node_id", "INTEGER NOT NULL"),
+        ("to_node_id", "INTEGER NOT NULL"),
+        ("source_way_id", "INTEGER NOT NULL"),
+        ("length_m", "INTEGER NOT NULL"),
+        ("travel_time_s", "REAL NOT NULL"),
+        ("generalized_cost", "REAL NOT NULL"),
+        ("waiting_time_s", "REAL NOT NULL"),
+        ("entry_time", "TEXT"),
+        ("exit_time", "TEXT"),
+        ("road_class", "TEXT NOT NULL"),
+        ("surface", "TEXT NOT NULL"),
+        ("name", "TEXT"),
+        ("violation_type", "TEXT"),
+    ];
+    segment_columns.extend(
+        segment_component_columns
+            .iter()
+            .map(|column| (column.column_name.as_str(), "REAL")),
+    );
+    gpkg.create_attribute_table("route_segments", &segment_columns)?;
     gpkg.create_attribute_table(
         "route_breakdown_road_class",
         &[
@@ -151,152 +183,190 @@ pub(super) fn write_route_batch_gpkg(
                 .breakdowns
                 .as_ref()
                 .map(|breakdowns| diagnostics_json(&breakdowns.surface));
-            gpkg.insert_feature(
-                "routes",
-                &[
-                    ("request_index", SqlValue::Integer(request_index)),
-                    ("route_id", SqlValue::Text(route.route_id.clone())),
-                    ("origin_id", SqlValue::Text(request.origin.id.clone())),
-                    (
-                        "destination_id",
-                        SqlValue::Text(request.destination.id.clone()),
+            let mut route_fields = vec![
+                ("request_index", SqlValue::Integer(request_index)),
+                ("route_id", SqlValue::Text(route.route_id.clone())),
+                ("origin_id", SqlValue::Text(request.origin.id.clone())),
+                (
+                    "destination_id",
+                    SqlValue::Text(request.destination.id.clone()),
+                ),
+                (
+                    "outcome",
+                    SqlValue::Text(outcome_name(route.outcome).to_string()),
+                ),
+                (
+                    "fallback_used",
+                    SqlValue::Integer(if route.fallback_used { 1 } else { 0 }),
+                ),
+                (
+                    "origin_component_id",
+                    SqlValue::NullableInteger(optional_u32_as_i64(route.origin.component_id)),
+                ),
+                (
+                    "destination_component_id",
+                    SqlValue::NullableInteger(optional_u32_as_i64(route.destination.component_id)),
+                ),
+                (
+                    "origin_hop_distance_m",
+                    SqlValue::NullableReal(route.origin_hop_distance_m),
+                ),
+                (
+                    "destination_hop_distance_m",
+                    SqlValue::NullableReal(route.destination_hop_distance_m),
+                ),
+                (
+                    "origin_snap_distance_m",
+                    SqlValue::Real(route.origin.snap_distance_m),
+                ),
+                (
+                    "destination_snap_distance_m",
+                    SqlValue::Real(route.destination.snap_distance_m),
+                ),
+                (
+                    "total_distance_m",
+                    SqlValue::Integer(route.summary.total_distance_m as i64),
+                ),
+                (
+                    "total_travel_time_s",
+                    SqlValue::Real(route.summary.total_travel_time_s),
+                ),
+                (
+                    "total_generalized_cost",
+                    SqlValue::Real(route.summary.total_generalized_cost),
+                ),
+                (
+                    "waiting_time_s",
+                    SqlValue::Real(route.summary.waiting_time_s),
+                ),
+                (
+                    "departure_time",
+                    SqlValue::NullableText(route.summary.departure_time.clone()),
+                ),
+                (
+                    "arrival_time",
+                    SqlValue::NullableText(route.summary.arrival_time.clone()),
+                ),
+                (
+                    "scenario_id",
+                    SqlValue::NullableText(route.summary.scenario_id.clone()),
+                ),
+                (
+                    "illegal_movement_penalty_s",
+                    SqlValue::Real(route.summary.illegal_movement_penalty_s),
+                ),
+                (
+                    "illegal_movement_penalty_cost",
+                    SqlValue::Real(route.summary.illegal_movement_penalty_cost),
+                ),
+                (
+                    "violation_count",
+                    SqlValue::Integer(route.summary.violation_count as i64),
+                ),
+                (
+                    "violation_types_json",
+                    SqlValue::Text(diagnostics_json(&route.summary.violation_types)),
+                ),
+                (
+                    "violations_json",
+                    SqlValue::Text(diagnostics_json(&route.violations)),
+                ),
+                (
+                    "segment_count",
+                    SqlValue::Integer(route.summary.segment_count as i64),
+                ),
+                (
+                    "node_path_json",
+                    SqlValue::Text(diagnostics_json(&route.node_path)),
+                ),
+                (
+                    "edge_path_json",
+                    SqlValue::Text(diagnostics_json(&route.edge_path)),
+                ),
+                (
+                    "road_breakdowns_json",
+                    SqlValue::NullableText(road_breakdowns),
+                ),
+                (
+                    "surface_breakdowns_json",
+                    SqlValue::NullableText(surface_breakdowns),
+                ),
+                (
+                    "diagnostics_json",
+                    SqlValue::Text(diagnostics_json(&route.diagnostics)),
+                ),
+                (
+                    "warnings_json",
+                    SqlValue::Text(diagnostics_json(&route.warnings)),
+                ),
+            ];
+            route_fields.extend(route_component_columns.iter().map(|column| {
+                (
+                    column.column_name.as_str(),
+                    SqlValue::NullableReal(
+                        route
+                            .summary
+                            .components
+                            .get(&column.component_name)
+                            .copied(),
                     ),
-                    (
-                        "outcome",
-                        SqlValue::Text(outcome_name(route.outcome).to_string()),
-                    ),
-                    (
-                        "fallback_used",
-                        SqlValue::Integer(if route.fallback_used { 1 } else { 0 }),
-                    ),
-                    (
-                        "origin_component_id",
-                        SqlValue::NullableInteger(optional_u32_as_i64(route.origin.component_id)),
-                    ),
-                    (
-                        "destination_component_id",
-                        SqlValue::NullableInteger(optional_u32_as_i64(
-                            route.destination.component_id,
-                        )),
-                    ),
-                    (
-                        "origin_hop_distance_m",
-                        SqlValue::NullableReal(route.origin_hop_distance_m),
-                    ),
-                    (
-                        "destination_hop_distance_m",
-                        SqlValue::NullableReal(route.destination_hop_distance_m),
-                    ),
-                    (
-                        "origin_snap_distance_m",
-                        SqlValue::Real(route.origin.snap_distance_m),
-                    ),
-                    (
-                        "destination_snap_distance_m",
-                        SqlValue::Real(route.destination.snap_distance_m),
-                    ),
-                    (
-                        "total_distance_m",
-                        SqlValue::Integer(route.summary.total_distance_m as i64),
-                    ),
-                    (
-                        "total_travel_time_s",
-                        SqlValue::Real(route.summary.total_travel_time_s),
-                    ),
-                    (
-                        "total_generalized_cost",
-                        SqlValue::Real(route.summary.total_generalized_cost),
-                    ),
-                    (
-                        "illegal_movement_penalty_s",
-                        SqlValue::Real(route.summary.illegal_movement_penalty_s),
-                    ),
-                    (
-                        "illegal_movement_penalty_cost",
-                        SqlValue::Real(route.summary.illegal_movement_penalty_cost),
-                    ),
-                    (
-                        "violation_count",
-                        SqlValue::Integer(route.summary.violation_count as i64),
-                    ),
-                    (
-                        "violation_types_json",
-                        SqlValue::Text(diagnostics_json(&route.summary.violation_types)),
-                    ),
-                    (
-                        "violations_json",
-                        SqlValue::Text(diagnostics_json(&route.violations)),
-                    ),
-                    (
-                        "segment_count",
-                        SqlValue::Integer(route.summary.segment_count as i64),
-                    ),
-                    (
-                        "node_path_json",
-                        SqlValue::Text(diagnostics_json(&route.node_path)),
-                    ),
-                    (
-                        "edge_path_json",
-                        SqlValue::Text(diagnostics_json(&route.edge_path)),
-                    ),
-                    (
-                        "road_breakdowns_json",
-                        SqlValue::NullableText(road_breakdowns),
-                    ),
-                    (
-                        "surface_breakdowns_json",
-                        SqlValue::NullableText(surface_breakdowns),
-                    ),
-                    (
-                        "diagnostics_json",
-                        SqlValue::Text(diagnostics_json(&route.diagnostics)),
-                    ),
-                    (
-                        "warnings_json",
-                        SqlValue::Text(diagnostics_json(&route.warnings)),
-                    ),
-                ],
-                &coords,
-            )?;
+                )
+            }));
+            gpkg.insert_feature_3d("routes", &route_fields, &coords)?;
 
             if let Some(segments) = route.segments.as_ref() {
                 for (segment_index, segment) in segments.iter().enumerate() {
-                    gpkg.insert_row(
-                        "route_segments",
-                        &[
-                            ("request_index", SqlValue::Integer(request_index)),
-                            ("route_id", SqlValue::Text(route.route_id.clone())),
-                            ("segment_index", SqlValue::Integer(segment_index as i64 + 1)),
-                            ("edge_id", SqlValue::Integer(segment.edge_id as i64)),
-                            (
-                                "from_node_id",
-                                SqlValue::Integer(segment.from_node_id as i64),
+                    let mut segment_fields = vec![
+                        ("request_index", SqlValue::Integer(request_index)),
+                        ("route_id", SqlValue::Text(route.route_id.clone())),
+                        ("segment_index", SqlValue::Integer(segment_index as i64 + 1)),
+                        ("edge_id", SqlValue::Integer(segment.edge_id as i64)),
+                        (
+                            "from_node_id",
+                            SqlValue::Integer(segment.from_node_id as i64),
+                        ),
+                        ("to_node_id", SqlValue::Integer(segment.to_node_id as i64)),
+                        ("source_way_id", SqlValue::Integer(segment.source_way_id)),
+                        ("length_m", SqlValue::Integer(segment.length_m as i64)),
+                        ("travel_time_s", SqlValue::Real(segment.travel_time_s)),
+                        ("generalized_cost", SqlValue::Real(segment.generalized_cost)),
+                        ("waiting_time_s", SqlValue::Real(segment.waiting_time_s)),
+                        (
+                            "entry_time",
+                            SqlValue::NullableText(segment.entry_time.clone()),
+                        ),
+                        (
+                            "exit_time",
+                            SqlValue::NullableText(segment.exit_time.clone()),
+                        ),
+                        (
+                            "road_class",
+                            SqlValue::Text(format!("{:?}", segment.road_class).to_lowercase()),
+                        ),
+                        (
+                            "surface",
+                            SqlValue::Text(format!("{:?}", segment.surface).to_lowercase()),
+                        ),
+                        ("name", SqlValue::NullableText(segment.name.clone())),
+                        (
+                            "violation_type",
+                            SqlValue::NullableText(segment.violation_type.map(|value| {
+                                serde_json::to_string(&value)
+                                    .unwrap_or_default()
+                                    .trim_matches('"')
+                                    .to_string()
+                            })),
+                        ),
+                    ];
+                    segment_fields.extend(segment_component_columns.iter().map(|column| {
+                        (
+                            column.column_name.as_str(),
+                            SqlValue::NullableReal(
+                                segment.components.get(&column.component_name).copied(),
                             ),
-                            ("to_node_id", SqlValue::Integer(segment.to_node_id as i64)),
-                            ("source_way_id", SqlValue::Integer(segment.source_way_id)),
-                            ("length_m", SqlValue::Integer(segment.length_m as i64)),
-                            ("travel_time_s", SqlValue::Real(segment.travel_time_s)),
-                            ("generalized_cost", SqlValue::Real(segment.generalized_cost)),
-                            (
-                                "road_class",
-                                SqlValue::Text(format!("{:?}", segment.road_class).to_lowercase()),
-                            ),
-                            (
-                                "surface",
-                                SqlValue::Text(format!("{:?}", segment.surface).to_lowercase()),
-                            ),
-                            ("name", SqlValue::NullableText(segment.name.clone())),
-                            (
-                                "violation_type",
-                                SqlValue::NullableText(segment.violation_type.map(|value| {
-                                    serde_json::to_string(&value)
-                                        .unwrap_or_default()
-                                        .trim_matches('"')
-                                        .to_string()
-                                })),
-                            ),
-                        ],
-                    )?;
+                        )
+                    }));
+                    gpkg.insert_row("route_segments", &segment_fields)?;
                 }
             }
 
@@ -434,17 +504,20 @@ mod tests {
                             id: "origin".to_string(),
                             lon: 6.0,
                             lat: 53.0,
+                            z: None,
                         },
                         destination: LabeledPoint {
                             id: "destination".to_string(),
                             lon: 6.2,
                             lat: 53.2,
+                            z: None,
                         },
                         snap: Default::default(),
                         connectivity: Default::default(),
                         fallback: Default::default(),
                         returns: ReturnConfig::default(),
                         alternatives: Default::default(),
+                        temporal: Default::default(),
                     },
                 },
                 RouteBatchEntry {
@@ -455,17 +528,20 @@ mod tests {
                             id: "origin_2".to_string(),
                             lon: 6.3,
                             lat: 53.3,
+                            z: None,
                         },
                         destination: LabeledPoint {
                             id: "destination_2".to_string(),
                             lon: 6.4,
                             lat: 53.4,
+                            z: None,
                         },
                         snap: Default::default(),
                         connectivity: Default::default(),
                         fallback: Default::default(),
                         returns: ReturnConfig::default(),
                         alternatives: Default::default(),
+                        temporal: Default::default(),
                     },
                 },
             ],
@@ -489,6 +565,7 @@ mod tests {
                             snapped_node_id: 1,
                             snapped_lon: 6.0,
                             snapped_lat: 53.0,
+                            snapped_z: 12.0,
                             snap_distance_m: 10.0,
                             snapped_edge_id: None,
                             snapped_edge_fraction: None,
@@ -503,6 +580,7 @@ mod tests {
                             snapped_node_id: 2,
                             snapped_lon: 6.2,
                             snapped_lat: 53.2,
+                            snapped_z: 18.0,
                             snap_distance_m: 20.0,
                             snapped_edge_id: None,
                             snapped_edge_fraction: None,
@@ -518,6 +596,11 @@ mod tests {
                             network_distance_m: 1_000,
                             network_travel_time_s: 120.0,
                             network_generalized_cost: 120.0,
+                            components: Default::default(),
+                            waiting_time_s: 0.0,
+                            departure_time: None,
+                            arrival_time: None,
+                            scenario_id: None,
                             illegal_movement_penalty_s: 0.0,
                             illegal_movement_penalty_cost: 0.0,
                             violation_count: 1,
@@ -529,7 +612,11 @@ mod tests {
                         },
                         node_path: vec![1, 2, 3],
                         edge_path: vec![10, 11],
-                        geometry: Some(vec![[6.0, 53.0], [6.1, 53.1], [6.2, 53.2]]),
+                        geometry: Some(vec![
+                            [6.0, 53.0, 12.0],
+                            [6.1, 53.1, 15.0],
+                            [6.2, 53.2, 18.0],
+                        ]),
                         hop_segments: vec![],
                         segments: Some(vec![
                             RouteSegment {
@@ -540,6 +627,10 @@ mod tests {
                                 length_m: 500,
                                 travel_time_s: 60.0,
                                 generalized_cost: 60.0,
+                                components: Default::default(),
+                                waiting_time_s: 0.0,
+                                entry_time: None,
+                                exit_time: None,
                                 road_class: RoadClass::Residential,
                                 surface: SurfaceClass::Paved,
                                 name: Some("Alpha".to_string()),
@@ -553,6 +644,10 @@ mod tests {
                                 length_m: 500,
                                 travel_time_s: 60.0,
                                 generalized_cost: 60.0,
+                                components: Default::default(),
+                                waiting_time_s: 0.0,
+                                entry_time: None,
+                                exit_time: None,
                                 road_class: RoadClass::Residential,
                                 surface: SurfaceClass::Paved,
                                 name: Some("Beta".to_string()),

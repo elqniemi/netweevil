@@ -12,23 +12,28 @@ use netweevil_persist::{
 };
 use netweevil_profile::{ProfileDocument, ReturnGeometry, load_profile};
 use netweevil_query::{
-    AccessibilityCategoryRequest, AccessibilityRequest, AccessibilityResult, MatrixResult,
-    OdResult, PreparedRoutingEngine, RouteBatchResult, RouteResult, ServiceAreaResult,
-    analysis_failure, load_od_pairs, load_point_set, load_route_batch, load_route_request,
-    load_service_area_request,
+    AccessibilityCategoryRequest, AccessibilityRequest, AccessibilityResult, BetweennessRequest,
+    MatrixResult, OdResult, PreparedRoutingEngine, RouteBatchResult, RouteResult,
+    ScenarioBatchRequest, ScenarioBatchResult, ServiceAreaResult, ServiceAreaSequenceRequest,
+    ServiceAreaSequenceResult, TemporalRequestOptions, analysis_failure, execute_scenario_batch,
+    load_betweenness_request, load_od_pairs, load_point_set, load_route_batch, load_route_request,
+    load_scenario_batch_request, load_service_area_request, load_service_area_sequence_request,
 };
 use netweevil_report::{
-    CompiledProfileManifest, RunKind, RunStatus, new_run_manifest, write_matrix_result,
-    write_od_result, write_route_batch_result, write_route_result, write_service_area_result,
+    CompiledProfileManifest, RunKind, RunStatus, new_run_manifest, write_betweenness_result,
+    write_matrix_result, write_od_result, write_route_batch_result, write_route_result,
+    write_service_area_result, write_service_area_sequence_result,
 };
 use netweevil_transit::{
-    PreparedTransitRouter, TransitRouteRequest, TransitRouteResult, load_transit_request,
-    read_transit_bundle,
+    AccessMode, TransitRouteRequest, TransitRouteResult, TransitStreetAccessModel,
+    load_transit_request, read_transit_bundle,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::software_info;
-use crate::transit::read_transit_manifest;
+use crate::transit::{
+    prepare_cli_transit_street_estimator, prepare_registered_transit_router, read_transit_manifest,
+};
 
 #[derive(Debug)]
 pub(crate) struct StoredRun {
@@ -54,6 +59,9 @@ pub(crate) enum AnalyzeCommand {
     Matrix(MatrixArgs),
     Accessibility(AccessibilityArgs),
     ServiceArea(ServiceAreaArgs),
+    ServiceAreaSequence(ServiceAreaSequenceArgs),
+    Betweenness(BetweennessArgs),
+    ScenarioBatch(ScenarioBatchArgs),
     TransitRoute(TransitRouteArgs),
     TransitBatch(TransitBatchArgs),
 }
@@ -66,6 +74,8 @@ pub(crate) struct RouteArgs {
     profile: PathBuf,
     #[arg(long)]
     request: PathBuf,
+    #[command(flatten)]
+    temporal: TemporalOverrideArgs,
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -78,6 +88,8 @@ pub(crate) struct RouteBatchArgs {
     profile: PathBuf,
     #[arg(long)]
     requests: PathBuf,
+    #[command(flatten)]
+    temporal: TemporalOverrideArgs,
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -90,6 +102,8 @@ pub(crate) struct OdArgs {
     profile: PathBuf,
     #[arg(long)]
     pairs: PathBuf,
+    #[command(flatten)]
+    temporal: TemporalOverrideArgs,
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -104,6 +118,8 @@ pub(crate) struct MatrixArgs {
     origins: PathBuf,
     #[arg(long)]
     destinations: PathBuf,
+    #[command(flatten)]
+    temporal: TemporalOverrideArgs,
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -122,12 +138,127 @@ pub(crate) struct AccessibilityArgs {
     thresholds_s: Vec<f64>,
     #[arg(long, default_value_t = 1200.0)]
     max_travel_time_s: f64,
+    #[command(flatten)]
+    temporal: TemporalOverrideArgs,
     #[arg(long)]
     out: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
 pub(crate) struct ServiceAreaArgs {
+    #[arg(long)]
+    dataset: String,
+    #[arg(long)]
+    profile: PathBuf,
+    #[arg(long)]
+    request: PathBuf,
+    #[command(flatten)]
+    temporal: TemporalOverrideArgs,
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ServiceAreaSequenceArgs {
+    #[arg(long)]
+    dataset: String,
+    #[arg(long)]
+    profile: PathBuf,
+    #[arg(long)]
+    request: PathBuf,
+    #[command(flatten)]
+    temporal: TemporalOverrideArgs,
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct BetweennessArgs {
+    #[arg(long)]
+    dataset: String,
+    #[arg(long)]
+    profile: PathBuf,
+    #[arg(long)]
+    request: PathBuf,
+    #[command(flatten)]
+    temporal: TemporalOverrideArgs,
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+/// Command-line overrides for the temporal fields embedded in request files.
+///
+/// Optional scalar flags replace only their matching request-file field. CLI
+/// overlays are appended so request-file overlays remain active and the later
+/// CLI entries retain their precedence.
+#[derive(Args, Debug, Clone, Default)]
+pub(crate) struct TemporalOverrideArgs {
+    /// Override the request departure time (RFC 3339).
+    #[arg(long)]
+    departure_time: Option<String>,
+    /// Override the request scenario file.
+    #[arg(long)]
+    scenario: Option<PathBuf>,
+    /// Override the request holiday calendar file.
+    #[arg(long)]
+    holiday_calendar: Option<PathBuf>,
+    /// Append a temporal overlay file; may be specified more than once.
+    #[arg(long = "overlay")]
+    overlays: Vec<PathBuf>,
+}
+
+impl TemporalOverrideArgs {
+    fn apply_to(&self, temporal: &mut TemporalRequestOptions) {
+        if let Some(departure_time) = &self.departure_time {
+            temporal.departure_time = Some(departure_time.clone());
+            // `departure_time` and `arrive_by` are alternative time anchors;
+            // an explicit CLI departure must be able to override either form.
+            temporal.arrive_by = None;
+        }
+        self.apply_non_departure_to(temporal);
+    }
+
+    fn apply_non_departure_to(&self, temporal: &mut TemporalRequestOptions) {
+        if let Some(scenario) = &self.scenario {
+            temporal.scenario = Some(scenario.clone());
+        }
+        if let Some(holiday_calendar) = &self.holiday_calendar {
+            temporal.holiday_calendar = Some(holiday_calendar.clone());
+        }
+        temporal.overlays.extend(self.overlays.iter().cloned());
+    }
+
+    fn apply_to_service_area_sequence(&self, request: &mut ServiceAreaSequenceRequest) {
+        self.apply_non_departure_to(&mut request.request.temporal);
+        if let Some(departure_time) = &self.departure_time {
+            request.departure_times = vec![departure_time.clone()];
+            request.start_time = None;
+            request.end_time = None;
+            request.step_s = None;
+        }
+    }
+}
+
+fn apply_matrix_temporal_overrides(
+    overrides: &TemporalOverrideArgs,
+    origins: &mut netweevil_query::PointSetDocument,
+    destinations: &mut netweevil_query::PointSetDocument,
+) {
+    match (
+        origins.temporal.requires_exact_labels(),
+        destinations.temporal.requires_exact_labels(),
+    ) {
+        (true, true) => {
+            overrides.apply_to(&mut origins.temporal);
+            overrides.apply_to(&mut destinations.temporal);
+        }
+        (false, true) => overrides.apply_to(&mut destinations.temporal),
+        _ => overrides.apply_to(&mut origins.temporal),
+    }
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct ScenarioBatchArgs {
     #[arg(long)]
     dataset: String,
     #[arg(long)]
@@ -144,6 +275,12 @@ pub(crate) struct TransitRouteArgs {
     feed: String,
     #[arg(long)]
     request: PathBuf,
+    /// Street dataset used when the request selects network access/egress.
+    #[arg(long)]
+    street_dataset: Option<String>,
+    /// Foot profile used when the request selects network access/egress.
+    #[arg(long)]
+    street_profile: Option<PathBuf>,
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -154,6 +291,12 @@ pub(crate) struct TransitBatchArgs {
     feed: String,
     #[arg(long)]
     requests: PathBuf,
+    /// Street dataset used by network access/egress requests in the batch.
+    #[arg(long)]
+    street_dataset: Option<String>,
+    /// Foot profile used by network access/egress requests in the batch.
+    #[arg(long)]
+    street_profile: Option<PathBuf>,
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -192,7 +335,8 @@ struct TransitBatchFailure {
 pub(crate) fn analyze_route(paths: &WorkspacePaths, args: RouteArgs) -> Result<()> {
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
-    let request = load_route_request(&args.request)?;
+    let mut request = load_route_request(&args.request)?;
+    args.temporal.apply_to(&mut request.temporal);
     let stored = match run_route_analysis(
         paths,
         &args.dataset,
@@ -216,6 +360,9 @@ pub(crate) fn analyze_route_batch(paths: &WorkspacePaths, args: RouteBatchArgs) 
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
     let mut requests = load_route_batch(&args.requests)?;
+    for entry in &mut requests.requests {
+        args.temporal.apply_to(&mut entry.request.temporal);
+    }
     if args.out.as_deref().is_some_and(output_needs_geometry) {
         for entry in &mut requests.requests {
             if matches!(entry.request.returns.geometry, ReturnGeometry::None) {
@@ -249,6 +396,7 @@ pub(crate) fn analyze_od(paths: &WorkspacePaths, args: OdArgs) -> Result<()> {
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
     let mut request = load_od_pairs(&args.pairs)?;
+    args.temporal.apply_to(&mut request.temporal);
     if args.out.as_deref().is_some_and(output_needs_geometry)
         && matches!(request.returns.geometry, ReturnGeometry::None)
     {
@@ -278,6 +426,7 @@ pub(crate) fn analyze_matrix(paths: &WorkspacePaths, args: MatrixArgs) -> Result
     profile.validate()?;
     let mut origins = load_point_set(&args.origins)?;
     let mut destinations = load_point_set(&args.destinations)?;
+    apply_matrix_temporal_overrides(&args.temporal, &mut origins, &mut destinations);
     if args.out.as_deref().is_some_and(output_needs_geometry) {
         if matches!(origins.returns.geometry, ReturnGeometry::None) {
             origins.returns.geometry = ReturnGeometry::Full;
@@ -310,7 +459,8 @@ pub(crate) fn analyze_matrix(paths: &WorkspacePaths, args: MatrixArgs) -> Result
 pub(crate) fn analyze_accessibility(paths: &WorkspacePaths, args: AccessibilityArgs) -> Result<()> {
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
-    let origins = load_point_set(&args.origins)?;
+    let mut origins = load_point_set(&args.origins)?;
+    args.temporal.apply_to(&mut origins.temporal);
     let categories = load_accessibility_categories(&args.destinations)?;
     let request = AccessibilityRequest {
         origins,
@@ -344,6 +494,7 @@ pub(crate) fn analyze_service_area(paths: &WorkspacePaths, args: ServiceAreaArgs
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
     let mut request = load_service_area_request(&args.request)?;
+    args.temporal.apply_to(&mut request.temporal);
     if args.out.as_deref().is_some_and(output_needs_geometry) {
         request.returns.geometry = true;
     }
@@ -363,14 +514,109 @@ pub(crate) fn analyze_service_area(paths: &WorkspacePaths, args: ServiceAreaArgs
     Ok(())
 }
 
+pub(crate) fn analyze_service_area_sequence(
+    paths: &WorkspacePaths,
+    args: ServiceAreaSequenceArgs,
+) -> Result<()> {
+    let profile = load_profile(&args.profile)?;
+    profile.validate()?;
+    let mut request = load_service_area_sequence_request(&args.request)?;
+    args.temporal.apply_to_service_area_sequence(&mut request);
+    if args.out.as_deref().is_some_and(output_needs_geometry) {
+        request.request.returns.geometry = true;
+    }
+    let stored = run_service_area_sequence_analysis(
+        paths,
+        &args.dataset,
+        &profile,
+        &args.request,
+        &request,
+        args.out,
+    )?;
+    println!(
+        "service-area sequence result written to {}",
+        stored.result_path.display()
+    );
+    println!("run manifest written to {}", stored.manifest_path.display());
+    Ok(())
+}
+
+pub(crate) fn analyze_betweenness(paths: &WorkspacePaths, args: BetweennessArgs) -> Result<()> {
+    let profile = load_profile(&args.profile)?;
+    profile.validate()?;
+    let mut request = load_betweenness_request(&args.request)?;
+    args.temporal.apply_to(&mut request.temporal);
+    let stored = run_betweenness_analysis(
+        paths,
+        &args.dataset,
+        &profile,
+        &args.request,
+        &request,
+        args.out,
+    )?;
+    println!(
+        "betweenness result written to {}",
+        stored.result_path.display()
+    );
+    println!("run manifest written to {}", stored.manifest_path.display());
+    Ok(())
+}
+
+pub(crate) fn analyze_scenario_batch(
+    paths: &WorkspacePaths,
+    args: ScenarioBatchArgs,
+) -> Result<()> {
+    let profile = load_profile(&args.profile)?;
+    profile.validate()?;
+    let request = load_scenario_batch_request(&args.request)?;
+    let stored = run_scenario_batch_analysis(
+        paths,
+        &args.dataset,
+        &profile,
+        &args.request,
+        &request,
+        args.out,
+    )?;
+    println!(
+        "scenario-batch result written to {}",
+        stored.result_path.display()
+    );
+    println!("run manifest written to {}", stored.manifest_path.display());
+    Ok(())
+}
+
 pub(crate) fn analyze_transit_route(paths: &WorkspacePaths, args: TransitRouteArgs) -> Result<()> {
     let manifest = read_transit_manifest(paths, &args.feed)?;
     let bundle = read_transit_bundle(&manifest.bundle_path)
         .with_context(|| format!("reading transit bundle {}", manifest.bundle_path))?;
     let request = load_transit_request(&args.request)?;
-    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    let street_estimator = if validate_network_street_access_modes(&request)? {
+        let (Some(dataset_id), Some(profile_path)) = (
+            args.street_dataset.as_deref(),
+            args.street_profile.as_deref(),
+        ) else {
+            anyhow::bail!(
+                "transit route '{}' sets modes.street_access=network; provide both --street-dataset and --street-profile",
+                request.route_id
+            );
+        };
+        Some(prepare_cli_transit_street_estimator(
+            paths,
+            dataset_id,
+            profile_path,
+            &bundle,
+        )?)
+    } else {
+        None
+    };
+    let router = prepare_registered_transit_router(&manifest, bundle)?;
     let result = router
-        .execute_route(&request)
+        .execute_route_with_street_estimator(
+            &request,
+            street_estimator
+                .as_ref()
+                .map(|estimator| estimator as &dyn netweevil_transit::StreetTimeEstimator),
+        )
         .with_context(|| format!("executing transit route '{}'", request.route_id))?;
     let result_path = args.out.unwrap_or_else(|| {
         paths
@@ -387,7 +633,32 @@ pub(crate) fn analyze_transit_batch(paths: &WorkspacePaths, args: TransitBatchAr
     let bundle = read_transit_bundle(&manifest.bundle_path)
         .with_context(|| format!("reading transit bundle {}", manifest.bundle_path))?;
     let document = load_transit_batch(&args.requests)?;
-    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    let mut first_network_request = None;
+    for request in &document.requests {
+        if validate_network_street_access_modes(request)? && first_network_request.is_none() {
+            first_network_request = Some(request);
+        }
+    }
+    let street_estimator = if let Some(request) = first_network_request {
+        let (Some(dataset_id), Some(profile_path)) = (
+            args.street_dataset.as_deref(),
+            args.street_profile.as_deref(),
+        ) else {
+            anyhow::bail!(
+                "transit batch route '{}' sets modes.street_access=network; provide both --street-dataset and --street-profile",
+                request.route_id
+            );
+        };
+        Some(prepare_cli_transit_street_estimator(
+            paths,
+            dataset_id,
+            profile_path,
+            &bundle,
+        )?)
+    } else {
+        None
+    };
+    let router = prepare_registered_transit_router(&manifest, bundle)?;
     let mut items = Vec::new();
     let mut failures = Vec::new();
     let mut scheduled_count = 0_usize;
@@ -395,7 +666,12 @@ pub(crate) fn analyze_transit_batch(paths: &WorkspacePaths, args: TransitBatchAr
     let mut not_implemented_count = 0_usize;
 
     for (index, request) in document.requests.iter().enumerate() {
-        match router.execute_route(request) {
+        match router.execute_route_with_street_estimator(
+            request,
+            street_estimator
+                .as_ref()
+                .map(|estimator| estimator as &dyn netweevil_transit::StreetTimeEstimator),
+        ) {
             Ok(result) => {
                 match result.outcome {
                     netweevil_transit::TransitOutcome::Scheduled => scheduled_count += 1,
@@ -448,6 +724,35 @@ fn load_transit_batch(path: &Path) -> Result<TransitBatchDocument> {
     serde_json::from_str(&raw).with_context(|| format!("parsing transit batch {}", path.display()))
 }
 
+fn validate_network_street_access_modes(request: &TransitRouteRequest) -> Result<bool> {
+    if request.modes.street_access != TransitStreetAccessModel::Network {
+        return Ok(false);
+    }
+
+    let access = request.modes.validated_access_modes()?;
+    let egress = request.modes.validated_egress_modes()?;
+    if access
+        .iter()
+        .chain(egress.iter())
+        .any(|mode| *mode != AccessMode::Walk)
+    {
+        anyhow::bail!(
+            "transit route '{}' uses modes.street_access=network, but the CLI street estimator currently supports walk-only access and egress",
+            request.route_id
+        );
+    }
+    Ok(true)
+}
+
+fn record_effective_request<T: Serialize>(
+    manifest: &mut netweevil_report::RunManifest,
+    request: &T,
+) -> Result<()> {
+    manifest.effective_request =
+        Some(serde_json::to_value(request).context("serializing effective analysis request")?);
+    Ok(())
+}
+
 pub(crate) fn run_route_analysis(
     paths: &WorkspacePaths,
     dataset_id: &str,
@@ -469,7 +774,7 @@ pub(crate) fn run_route_analysis(
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
-    let engine = engine_description_from(&prepared);
+    let engine = engine_description_for_route(&prepared, &request);
     let edge_names = if request.returns.segment_rows {
         load_edge_names(paths, dataset_id)?
     } else {
@@ -510,7 +815,7 @@ fn run_route_batch_analysis(
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
-    let engine = engine_description_from(&prepared);
+    let engine = engine_description_for_route_batch(&prepared, &requests);
 
     let needs_edge_names = requests
         .requests
@@ -606,6 +911,191 @@ fn run_route_batch_analysis(
     )
 }
 
+fn run_betweenness_analysis(
+    paths: &WorkspacePaths,
+    dataset_id: &str,
+    profile: &ProfileDocument,
+    request_path: &Path,
+    request: &BetweennessRequest,
+    out: Option<PathBuf>,
+) -> Result<StoredRun> {
+    let (topology, acceleration, compiled_manifest, compiled_bundle) =
+        load_route_execution_inputs(paths, dataset_id, profile)?;
+    let prepared = PreparedRoutingEngine::new(
+        Arc::new(topology),
+        Arc::new(compiled_bundle),
+        acceleration.map(Arc::new),
+    )
+    .context("preparing routing engine")?;
+    let engine = engine_description_for_temporal_options(&prepared, &request.temporal);
+    let result = prepared
+        .execute_betweenness(request)
+        .with_context(|| format!("executing betweenness '{}'", request.analysis_id))?;
+    let mut manifest = new_run_manifest(
+        RunKind::Betweenness,
+        dataset_id.to_string(),
+        profile,
+        request_path.display().to_string(),
+        RunStatus::Succeeded,
+        format!(
+            "Betweenness '{}' routed {} of {} weighted OD pairs and scored {} directed edges.",
+            result.analysis_id,
+            result.routed_pair_count,
+            result.requested_pair_count,
+            result.edges.len(),
+        ),
+        software_info(),
+        Some(compiled_manifest.bundle.bundle_id.0.clone()),
+    )?;
+    record_effective_request(&mut manifest, request)?;
+    manifest.algorithm.engine = if request.temporal.is_temporal() {
+        "time_dependent_exact_edge_dijkstra".to_string()
+    } else {
+        "demand_weighted_one_to_many_edge_trees".to_string()
+    };
+    manifest.algorithm.acceleration = engine.acceleration.to_string();
+    manifest.methods_summary.plain_language =
+        "Weighted origin-to-destination shortest paths are accumulated on every traversed directed edge; static unrestricted origins reuse one-to-many trees, while temporal or sequence-restricted requests use exact pairwise routing."
+            .to_string();
+    let result_path = out.unwrap_or_else(|| {
+        paths
+            .runs_dir
+            .join(format!("{}-result.json", manifest.run_id))
+    });
+    write_betweenness_result(&result_path, &result)?;
+    manifest.result_path = Some(result_path.display().to_string());
+    let manifest_path = write_run_manifest(paths, &manifest)?;
+    Ok(StoredRun {
+        result_path,
+        manifest_path,
+        summary: Some(serde_json::json!({
+            "analysis_id": result.analysis_id,
+            "requested_pair_count": result.requested_pair_count,
+            "routed_pair_count": result.routed_pair_count,
+            "unreachable_pair_count": result.unreachable_pair_count,
+            "routed_demand": result.routed_demand,
+            "edge_count": result.edges.len(),
+            "time_dependent": result.time_dependent,
+        })),
+    })
+}
+
+fn run_scenario_batch_analysis(
+    paths: &WorkspacePaths,
+    dataset_id: &str,
+    profile: &ProfileDocument,
+    request_path: &Path,
+    request: &ScenarioBatchRequest,
+    out: Option<PathBuf>,
+) -> Result<StoredRun> {
+    let (topology, acceleration, compiled_manifest, compiled_bundle) =
+        load_route_execution_inputs(paths, dataset_id, profile)?;
+    let prepared = PreparedRoutingEngine::new(
+        Arc::new(topology),
+        Arc::new(compiled_bundle),
+        acceleration.map(Arc::new),
+    )
+    .context("preparing routing engine")?;
+    let result = execute_scenario_batch(&prepared, request)
+        .with_context(|| format!("executing scenario batch '{}'", request.batch_id))?;
+    let analysis_count = request.routes.len()
+        + request.service_areas.len()
+        + request.accessibility.len()
+        + request.od.len()
+        + request.matrices.len()
+        + request.betweenness.len();
+    let failure_count = scenario_batch_failure_count(&result);
+    let mut manifest = new_run_manifest(
+        RunKind::ScenarioBatch,
+        dataset_id.to_string(),
+        profile,
+        request_path.display().to_string(),
+        RunStatus::Succeeded,
+        format!(
+            "Scenario batch '{}' evaluated {} analysis request(s) against {} scenario(s), with {} individual execution failure(s).",
+            result.batch_id,
+            analysis_count,
+            result.scenarios.len(),
+            failure_count,
+        ),
+        software_info(),
+        Some(compiled_manifest.bundle.bundle_id.0.clone()),
+    )?;
+    record_effective_request(&mut manifest, request)?;
+    manifest.algorithm.engine = "scenario_batch_exact_overlay_replay".to_string();
+    manifest.algorithm.acceleration = "static_baseline+exact_temporal_scenarios".to_string();
+    manifest.methods_summary.plain_language =
+        "Each analysis is executed once as a baseline and once per scenario overlay; route time, disconnected demand, reachable network, and accessibility changes are diffed against the baseline."
+            .to_string();
+    let result_path = out.unwrap_or_else(|| {
+        paths
+            .runs_dir
+            .join(format!("{}-result.json", manifest.run_id))
+    });
+    if result_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| !extension.eq_ignore_ascii_case("json"))
+    {
+        anyhow::bail!("scenario-batch output must be JSON; use a .json path");
+    }
+    write_json(&result_path, &result)?;
+    manifest.result_path = Some(result_path.display().to_string());
+    let manifest_path = write_run_manifest(paths, &manifest)?;
+    Ok(StoredRun {
+        result_path,
+        manifest_path,
+        summary: Some(serde_json::json!({
+            "batch_id": result.batch_id,
+            "scenario_count": result.scenarios.len(),
+            "analysis_count": analysis_count,
+            "failure_count": failure_count,
+        })),
+    })
+}
+
+fn scenario_batch_failure_count(result: &ScenarioBatchResult) -> usize {
+    fn snapshot_failure_count(snapshot: &netweevil_query::ScenarioAnalysisSnapshot) -> usize {
+        snapshot
+            .routes
+            .iter()
+            .filter(|item| item.error.is_some())
+            .count()
+            + snapshot
+                .service_areas
+                .iter()
+                .filter(|item| item.error.is_some())
+                .count()
+            + snapshot
+                .accessibility
+                .iter()
+                .filter(|item| item.error.is_some())
+                .count()
+            + snapshot
+                .od
+                .iter()
+                .filter(|item| item.error.is_some())
+                .count()
+            + snapshot
+                .matrices
+                .iter()
+                .filter(|item| item.error.is_some())
+                .count()
+            + snapshot
+                .betweenness
+                .iter()
+                .filter(|item| item.error.is_some())
+                .count()
+    }
+
+    snapshot_failure_count(&result.baseline)
+        + result
+            .scenarios
+            .iter()
+            .map(|scenario| snapshot_failure_count(&scenario.analyses))
+            .sum::<usize>()
+}
+
 pub(crate) fn run_od_analysis(
     paths: &WorkspacePaths,
     dataset_id: &str,
@@ -627,7 +1117,7 @@ pub(crate) fn run_od_analysis(
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
-    let engine = engine_description_from(&prepared);
+    let engine = engine_description_for_temporal_options(&prepared, &request.temporal);
     let result = prepared
         .execute_od(&request)
         .with_context(|| format!("executing OD pairs from '{}'", pairs_path.display()))?;
@@ -670,7 +1160,11 @@ pub(crate) fn run_matrix_analysis(
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
-    let engine = engine_description_from(&prepared);
+    let engine = if origins.temporal.is_temporal() {
+        engine_description_for_temporal_options(&prepared, &origins.temporal)
+    } else {
+        engine_description_for_temporal_options(&prepared, &destinations.temporal)
+    };
     let result = prepared
         .execute_matrix(&origins, &destinations)
         .with_context(|| {
@@ -739,7 +1233,11 @@ fn run_accessibility_analysis(
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
-    let engine = engine_description_from(&prepared);
+    let mut engine = engine_description_for_temporal_options(&prepared, &request.origins.temporal);
+    if request.origins.temporal.is_temporal() {
+        engine.batch_engine = "time_dependent_bounded_accessibility";
+        engine.batch_summary = "Exact time-dependent bounded one-to-many expansion evaluates edge-entry rules, scenario overrides, waiting, and overlays before reducing reachable destination categories.";
+    }
     let result = prepared
         .execute_accessibility(request)
         .with_context(|| format!("executing accessibility from '{}'", origins_path.display()))?;
@@ -772,7 +1270,11 @@ pub(crate) fn run_service_area_analysis(
         acceleration.map(Arc::new),
     )
     .context("preparing routing engine")?;
-    let engine = engine_description_from(&prepared);
+    let mut engine = engine_description_for_temporal_options(&prepared, &request.temporal);
+    if request.temporal.is_temporal() {
+        engine.batch_engine = "time_dependent_exact_service_area";
+        engine.batch_summary = "Exact time-dependent one-to-many edge expansion evaluates rules, scenario overrides, waiting, and overlays at edge entry for every reachable service-area segment.";
+    }
     let result = prepared
         .execute_service_area(request)
         .with_context(|| format!("executing service-area '{}'", request.analysis_id))?;
@@ -787,6 +1289,92 @@ pub(crate) fn run_service_area_analysis(
         engine,
         out,
     )
+}
+
+fn run_service_area_sequence_analysis(
+    paths: &WorkspacePaths,
+    dataset_id: &str,
+    profile: &ProfileDocument,
+    request_path: &Path,
+    request: &ServiceAreaSequenceRequest,
+    out: Option<PathBuf>,
+) -> Result<StoredRun> {
+    let (topology, acceleration, compiled_manifest, compiled_bundle) =
+        load_route_execution_inputs(paths, dataset_id, profile)?;
+    let prepared = PreparedRoutingEngine::new(
+        Arc::new(topology),
+        Arc::new(compiled_bundle),
+        acceleration.map(Arc::new),
+    )
+    .context("preparing routing engine")?;
+    let result = prepared
+        .execute_service_area_sequence(request)
+        .with_context(|| format!("executing service-area sequence '{}'", request.sequence_id))?;
+    store_service_area_sequence_run(
+        paths,
+        dataset_id,
+        profile,
+        request_path,
+        request,
+        &result,
+        &compiled_manifest,
+        out,
+    )
+}
+
+fn store_service_area_sequence_run(
+    paths: &WorkspacePaths,
+    dataset_id: &str,
+    profile: &ProfileDocument,
+    request_path: &Path,
+    request: &ServiceAreaSequenceRequest,
+    result: &ServiceAreaSequenceResult,
+    compiled_manifest: &CompiledProfileManifest,
+    out: Option<PathBuf>,
+) -> Result<StoredRun> {
+    let feature_count = result
+        .frames
+        .iter()
+        .map(|frame| frame.result.features.len())
+        .sum::<usize>();
+    let mut manifest = new_run_manifest(
+        RunKind::ServiceAreaSequence,
+        dataset_id.to_string(),
+        profile,
+        request_path.display().to_string(),
+        RunStatus::Succeeded,
+        format!(
+            "Service-area sequence '{}' completed {} temporal frame(s) with {} output feature(s).",
+            result.sequence_id, result.frame_count, feature_count
+        ),
+        software_info(),
+        Some(compiled_manifest.bundle.bundle_id.0.clone()),
+    )?;
+    record_effective_request(&mut manifest, request)?;
+    manifest.algorithm.engine = "time_dependent_exact_fifo_service_area_sequence".to_string();
+    manifest.algorithm.acceleration = "none_temporal_exact".to_string();
+    manifest.methods_summary.plain_language =
+        "The same service-area request was replayed at each requested departure datetime with exact edge-entry temporal rules; GeoJSON frames carry departure_time for QGIS instant-mode animation."
+            .to_string();
+    manifest.connectivity_policy = Some(request.request.connectivity.clone());
+    manifest.fallback_policy = Some(request.request.fallback.clone());
+    let result_path = out.unwrap_or_else(|| {
+        paths
+            .runs_dir
+            .join(format!("{}-result.json", manifest.run_id))
+    });
+    write_service_area_sequence_result(&result_path, result)?;
+    manifest.result_path = Some(result_path.display().to_string());
+    let manifest_path = write_run_manifest(paths, &manifest)?;
+    Ok(StoredRun {
+        result_path,
+        manifest_path,
+        summary: Some(serde_json::json!({
+            "sequence_id": result.sequence_id,
+            "frame_count": result.frame_count,
+            "feature_count": feature_count,
+        })),
+    })
 }
 
 fn store_route_run(
@@ -818,6 +1406,7 @@ fn store_route_run(
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
     )?;
+    record_effective_request(&mut manifest, request)?;
     manifest.algorithm.engine = engine.route_engine.to_string();
     manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.route_summary.to_string();
@@ -872,6 +1461,7 @@ fn store_route_batch_run(
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
     )?;
+    record_effective_request(&mut manifest, requests)?;
     manifest.algorithm.engine = engine.route_engine.to_string();
     manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = format!(
@@ -930,6 +1520,7 @@ fn store_od_run(
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
     )?;
+    record_effective_request(&mut manifest, request)?;
     manifest.algorithm.engine = engine.batch_engine.to_string();
     manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.batch_summary.to_string();
@@ -985,6 +1576,10 @@ fn store_matrix_run(
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
     )?;
+    manifest.effective_request = Some(serde_json::json!({
+        "origins": origins,
+        "destinations": destinations,
+    }));
     manifest.algorithm.engine = engine.batch_engine.to_string();
     manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = engine.batch_summary.to_string();
@@ -1058,7 +1653,12 @@ fn store_accessibility_run(
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
     )?;
-    manifest.algorithm.engine = "bounded_single_origin_accessibility".to_string();
+    record_effective_request(&mut manifest, request)?;
+    manifest.algorithm.engine = if request.origins.temporal.is_temporal() {
+        engine.batch_engine.to_string()
+    } else {
+        "bounded_single_origin_accessibility".to_string()
+    };
     manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = format!(
         "{} Accessibility execution performs one exact bounded legal-network expansion per unique snapped origin up to {:.0}s, snaps all destinations once, and reduces each category to nearest destination and threshold counts without materializing all OD cells.",
@@ -1120,6 +1720,7 @@ fn store_service_area_run(
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
     )?;
+    record_effective_request(&mut manifest, request)?;
     manifest.algorithm.engine = engine.batch_engine.to_string();
     manifest.algorithm.acceleration = engine.acceleration.to_string();
     manifest.methods_summary.plain_language = format!(
@@ -1270,6 +1871,79 @@ fn engine_description_from(prepared: &PreparedRoutingEngine) -> EngineDescriptio
     }
 }
 
+fn engine_description_for_route(
+    prepared: &PreparedRoutingEngine,
+    request: &netweevil_query::RouteRequest,
+) -> EngineDescription {
+    let mut description = engine_description_from(prepared);
+    if !request.temporal.constraints.is_empty() || request.temporal.pareto.is_some() {
+        description.route_engine = "component_nondominated_label_setting";
+        description.route_summary = "Exact nondominated label-setting over generalized cost and named component dimensions, with hard component budgets and a per-state label guard.";
+        description.acceleration = "spatial_index+edge_phantoms+turn_automaton";
+    } else if request.temporal.is_temporal() {
+        description.route_engine = "time_dependent_nondominated_label_setting";
+        description.route_summary = "Exact time-dependent nondominated label-setting evaluates edge rules, scenario overrides, and temporal overlays at edge entry time.";
+        description.acceleration = "spatial_index+edge_phantoms+turn_automaton";
+    }
+    description
+}
+
+fn engine_description_for_temporal_options(
+    prepared: &PreparedRoutingEngine,
+    temporal: &netweevil_query::TemporalRequestOptions,
+) -> EngineDescription {
+    let mut description = engine_description_from(prepared);
+    if !temporal.constraints.is_empty() || temporal.pareto.is_some() {
+        description.route_engine = "component_nondominated_label_setting";
+        description.route_summary = "Exact nondominated label-setting over generalized cost and named component dimensions, with hard component budgets and a per-state label guard.";
+        description.batch_engine = "component_nondominated_pairwise_label_setting";
+        description.batch_summary = "Exact pairwise nondominated label-setting over generalized cost, temporal state, and named component dimensions; label guards fail rather than approximate.";
+        description.acceleration = "spatial_index+edge_phantoms+turn_automaton";
+    } else if temporal.is_temporal() {
+        description.route_engine = "time_dependent_nondominated_label_setting";
+        description.route_summary = "Exact time-dependent nondominated label-setting evaluates edge rules, scenario overrides, and temporal overlays at edge entry time.";
+        description.batch_engine = "time_dependent_exact_pairwise_label_setting";
+        description.batch_summary = "Exact time-dependent pairwise label-setting evaluates edge-entry rules, scenario overrides, waiting, and overlays independently for each requested pair.";
+        description.acceleration = "spatial_index+edge_phantoms+turn_automaton";
+    }
+    description
+}
+
+fn engine_description_for_route_batch(
+    prepared: &PreparedRoutingEngine,
+    requests: &netweevil_query::RouteBatchDocument,
+) -> EngineDescription {
+    let has_component_search = requests.requests.iter().any(|entry| {
+        !entry.request.temporal.constraints.is_empty() || entry.request.temporal.pareto.is_some()
+    });
+    let has_temporal_search = requests
+        .requests
+        .iter()
+        .any(|entry| entry.request.temporal.is_temporal());
+    let has_static_search = requests
+        .requests
+        .iter()
+        .any(|entry| !entry.request.temporal.is_temporal());
+    let representative = requests.requests.iter().find(|entry| {
+        if has_component_search {
+            !entry.request.temporal.constraints.is_empty()
+                || entry.request.temporal.pareto.is_some()
+        } else {
+            entry.request.temporal.is_temporal()
+        }
+    });
+    let mut description = representative.map_or_else(
+        || engine_description_from(prepared),
+        |entry| engine_description_for_route(prepared, &entry.request),
+    );
+    if has_static_search && has_temporal_search {
+        description.route_engine = "mixed_static_and_exact_temporal_dispatch";
+        description.route_summary = "Each route is dispatched by its effective request: static routes use the prepared accelerated engine, while temporal/component routes use exact label-setting with edge-entry evaluation.";
+        description.acceleration = "mixed_cch_static+exact_temporal";
+    }
+    description
+}
+
 fn output_needs_geometry(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
@@ -1403,5 +2077,202 @@ fn csv_escape(value: &str) -> String {
         format!("\"{}\"", value.replace('"', "\"\""))
     } else {
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn parses_repeatable_temporal_analyze_overrides() {
+        let cli = crate::Cli::try_parse_from([
+            "netweevil",
+            "analyze",
+            "route",
+            "--dataset",
+            "hk-pedestrian",
+            "--profile",
+            "pedestrian.yml",
+            "--request",
+            "route.json",
+            "--departure-time",
+            "2026-07-10T09:55:00+08:00",
+            "--scenario",
+            "central.yml",
+            "--holiday-calendar",
+            "holidays.yml",
+            "--overlay",
+            "shade.csv",
+            "--overlay",
+            "heat.csv",
+        ])
+        .expect("temporal route options parse");
+        let crate::Command::Analyze {
+            command: AnalyzeCommand::Route(args),
+        } = cli.command
+        else {
+            panic!("expected analyze route command");
+        };
+        assert_eq!(
+            args.temporal.departure_time.as_deref(),
+            Some("2026-07-10T09:55:00+08:00")
+        );
+        assert_eq!(
+            args.temporal.scenario.as_deref(),
+            Some(Path::new("central.yml"))
+        );
+        assert_eq!(
+            args.temporal.holiday_calendar.as_deref(),
+            Some(Path::new("holidays.yml"))
+        );
+        assert_eq!(
+            args.temporal.overlays,
+            [PathBuf::from("shade.csv"), PathBuf::from("heat.csv")]
+        );
+    }
+
+    #[test]
+    fn temporal_overrides_preserve_unmentioned_request_fields() {
+        let mut temporal = TemporalRequestOptions {
+            departure_time: Some("2026-07-10T08:00:00+08:00".to_string()),
+            scenario: Some(PathBuf::from("request-scenario.yml")),
+            holiday_calendar: Some(PathBuf::from("request-holidays.yml")),
+            overlays: vec![PathBuf::from("request-overlay.csv")],
+            ..TemporalRequestOptions::default()
+        };
+        TemporalOverrideArgs {
+            scenario: Some(PathBuf::from("cli-scenario.yml")),
+            overlays: vec![
+                PathBuf::from("cli-overlay-a.csv"),
+                PathBuf::from("cli-overlay-b.csv"),
+            ],
+            ..TemporalOverrideArgs::default()
+        }
+        .apply_to(&mut temporal);
+
+        assert_eq!(
+            temporal.departure_time.as_deref(),
+            Some("2026-07-10T08:00:00+08:00")
+        );
+        assert_eq!(
+            temporal.scenario.as_deref(),
+            Some(Path::new("cli-scenario.yml"))
+        );
+        assert_eq!(
+            temporal.holiday_calendar.as_deref(),
+            Some(Path::new("request-holidays.yml"))
+        );
+        assert_eq!(
+            temporal.overlays,
+            [
+                PathBuf::from("request-overlay.csv"),
+                PathBuf::from("cli-overlay-a.csv"),
+                PathBuf::from("cli-overlay-b.csv"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_transit_network_street_inputs() {
+        let cli = crate::Cli::try_parse_from([
+            "netweevil",
+            "analyze",
+            "transit-route",
+            "--feed",
+            "hk-mtr",
+            "--request",
+            "transit.json",
+            "--street-dataset",
+            "hk-pedestrian",
+            "--street-profile",
+            "pedestrian.yml",
+        ])
+        .expect("transit street inputs parse");
+        let crate::Command::Analyze {
+            command: AnalyzeCommand::TransitRoute(args),
+        } = cli.command
+        else {
+            panic!("expected analyze transit-route command");
+        };
+        assert_eq!(args.street_dataset.as_deref(), Some("hk-pedestrian"));
+        assert_eq!(
+            args.street_profile.as_deref(),
+            Some(Path::new("pedestrian.yml"))
+        );
+    }
+
+    #[test]
+    fn parses_transit_batch_network_street_inputs() {
+        let cli = crate::Cli::try_parse_from([
+            "netweevil",
+            "analyze",
+            "transit-batch",
+            "--feed",
+            "hk-mtr",
+            "--requests",
+            "transit-batch.json",
+            "--street-dataset",
+            "hk-pedestrian",
+            "--street-profile",
+            "step-free.yml",
+        ])
+        .expect("transit batch street inputs parse");
+        let crate::Command::Analyze {
+            command: AnalyzeCommand::TransitBatch(args),
+        } = cli.command
+        else {
+            panic!("expected analyze transit-batch command");
+        };
+        assert_eq!(args.street_dataset.as_deref(), Some("hk-pedestrian"));
+        assert_eq!(
+            args.street_profile.as_deref(),
+            Some(Path::new("step-free.yml"))
+        );
+    }
+
+    #[test]
+    fn cli_network_street_estimator_rejects_non_walk_modes() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut request = load_transit_request(
+            repository.join("examples/requests/transit_openov_groningen.json"),
+        )
+        .expect("transit request loads");
+        request.modes.street_access = TransitStreetAccessModel::Network;
+        assert!(
+            validate_network_street_access_modes(&request)
+                .expect("walk-only network modes are valid")
+        );
+
+        request.modes.access = vec![AccessMode::Bicycle];
+        request.modes.egress = vec![AccessMode::Bicycle];
+        let error = validate_network_street_access_modes(&request)
+            .expect_err("bicycle network modes must be rejected");
+        assert!(error.to_string().contains("walk-only"));
+    }
+
+    #[test]
+    fn hong_kong_escalator_fixture_uses_materialized_source_feature() {
+        let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mapping = netweevil_ingest::load_gpkg_mapping(
+            repository.join("examples/ingest/hong_kong_pedestrian_mapping.yml"),
+        )
+        .expect("Hong Kong mapping loads");
+        assert_eq!(mapping.materialize_both_directions_for.len(), 33);
+        assert!(
+            mapping
+                .materialize_both_directions_for
+                .contains(&250_009_423)
+        );
+
+        let scenario = netweevil_query::load_scenario_overlay(
+            repository.join("examples/scenarios/hong_kong_central_escalator_example.yml"),
+        )
+        .expect("Central-Mid-Levels scenario loads");
+        assert_eq!(scenario.features.len(), 1);
+        assert_eq!(scenario.features[0].source_feature_id, 250_009_423);
+        assert!(scenario.features[0].replace_rules);
     }
 }

@@ -1,0 +1,36 @@
+{
+  "analysis_id": "hk_example_vertical_criticality",
+  "origins": [
+    {
+      "id": "illustrative_hillside_demand_a",
+      "lon": 114.1517,
+      "lat": 22.2839,
+      "z": 34.0,
+      "weight": 120.0
+    },
+    {
+      "id": "illustrative_hillside_demand_b",
+      "lon": 114.1530,
+      "lat": 22.2846,
+      "z": 42.0,
+      "weight": 80.0
+    }
+  ],
+  "destinations": [
+    {
+      "id": "illustrative_station_entrance",
+      "lon": 114.1577,
+      "lat": 22.2820,
+      "z": 3.0,
+      "weight": 1.0
+    }
+  ],
+  "snap": {
+    "max_distance_m": 300.0,
+    "z_window_m": 5.0
+  },
+  "departure_time": "2026-07-10T09:55:00+08:00",
+  "holiday_calendar": "examples/temporal/example_holidays.yml",
+  "max_od_pairs": 10000,
+  "include_zero": false
+}

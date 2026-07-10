@@ -1,6 +1,6 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-pub(crate) const TOPOLOGY_BUNDLE_SCHEMA_VERSION: u32 = 10;
+pub(crate) const TOPOLOGY_BUNDLE_SCHEMA_VERSION: u32 = 12;
 
 use anyhow::Result;
 use netweevil_core::{
@@ -18,19 +18,35 @@ use crate::scan::{PendingWay, ScanOutput, scan_osm};
 use netweevil_core::SourceFormat;
 
 pub(crate) fn build_topology_bundle(
-    source_path: &Path,
+    source_paths: &[PathBuf],
     source_size_bytes: u64,
     source_sha256: &str,
     source_format: SourceFormat,
+    mapping: Option<&crate::GeoPackageMapping>,
     progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<(TopologyBundle, EdgeNameBundle, TopologyBundleMeta)> {
+    let source_path = source_paths
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("dataset import requires at least one source"))?;
     let scan = match source_format {
         SourceFormat::OsmPbf => scan_osm(source_path, source_size_bytes, progress)?,
         SourceFormat::OvertureParquet => {
             crate::overture::scan_overture(source_path, source_size_bytes, progress)?
         }
+        SourceFormat::GeoPackage => crate::geopackage::scan_geopackages(
+            source_paths,
+            mapping.ok_or_else(|| anyhow::anyhow!("GeoPackage import requires a mapping"))?,
+            progress,
+        )?,
     };
-    build_topology_from_scan(source_path, source_sha256, scan, progress)
+    let (mut bundle, names, meta) =
+        build_topology_from_scan(source_path, source_sha256, scan, progress)?;
+    bundle.source_path = source_paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(";");
+    Ok((bundle, names, meta))
 }
 
 pub(crate) fn build_topology_from_scan(
@@ -45,6 +61,8 @@ pub(crate) fn build_topology_from_scan(
         node_coords,
         traffic_signal_nodes,
         counts,
+        feature_attributes,
+        temporal_rule_sets,
     } = scan;
     let (nodes, node_lookup) = build_nodes(&node_coords);
     let name_lookup = build_name_lookup(&pending_ways);
@@ -80,15 +98,17 @@ pub(crate) fn build_topology_from_scan(
                 continue;
             }
 
-            let Some(&(from_id, from_lon, from_lat)) = node_lookup.get(&from) else {
+            let Some(&(from_id, from_lon, from_lat, from_z)) = node_lookup.get(&from) else {
                 continue;
             };
-            let Some(&(to_id, to_lon, to_lat)) = node_lookup.get(&to) else {
+            let Some(&(to_id, to_lon, to_lat, to_z)) = node_lookup.get(&to) else {
                 continue;
             };
 
-            let length_m = haversine_meters(from_lon, from_lat, to_lon, to_lat).round() as u32;
-            segments.push((from_id, to_id, from, to, length_m));
+            let length_m =
+                distance_3d_meters(from_lon, from_lat, from_z, to_lon, to_lat, to_z).round() as u32;
+            let (ascent_m, descent_m) = ascent_descent_meters(from_z, to_z);
+            segments.push((from_id, to_id, from, to, length_m, ascent_m, descent_m));
         }
 
         if segments.is_empty() {
@@ -98,10 +118,10 @@ pub(crate) fn build_topology_from_scan(
 
         let total_length_m = segments
             .iter()
-            .map(|(_, _, _, _, length_m)| *length_m as u64)
+            .map(|(_, _, _, _, length_m, _, _)| *length_m as u64)
             .sum();
         let segment_count = segments.len() as u32;
-        for (from_id, to_id, from_osm_id, to_osm_id, length_m) in segments {
+        for (from_id, to_id, from_osm_id, to_osm_id, length_m, ascent_m, descent_m) in segments {
             let duration_s =
                 apportioned_duration_s(way.duration_s, length_m, total_length_m, segment_count);
             let mut forward_flags = 0_u32;
@@ -124,6 +144,11 @@ pub(crate) fn build_topology_from_scan(
                     to: to_id,
                     source_way_id: way.osm_way_id,
                     length_m,
+                    ascent_m,
+                    descent_m,
+                    feature_row: way.feature_row,
+                    source_direction: 1,
+                    temporal_rule_id: way.temporal_rule_id,
                     duration_s,
                     road_class: way.road_class,
                     surface: way.surface,
@@ -147,6 +172,11 @@ pub(crate) fn build_topology_from_scan(
                     to: from_id,
                     source_way_id: way.osm_way_id,
                     length_m,
+                    ascent_m: descent_m,
+                    descent_m: ascent_m,
+                    feature_row: way.feature_row,
+                    source_direction: -1,
+                    temporal_rule_id: way.temporal_rule_id,
                     duration_s,
                     road_class: way.road_class,
                     surface: way.surface,
@@ -228,6 +258,8 @@ pub(crate) fn build_topology_from_scan(
         spatial_index,
         node_component_ids: components.node_component_ids.clone(),
         edge_component_ids: components.edge_component_ids.clone(),
+        feature_attributes,
+        temporal_rule_sets,
     };
     let meta = TopologyBundleMeta {
         node_count: bundle.nodes.len() as u64,
@@ -399,20 +431,25 @@ fn union_components(parent: &mut [u32], rank: &mut [u8], left: usize, right: usi
 }
 
 fn build_nodes(
-    node_coords: &FxHashMap<i64, (f64, f64)>,
-) -> (Vec<TopologyNode>, FxHashMap<i64, (NodeId, f64, f64)>) {
+    node_coords: &FxHashMap<i64, (f64, f64, f64)>,
+) -> (Vec<TopologyNode>, FxHashMap<i64, (NodeId, f64, f64, f64)>) {
     let mut used_nodes = node_coords.keys().copied().collect::<Vec<_>>();
     used_nodes.sort_unstable();
 
     let mut nodes = Vec::with_capacity(used_nodes.len());
     let mut lookup = FxHashMap::with_capacity_and_hasher(used_nodes.len(), Default::default());
     for osm_node_id in used_nodes {
-        let Some(&(lon, lat)) = node_coords.get(&osm_node_id) else {
+        let Some(&(lon, lat, z)) = node_coords.get(&osm_node_id) else {
             continue;
         };
         let node_id = NodeId(nodes.len() as u32);
-        nodes.push(TopologyNode { node_id, lon, lat });
-        lookup.insert(osm_node_id, (node_id, lon, lat));
+        nodes.push(TopologyNode {
+            node_id,
+            lon,
+            lat,
+            z,
+        });
+        lookup.insert(osm_node_id, (node_id, lon, lat, z));
     }
 
     (nodes, lookup)
@@ -545,18 +582,58 @@ fn apportioned_duration_s(
     None
 }
 
-use netweevil_core::geo::haversine_meters;
+use netweevil_core::geo::{ascent_descent_meters, distance_3d_meters};
 
 #[cfg(test)]
 mod tests {
-    use super::{apportioned_duration_s, haversine_meters, label_weak_components};
-    use crate::test_util::edge;
+    use super::{
+        TOPOLOGY_BUNDLE_SCHEMA_VERSION, apportioned_duration_s, build_topology_from_scan,
+        label_weak_components,
+    };
+    use crate::scan::{ObjectCounts, ScanOutput};
+    use crate::test_util::{edge, pending_way};
+    use netweevil_core::geo::haversine_meters;
+    use rustc_hash::{FxHashMap, FxHashSet};
+    use std::path::Path;
 
     #[test]
     fn computes_reasonable_segment_length() {
         let meters = haversine_meters(6.5665, 53.2194, 6.5675, 53.2204);
         assert!(meters > 100.0);
         assert!(meters < 200.0);
+    }
+
+    #[test]
+    fn builds_directional_three_dimensional_edge_quantities() {
+        let scan = ScanOutput {
+            pending_ways: vec![pending_way(10, &[100, 200])],
+            restriction_candidates: Vec::new(),
+            node_coords: FxHashMap::from_iter([
+                (100, (114.1, 22.3, 10.0)),
+                (200, (114.1, 22.3, 22.0)),
+            ]),
+            traffic_signal_nodes: FxHashSet::default(),
+            counts: ObjectCounts {
+                nodes: 2,
+                ways: 1,
+                relations: 0,
+            },
+            feature_attributes: Default::default(),
+            temporal_rule_sets: Vec::new(),
+        };
+        let (bundle, _, _) =
+            build_topology_from_scan(Path::new("station.gpkg"), "abc", scan, &mut |_| {})
+                .expect("3D topology builds");
+
+        assert_eq!(bundle.schema_version, TOPOLOGY_BUNDLE_SCHEMA_VERSION);
+        assert_eq!(bundle.nodes[0].z, 10.0);
+        assert_eq!(bundle.nodes[1].z, 22.0);
+        assert_eq!(bundle.edge_count(), 2);
+        let forward = bundle.routing_edge(0);
+        let reverse = bundle.routing_edge(1);
+        assert_eq!(forward.length_m, 12);
+        assert_eq!((forward.ascent_m, forward.descent_m), (12.0, 0.0));
+        assert_eq!((reverse.ascent_m, reverse.descent_m), (0.0, 12.0));
     }
 
     #[test]

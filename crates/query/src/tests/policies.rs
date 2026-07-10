@@ -6,6 +6,7 @@ use crate::{
     analysis_failure, execute_od, execute_route, execute_service_area, load_service_area_request,
 };
 
+use netweevil_core::CompiledCostComponent;
 use netweevil_profile::{ReturnConfig, ReturnGeometry};
 use std::fs;
 
@@ -22,19 +23,24 @@ fn reports_structured_diagnostics_for_component_mismatch() {
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.01,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 100.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let error = execute_route(&topology, &metrics, &request).expect_err("route should fail");
@@ -59,14 +65,18 @@ fn returns_partial_route_when_ignore_unreachable_is_enabled() {
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.01,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 100.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: ConnectivityPolicy {
             disconnected: DisconnectedNetworkMode::IgnoreUnreachable,
@@ -78,6 +88,7 @@ fn returns_partial_route_when_ignore_unreachable_is_enabled() {
             ..ReturnConfig::default()
         },
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_route(&topology, &metrics, &request).expect("route returns partial");
@@ -112,11 +123,13 @@ fn marks_ignored_unreachable_pairs_explicitly_in_od_batches() {
                     id: "origin_a".to_string(),
                     lon: 6.0,
                     lat: 53.0,
+                    z: None,
                 },
                 destination: crate::LabeledPoint {
                     id: "destination_a".to_string(),
                     lon: 6.001,
                     lat: 53.0,
+                    z: None,
                 },
             },
             OdPair {
@@ -125,16 +138,20 @@ fn marks_ignored_unreachable_pairs_explicitly_in_od_batches() {
                     id: "origin_b".to_string(),
                     lon: 6.0,
                     lat: 53.0,
+                    z: None,
                 },
                 destination: crate::LabeledPoint {
                     id: "destination_b".to_string(),
                     lon: 6.01,
                     lat: 53.0,
+                    z: None,
                 },
             },
         ],
         snap: SnapOptions {
             max_distance_m: 100.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: ConnectivityPolicy {
             disconnected: DisconnectedNetworkMode::IgnoreUnreachable,
@@ -146,6 +163,7 @@ fn marks_ignored_unreachable_pairs_explicitly_in_od_batches() {
             ..ReturnConfig::default()
         },
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_od(&topology, &metrics, &document).expect("OD succeeds");
@@ -177,11 +195,13 @@ fn service_area_ignores_unreachable_origins_under_ignore_policy() {
                 id: "reachable".to_string(),
                 lon: 6.0,
                 lat: 53.0,
+                z: None,
             },
             crate::LabeledPoint {
                 id: "too_far".to_string(),
                 lon: 6.5,
                 lat: 53.5,
+                z: None,
             },
         ],
         thresholds: vec![ServiceAreaThreshold {
@@ -191,6 +211,8 @@ fn service_area_ignores_unreachable_origins_under_ignore_policy() {
         }],
         snap: SnapOptions {
             max_distance_m: 50.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: ConnectivityPolicy {
             disconnected: DisconnectedNetworkMode::IgnoreUnreachable,
@@ -203,6 +225,7 @@ fn service_area_ignores_unreachable_origins_under_ignore_policy() {
         multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
         polygon: Default::default(),
         returns: Default::default(),
+        temporal: Default::default(),
     };
 
     let result =
@@ -227,6 +250,7 @@ fn rejects_service_area_failure_modes_until_supported() {
             id: "a".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         }],
         thresholds: vec![ServiceAreaThreshold {
             id: Some("band".to_string()),
@@ -245,6 +269,7 @@ fn rejects_service_area_failure_modes_until_supported() {
         multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
         polygon: Default::default(),
         returns: Default::default(),
+        temporal: Default::default(),
     };
 
     let path = write_temp_file(
@@ -270,14 +295,18 @@ fn allows_reverse_oneway_when_requested() {
             id: "origin".to_string(),
             lon: 6.002,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 2.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: FallbackPolicy {
@@ -290,6 +319,7 @@ fn allows_reverse_oneway_when_requested() {
         },
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_route(&topology, &metrics, &request).expect("degraded route succeeds");
@@ -313,19 +343,24 @@ fn strict_route_still_fails_on_oneway_dead_end() {
             id: "origin".to_string(),
             lon: 6.002,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.001,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 2.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     assert!(execute_route(&topology, &metrics, &request).is_err());
@@ -341,14 +376,18 @@ fn auto_relaxes_unreachable_route_with_minimal_reverse_oneway_policy() {
             id: "origin".to_string(),
             lon: 6.0019,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.001,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 40.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: FallbackPolicy {
@@ -357,6 +396,7 @@ fn auto_relaxes_unreachable_route_with_minimal_reverse_oneway_policy() {
         },
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_route(&topology, &metrics, &request).expect("auto route succeeds");
@@ -383,14 +423,18 @@ fn allows_illegal_turn_when_requested() {
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.002,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 40.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: FallbackPolicy {
@@ -403,6 +447,7 @@ fn allows_illegal_turn_when_requested() {
         },
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_route(&topology, &metrics, &request).expect("illegal turn route succeeds");
@@ -425,19 +470,24 @@ fn ignores_multi_edge_restriction_only_when_explicitly_requested() {
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.003,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 40.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
     assert!(execute_route(&topology, &metrics, &strict_request).is_err());
 
@@ -473,19 +523,24 @@ fn allows_forbidden_uturn_when_requested() {
             id: "origin".to_string(),
             lon: 6.0009,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.0,
             lat: 53.001,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 40.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let degraded_request = RouteRequest {
@@ -520,19 +575,24 @@ fn detects_ferry_only_component_fixture() {
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.011,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 40.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let error = execute_route(&topology, &metrics, &request).expect_err("route should fail");
@@ -578,6 +638,7 @@ fn executes_service_area_with_partial_edge_frontier() {
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         }],
         thresholds: vec![ServiceAreaThreshold {
             id: Some("fifteen_s".to_string()),
@@ -586,6 +647,8 @@ fn executes_service_area_with_partial_edge_frontier() {
         }],
         snap: SnapOptions {
             max_distance_m: 500.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
@@ -595,6 +658,7 @@ fn executes_service_area_with_partial_edge_frontier() {
         multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
         polygon: Default::default(),
         returns: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_service_area(
@@ -631,6 +695,7 @@ fn executes_unbanded_service_area_with_segment_costs() {
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         }],
         thresholds: vec![ServiceAreaThreshold {
             id: Some("fifteen_s".to_string()),
@@ -639,6 +704,8 @@ fn executes_unbanded_service_area_with_segment_costs() {
         }],
         snap: SnapOptions {
             max_distance_m: 500.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
@@ -651,6 +718,7 @@ fn executes_unbanded_service_area_with_segment_costs() {
             segments: true,
             ..ServiceAreaReturnOptions::default()
         },
+        temporal: Default::default(),
     };
 
     let result = execute_service_area(
@@ -677,6 +745,114 @@ fn executes_unbanded_service_area_with_segment_costs() {
     assert_eq!(result.segments[1].segment_distance_m, 50.0);
 }
 
+fn service_area_component_metrics() -> netweevil_core::CompiledProfileBundle {
+    let mut metrics = service_area_linear_metrics();
+    metrics.components = vec![CompiledCostComponent {
+        name: "Exposure".to_string(),
+        weight: 1.0,
+        edge_values: vec![4.0, 8.0],
+        scales_with_travel_time: false,
+        overlay_name: None,
+        invert_overlay: false,
+    }];
+    metrics
+}
+
+fn component_service_area_request() -> crate::ServiceAreaRequest {
+    crate::ServiceAreaRequest {
+        analysis_id: "service-area-components".to_string(),
+        origins: vec![crate::LabeledPoint {
+            id: "origin".to_string(),
+            lon: 6.0,
+            lat: 53.0,
+            z: None,
+        }],
+        thresholds: vec![ServiceAreaThreshold {
+            id: Some("fifteen_s".to_string()),
+            limit: 15.0,
+            metric: ServiceAreaThresholdMetric::TravelTimeS,
+        }],
+        snap: SnapOptions {
+            max_distance_m: 500.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
+        },
+        connectivity: Default::default(),
+        fallback: Default::default(),
+        output_mode: ServiceAreaOutputMode::Network,
+        band_mode: ServiceAreaBandMode::Unbanded,
+        boundary_mode: ServiceAreaBoundaryMode::CutAtBoundary,
+        multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+        polygon: Default::default(),
+        returns: ServiceAreaReturnOptions {
+            segments: true,
+            ..ServiceAreaReturnOptions::default()
+        },
+        temporal: Default::default(),
+    }
+}
+
+fn assert_component_service_area(result: &crate::ServiceAreaResult) {
+    let first = result
+        .segments
+        .iter()
+        .find(|segment| segment.edge_id == 0)
+        .expect("first edge is emitted");
+    assert_eq!(first.start_components.get("Exposure"), Some(&0.0));
+    assert_eq!(first.end_components.get("Exposure"), Some(&4.0));
+
+    let frontier = result
+        .segments
+        .iter()
+        .find(|segment| segment.edge_id == 1)
+        .expect("frontier edge is emitted");
+    assert_eq!(frontier.start_fraction, 0.0);
+    assert_eq!(frontier.end_fraction, 0.25);
+    assert_eq!(frontier.start_components.get("Exposure"), Some(&4.0));
+    assert_eq!(frontier.end_components.get("Exposure"), Some(&6.0));
+
+    let feature = result
+        .features
+        .iter()
+        .find(|feature| feature.edge_id == Some(1))
+        .expect("frontier segment feature is emitted");
+    assert_eq!(feature.start_components, frontier.start_components);
+    assert_eq!(feature.end_components, frontier.end_components);
+}
+
+#[test]
+fn reports_exact_static_service_area_component_labels() {
+    let result = execute_service_area(
+        &service_area_linear_topology(),
+        &service_area_component_metrics(),
+        &component_service_area_request(),
+    )
+    .expect("static component service area succeeds");
+
+    assert_component_service_area(&result);
+}
+
+#[test]
+fn reports_exact_temporal_service_area_component_labels() {
+    let mut request = component_service_area_request();
+    request.temporal.departure_time = Some("2026-07-10T08:00:00Z".to_string());
+    let result = execute_service_area(
+        &service_area_linear_topology(),
+        &service_area_component_metrics(),
+        &request,
+    )
+    .expect("temporal component service area succeeds");
+
+    assert_component_service_area(&result);
+    assert_eq!(result.departure_time, request.temporal.departure_time);
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("exact FIFO Dijkstra"))
+    );
+}
+
 #[test]
 fn rejects_service_area_output_above_geometry_point_limit() {
     let request = crate::ServiceAreaRequest {
@@ -685,6 +861,7 @@ fn rejects_service_area_output_above_geometry_point_limit() {
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         }],
         thresholds: vec![ServiceAreaThreshold {
             id: Some("thirty_s".to_string()),
@@ -693,6 +870,8 @@ fn rejects_service_area_output_above_geometry_point_limit() {
         }],
         snap: SnapOptions {
             max_distance_m: 500.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
@@ -705,6 +884,7 @@ fn rejects_service_area_output_above_geometry_point_limit() {
             max_geometry_points: 1,
             ..ServiceAreaReturnOptions::default()
         },
+        temporal: Default::default(),
     };
 
     let error = execute_service_area(
@@ -725,6 +905,7 @@ fn executes_service_area_ring_bands() {
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         }],
         thresholds: vec![
             ServiceAreaThreshold {
@@ -740,6 +921,8 @@ fn executes_service_area_ring_bands() {
         ],
         snap: SnapOptions {
             max_distance_m: 500.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
@@ -749,6 +932,7 @@ fn executes_service_area_ring_bands() {
         multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
         polygon: Default::default(),
         returns: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_service_area(
@@ -773,11 +957,13 @@ fn merges_multi_origin_service_areas() {
                 id: "origin_a".to_string(),
                 lon: 6.0,
                 lat: 53.0,
+                z: None,
             },
             crate::LabeledPoint {
                 id: "origin_b".to_string(),
                 lon: 6.001,
                 lat: 53.0,
+                z: None,
             },
         ],
         thresholds: vec![ServiceAreaThreshold {
@@ -787,6 +973,8 @@ fn merges_multi_origin_service_areas() {
         }],
         snap: SnapOptions {
             max_distance_m: 500.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
@@ -796,6 +984,7 @@ fn merges_multi_origin_service_areas() {
         multi_origin_mode: ServiceAreaMultiOriginMode::Merge,
         polygon: Default::default(),
         returns: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_service_area(
@@ -819,6 +1008,7 @@ fn emits_service_area_polygon_output() {
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         }],
         thresholds: vec![ServiceAreaThreshold {
             id: Some("three_hundred_m".to_string()),
@@ -827,6 +1017,8 @@ fn emits_service_area_polygon_output() {
         }],
         snap: SnapOptions {
             max_distance_m: 500.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
@@ -836,6 +1028,7 @@ fn emits_service_area_polygon_output() {
         multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
         polygon: Default::default(),
         returns: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_service_area(
@@ -867,14 +1060,18 @@ fn allows_origin_hop_fallback_between_components() {
             id: "origin".to_string(),
             lon: 6.0002,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.0015,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 40.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: ConnectivityPolicy {
             disconnected: DisconnectedNetworkMode::HopOriginToNearestReachableComponent,
@@ -887,6 +1084,7 @@ fn allows_origin_hop_fallback_between_components() {
             ..ReturnConfig::default()
         },
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
@@ -908,14 +1106,18 @@ fn allows_destination_hop_fallback_between_components() {
             id: "origin".to_string(),
             lon: 6.0010,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.0003,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 40.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: ConnectivityPolicy {
             disconnected: DisconnectedNetworkMode::HopDestinationToNearestReachableComponent,
@@ -925,6 +1127,7 @@ fn allows_destination_hop_fallback_between_components() {
         fallback: Default::default(),
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
@@ -949,14 +1152,18 @@ fn allows_either_end_hop_fallback_between_components() {
             id: "origin".to_string(),
             lon: 6.0002,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.0015,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 40.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: ConnectivityPolicy {
             disconnected: DisconnectedNetworkMode::HopEitherEnd,
@@ -966,6 +1173,7 @@ fn allows_either_end_hop_fallback_between_components() {
         fallback: Default::default(),
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
@@ -983,19 +1191,24 @@ fn hop_fallback_keeps_legal_network_cost_unchanged() {
             id: "origin".to_string(),
             lon: 6.0010,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.0015,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 40.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
     let hopped_request = RouteRequest {
         route_id: "hopped".to_string(),
@@ -1003,14 +1216,18 @@ fn hop_fallback_keeps_legal_network_cost_unchanged() {
             id: "origin".to_string(),
             lon: 6.0002,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.0015,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 40.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: ConnectivityPolicy {
             disconnected: DisconnectedNetworkMode::HopOriginToNearestReachableComponent,
@@ -1020,6 +1237,7 @@ fn hop_fallback_keeps_legal_network_cost_unchanged() {
         fallback: Default::default(),
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let legal = execute_route(&topology, &metrics, &legal_request).expect("legal route");
@@ -1050,19 +1268,24 @@ fn skips_non_traversable_nodes_when_snapping_route_endpoints() {
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.0002,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 30.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: Default::default(),
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
@@ -1098,14 +1321,18 @@ fn accelerated_failure_mode_route_matches_astar_route() {
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
+            z: None,
         },
         destination: crate::LabeledPoint {
             id: "destination".to_string(),
             lon: 6.002,
             lat: 53.0,
+            z: None,
         },
         snap: SnapOptions {
             max_distance_m: 40.0,
+            z_window_m: None,
+            attribute_filters: Default::default(),
         },
         connectivity: Default::default(),
         fallback: FallbackPolicy {
@@ -1118,6 +1345,7 @@ fn accelerated_failure_mode_route_matches_astar_route() {
         },
         returns: ReturnConfig::default(),
         alternatives: Default::default(),
+        temporal: Default::default(),
     };
 
     let plain = plain_engine

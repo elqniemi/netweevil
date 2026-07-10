@@ -22,12 +22,15 @@ mod state;
 mod transit;
 
 pub use dto::{
-    DatasetInfo, ExecutionContext, HealthResponse, MatrixExecutionRequest, MatrixExecutionResponse,
-    MatrixRequest, OdExecutionRequest, OdExecutionResponse, ProfileInfo, RouteExecutionRequest,
-    RouteExecutionResponse, ServiceAreaExecutionRequest, ServiceAreaExecutionResponse,
-    ServiceInfoResponse, TransitExecutionContext, TransitFeedInfo, TransitRouteExecutionRequest,
-    TransitRouteExecutionResponse, TransitServiceAreaExecutionRequest,
-    TransitServiceAreaExecutionResponse,
+    AccessibilityExecutionRequest, AccessibilityExecutionResponse, BetweennessExecutionRequest,
+    BetweennessExecutionResponse, DatasetInfo, ExecutionContext, HealthResponse,
+    MatrixExecutionRequest, MatrixExecutionResponse, MatrixRequest, OdExecutionRequest,
+    OdExecutionResponse, ProfileInfo, RouteExecutionRequest, RouteExecutionResponse,
+    ScenarioBatchExecutionRequest, ScenarioBatchExecutionResponse, ServiceAreaExecutionRequest,
+    ServiceAreaExecutionResponse, ServiceAreaSequenceExecutionRequest,
+    ServiceAreaSequenceExecutionResponse, ServiceInfoResponse, TransitExecutionContext,
+    TransitFeedInfo, TransitRouteExecutionRequest, TransitRouteExecutionResponse,
+    TransitServiceAreaExecutionRequest, TransitServiceAreaExecutionResponse,
 };
 pub use state::ApiServeOptions;
 
@@ -76,7 +79,14 @@ fn router(state: ApiState) -> Router {
         )
         .route("/v1/od", post(handlers::od_handler))
         .route("/v1/matrix", post(handlers::matrix_handler))
+        .route("/v1/accessibility", post(handlers::accessibility_handler))
         .route("/v1/service-area", post(handlers::service_area_handler))
+        .route(
+            "/v1/service-area-sequence",
+            post(handlers::service_area_sequence_handler),
+        )
+        .route("/v1/betweenness", post(handlers::betweenness_handler))
+        .route("/v1/scenario-batch", post(handlers::scenario_batch_handler))
         .route(
             "/v1/simulation",
             get(simulation::list_simulations).post(simulation::create_simulation),

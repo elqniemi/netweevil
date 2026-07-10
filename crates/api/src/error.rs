@@ -11,6 +11,7 @@ struct ErrorResponse {
     diagnostics: Vec<AnalysisDiagnostic>,
 }
 
+#[derive(Debug)]
 pub(crate) struct ApiError {
     status: StatusCode,
     message: String,

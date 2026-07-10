@@ -11,7 +11,7 @@ The production surface is the `netweevil` CLI plus a preloadable HTTP API. The Q
 ## What Is In This Repo
 
 - `crates/core`: graph primitives, topology bundles, metrics, and acceleration data types
-- `crates/ingest`: OSM PBF import, topology build, turn restrictions, road classification, and acceleration preprocessing
+- `crates/ingest`: OSM PBF, Overture, and mapped GeoPackage import; topology build, turn restrictions, road classification, and acceleration preprocessing
 - `crates/profile`: profile schema, validation, compilation, turn costs, and edge costs
 - `crates/query`: routing, route batches, OD, matrix, service areas, accessibility, alternatives, snapping, and request/result models
 - `crates/persist`: `.netweevil/` state layout, manifests, binary bundle IO, and cache reads
@@ -22,7 +22,11 @@ The production surface is the `netweevil` CLI plus a preloadable HTTP API. The Q
 - `crates/cli`: the `netweevil` binary
 - `qgis_plugin/netweevil_qgis`: QGIS 3/4 plugin
 - `examples/profiles`: profile examples
+- `examples/ingest`: GeoPackage mapping examples
 - `examples/requests`: CLI request fixtures
+- `examples/scenarios`: runtime feature-state examples
+- `examples/temporal`: holiday and continuous-overlay examples
+- `examples/transit`: stop-to-network binding examples
 - `examples/api`: API payload examples
 - `examples/perf`: performance route corpora
 - `scripts`: QGIS packaging and performance scripts
@@ -71,6 +75,80 @@ cargo run -p netweevil-cli -- analyze route \
   --request examples/requests/route.json \
   --out .netweevil/runs/example-route.geojson
 ```
+
+## 3D GeoPackage And Temporal Analysis
+
+GeoPackage ingest expects inputs already transformed to WGS84
+longitude/latitude with Z in metres. NetWeevil does not directly transform raw
+Hong Kong EPSG:2326+5738 data or read FileGDB; perform that conversion in the
+analysis preprocessing environment first. Then import outdoor and indoor
+sources together and audit the retained fields and segment geometry:
+
+```bash
+scripts/prepare_hong_kong_pedestrian.sh \
+  /home/elmeriniemi/stuff/hong-kong-analysis
+
+cargo run -p netweevil-cli -- dataset import \
+  /home/elmeriniemi/stuff/hong-kong-analysis/prepared/3D_Pedestrian_Network.gpkg \
+  /home/elmeriniemi/stuff/hong-kong-analysis/prepared/3D_Indoor_Network.gpkg \
+  --name hk_pedestrian_3d \
+  --format gpkg \
+  --mapping examples/ingest/hong_kong_pedestrian_mapping.yml
+
+cargo run -p netweevil-cli -- dataset audit \
+  --dataset hk_pedestrian_3d \
+  --against \
+    /home/elmeriniemi/stuff/hong-kong-analysis/prepared/3D_Pedestrian_Network.gpkg \
+    /home/elmeriniemi/stuff/hong-kong-analysis/prepared/3D_Indoor_Network.gpkg \
+  --mapping examples/ingest/hong_kong_pedestrian_mapping.yml
+
+cargo run -p netweevil-cli -- profile compile \
+  --dataset hk_pedestrian_3d \
+  --profile examples/profiles/pedestrian_multilayer.yml
+```
+
+The preparation script validates GDAL and both source files, preserves the
+GeoPackage basenames, layers, fields, and HKPD Z values, transforms horizontal
+coordinates to WGS84, and writes source hashes plus transformation details to
+`prepared/netweevil-preprocessing-manifest.txt`. Use `--output-dir` to choose a
+different destination. Platform-level GTFS synthesis and real stop bindings
+remain project-specific input generation; the routing, transfer-table, and
+analysis engine workflow is otherwise runnable from this repository.
+
+Run time-dependent, constrained/Pareto, criticality, and failure-scenario
+examples after adapting their clearly marked illustrative Hong Kong coordinates
+and source feature ids:
+
+```bash
+cargo run -p netweevil-cli -- analyze route \
+  --dataset hk_pedestrian_3d \
+  --profile examples/profiles/pedestrian_multilayer.yml \
+  --request examples/requests/hong_kong_example_temporal_route.json \
+  --out .netweevil/runs/hk-example-temporal-route.geojson
+
+cargo run -p netweevil-cli -- analyze betweenness \
+  --dataset hk_pedestrian_3d \
+  --profile examples/profiles/pedestrian_multilayer.yml \
+  --request examples/requests/hong_kong_example_betweenness.json \
+  --out .netweevil/runs/hk-example-betweenness.gpkg
+
+cargo run -p netweevil-cli -- analyze scenario-batch \
+  --dataset hk_pedestrian_3d \
+  --profile examples/profiles/pedestrian_multilayer.yml \
+  --request examples/requests/hong_kong_example_scenario_batch.yml \
+  --out .netweevil/runs/hk-example-scenario-batch.json
+
+cargo run -p netweevil-cli -- analyze service-area-sequence \
+  --dataset hk_pedestrian_3d \
+  --profile examples/profiles/pedestrian_multilayer.yml \
+  --request examples/requests/hong_kong_example_service_area_sequence.json \
+  --out .netweevil/runs/hk-example-ten-am-frames.geojson
+```
+
+See [`docs/multilayer-temporal-routing.md`](docs/multilayer-temporal-routing.md)
+for the mapping roles, preprocessing contract, opening-hours format, profile
+components, temporal rules, overlays, Pareto constraints, portal QA, transit
+bindings, and network-transfer workflow.
 
 Start the API:
 
@@ -184,10 +262,10 @@ cargo run -p netweevil-cli -- api serve --help
 
 Top-level commands:
 
-- `dataset import|list`
-- `transit import|list`
+- `dataset import|audit|list`
+- `transit import|bindings apply|transfers build|list`
 - `profile validate|compile`
-- `analyze route|route-batch|od|matrix|accessibility|service-area|transit-route|transit-batch`
+- `analyze route|route-batch|od|matrix|accessibility|service-area|service-area-sequence|betweenness|scenario-batch|transit-route|transit-batch`
 - `experiment run`
 - `simulate validate|run`
 - `report render`
@@ -219,6 +297,12 @@ cargo run -p netweevil-cli -- analyze service-area \
   --out .netweevil/runs/example-service-area.geojson
 ```
 
+Street-analysis commands also accept `--departure-time`, `--scenario`,
+`--holiday-calendar`, and repeatable `--overlay` overrides. Scalars replace
+only the matching request-file field; CLI overlays append to any overlays
+already in the document. See the multilayer runbook for matrix and
+service-area-sequence semantics.
+
 ## Transit
 
 Import an existing GTFS archive:
@@ -230,6 +314,34 @@ cargo run -p netweevil-cli -- transit import \
   --service-start 2026-05-09 \
   --service-days 7
 ```
+
+An exact stop-to-network binding table can be applied during import with
+`--stop-bindings bindings.json`, or replaced later:
+
+```bash
+cargo run -p netweevil-cli -- transit bindings apply \
+  --feed hk_example_mtr \
+  examples/transit/hong_kong_example_stop_bindings.json
+
+cargo run -p netweevil-cli -- transit transfers build \
+  --feed hk_example_mtr \
+  --dataset hk_pedestrian_3d \
+  --profile examples/profiles/pedestrian_step_free_multilayer.yml \
+  --max-transfer-distance-m 500
+```
+
+For a transit request with `modes.street_access: "network"`, pass both
+`--street-dataset` and `--street-profile` to `analyze transit-route` or
+`analyze transit-batch`. The CLI network estimator currently supports a foot
+profile with walk-only access and egress. See
+[`docs/transit-fusion.md`](docs/transit-fusion.md).
+
+The transfer build routes directed stop pairs through the loaded street/indoor
+graph, registers the resulting table on the feed, and records the dataset,
+profile hash, and binding fingerprint used to create it. Select it in a transit
+request with `modes.transfer_profile_id: "pedestrian_step_free_multilayer"`. See
+[`docs/transit-fusion.md`](docs/transit-fusion.md) for binding formats and the
+full result contract.
 
 Run a pedestrian+transit route:
 
@@ -257,9 +369,15 @@ stop, set `modes.mixed_access_egress: true` (see
 Access and egress legs are priced by straight-line distance over the mode
 speed by default. Set `modes.street_access: "network"` to price them with
 real street-network travel times instead; the API resolves a loaded street
-profile per access mode (walk requires a foot profile), and candidates fall
-back to the straight-line estimate when no matching profile is loaded.
-Transit service areas accept the same option.
+profile per access mode (walk requires a foot profile). Network mode is strict:
+a stop candidate is omitted when no matching engine/path exists, so a
+disconnected component, paid-area barrier, or missing profile cannot become a
+straight-line teleport. Use `street_access: "straight_line"` explicitly when
+geometric access is desired. Transit service areas accept the same option.
+
+For API requests, `transfer_profile_id` may be supplied either beside
+`feed_id` or as `request.modes.transfer_profile_id`. `/v1/service` reports each
+feed's bound-stop count and available transfer profile IDs.
 
 Preload a transit feed into the API:
 
@@ -339,11 +457,17 @@ Execution endpoints:
 - `POST /v1/route`
 - `POST /v1/od`
 - `POST /v1/matrix`
+- `POST /v1/accessibility`
 - `POST /v1/service-area`
+- `POST /v1/service-area-sequence`
+- `POST /v1/betweenness`
+- `POST /v1/scenario-batch`
 - `POST /v1/transit-route`
 - `POST /v1/transit-service-area`
 
-For `route`, `od`, and `matrix`, add `?format=geojson` to request GeoJSON instead of JSON:
+For `route`, `od`, `matrix`, `service-area`, `service-area-sequence`,
+`betweenness`, and `scenario-batch`, add `?format=geojson` to request GeoJSON
+instead of JSON:
 
 ```bash
 curl -X POST 'http://127.0.0.1:8080/v1/route?format=geojson' \

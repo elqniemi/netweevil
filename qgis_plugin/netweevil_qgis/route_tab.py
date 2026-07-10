@@ -101,6 +101,9 @@ class RouteTabMixin:
         )
         layout.addWidget(options_group)
 
+        self.route_temporal_group = self._build_street_temporal_group("route")
+        layout.addWidget(self.route_temporal_group)
+
         return_group = QGroupBox("Returned route detail")
         return_form = QFormLayout(return_group)
         self.route_geometry_combo = QComboBox()
@@ -297,7 +300,7 @@ class RouteTabMixin:
         snap_distance = self.parse_optional_float(
             self.snap_distance_edit.text(), "Snap distance"
         )
-        return {
+        request = {
             "route_id": route_id,
             "origin": {
                 "id": self.origin_id_edit.text().strip() or "origin",
@@ -315,6 +318,8 @@ class RouteTabMixin:
             "returns": self.build_route_returns(),
             "alternatives": self.build_alternative_options("route"),
         }
+        request.update(self.build_street_temporal_options("route"))
+        return request
 
     def write_route_request(self):
         try:

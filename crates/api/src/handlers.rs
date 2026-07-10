@@ -4,19 +4,25 @@ use axum::Json;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::response::{IntoResponse, Response};
 use netweevil_profile::ReturnGeometry;
-use netweevil_query::{EffectiveEngineDescription, EngineMode};
+use netweevil_query::{
+    EffectiveEngineDescription, EngineMode, TemporalRequestOptions, execute_scenario_batch,
+};
 use tracing::{info, warn};
 
 use crate::dto::{
-    DatasetInfo, ExecutionContext, HealthResponse, MatrixExecutionRequest, MatrixExecutionResponse,
-    OdExecutionRequest, OdExecutionResponse, ProfileInfo, ResponseFormatQuery,
-    RouteExecutionRequest, RouteExecutionResponse, ServiceAreaExecutionRequest,
-    ServiceAreaExecutionResponse, ServiceInfoResponse, TransitFeedInfo,
+    AccessibilityExecutionRequest, AccessibilityExecutionResponse, BetweennessExecutionRequest,
+    BetweennessExecutionResponse, DatasetInfo, ExecutionContext, HealthResponse,
+    MatrixExecutionRequest, MatrixExecutionResponse, OdExecutionRequest, OdExecutionResponse,
+    ProfileInfo, ResponseFormatQuery, RouteExecutionRequest, RouteExecutionResponse,
+    ScenarioBatchExecutionRequest, ScenarioBatchExecutionResponse, ServiceAreaExecutionRequest,
+    ServiceAreaExecutionResponse, ServiceAreaSequenceExecutionRequest,
+    ServiceAreaSequenceExecutionResponse, ServiceInfoResponse, TransitFeedInfo,
 };
 use crate::error::ApiError;
 use crate::geojson::{
-    geojson_response, matrix_result_geojson, od_result_geojson, route_result_geojson,
-    service_area_result_geojson, wants_geojson,
+    betweenness_result_geojson, geojson_response, matrix_result_geojson, od_result_geojson,
+    route_result_geojson, scenario_batch_result_geojson, service_area_result_geojson,
+    service_area_sequence_result_geojson, wants_geojson,
 };
 use crate::state::{
     ApiState, LoadedProfile, ServiceRuntime, execute_on_routing_worker, load_edge_names,
@@ -71,7 +77,9 @@ pub(crate) async fn route_handler(
     if wants_geojson(&query) {
         request.returns.geometry = ReturnGeometry::Full;
     }
-    let effective_engine = profile.engine.effective_engine_description(engine_mode);
+    let effective_engine = profile
+        .engine
+        .effective_route_engine_description(&request, engine_mode);
     let service = execution_context(state.service.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
     let route_id = request.route_id.clone();
@@ -131,7 +139,11 @@ pub(crate) async fn od_handler(
     if wants_geojson(&query) {
         request.returns.geometry = ReturnGeometry::Full;
     }
-    let effective_engine = profile.engine.effective_engine_description(engine_mode);
+    let effective_engine = effective_engine_for_temporal_options(
+        profile.engine.effective_engine_description(engine_mode),
+        &request.temporal,
+        "time_dependent_exact_pairwise_label_setting",
+    );
     let service = execution_context(state.service.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
     let result = execute_on_routing_worker(state.service.as_ref(), move || {
@@ -181,7 +193,16 @@ pub(crate) async fn matrix_handler(
         request.origins.returns.geometry = ReturnGeometry::Full;
         request.destinations.returns.geometry = ReturnGeometry::Full;
     }
-    let effective_engine = profile.engine.effective_engine_description(engine_mode);
+    let temporal = if request.origins.temporal.is_temporal() {
+        &request.origins.temporal
+    } else {
+        &request.destinations.temporal
+    };
+    let effective_engine = effective_engine_for_temporal_options(
+        profile.engine.effective_engine_description(engine_mode),
+        temporal,
+        "time_dependent_exact_pairwise_label_setting",
+    );
     let service = execution_context(state.service.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
     let result = execute_on_routing_worker(state.service.as_ref(), move || {
@@ -206,6 +227,48 @@ pub(crate) async fn matrix_handler(
     Ok(Json(MatrixExecutionResponse { service, result }).into_response())
 }
 
+pub(crate) async fn accessibility_handler(
+    State(state): State<ApiState>,
+    Json(payload): Json<AccessibilityExecutionRequest>,
+) -> Result<Response, ApiError> {
+    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    info!(
+        endpoint = "accessibility",
+        profile_id = %profile.document.profile.id,
+        origins = payload.request.origins.points.len(),
+        categories = payload.request.categories.len(),
+        engine_mode = ?payload.engine_mode,
+        "request"
+    );
+    let effective_engine = effective_engine_for_temporal_options(
+        profile
+            .engine
+            .effective_engine_description(payload.engine_mode),
+        &payload.request.origins.temporal,
+        "time_dependent_bounded_accessibility",
+    );
+    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let engine = Arc::clone(&profile.engine);
+    let engine_mode = payload.engine_mode;
+    let request = payload.request;
+    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+        engine.execute_accessibility_with_mode(&request, engine_mode)
+    })
+    .await
+    .map_err(|error| {
+        warn!(endpoint = "accessibility", %error, "request failed");
+        ApiError::from_execution_error(error)
+    })?;
+    info!(
+        endpoint = "accessibility",
+        rows = result.row_count,
+        succeeded = result.succeeded_count,
+        failed = result.failed_count,
+        "response"
+    );
+    Ok(Json(AccessibilityExecutionResponse { service, result }).into_response())
+}
+
 pub(crate) async fn service_area_handler(
     State(state): State<ApiState>,
     Query(query): Query<ResponseFormatQuery>,
@@ -226,9 +289,13 @@ pub(crate) async fn service_area_handler(
     if wants_geojson(&query) {
         request.returns.geometry = true;
     }
-    let effective_engine = profile
-        .engine
-        .effective_engine_description(EngineMode::Auto);
+    let effective_engine = effective_engine_for_temporal_options(
+        profile
+            .engine
+            .effective_engine_description(EngineMode::Auto),
+        &request.temporal,
+        "time_dependent_exact_service_area",
+    );
     let service = execution_context(state.service.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
     let result = execute_on_routing_worker(state.service.as_ref(), move || {
@@ -251,6 +318,162 @@ pub(crate) async fn service_area_handler(
         return geojson_response(service_area_result_geojson(&service, &result));
     }
     Ok(Json(ServiceAreaExecutionResponse { service, result }).into_response())
+}
+
+pub(crate) async fn service_area_sequence_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<ResponseFormatQuery>,
+    Json(payload): Json<ServiceAreaSequenceExecutionRequest>,
+) -> Result<Response, ApiError> {
+    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let mut request = payload.request;
+    if wants_geojson(&query) {
+        request.request.returns.geometry = true;
+    }
+    let effective_engine = EffectiveEngineDescription {
+        route_engine: "time_dependent_nondominated_label_setting",
+        batch_engine: "time_dependent_exact_service_area_sequence",
+        acceleration: "spatial_index+edge_phantoms+turn_automaton",
+    };
+    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let sequence_id = request.sequence_id.clone();
+    let engine = Arc::clone(&profile.engine);
+    info!(
+        endpoint = "service_area_sequence",
+        profile_id = %profile.document.profile.id,
+        sequence_id = %sequence_id,
+        format = query.format.as_deref().unwrap_or("json"),
+        "request"
+    );
+    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+        engine.execute_service_area_sequence(&request)
+    })
+    .await
+    .map_err(|error| {
+        warn!(endpoint = "service_area_sequence", sequence_id = %sequence_id, %error, "request failed");
+        ApiError::from_execution_error(error)
+    })?;
+    if wants_geojson(&query) {
+        return geojson_response(service_area_sequence_result_geojson(&service, &result));
+    }
+    Ok(Json(ServiceAreaSequenceExecutionResponse { service, result }).into_response())
+}
+
+pub(crate) async fn betweenness_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<ResponseFormatQuery>,
+    Json(payload): Json<BetweennessExecutionRequest>,
+) -> Result<Response, ApiError> {
+    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    info!(
+        endpoint = "betweenness",
+        profile_id = %profile.document.profile.id,
+        analysis_id = %payload.request.analysis_id,
+        origins = payload.request.origins.len(),
+        destinations = payload.request.destinations.len(),
+        "request"
+    );
+    let effective_engine = effective_engine_for_temporal_options(
+        profile
+            .engine
+            .effective_engine_description(EngineMode::Auto),
+        &payload.request.temporal,
+        "time_dependent_exact_betweenness",
+    );
+    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let engine = Arc::clone(&profile.engine);
+    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+        engine.execute_betweenness(&payload.request)
+    })
+    .await
+    .map_err(ApiError::from_execution_error)?;
+    if wants_geojson(&query) {
+        return geojson_response(betweenness_result_geojson(&service, &result));
+    }
+    Ok(Json(BetweennessExecutionResponse { service, result }).into_response())
+}
+
+pub(crate) async fn scenario_batch_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<ResponseFormatQuery>,
+    Json(payload): Json<ScenarioBatchExecutionRequest>,
+) -> Result<Response, ApiError> {
+    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let mut request = payload.request;
+    info!(
+        endpoint = "scenario_batch",
+        profile_id = %profile.document.profile.id,
+        batch_id = %request.batch_id,
+        scenarios = request.scenarios.len(),
+        routes = request.routes.len(),
+        service_areas = request.service_areas.len(),
+        accessibility = request.accessibility.len(),
+        od = request.od.len(),
+        matrices = request.matrices.len(),
+        betweenness = request.betweenness.len(),
+        "request"
+    );
+    if wants_geojson(&query) {
+        for route in &mut request.routes {
+            route.returns.geometry = ReturnGeometry::Full;
+        }
+        for service_area in &mut request.service_areas {
+            service_area.returns.geometry = true;
+        }
+        for od in &mut request.od {
+            od.request.returns.geometry = ReturnGeometry::Full;
+        }
+        for matrix in &mut request.matrices {
+            matrix.origins.returns.geometry = ReturnGeometry::Full;
+            matrix.destinations.returns.geometry = ReturnGeometry::Full;
+        }
+    }
+    let effective_engine = EffectiveEngineDescription {
+        route_engine: "scenario_batch_overlay_replay",
+        batch_engine: "scenario_batch_overlay_replay",
+        acceleration: "static_baseline+exact_temporal_scenarios",
+    };
+    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let engine = Arc::clone(&profile.engine);
+    let batch_id = request.batch_id.clone();
+    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+        execute_scenario_batch(engine.as_ref(), &request)
+    })
+    .await
+    .map_err(|error| {
+        warn!(endpoint = "scenario_batch", batch_id = %batch_id, %error, "request failed");
+        ApiError::from_execution_error(error)
+    })?;
+    if wants_geojson(&query) {
+        return geojson_response(scenario_batch_result_geojson(
+            state.service.as_ref(),
+            &service,
+            &result,
+        ));
+    }
+    Ok(Json(ScenarioBatchExecutionResponse { service, result }).into_response())
+}
+
+fn effective_engine_for_temporal_options(
+    base: EffectiveEngineDescription,
+    temporal: &TemporalRequestOptions,
+    temporal_batch_engine: &'static str,
+) -> EffectiveEngineDescription {
+    if !temporal.constraints.is_empty() || temporal.pareto.is_some() {
+        return EffectiveEngineDescription {
+            route_engine: "component_nondominated_label_setting",
+            batch_engine: "component_nondominated_pairwise_label_setting",
+            acceleration: "spatial_index+edge_phantoms+turn_automaton",
+        };
+    }
+    if temporal.is_temporal() {
+        return EffectiveEngineDescription {
+            route_engine: "time_dependent_nondominated_label_setting",
+            batch_engine: temporal_batch_engine,
+            acceleration: "spatial_index+edge_phantoms+turn_automaton",
+        };
+    }
+    base
 }
 
 pub(crate) fn build_service_info(service: &ServiceRuntime) -> ServiceInfoResponse {
@@ -299,6 +522,13 @@ pub(crate) fn build_transit_feed_infos(service: &ServiceRuntime) -> Vec<TransitF
             route_count: feed.manifest.route_count,
             trip_count: feed.manifest.trip_count,
             connection_count: feed.manifest.connection_count,
+            bound_stop_count: feed.manifest.bound_stop_count,
+            transfer_profile_ids: feed
+                .router
+                .transfer_profile_ids()
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
         })
         .collect()
 }
@@ -332,5 +562,36 @@ pub(crate) fn execution_context(
         route_engine: engine.route_engine.to_string(),
         batch_engine: engine.batch_engine.to_string(),
         acceleration: engine.acceleration.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn temporal_execution_context_does_not_advertise_static_acceleration() {
+        let base = EffectiveEngineDescription {
+            route_engine: "accelerated_pairwise_turns",
+            batch_engine: "accelerated_pairwise_turns_batch_reuse",
+            acceleration: "spatial_index+edge_phantoms+cch",
+        };
+        let temporal = TemporalRequestOptions {
+            departure_time: Some("2026-07-10T09:59:00+08:00".to_string()),
+            ..TemporalRequestOptions::default()
+        };
+        let effective = effective_engine_for_temporal_options(
+            base,
+            &temporal,
+            "time_dependent_bounded_accessibility",
+        );
+        assert_eq!(
+            effective.batch_engine,
+            "time_dependent_bounded_accessibility"
+        );
+        assert_eq!(
+            effective.acceleration,
+            "spatial_index+edge_phantoms+turn_automaton"
+        );
     }
 }

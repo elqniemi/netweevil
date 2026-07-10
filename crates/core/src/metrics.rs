@@ -27,6 +27,52 @@ pub struct CompiledEdgeMetric {
     pub generalized_cost: Option<f64>,
 }
 
+/// One named, edge-aligned accounting column emitted by profile
+/// compilation. Values are stored separately from the scalar objective so a
+/// shortest path can report its complete cost vector without changing the
+/// fast static search representation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompiledCostComponent {
+    pub name: String,
+    /// Contribution of this component to generalized cost.
+    #[serde(default)]
+    pub weight: f64,
+    /// Per-edge values aligned with [`CompiledProfileBundle::edge_metrics`].
+    #[serde(default)]
+    pub edge_values: Vec<f32>,
+    /// Components based on `travel_time` scale with a temporal speed factor
+    /// (but not with waiting before an edge opens).
+    #[serde(default)]
+    pub scales_with_travel_time: bool,
+    /// Optional continuous temporal overlay multiplied into the value.
+    #[serde(default)]
+    pub overlay_name: Option<String>,
+    /// When true, multiply by `1 - overlay` instead of `overlay`.
+    #[serde(default)]
+    pub invert_overlay: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct CompiledTemporalProfile {
+    #[serde(default)]
+    pub allow_wait: bool,
+    #[serde(default = "default_max_wait_s")]
+    pub max_wait_s: f64,
+}
+
+impl Default for CompiledTemporalProfile {
+    fn default() -> Self {
+        Self {
+            allow_wait: false,
+            max_wait_s: default_max_wait_s(),
+        }
+    }
+}
+
+fn default_max_wait_s() -> f64 {
+    3_600.0
+}
+
 /// Sentinel for arcs whose weight comes from the base transition rather than
 /// a lower triangle; such arcs unpack directly to their head edge state.
 pub const NO_MIDDLE: u32 = u32::MAX;
@@ -74,6 +120,10 @@ pub struct CompiledProfileBundle {
     pub mode: TravelMode,
     #[serde(default)]
     pub turn_costs: CompiledTurnCostConfig,
+    #[serde(default)]
+    pub components: Vec<CompiledCostComponent>,
+    #[serde(default)]
+    pub temporal: CompiledTemporalProfile,
     pub source_topology_bundle_id: CacheBundleId,
     #[serde(default)]
     pub acceleration: Option<CompiledAcceleration>,

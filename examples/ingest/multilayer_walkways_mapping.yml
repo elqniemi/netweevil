@@ -1,0 +1,149 @@
+# Generic two-source GeoPackage mapping. The file names, table name, column
+# names, coded values, and demo feature id must be adapted to the source data.
+version: 1
+
+coordinates:
+  geographic_wgs84: true
+  z_metres: true
+
+retain: all
+
+quantization:
+  xy_degrees: 1.0e-9
+  z_m: 0.01
+
+# Demo feature 900001 has a runtime direction override in the scenario
+# fixtures, so both directed edges must exist in the imported topology.
+materialize_both_directions_for:
+  - 900001
+
+layers:
+  - source: outdoor_walkways.gpkg
+    table: walkways
+    geometry_column: geom
+    defaults:
+      highway: footway
+      access: [foot]
+      direction: both
+    fields:
+      feature_id: feature_id
+      direction:
+        role: direction
+        decode:
+          "-1": reverse
+          "0": both
+          "1": forward
+      feature_type:
+        role: feature_type
+        decode:
+          "1": footway
+          "2": stairs
+          "3": escalator
+          "4": lift
+          "5": travelator
+          "6": ramp
+          "7": footbridge
+          "8": subway
+      covered:
+        role: covered
+        decode:
+          "0": "false"
+          "1": "true"
+      indoor_location:
+        role: indoor_location
+        decode:
+          "0": outdoor
+          "1": public
+          "2": paid_area
+          "3": platform
+      wheelchair_access:
+        role: wheelchair_access
+        decode:
+          "0": "false"
+          "1": "true"
+      wheelchair_barrier:
+        role: wheelchair_barrier
+        decode:
+          "0": "false"
+          "1": "true"
+      enabled:
+        role: enabled
+        decode:
+          "0": "false"
+          "1": "true"
+      access_schedule_json: access_schedule
+      access_schedule_polarity:
+        role: access_schedule_polarity
+        decode:
+          "1": OPEN
+          "2": CLOSE
+      name_en: name_en
+      name_local: name_local
+      building_id: building_id
+      terminal_id: terminal_id
+      floor_id: floor_id
+
+  - source: indoor_walkways.gpkg
+    table: walkways
+    geometry_column: geom
+    defaults:
+      highway: footway
+      access: [foot]
+      direction: both
+    fields:
+      feature_id: feature_id
+      direction:
+        role: direction
+        decode:
+          "-1": reverse
+          "0": both
+          "1": forward
+      feature_type:
+        role: feature_type
+        decode:
+          "1": footway
+          "2": stairs
+          "3": escalator
+          "4": lift
+          "5": travelator
+          "6": ramp
+          "7": footbridge
+          "8": subway
+      covered:
+        role: covered
+        decode:
+          "0": "false"
+          "1": "true"
+      indoor_location:
+        role: indoor_location
+        decode:
+          "0": outdoor
+          "1": public
+          "2": paid_area
+          "3": platform
+      wheelchair_access:
+        role: wheelchair_access
+        decode:
+          "0": "false"
+          "1": "true"
+      wheelchair_barrier:
+        role: wheelchair_barrier
+        decode:
+          "0": "false"
+          "1": "true"
+      enabled:
+        role: enabled
+        decode:
+          "0": "false"
+          "1": "true"
+      access_schedule_json: access_schedule
+      access_schedule_polarity:
+        role: access_schedule_polarity
+        decode:
+          "1": OPEN
+          "2": CLOSE
+      name_en: name_en
+      name_local: name_local
+      building_id: building_id
+      terminal_id: terminal_id
+      floor_id: floor_id

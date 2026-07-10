@@ -39,7 +39,6 @@ from qgis.gui import QgsMapLayerComboBox
 
 from .compat import (
     qt_orientation,
-    vector_temporal_mode_instant,
     MSG_WARNING,
     LAYER_FILTER_POINT,
     LAYER_FILTER_POLYGON,
@@ -1027,17 +1026,4 @@ class SimulationTabMixin:
         layer = self.load_output_layer(output_path, "simulation temporal agents")
         if layer is None:
             return
-        try:
-            properties = layer.temporalProperties()
-            properties.setMode(vector_temporal_mode_instant())
-            properties.setStartField("datetime")
-            properties.setIsActive(True)
-            self.log(
-                "Temporal layer ready: enable the QGIS Temporal Controller to animate it."
-            )
-        except Exception as exc:
-            self.log(
-                "Loaded temporal layer, but automatic temporal setup failed: {}".format(exc),
-                MSG_WARNING,
-            )
         self.set_last_output_layers([layer])

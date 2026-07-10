@@ -46,6 +46,12 @@ pub fn execute_transit_service_area(
     bundle: &TransitBundle,
     request: &TransitServiceAreaRequest,
 ) -> Result<TransitServiceAreaResult> {
+    if let Some(profile_id) = request.modes.transfer_profile_id.as_deref() {
+        bail!(
+            "transit transfer profile '{}' requires PreparedTransitRouter::new_with_transfer_tables",
+            profile_id
+        );
+    }
     let departures_by_stop = build_departures_by_stop(bundle);
     let stop_index = StopSpatialIndex::new(&bundle.stops);
     let transfer_candidates = build_transfer_candidates(bundle, &stop_index);
@@ -263,6 +269,9 @@ fn search_service_area_origin(
                 departure_s,
                 time_s: candidate.time_s,
                 mode: candidate.mode,
+                // Service-area output does not materialize access paths; avoid
+                // retaining a potentially large path per reached state.
+                network_path: None,
             },
         );
     }
@@ -288,8 +297,9 @@ fn search_service_area_origin(
                 if transfer.stop_index == entry.state.stop_index {
                     continue;
                 }
-                let walk_s =
-                    seconds_for_distance(transfer.distance_m, request.modes.walk_speed_kph);
+                let walk_s = transfer.transfer_time_s.unwrap_or_else(|| {
+                    seconds_for_distance(transfer.distance_m, request.modes.walk_speed_kph)
+                });
                 let arrival_s = transfer_departure_s.saturating_add(walk_s);
                 if arrival_s > time_limit_s {
                     continue;
@@ -307,8 +317,9 @@ fn search_service_area_origin(
                     arrival_s,
                     PrevStep::Transfer {
                         previous: entry.state,
-                        distance_m: transfer.distance_m,
                         departure_s: transfer_departure_s,
+                        travel_time_s: walk_s,
+                        network_path: None,
                     },
                 );
             }

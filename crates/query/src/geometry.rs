@@ -1,13 +1,8 @@
-pub(crate) fn interpolate_edge_point(
-    from_lon: f64,
-    from_lat: f64,
-    to_lon: f64,
-    to_lat: f64,
-    fraction: f64,
-) -> [f64; 2] {
+pub(crate) fn interpolate_edge_point_3d(from: [f64; 3], to: [f64; 3], fraction: f64) -> [f64; 3] {
     [
-        from_lon + (to_lon - from_lon) * fraction,
-        from_lat + (to_lat - from_lat) * fraction,
+        from[0] + (to[0] - from[0]) * fraction,
+        from[1] + (to[1] - from[1]) * fraction,
+        from[2] + (to[2] - from[2]) * fraction,
     ]
 }
 

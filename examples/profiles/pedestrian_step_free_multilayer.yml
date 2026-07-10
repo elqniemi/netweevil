@@ -1,0 +1,94 @@
+profile:
+  id: pedestrian_step_free_multilayer
+  label: "Step-free multilayer pedestrian"
+  mode: foot
+  defaults_pack: eu_foot_2026_01
+
+cost:
+  objective: generalized
+  time_weight: 1.0
+  distance_weight: 0.0
+
+speed_rules:
+  - match:
+      highway: footway
+    speed_kph: 4.0
+  - match:
+      highway: path
+    speed_kph: 3.8
+  - match:
+      highway: pedestrian
+    speed_kph: 4.0
+
+exclude_rules:
+  - match:
+      enabled: "false"
+  - match:
+      wheelchair_barrier: "true"
+  - match:
+      feature_type: stairs
+  - match:
+      feature_type: escalator
+
+slope_model:
+  kind: piecewise
+  points:
+    - {gradient: -0.12, speed_factor: 0.55}
+    - {gradient: -0.04, speed_factor: 0.90}
+    - {gradient: 0.00, speed_factor: 1.00}
+    - {gradient: 0.04, speed_factor: 0.75}
+    - {gradient: 0.08, speed_factor: 0.45}
+    - {gradient: 0.12, speed_factor: 0.20}
+
+facilities:
+  attribute: feature_type
+  classes:
+    lift:
+      kind: lift
+      wait_s: 35.0
+      vertical_speed_mps: 1.2
+      wait_component: lift_wait
+    stairlift:
+      kind: lift
+      wait_s: 45.0
+      vertical_speed_mps: 0.15
+      wait_component: lift_wait
+    travelator:
+      kind: travelator
+      conveyor_speed_mps: 0.65
+      walking_speed_mps: 0.25
+      boarding_penalty_s: 2.0
+    ramp:
+      kind: ramp
+      speed_factor: 0.70
+      boarding_penalty_s: 0.0
+
+components:
+  uncovered_time:
+    expression: "travel_time * (covered == false)"
+    weight: 0.20
+  ascent_m:
+    expression: ascent
+    weight: 5.0
+  coverage_unknown_time:
+    expression: "travel_time * (covered == unknown)"
+    weight: 0.0
+  lift_wait:
+    expression: zero
+    weight: 0.0
+
+temporal:
+  allow_wait: true
+  max_wait_s: 1200
+
+direction:
+  ignore_plain_oneway_for_foot: true
+
+ferry:
+  allow: false
+
+returns:
+  geometry: full
+  segment_rows: true
+  penalty_breakdown: true
+  explain_cost_derivation: true

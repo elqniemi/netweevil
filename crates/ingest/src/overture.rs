@@ -104,6 +104,8 @@ pub(crate) fn scan_overture(
         node_coords: state.node_coords,
         traffic_signal_nodes: Default::default(),
         counts: state.counts,
+        feature_attributes: Default::default(),
+        temporal_rule_sets: Vec::new(),
     })
 }
 
@@ -296,7 +298,7 @@ struct RawTransition {
 #[derive(Debug, Default)]
 struct OvertureState {
     pending_ways: Vec<PendingWay>,
-    node_coords: FxHashMap<i64, (f64, f64)>,
+    node_coords: FxHashMap<i64, (f64, f64, f64)>,
     counts: ObjectCounts,
     connector_nodes: FxHashMap<String, i64>,
     segment_topologies: FxHashMap<String, SegmentTopology>,
@@ -542,7 +544,10 @@ fn ingest_segment(row: SegmentRow, line: &[(f64, f64)], state: &mut OvertureStat
                 Some(&node) => node,
                 None => state.allocate_node(),
             };
-            state.node_coords.entry(node).or_insert((coord.0, coord.1));
+            state
+                .node_coords
+                .entry(node)
+                .or_insert((coord.0, coord.1, 0.0));
             state.counts.nodes += 1;
             node_ids.push(node);
         }
@@ -574,6 +579,8 @@ fn ingest_segment(row: SegmentRow, line: &[(f64, f64)], state: &mut OvertureStat
             forward_lanes,
             reverse_lanes,
             name: name.clone(),
+            feature_row: netweevil_core::NO_FEATURE_ROW,
+            temporal_rule_id: None,
         });
     }
 
@@ -1265,8 +1272,9 @@ mod tests {
         assert_eq!(chunk_a.forward_max_speed_kph, Some(50.0));
         assert_eq!(chunk_a.reverse_max_speed_kph, Some(50.0));
         assert_eq!(output.node_coords.len(), 4);
-        let (lon, lat) = output.node_coords[chunk_a.node_ids.last().unwrap()];
+        let (lon, lat, z) = output.node_coords[chunk_a.node_ids.last().unwrap()];
         assert!((lon - 6.562).abs() < 1e-9 && (lat - 53.20).abs() < 1e-9);
+        assert_eq!(z, 0.0);
     }
 
     #[test]
@@ -1361,6 +1369,7 @@ mod tests {
                 name: "overture-test".to_string(),
                 source: fixture.display().to_string(),
                 format: None,
+                mapping: None,
             },
         )
         .expect("overture dataset imports");
@@ -1377,7 +1386,10 @@ mod tests {
             &manifest.topology_bundle.expect("bundle ref").path,
         )
         .expect("bundle reads back");
-        assert_eq!(bundle.schema_version, 10);
+        assert_eq!(
+            bundle.schema_version,
+            crate::topology::TOPOLOGY_BUNDLE_SCHEMA_VERSION
+        );
         assert_eq!(bundle.edge_profile(0).max_speed_kph, Some(60.0));
 
         std::fs::remove_file(fixture).expect("fixture removes");

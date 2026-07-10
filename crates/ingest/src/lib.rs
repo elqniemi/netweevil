@@ -4,17 +4,32 @@
 //! and preprocesses the CCH acceleration bundle used by the query engine.
 
 mod acceleration;
+mod audit;
 mod classify;
+mod geopackage;
 mod import;
+mod mapping;
+mod opening_hours;
 mod overture;
 mod restrictions;
 mod scan;
 mod topology;
+mod wkb;
 
+pub use audit::{
+    AttributeDrift, AttributeSchemaDrift, DatasetAuditReport, EdgeAttributeLinkDrift,
+    GeometryDrift, GeometrySegment, audit_geopackage_dataset,
+};
 pub use import::{
     DatasetImportOptions, DatasetImportProgress, DatasetImportStage, detect_source_format,
-    import_dataset, import_dataset_with_progress,
+    import_dataset, import_dataset_sources, import_dataset_sources_with_progress,
+    import_dataset_with_progress,
 };
+pub use mapping::{
+    CoordinateMapping, CoordinateQuantization, DirectionValue, FieldMapping,
+    GeoPackageLayerMapping, GeoPackageMapping, LayerDefaults, RetainMode, load_gpkg_mapping,
+};
+pub use opening_hours::parse_access_schedule;
 
 #[cfg(test)]
 pub(crate) mod test_util {
@@ -43,6 +58,8 @@ pub(crate) mod test_util {
             forward_lanes: None,
             reverse_lanes: None,
             name: None,
+            feature_row: netweevil_core::NO_FEATURE_ROW,
+            temporal_rule_id: None,
         }
     }
 
@@ -53,6 +70,11 @@ pub(crate) mod test_util {
             to: NodeId(to),
             source_way_id,
             length_m: 100,
+            ascent_m: 0.0,
+            descent_m: 0.0,
+            feature_row: netweevil_core::NO_FEATURE_ROW,
+            source_direction: 1,
+            temporal_rule_id: None,
             duration_s: None,
             road_class: RoadClass::Residential,
             surface: SurfaceClass::Asphalt,

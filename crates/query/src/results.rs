@@ -56,6 +56,16 @@ pub struct ServiceAreaFeature {
     pub segment_distance_m: Option<f64>,
     #[serde(default)]
     pub segment_travel_time_s: Option<f64>,
+    /// Named additive profile-component totals at the start of a segment.
+    ///
+    /// These are populated only for segment features. A merged network or
+    /// polygon represents many shortest paths and therefore has no single
+    /// well-defined cumulative component vector.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub start_components: BTreeMap<String, f64>,
+    /// Named additive profile-component totals at the end of a segment.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub end_components: BTreeMap<String, f64>,
     #[serde(default)]
     pub geometry: Option<serde_json::Value>,
 }
@@ -88,6 +98,14 @@ pub struct ServiceAreaSegment {
     pub origin_component_id: Option<u32>,
     #[serde(default)]
     pub origin_hop_distance_m: Option<f64>,
+    /// Cumulative named profile-component totals on the winning shortest
+    /// path at `start_fraction`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub start_components: BTreeMap<String, f64>,
+    /// Cumulative named profile-component totals on the same path at
+    /// `end_fraction`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub end_components: BTreeMap<String, f64>,
     #[serde(default)]
     pub geometry: Option<serde_json::Value>,
 }
@@ -117,6 +135,10 @@ pub struct ServiceAreaThresholdSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceAreaResult {
     pub analysis_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub departure_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
     #[serde(default)]
     pub outcome: AnalysisOutcome,
     #[serde(default)]
@@ -155,6 +177,10 @@ pub struct SnappedPoint {
     pub snapped_node_id: u32,
     pub snapped_lon: f64,
     pub snapped_lat: f64,
+    /// Elevation of the snapped network position in metres. Sources without
+    /// elevation data use zero.
+    #[serde(default)]
+    pub snapped_z: f64,
     pub snap_distance_m: f64,
     #[serde(default)]
     pub snapped_edge_id: Option<u32>,
@@ -176,6 +202,16 @@ pub struct RouteSummary {
     pub network_travel_time_s: f64,
     #[serde(default)]
     pub network_generalized_cost: f64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub components: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub waiting_time_s: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub departure_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrival_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
     #[serde(default)]
     pub illegal_movement_penalty_s: f64,
     #[serde(default)]
@@ -227,7 +263,7 @@ pub enum HopEndpoint {
 pub struct RouteHopSegment {
     pub endpoint: HopEndpoint,
     pub distance_m: f64,
-    pub geometry: Vec<[f64; 2]>,
+    pub geometry: Vec<[f64; 3]>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -239,6 +275,14 @@ pub struct RouteSegment {
     pub length_m: u32,
     pub travel_time_s: f64,
     pub generalized_cost: f64,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub components: BTreeMap<String, f64>,
+    #[serde(default)]
+    pub waiting_time_s: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_time: Option<String>,
     pub road_class: RoadClass,
     pub surface: SurfaceClass,
     #[serde(default)]
@@ -282,7 +326,7 @@ pub struct RouteResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edge_path: Vec<u32>,
     #[serde(default)]
-    pub geometry: Option<Vec<[f64; 2]>>,
+    pub geometry: Option<Vec<[f64; 3]>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hop_segments: Vec<RouteHopSegment>,
     #[serde(default)]
@@ -309,7 +353,7 @@ pub struct RouteAlternative {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edge_path: Vec<u32>,
     #[serde(default)]
-    pub geometry: Option<Vec<[f64; 2]>>,
+    pub geometry: Option<Vec<[f64; 3]>>,
     #[serde(default)]
     pub segments: Option<Vec<RouteSegment>>,
     #[serde(default)]
@@ -380,6 +424,8 @@ pub struct OdPairResult {
     pub total_travel_time_s: Option<f64>,
     #[serde(default)]
     pub total_generalized_cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub components: BTreeMap<String, f64>,
     #[serde(default)]
     pub illegal_movement_penalty_s: Option<f64>,
     #[serde(default)]
@@ -389,7 +435,7 @@ pub struct OdPairResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub violation_types: Vec<RouteViolationType>,
     #[serde(default)]
-    pub geometry: Option<Vec<[f64; 2]>>,
+    pub geometry: Option<Vec<[f64; 3]>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
@@ -400,6 +446,12 @@ pub struct OdPairResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OdResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub departure_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrive_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
     pub pair_count: usize,
     pub succeeded_count: usize,
     pub failed_count: usize,
@@ -439,6 +491,8 @@ pub struct MatrixCellResult {
     pub total_travel_time_s: Option<f64>,
     #[serde(default)]
     pub total_generalized_cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub components: BTreeMap<String, f64>,
     #[serde(default)]
     pub illegal_movement_penalty_s: Option<f64>,
     #[serde(default)]
@@ -448,7 +502,7 @@ pub struct MatrixCellResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub violation_types: Vec<RouteViolationType>,
     #[serde(default)]
-    pub geometry: Option<Vec<[f64; 2]>>,
+    pub geometry: Option<Vec<[f64; 3]>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
@@ -467,8 +521,10 @@ pub struct BatchAlternativeResult {
     pub total_travel_time_s: Option<f64>,
     #[serde(default)]
     pub total_generalized_cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub components: BTreeMap<String, f64>,
     #[serde(default)]
-    pub geometry: Option<Vec<[f64; 2]>>,
+    pub geometry: Option<Vec<[f64; 3]>>,
     #[serde(default)]
     pub violation_count: usize,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -477,6 +533,12 @@ pub struct BatchAlternativeResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatrixResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub departure_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrive_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
     pub origin_count: usize,
     pub destination_count: usize,
     pub cell_count: usize,
@@ -524,6 +586,12 @@ pub struct AccessibilityCategoryResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AccessibilityResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub departure_time: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub arrive_by: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scenario_id: Option<String>,
     pub origin_count: usize,
     pub category_count: usize,
     pub destination_count: usize,
@@ -539,4 +607,55 @@ pub struct AccessibilityResult {
     pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
     pub warnings: Vec<String>,
+}
+
+#[cfg(test)]
+mod provenance_compatibility_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_batch_results_default_temporal_provenance() {
+        let od: OdResult = serde_json::from_value(serde_json::json!({
+            "pair_count": 0,
+            "succeeded_count": 0,
+            "failed_count": 0,
+            "pairs": []
+        }))
+        .expect("legacy OD result parses");
+        let matrix: MatrixResult = serde_json::from_value(serde_json::json!({
+            "origin_count": 0,
+            "destination_count": 0,
+            "cell_count": 0,
+            "succeeded_count": 0,
+            "failed_count": 0,
+            "cells": []
+        }))
+        .expect("legacy matrix result parses");
+        let accessibility: AccessibilityResult = serde_json::from_value(serde_json::json!({
+            "origin_count": 0,
+            "category_count": 0,
+            "destination_count": 0,
+            "max_travel_time_s": 600.0,
+            "thresholds_s": [300.0],
+            "row_count": 0,
+            "succeeded_count": 0,
+            "failed_count": 0,
+            "rows": []
+        }))
+        .expect("legacy accessibility result parses");
+
+        for value in [
+            od.departure_time,
+            od.arrive_by,
+            od.scenario_id,
+            matrix.departure_time,
+            matrix.arrive_by,
+            matrix.scenario_id,
+            accessibility.departure_time,
+            accessibility.arrive_by,
+            accessibility.scenario_id,
+        ] {
+            assert!(value.is_none());
+        }
+    }
 }

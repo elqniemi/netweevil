@@ -14,8 +14,8 @@ use netweevil_query::{
 use serde::Serialize;
 
 pub use output::{
-    write_matrix_result, write_od_result, write_route_batch_result, write_route_result,
-    write_service_area_result,
+    write_betweenness_result, write_matrix_result, write_od_result, write_route_batch_result,
+    write_route_result, write_service_area_result, write_service_area_sequence_result,
 };
 
 pub use netweevil_manifest::{
@@ -216,7 +216,11 @@ pub fn load_run_result_summary(manifest: &RunManifest) -> Result<Option<RunResul
                 warnings: service_area.warnings,
             })
         }
-        RunKind::Experiment | RunKind::Simulation => return Ok(None),
+        RunKind::Betweenness
+        | RunKind::ServiceAreaSequence
+        | RunKind::ScenarioBatch
+        | RunKind::Experiment
+        | RunKind::Simulation => return Ok(None),
     };
     Ok(Some(summary))
 }
@@ -864,6 +868,7 @@ mod tests {
             profile_id: "car_research_v1".to_string(),
             compiled_profile_bundle_id: Some("metric-groningen-abc".to_string()),
             request_source: "examples/requests/route.json".to_string(),
+            effective_request: None,
             result_path: Some(".netweevil/runs/run-123-result.json".to_string()),
             report_path: None,
             software: SoftwareInfo {

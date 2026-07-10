@@ -1,0 +1,6 @@
+id: generic_asset_failure
+features:
+  # Demo source feature id from the example mapping. Replace it with an id
+  # present in the imported dataset.
+  - source_feature_id: 900002
+    force_closed: true

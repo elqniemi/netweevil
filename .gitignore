@@ -70,6 +70,7 @@ __pycache__/
 *.pyo
 *.pyd
 .venv/
+.venv_maps/
 venv/
 .mypy_cache/
 .pytest_cache/

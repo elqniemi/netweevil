@@ -1,0 +1,76 @@
+{
+  "sequence_id": "hk_example_ten_am_escalator_flip",
+  "request": {
+    "analysis_id": "hk_example_mid_levels_temporal_isochrone",
+    "origins": [
+      {
+        "id": "illustrative_mid_levels_origin",
+        "lon": 114.1517,
+        "lat": 22.2839,
+        "z": 34.0
+      }
+    ],
+    "thresholds": [
+      {
+        "id": "five_minutes",
+        "limit": 300.0,
+        "metric": "travel_time_s"
+      },
+      {
+        "id": "ten_minutes",
+        "limit": 600.0,
+        "metric": "travel_time_s"
+      },
+      {
+        "id": "fifteen_minutes",
+        "limit": 900.0,
+        "metric": "travel_time_s"
+      },
+      {
+        "id": "twenty_minutes",
+        "limit": 1200.0,
+        "metric": "travel_time_s"
+      }
+    ],
+    "snap": {
+      "max_distance_m": 300.0,
+      "z_window_m": 5.0,
+      "attribute_filters": {
+        "indoor_location": "outdoor"
+      }
+    },
+    "connectivity": {
+      "disconnected": "strict"
+    },
+    "fallback": {
+      "allow_reverse_oneway": false,
+      "allow_illegal_turn": false,
+      "ignore_turn_restrictions": false,
+      "allow_uturn_where_normally_forbidden": false
+    },
+    "output_mode": "both",
+    "band_mode": "cumulative",
+    "boundary_mode": "overlap",
+    "multi_origin_mode": "merge",
+    "polygon": {
+      "hull_aggressiveness": 1.0,
+      "simplification_tolerance_m": 10.0
+    },
+    "returns": {
+      "geometry": true,
+      "attributes": true,
+      "per_threshold_summary": true,
+      "diagnostics": true,
+      "segments": true
+    },
+    "scenario": "examples/scenarios/hong_kong_central_escalator_example.yml",
+    "holiday_calendar": "examples/temporal/example_holidays.yml",
+    "overlay": [
+      "examples/temporal/shade_fraction.csv"
+    ],
+    "max_labels_per_state": 24
+  },
+  "start_time": "2026-07-10T09:40:00+08:00",
+  "end_time": "2026-07-10T10:20:00+08:00",
+  "step_s": 300
+}

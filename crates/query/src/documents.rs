@@ -57,6 +57,44 @@ pub fn load_service_area_request(path: impl AsRef<Path>) -> Result<ServiceAreaRe
     validate_service_area_request(request)
 }
 
+pub fn load_service_area_sequence_request(
+    path: impl AsRef<Path>,
+) -> Result<ServiceAreaSequenceRequest> {
+    let path = path.as_ref();
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("reading service-area sequence request {}", path.display()))?;
+    let request: ServiceAreaSequenceRequest = match path.extension().and_then(|ext| ext.to_str()) {
+        Some("json") => {
+            serde_json::from_str(&raw).context("parsing JSON service-area sequence request")?
+        }
+        Some("yaml") | Some("yml") => {
+            serde_yaml::from_str(&raw).context("parsing YAML service-area sequence request")?
+        }
+        other => bail!(
+            "unsupported service-area sequence extension {:?}; use .json, .yml, or .yaml",
+            other
+        ),
+    };
+    request.expanded_departure_times()?;
+    Ok(request)
+}
+
+pub fn load_betweenness_request(path: impl AsRef<Path>) -> Result<BetweennessRequest> {
+    let path = path.as_ref();
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("reading betweenness request {}", path.display()))?;
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("json") => serde_json::from_str(&raw).context("parsing JSON betweenness request"),
+        Some("yaml") | Some("yml") => {
+            serde_yaml::from_str(&raw).context("parsing YAML betweenness request")
+        }
+        other => bail!(
+            "unsupported betweenness request extension {:?}; use .json, .yml, or .yaml",
+            other
+        ),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OdPair {
     pub pair_id: String,
@@ -91,6 +129,8 @@ pub struct OdPairsDocument {
     pub returns: ReturnConfig,
     #[serde(default)]
     pub alternatives: AlternativeRouteOptions,
+    #[serde(default, flatten)]
+    pub temporal: TemporalRequestOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +147,8 @@ pub struct PointSetDocument {
     pub returns: ReturnConfig,
     #[serde(default)]
     pub alternatives: AlternativeRouteOptions,
+    #[serde(default, flatten)]
+    pub temporal: TemporalRequestOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -191,6 +233,8 @@ fn load_od_pairs_csv(raw: &str) -> Result<OdPairsDocument> {
         &header,
         &["target_y", "target_lat", "destination_y", "destination_lat"],
     )?;
+    let source_z_index = optional_header_index(&header, &["source_z", "origin_z"]);
+    let target_z_index = optional_header_index(&header, &["target_z", "destination_z"]);
 
     let mut pairs = Vec::new();
     for (row_number, row) in rows.enumerate() {
@@ -206,11 +250,13 @@ fn load_od_pairs_csv(raw: &str) -> Result<OdPairsDocument> {
                 id: format!("{pair_id}:source"),
                 lon: source_x,
                 lat: source_y,
+                z: parse_optional_csv_f64(&row, source_z_index, row_number + 2, "source_z")?,
             },
             destination: LabeledPoint {
                 id: format!("{pair_id}:target"),
                 lon: target_x,
                 lat: target_y,
+                z: parse_optional_csv_f64(&row, target_z_index, row_number + 2, "target_z")?,
             },
         });
     }
@@ -222,6 +268,7 @@ fn load_od_pairs_csv(raw: &str) -> Result<OdPairsDocument> {
         fallback: FallbackPolicy::default(),
         returns: ReturnConfig::default(),
         alternatives: AlternativeRouteOptions::default(),
+        temporal: TemporalRequestOptions::default(),
     })
 }
 
@@ -233,6 +280,7 @@ fn load_point_set_csv(raw: &str) -> Result<PointSetDocument> {
     let id_index = header_index(&header, &["id"])?;
     let x_index = header_index(&header, &["x", "lon", "longitude"])?;
     let y_index = header_index(&header, &["y", "lat", "latitude"])?;
+    let z_index = optional_header_index(&header, &["z", "elevation", "elevation_m"]);
 
     let mut points = Vec::new();
     for (row_number, row) in rows.enumerate() {
@@ -240,6 +288,7 @@ fn load_point_set_csv(raw: &str) -> Result<PointSetDocument> {
             id: csv_field(&row, id_index, row_number + 2, "id")?.to_string(),
             lon: parse_csv_f64(&row, x_index, row_number + 2, "x")?,
             lat: parse_csv_f64(&row, y_index, row_number + 2, "y")?,
+            z: parse_optional_csv_f64(&row, z_index, row_number + 2, "z")?,
         });
     }
 
@@ -250,6 +299,7 @@ fn load_point_set_csv(raw: &str) -> Result<PointSetDocument> {
         fallback: FallbackPolicy::default(),
         returns: ReturnConfig::default(),
         alternatives: AlternativeRouteOptions::default(),
+        temporal: TemporalRequestOptions::default(),
     })
 }
 
@@ -267,6 +317,14 @@ fn header_index(header: &[String], accepted: &[&str]) -> Result<usize> {
                 accepted.join(", ")
             )
         })
+}
+
+fn optional_header_index(header: &[String], accepted: &[&str]) -> Option<usize> {
+    header.iter().position(|value| {
+        accepted
+            .iter()
+            .any(|candidate| value.eq_ignore_ascii_case(candidate))
+    })
 }
 
 fn csv_field<'a>(
@@ -294,6 +352,26 @@ fn parse_csv_f64(
         .with_context(|| {
             format!("CSV row {row_number} has an invalid float in column '{column_name}'")
         })
+}
+
+fn parse_optional_csv_f64(
+    row: &[String],
+    index: Option<usize>,
+    row_number: usize,
+    column_name: &str,
+) -> Result<Option<f64>> {
+    let Some(index) = index else {
+        return Ok(None);
+    };
+    let Some(value) = row.get(index).map(|value| value.trim()) else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+    value.parse::<f64>().map(Some).with_context(|| {
+        format!("CSV row {row_number} has an invalid float in column '{column_name}'")
+    })
 }
 
 fn csv_rows(raw: &str) -> impl Iterator<Item = Vec<String>> + '_ {
@@ -339,6 +417,7 @@ fn parse_structured_point_set(parsed: PointSetFile) -> PointSetDocument {
             fallback: FallbackPolicy::default(),
             returns: ReturnConfig::default(),
             alternatives: AlternativeRouteOptions::default(),
+            temporal: TemporalRequestOptions::default(),
         },
     }
 }
@@ -353,6 +432,7 @@ fn parse_structured_od_pairs(parsed: OdPairsFile) -> OdPairsDocument {
             fallback: FallbackPolicy::default(),
             returns: ReturnConfig::default(),
             alternatives: AlternativeRouteOptions::default(),
+            temporal: TemporalRequestOptions::default(),
         },
     }
 }

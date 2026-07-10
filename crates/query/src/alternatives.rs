@@ -345,6 +345,10 @@ fn route_segments_for_path(
                 length_m: (edge.length_m as f64 * factor).round() as u32,
                 travel_time_s: metric.travel_time_s.unwrap_or_default() * factor,
                 generalized_cost: metric.generalized_cost.unwrap_or_default() * factor,
+                components: static_edge_components(metrics, edge_index, factor),
+                waiting_time_s: 0.0,
+                entry_time: None,
+                exit_time: None,
                 road_class: edge.road_class,
                 surface: edge.surface,
                 name: edge

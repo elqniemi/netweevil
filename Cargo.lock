@@ -1197,12 +1197,17 @@ dependencies = [
  "netweevil-core",
  "netweevil-manifest",
  "netweevil-persist",
+ "netweevil-profile",
+ "netweevil-query",
+ "netweevil-transit",
  "osmpbfreader",
  "parquet",
  "rayon",
+ "rusqlite",
  "rustc-hash",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sha2",
 ]
 
@@ -1215,6 +1220,7 @@ dependencies = [
  "netweevil-profile",
  "netweevil-query",
  "serde",
+ "serde_json",
  "time",
  "uuid",
 ]
@@ -1253,13 +1259,18 @@ name = "netweevil-query"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arrow-array",
+ "arrow-json",
+ "csv",
  "netweevil-core",
  "netweevil-profile",
+ "parquet",
  "rayon",
  "rustc-hash",
  "serde",
  "serde_json",
  "serde_yaml",
+ "time",
  "toml",
  "tracing",
 ]

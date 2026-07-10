@@ -109,6 +109,27 @@ impl GeoPackageWriter {
         geometry_type_name: &str,
         extent: Option<Extent>,
     ) -> Result<()> {
+        self.create_feature_table_with_z(table_name, columns, geometry_type_name, extent, false)
+    }
+
+    pub(super) fn create_feature_table_3d(
+        &mut self,
+        table_name: &str,
+        columns: &[(&str, &str)],
+        geometry_type_name: &str,
+        extent: Option<Extent>,
+    ) -> Result<()> {
+        self.create_feature_table_with_z(table_name, columns, geometry_type_name, extent, true)
+    }
+
+    fn create_feature_table_with_z(
+        &mut self,
+        table_name: &str,
+        columns: &[(&str, &str)],
+        geometry_type_name: &str,
+        extent: Option<Extent>,
+        has_z: bool,
+    ) -> Result<()> {
         let mut sql = format!("CREATE TABLE {table_name} (id INTEGER PRIMARY KEY AUTOINCREMENT");
         for (name, definition) in columns {
             sql.push_str(&format!(", {name} {definition}"));
@@ -131,8 +152,8 @@ impl GeoPackageWriter {
         self.connection.execute(
             "INSERT INTO gpkg_geometry_columns
              (table_name, column_name, geometry_type_name, srs_id, z, m)
-             VALUES (?1, 'geom', ?2, ?3, 0, 0)",
-            params![table_name, geometry_type_name, EPSG_4326],
+             VALUES (?1, 'geom', ?2, ?3, ?4, 0)",
+            params![table_name, geometry_type_name, EPSG_4326, has_z as i32],
         )?;
         Ok(())
     }
@@ -157,20 +178,20 @@ impl GeoPackageWriter {
         Ok(())
     }
 
-    pub(super) fn insert_feature(
+    pub(super) fn insert_feature_3d(
         &mut self,
         table_name: &str,
         fields: &[(&str, SqlValue)],
-        coords: &[[f64; 2]],
+        coords: &[[f64; 3]],
     ) -> Result<()> {
         let mut field_names = fields.iter().map(|(name, _)| *name).collect::<Vec<_>>();
         field_names.push("geom");
-        let mut sql = format!(
+        let sql = format!(
             "INSERT INTO {table_name} ({}) VALUES ({})",
             field_names.join(", "),
             vec!["?"; field_names.len()].join(", ")
         );
-        let geometry = gpkg_linestring(coords);
+        let geometry = gpkg_linestring_z(coords);
         let mut statement = self.connection.prepare(&sql)?;
         let mut values = fields
             .iter()
@@ -178,7 +199,6 @@ impl GeoPackageWriter {
             .collect::<Vec<_>>();
         values.push(rusqlite::types::Value::Blob(geometry));
         statement.execute(rusqlite::params_from_iter(values))?;
-        sql.clear();
         Ok(())
     }
 
@@ -265,9 +285,8 @@ impl SqlValue {
     }
 }
 
-fn gpkg_linestring(coords: &[[f64; 2]]) -> Vec<u8> {
-    let coords = coerce_linestring_coords(coords);
-    gpkg_wkb(&wkb_linestring(&coords))
+fn gpkg_linestring_z(coords: &[[f64; 3]]) -> Vec<u8> {
+    gpkg_wkb(&wkb_linestring_z(&coerce_linestring_coords_z(coords)))
 }
 
 fn gpkg_wkb(wkb: &[u8]) -> Vec<u8> {
@@ -280,26 +299,29 @@ fn gpkg_wkb(wkb: &[u8]) -> Vec<u8> {
     binary
 }
 
-pub(super) fn wkb_linestring(coords: &[[f64; 2]]) -> Vec<u8> {
-    let coords = coerce_linestring_coords(coords);
-    let mut binary = Vec::with_capacity(1 + 4 + 4 + coords.len() * 16);
+/// ISO WKB `LineString Z` (type code 1002), as required by GeoPackage for
+/// XYZ coordinates.
+pub(super) fn wkb_linestring_z(coords: &[[f64; 3]]) -> Vec<u8> {
+    let coords = coerce_linestring_coords_z(coords);
+    let mut binary = Vec::with_capacity(1 + 4 + 4 + coords.len() * 24);
     binary.push(1);
-    binary.extend_from_slice(&2_u32.to_le_bytes());
+    binary.extend_from_slice(&1002_u32.to_le_bytes());
     binary.extend_from_slice(&(coords.len() as u32).to_le_bytes());
-    for [x, y] in coords {
+    for [x, y, z] in coords {
         binary.extend_from_slice(&x.to_le_bytes());
         binary.extend_from_slice(&y.to_le_bytes());
+        binary.extend_from_slice(&z.to_le_bytes());
     }
     binary
 }
 
-pub(super) fn wkb_multilinestring(lines: &[Vec<[f64; 2]>]) -> Vec<u8> {
+pub(super) fn wkb_multilinestring_z(lines: &[Vec<[f64; 3]>]) -> Vec<u8> {
     let mut binary = Vec::new();
     binary.push(1);
-    binary.extend_from_slice(&5_u32.to_le_bytes());
+    binary.extend_from_slice(&1005_u32.to_le_bytes());
     binary.extend_from_slice(&(lines.len() as u32).to_le_bytes());
     for line in lines {
-        binary.extend_from_slice(&wkb_linestring(line));
+        binary.extend_from_slice(&wkb_linestring_z(line));
     }
     binary
 }
@@ -328,4 +350,56 @@ pub(super) fn wkb_multipolygon(polygons: &[Vec<Vec<[f64; 2]>>]) -> Vec<u8> {
         binary.extend_from_slice(&wkb_polygon(polygon));
     }
     binary
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GeoPackageWriter, wkb_linestring_z};
+    use rusqlite::Connection;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn writes_iso_linestring_z_wkb() {
+        let bytes = wkb_linestring_z(&[[114.1, 22.3, 12.5], [114.2, 22.4, 18.0]]);
+        assert_eq!(bytes[0], 1);
+        assert_eq!(u32::from_le_bytes(bytes[1..5].try_into().unwrap()), 1002);
+        assert_eq!(u32::from_le_bytes(bytes[5..9].try_into().unwrap()), 2);
+        assert_eq!(bytes.len(), 9 + 2 * 24);
+    }
+
+    #[test]
+    fn registers_three_dimensional_feature_tables() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("netweevil-gpkg-z-{unique}.gpkg"));
+        let mut writer = GeoPackageWriter::create(&path).expect("GeoPackage created");
+        writer
+            .create_feature_table_3d("routes", &[], "LINESTRING", None)
+            .expect("3D table created");
+        writer
+            .insert_feature_3d("routes", &[], &[[114.1, 22.3, 4.0], [114.2, 22.4, 8.0]])
+            .expect("3D feature inserted");
+        drop(writer);
+
+        let connection = Connection::open(&path).expect("GeoPackage opens");
+        let z: i64 = connection
+            .query_row(
+                "SELECT z FROM gpkg_geometry_columns WHERE table_name = 'routes'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("z metadata present");
+        assert_eq!(z, 1);
+        let geometry: Vec<u8> = connection
+            .query_row("SELECT geom FROM routes", [], |row| row.get(0))
+            .expect("geometry present");
+        assert_eq!(
+            u32::from_le_bytes(geometry[9..13].try_into().unwrap()),
+            1002
+        );
+        fs::remove_file(path).expect("temporary GeoPackage removed");
+    }
 }

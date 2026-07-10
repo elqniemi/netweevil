@@ -3,19 +3,26 @@ name=netweevil
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99.0
 supportsQt6=True
-description=Run netweevil API route, transit, OD, matrix, service-area, and agent-based traffic simulation analyses with live playback, congestion layers, and grouped output layers directly in QGIS 3 and QGIS 4.
-version=1.1.0
+description=Run static and time-dependent netweevil routing, transit, service-area, batch, and simulation analyses with grouped 3D and temporal outputs in QGIS 3 and QGIS 4.
+version=1.2.0
 icon=logo.svg
 author=Elmeri Niemi
 email=elmeri.niemi@gmail.com
-about=Connects QGIS directly to the netweevil HTTP API, discovers loaded datasets, profiles, and transit feeds, submits route/transit/OD/matrix/service-area JSON requests with advanced analysis controls, runs multi-mode agent-based traffic simulations with mid-run control, animated playback, congestion and busy-segment layers, and loads grouped spatial outputs from API JSON or GeoJSON responses. Works on QGIS 3.28+ (Qt 5) and QGIS 4 (Qt 6).
+about=Connects QGIS directly to the netweevil HTTP API, discovers loaded datasets, profiles, and transit feeds, submits route/transit/OD/matrix/service-area JSON requests with advanced analysis controls, supports time-dependent street routing with scenario, holiday-calendar, and continuous-overlay files, runs multi-mode agent-based traffic simulations, and loads grouped 3D and temporal outputs from API JSON or GeoJSON responses. Works on QGIS 3.28+ (Qt 5) and QGIS 4 (Qt 6).
 category=Vector
 hasProcessingProvider=no
-tags=routing,network analysis,accessibility,service area,transit,gtfs,simulation,osm
+tags=routing,network analysis,accessibility,service area,transit,gtfs,simulation,temporal,3d,osm
 homepage=https://github.com/elqniemi/netweevil
 tracker=https://github.com/elqniemi/netweevil/issues
 repository=https://github.com/elqniemi/netweevil
 changelog=
+  1.2.0
+  - Street route and service-area controls for departure datetime, scenario
+    overlays, holiday calendars, and CSV/Parquet continuous temporal overlays
+  - Temporal service-area and simulation layers are configured automatically
+    from departure/frame datetime fields for the QGIS Temporal Controller
+  - 3D route and segment coordinates retain their Z ordinate when split and
+    loaded; vertical segments are kept distinct
   1.1.0
   - Transit first/last-mile modes: routes and transit service areas can reach
     transit by walking, cycling, or car (walking+transit, cycling+transit,

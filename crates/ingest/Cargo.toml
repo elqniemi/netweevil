@@ -21,10 +21,17 @@ arrow-schema.workspace = true
 osmpbfreader.workspace = true
 parquet.workspace = true
 rayon.workspace = true
+rusqlite.workspace = true
 rustc-hash.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 sha2.workspace = true
+
+[dev-dependencies]
+netweevil-profile = { path = "../profile" }
+netweevil-query = { path = "../query" }
+netweevil-transit = { path = "../transit" }
 
 [lints]
 workspace = true

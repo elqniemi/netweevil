@@ -6,7 +6,10 @@ use time::{OffsetDateTime, PrimitiveDateTime, Time, format_description::well_kno
 
 use crate::gtfs::parse_iso_date;
 use crate::legs::{haversine_m, seconds_for_distance};
-use crate::model::{AccessMode, TransitBundle, TransitConnection, TransitModeOptions, TransitStop};
+use crate::model::{
+    AccessMode, TransitBundle, TransitConnection, TransitModeOptions, TransitStop,
+    TransitStreetPath,
+};
 
 pub(crate) fn build_departures_by_stop(bundle: &TransitBundle) -> Vec<Vec<TransitConnection>> {
     let mut departures_by_stop: Vec<Vec<TransitConnection>> = vec![Vec::new(); bundle.stops.len()];
@@ -52,7 +55,7 @@ impl StopSpatialIndex {
         }
     }
 
-    fn nearby_stops(
+    pub(crate) fn nearby_stops(
         &self,
         bundle: &TransitBundle,
         lon: f64,
@@ -81,6 +84,8 @@ impl StopSpatialIndex {
                         candidates.push(StopCandidate {
                             stop_index,
                             distance_m,
+                            transfer_time_s: None,
+                            network_path: None,
                         });
                     }
                 }
@@ -140,8 +145,9 @@ pub(crate) fn build_transfer_candidates(
 /// decoupled from the street router.
 pub trait StreetTimeEstimator: Send + Sync {
     /// Network travel time in seconds between two points for a street mode,
-    /// or `None` when no engine covers the mode or the pair is unreachable
-    /// (callers fall back to the straight-line estimate).
+    /// or `None` when no engine covers the mode or the pair is unreachable.
+    /// In network street-access mode, `None` makes the candidate unreachable;
+    /// straight-line pricing is used only when explicitly requested.
     fn street_time_s(
         &self,
         mode: AccessMode,
@@ -151,6 +157,51 @@ pub trait StreetTimeEstimator: Send + Sync {
         to_lon: f64,
         to_lat: f64,
     ) -> Option<u32>;
+
+    /// Rich path from an arbitrary origin point to a transit stop. Binding-
+    /// aware hosts override this method. The caller separately consults
+    /// `street_time_s` when this richer method returns `None` for an unbound
+    /// stop, preserving compatibility with coordinate-only estimators. A
+    /// bound stop never falls back to coordinates because that would bypass
+    /// its platform/node feasibility constraint.
+    fn point_to_stop_path(
+        &self,
+        _mode: AccessMode,
+        _from_lon: f64,
+        _from_lat: f64,
+        _stop: &TransitStop,
+    ) -> Option<TransitStreetPath> {
+        None
+    }
+
+    /// Rich path from a bound transit stop to an arbitrary destination point.
+    fn stop_to_point_path(
+        &self,
+        _mode: AccessMode,
+        _stop: &TransitStop,
+        _to_lon: f64,
+        _to_lat: f64,
+    ) -> Option<TransitStreetPath> {
+        None
+    }
+
+    /// Directed path between two transit stops. This is the extension point
+    /// used by transfer-table precomputation. Both stops carry any explicit
+    /// node/edge/3D-coordinate bindings loaded for the feed. The default
+    /// coordinate-only implementation is available only when both stops are
+    /// unbound; binding-aware hosts must override it.
+    fn stop_to_stop_path(
+        &self,
+        mode: AccessMode,
+        from: &TransitStop,
+        to: &TransitStop,
+    ) -> Option<TransitStreetPath> {
+        if from.binding.is_some() || to.binding.is_some() {
+            return None;
+        }
+        self.street_time_s(mode, false, from.lon, from.lat, to.lon, to.lat)
+            .map(TransitStreetPath::time_only)
+    }
 }
 
 pub(crate) struct TransitRuntime<'a> {
@@ -247,19 +298,24 @@ fn parse_naive_datetime(raw: &str) -> Result<OffsetDateTime> {
     Ok(PrimitiveDateTime::new(date, time).assume_utc())
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct StopCandidate {
     pub(crate) stop_index: u32,
     pub(crate) distance_m: f64,
+    /// `Some` for a precomputed network transfer; `None` means derive a
+    /// straight-line walking time from `distance_m` at request time.
+    pub(crate) transfer_time_s: Option<u32>,
+    pub(crate) network_path: Option<TransitStreetPath>,
 }
 
 /// Best street-mode connection between a point and a stop, picked across the
 /// requested access or egress modes.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct StreetCandidate {
     pub(crate) stop_index: u32,
     pub(crate) time_s: u32,
     pub(crate) mode: AccessMode,
+    pub(crate) network_path: Option<TransitStreetPath>,
 }
 
 pub(crate) fn best_street_candidates(
@@ -270,12 +326,11 @@ pub(crate) fn best_street_candidates(
     options: &TransitModeOptions,
     egress: bool,
 ) -> Vec<StreetCandidate> {
-    let network_estimator = matches!(
+    let use_network = matches!(
         options.street_access,
         crate::model::TransitStreetAccessModel::Network
-    )
-    .then_some(runtime.street_estimator)
-    .flatten();
+    );
+    let network_estimator = use_network.then_some(runtime.street_estimator).flatten();
     let mut best = HashMap::<u32, StreetCandidate>::new();
     for &mode in street_modes {
         let max_distance_m = if egress {
@@ -284,29 +339,52 @@ pub(crate) fn best_street_candidates(
             mode.max_access_distance_m(options)
         };
         for candidate in runtime.nearby_access_stops(lon, lat, max_distance_m) {
-            let straight_line_time_s =
-                seconds_for_distance(candidate.distance_m, mode.speed_kph(options));
             // Candidates are pre-filtered by straight-line distance (a lower
-            // bound on network distance); the estimator refines the time.
-            let time_s = network_estimator
-                .and_then(|estimator| {
-                    let stop = &runtime.bundle.stops[candidate.stop_index as usize];
-                    if egress {
-                        estimator.street_time_s(mode, true, stop.lon, stop.lat, lon, lat)
-                    } else {
-                        estimator.street_time_s(mode, false, lon, lat, stop.lon, stop.lat)
-                    }
-                })
-                .unwrap_or(straight_line_time_s);
+            // bound on network distance). In network mode, absence of a
+            // routed path/time means the pair is unreachable; it must not
+            // silently turn into a geometric teleport.
+            let (time_s, network_path) = if use_network {
+                let Some(estimator) = network_estimator else {
+                    continue;
+                };
+                let stop = &runtime.bundle.stops[candidate.stop_index as usize];
+                let network_path = if egress {
+                    estimator.stop_to_point_path(mode, stop, lon, lat)
+                } else {
+                    estimator.point_to_stop_path(mode, lon, lat, stop)
+                };
+                let network_time_s = network_path
+                    .as_ref()
+                    .map(|path| path.travel_time_s)
+                    .or_else(|| {
+                        stop.binding.is_none().then(|| {
+                            if egress {
+                                estimator.street_time_s(mode, true, stop.lon, stop.lat, lon, lat)
+                            } else {
+                                estimator.street_time_s(mode, false, lon, lat, stop.lon, stop.lat)
+                            }
+                        })?
+                    });
+                let Some(network_time_s) = network_time_s else {
+                    continue;
+                };
+                (network_time_s, network_path)
+            } else {
+                (
+                    seconds_for_distance(candidate.distance_m, mode.speed_kph(options)),
+                    None,
+                )
+            };
             let entry = StreetCandidate {
                 stop_index: candidate.stop_index,
                 time_s,
                 mode,
+                network_path,
             };
             best.entry(candidate.stop_index)
                 .and_modify(|known| {
                     if time_s < known.time_s {
-                        *known = entry;
+                        *known = entry.clone();
                     }
                 })
                 .or_insert(entry);
@@ -371,11 +449,13 @@ pub(crate) enum PrevStep {
         /// network); leg reconstruction must reuse it, not re-derive it.
         time_s: u32,
         mode: AccessMode,
+        network_path: Option<TransitStreetPath>,
     },
     Transfer {
         previous: StateKey,
-        distance_m: f64,
         departure_s: u32,
+        travel_time_s: u32,
+        network_path: Option<TransitStreetPath>,
     },
     Transit {
         previous: StateKey,

@@ -1,0 +1,14 @@
+{
+  "route_id": "groningen_alternatives",
+  "origin": { "id": "west", "lon": 6.5150, "lat": 53.2200 },
+  "destination": { "id": "east", "lon": 6.6300, "lat": 53.2150 },
+  "snap": { "max_distance_m": 600.0 },
+  "returns": { "geometry": "full", "segment_rows": true },
+  "alternatives": {
+    "max_routes": 4,
+    "max_cost_ratio": 1.9,
+    "max_extra_time_s": 480.0,
+    "min_jaccard_distance": 0.35,
+    "max_search_attempts": 48
+  }
+}

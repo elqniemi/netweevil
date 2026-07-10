@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use netweevil_core::{CompiledProfileBundle, DatasetAccelerationBundle, TopologyBundle};
+use netweevil_core::{
+    CompiledProfileBundle, DatasetAccelerationBundle, EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION,
+    TopologyBundle,
+};
 
 use crate::*;
 
@@ -29,7 +32,9 @@ pub(crate) struct RoutingGraph {
     /// plain acceleration weights must never serve failure-mode searches.
     pub(crate) acceleration_includes_failure_penalties: bool,
     pub(crate) automaton: RestrictionAutomaton,
+    pub(crate) reverse_automaton: RestrictionAutomaton,
     pub(crate) virtual_reverse_of: Vec<Option<usize>>,
+    pub(crate) includes_temporal_materialized_directions: bool,
 }
 
 impl RoutingGraph {
@@ -219,6 +224,7 @@ pub(crate) fn build_edge_based_topology_fallback(
 pub(crate) struct RoutingGraphBuildOptions {
     pub(crate) ignore_multi_edge_restriction_sequences: bool,
     pub(crate) search_time_turn_restrictions: bool,
+    pub(crate) include_temporal_materialized_directions: bool,
 }
 
 pub(crate) fn build_routing_graph(
@@ -226,6 +232,23 @@ pub(crate) fn build_routing_graph(
     metrics: &CompiledProfileBundle,
 ) -> Result<RoutingGraph> {
     build_routing_graph_with_options(topology, metrics, RoutingGraphBuildOptions::default())
+}
+
+/// Builds the exact-search graph used when request-owned temporal direction
+/// rules may enable reverse edges that are intentionally absent from the
+/// static graph and its CCH weights.
+pub(crate) fn build_temporal_routing_graph(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+) -> Result<RoutingGraph> {
+    build_routing_graph_with_options(
+        topology,
+        metrics,
+        RoutingGraphBuildOptions {
+            include_temporal_materialized_directions: true,
+            ..RoutingGraphBuildOptions::default()
+        },
+    )
 }
 
 pub(crate) fn build_routing_graph_with_options(
@@ -264,6 +287,11 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
     for edge_index in 0..edge_count {
         let edge = topology.routing_edge(edge_index);
         let metric = &metrics.edge_metrics[edge_index];
+        if edge.flags & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION != 0
+            && !options.include_temporal_materialized_directions
+        {
+            continue;
+        }
         if let (Some(cost), Some(_)) = (metric.generalized_cost, metric.travel_time_s) {
             edge_costs[edge_index] = cost;
             in_degree[edge.to.0 as usize] += 1;
@@ -456,6 +484,11 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
         }
     }
 
+    let reverse_restricted_sequences = restricted_sequences
+        .iter()
+        .map(|sequence| sequence.iter().rev().copied().collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+
     Ok(RoutingGraph {
         first_out,
         edge_order,
@@ -468,10 +501,21 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
         reverse_transition_first_out,
         reverse_transition_edges,
         reverse_transition_costs,
-        acceleration: build_acceleration_graph(metrics, acceleration, edge_count)?,
+        // Temporal-inclusive graphs intentionally run exact searches: their
+        // scenario-only directions are absent from the static CCH weights.
+        // Do not invoke the acceleration loader here, because a missing
+        // dataset bundle is expected and warning that the user must re-import
+        // would be misleading.
+        acceleration: if options.include_temporal_materialized_directions {
+            None
+        } else {
+            build_acceleration_graph(metrics, acceleration, edge_count)?
+        },
         acceleration_includes_failure_penalties: false,
         automaton: RestrictionAutomaton::build(&restricted_sequences),
+        reverse_automaton: RestrictionAutomaton::build(&reverse_restricted_sequences),
         virtual_reverse_of: vec![None; edge_count],
+        includes_temporal_materialized_directions: options.include_temporal_materialized_directions,
     })
 }
 

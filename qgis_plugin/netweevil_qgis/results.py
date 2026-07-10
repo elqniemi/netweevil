@@ -1,7 +1,9 @@
 """Response-to-layer conversion, styling, grouping, and diagnostics logging."""
 
 import json
+import math
 import re
+from itertools import islice
 from pathlib import Path
 
 from qgis.core import (
@@ -17,9 +19,23 @@ from qgis.core import (
     QgsWkbTypes,
 )
 
-from .compat import MSG_WARNING, MSG_CRITICAL, GEOM_POINT, GEOM_LINE
+from .compat import (
+    GEOM_LINE,
+    GEOM_POINT,
+    MSG_CRITICAL,
+    MSG_WARNING,
+    vector_temporal_mode_instant,
+)
 
 SERVICE_AREA_DIRECT_LOAD_BYTES = 50 * 1024 * 1024
+TEMPORAL_FIELD_CANDIDATES = (
+    "departure_time",
+    "frame_datetime",
+    "datetime",
+    "frame_time",
+    "timestamp",
+    "entry_time",
+)
 
 
 class ResultsMixin:
@@ -173,6 +189,11 @@ class ResultsMixin:
                     "network_distance_m": summary.get("network_distance_m"),
                     "network_travel_time_s": summary.get("network_travel_time_s"),
                     "network_generalized_cost": summary.get("network_generalized_cost"),
+                    "components_json": self.json_text(summary.get("components") or {}),
+                    "waiting_time_s": summary.get("waiting_time_s"),
+                    "departure_time": summary.get("departure_time"),
+                    "arrival_time": summary.get("arrival_time"),
+                    "scenario_id": summary.get("scenario_id"),
                     "illegal_movement_penalty_s": summary.get("illegal_movement_penalty_s"),
                     "illegal_movement_penalty_cost": summary.get("illegal_movement_penalty_cost"),
                     "violation_count": summary.get("violation_count"),
@@ -209,6 +230,13 @@ class ResultsMixin:
                         "total_distance_m": alt_summary.get("total_distance_m"),
                         "total_travel_time_s": alt_summary.get("total_travel_time_s"),
                         "total_generalized_cost": alt_summary.get("total_generalized_cost"),
+                        "components_json": self.json_text(
+                            alt_summary.get("components") or {}
+                        ),
+                        "waiting_time_s": alt_summary.get("waiting_time_s"),
+                        "departure_time": alt_summary.get("departure_time"),
+                        "arrival_time": alt_summary.get("arrival_time"),
+                        "scenario_id": alt_summary.get("scenario_id"),
                         "violation_count": alt_summary.get("violation_count"),
                         "violation_types_json": self.json_text(
                             alt_summary.get("violation_types") or []
@@ -252,9 +280,11 @@ class ResultsMixin:
                 ratio = (distance_m - start_distance) / (end_distance - start_distance)
                 start = coordinates[index]
                 end = coordinates[index + 1]
+                dimensions = min(len(start), len(end))
                 return [
-                    start[0] + (end[0] - start[0]) * ratio,
-                    start[1] + (end[1] - start[1]) * ratio,
+                    start[dimension]
+                    + (end[dimension] - start[dimension]) * ratio
+                    for dimension in range(dimensions)
                 ]
         return list(coordinates[-1])
 
@@ -264,9 +294,9 @@ class ResultsMixin:
         deduped = [coordinates[0]]
         for coordinate in coordinates[1:]:
             previous = deduped[-1]
-            if (
-                abs(previous[0] - coordinate[0]) > 1.0e-12
-                or abs(previous[1] - coordinate[1]) > 1.0e-12
+            if len(previous) != len(coordinate) or any(
+                abs(previous[index] - coordinate[index]) > 1.0e-12
+                for index in range(min(len(previous), len(coordinate)))
             ):
                 deduped.append(coordinate)
         return deduped
@@ -291,10 +321,23 @@ class ResultsMixin:
         distance = self.route_distance_area()
         cumulative_lengths = [0.0]
         for start, end in zip(coordinates, coordinates[1:]):
-            segment_distance = distance.measureLine(
+            horizontal_distance = distance.measureLine(
                 QgsPointXY(start[0], start[1]),
                 QgsPointXY(end[0], end[1]),
             )
+            segment_distance = horizontal_distance
+            if len(start) >= 3 and len(end) >= 3:
+                try:
+                    start_z = float(start[2])
+                    end_z = float(end[2])
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    if math.isfinite(start_z) and math.isfinite(end_z):
+                        segment_distance = math.hypot(
+                            horizontal_distance,
+                            end_z - start_z,
+                        )
             cumulative_lengths.append(cumulative_lengths[-1] + max(segment_distance, 0.0))
         total_geometry_length = cumulative_lengths[-1]
         total_segment_length = sum(max(float(length), 0.0) for length in segment_lengths_m)
@@ -350,6 +393,12 @@ class ResultsMixin:
                         "length_m": segment.get("length_m"),
                         "travel_time_s": segment.get("travel_time_s"),
                         "generalized_cost": segment.get("generalized_cost"),
+                        "components_json": self.json_text(
+                            segment.get("components") or {}
+                        ),
+                        "waiting_time_s": segment.get("waiting_time_s"),
+                        "entry_time": segment.get("entry_time"),
+                        "exit_time": segment.get("exit_time"),
                         "road_class": segment.get("road_class"),
                         "surface": segment.get("surface"),
                         "name": segment.get("name"),
@@ -758,6 +807,7 @@ class ResultsMixin:
                 continue
             if color is not None:
                 self.apply_route_line_style(layer, color, width, line_style)
+            self.configure_temporal_layer(layer)
             QgsProject.instance().addMapLayer(layer, False)
             group.addLayer(layer)
             loaded_layers.append(layer)
@@ -863,6 +913,21 @@ class ResultsMixin:
                             "total_generalized_cost": result.get("summary", {}).get(
                                 "total_generalized_cost"
                             ),
+                            "components_json": self.json_text(
+                                result.get("summary", {}).get("components") or {}
+                            ),
+                            "waiting_time_s": result.get("summary", {}).get(
+                                "waiting_time_s"
+                            ),
+                            "departure_time": result.get("summary", {}).get(
+                                "departure_time"
+                            ),
+                            "arrival_time": result.get("summary", {}).get(
+                                "arrival_time"
+                            ),
+                            "scenario_id": result.get("summary", {}).get(
+                                "scenario_id"
+                            ),
                             "segment_count": result.get("summary", {}).get("segment_count"),
                             "origin_point_id": result.get("origin", {}).get("point_id"),
                             "destination_point_id": result.get("destination", {}).get("point_id"),
@@ -910,6 +975,23 @@ class ResultsMixin:
                                 "reachable_network_length_m"
                             ),
                             "reachable_edge_count": feature.get("reachable_edge_count"),
+                            "departure_time": feature.get("departure_time")
+                            or result.get("departure_time"),
+                            "scenario_id": feature.get("scenario_id")
+                            or result.get("scenario_id"),
+                            "edge_id": feature.get("edge_id"),
+                            "edge_index": feature.get("edge_index"),
+                            "source_way_id": feature.get("source_way_id"),
+                            "from_node_id": feature.get("from_node_id"),
+                            "to_node_id": feature.get("to_node_id"),
+                            "start_fraction": feature.get("start_fraction"),
+                            "end_fraction": feature.get("end_fraction"),
+                            "start_cost": feature.get("start_cost"),
+                            "end_cost": feature.get("end_cost"),
+                            "segment_distance_m": feature.get("segment_distance_m"),
+                            "segment_travel_time_s": feature.get(
+                                "segment_travel_time_s"
+                            ),
                         },
                     }
                 )
@@ -927,6 +1009,8 @@ class ResultsMixin:
                     "skipped_origin_count": result.get("skipped_origin_count"),
                     "fallback_origin_count": result.get("fallback_origin_count"),
                     "threshold_count": result.get("threshold_count"),
+                    "departure_time": result.get("departure_time"),
+                    "scenario_id": result.get("scenario_id"),
                     "warnings": result.get("warnings") or [],
                 },
             }
@@ -960,6 +1044,7 @@ class ResultsMixin:
                         "total_distance_m": item.get("total_distance_m"),
                         "total_travel_time_s": item.get("total_travel_time_s"),
                         "total_generalized_cost": item.get("total_generalized_cost"),
+                        "components_json": self.json_text(item.get("components") or {}),
                         "error": item.get("error"),
                     },
                 }
@@ -988,8 +1073,52 @@ class ResultsMixin:
             return None
         QgsProject.instance().addMapLayer(layer, False)
         QgsProject.instance().layerTreeRoot().insertLayer(0, layer)
+        self.configure_temporal_layer(layer)
         self.log("Loaded layer {}".format(output_path))
         return layer
+
+    def configure_temporal_layer(self, layer, preferred_field=None):
+        """Enable feature-instant animation when an output exposes frame time."""
+        if layer is None or not hasattr(layer, "temporalProperties"):
+            return False
+        field_names = {field.name() for field in layer.fields()}
+        candidates = []
+        if preferred_field:
+            candidates.append(preferred_field)
+        candidates.extend(TEMPORAL_FIELD_CANDIDATES)
+        sample_features = list(islice(layer.getFeatures(), 32))
+        temporal_field = None
+        for candidate in candidates:
+            if candidate not in field_names:
+                continue
+            for feature in sample_features:
+                value = feature[candidate]
+                if value is None or str(value).strip().upper() in ("", "NULL"):
+                    continue
+                temporal_field = candidate
+                break
+            if temporal_field is not None:
+                break
+        if temporal_field is None:
+            return False
+        try:
+            properties = layer.temporalProperties()
+            properties.setMode(vector_temporal_mode_instant())
+            properties.setStartField(temporal_field)
+            properties.setIsActive(True)
+        except Exception as exc:
+            self.log(
+                "Loaded '{}', but automatic temporal setup on '{}' failed: {}".format(
+                    layer.name(), temporal_field, exc
+                ),
+                MSG_WARNING,
+            )
+            return False
+        self.log(
+            "Temporal layer '{}' uses '{}' as its frame instant; enable the QGIS "
+            "Temporal Controller to animate it.".format(layer.name(), temporal_field)
+        )
+        return True
 
     def load_service_area_layers(self, geojson, layer_name):
         features = geojson.get("features") or []
@@ -1027,6 +1156,7 @@ class ResultsMixin:
                 self.log("Failed to load layer {}".format(temp_path), MSG_WARNING)
                 continue
             self.apply_service_area_style(layer, grouped[key], geometry_type, threshold_index)
+            self.configure_temporal_layer(layer, "departure_time")
             QgsProject.instance().addMapLayer(layer, False)
             group.addLayer(layer)
             loaded_layers.append(layer)

@@ -35,6 +35,7 @@ from .runs_tab import RunsTabMixin
 from .service_area_tab import ServiceAreaTabMixin
 from .settings_io import SettingsIoMixin
 from .simulation_tab import SimulationTabMixin
+from .temporal_controls import TemporalControlsMixin
 from .transit_tab import TransitTabMixin
 
 
@@ -42,6 +43,7 @@ class NetweevilDock(
     ConnectionMixin,
     MapPointsMixin,
     AdvancedControlsMixin,
+    TemporalControlsMixin,
     RouteTabMixin,
     TransitTabMixin,
     BatchTabMixin,

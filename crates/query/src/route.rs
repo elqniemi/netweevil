@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Result, bail};
 use netweevil_core::{CompiledEdgeMetric, CompiledProfileBundle, DirectedEdge, TopologyBundle};
@@ -333,6 +333,11 @@ fn build_failure_mode_bundle(
                 to: edge.from,
                 source_way_id: edge.source_way_id,
                 length_m: edge.length_m,
+                ascent_m: edge.descent_m,
+                descent_m: edge.ascent_m,
+                feature_row: edge.feature_row,
+                source_direction: -edge.source_direction,
+                temporal_rule_id: edge.temporal_rule_id,
                 duration_s: edge.duration_s,
                 road_class: edge.road_class,
                 surface: edge.surface,
@@ -381,23 +386,51 @@ pub(crate) fn execute_route_with_graph(
     request: &RouteRequest,
     edge_names: Option<&[String]>,
 ) -> Result<RouteResult> {
+    let temporal_routing_graph;
+    let routing_graph = if request.temporal.is_temporal()
+        && !routing_graph.includes_temporal_materialized_directions
+    {
+        temporal_routing_graph = build_temporal_routing_graph(topology, metrics)?;
+        &temporal_routing_graph
+    } else {
+        routing_graph
+    };
+    if !request.temporal.constraints.is_empty() || request.temporal.pareto.is_some() {
+        return execute_component_route_with_graph(
+            topology,
+            metrics,
+            routing_graph,
+            request,
+            edge_names,
+        );
+    }
+    if request.temporal.is_temporal() {
+        let context = crate::temporal::context_from_request(&request.temporal)?;
+        return crate::temporal::execute_temporal_route_with_graph(
+            topology,
+            metrics,
+            routing_graph,
+            request,
+            &context,
+            edge_names,
+        );
+    }
     let search_distance_m = request
         .connectivity
         .max_hop_distance_m
         .unwrap_or(request.snap.max_distance_m)
         .max(request.snap.max_distance_m);
-    let origin_candidates = snap_candidates(
-        topology,
-        routing_graph,
-        &request.origin,
-        search_distance_m,
-        true,
-    )?;
-    let destination_candidates = snap_candidates(
+    let search_snap = SnapOptions {
+        max_distance_m: search_distance_m,
+        ..request.snap.clone()
+    };
+    let origin_candidates =
+        snap_candidates_with_options(topology, routing_graph, &request.origin, &search_snap, true)?;
+    let destination_candidates = snap_candidates_with_options(
         topology,
         routing_graph,
         &request.destination,
-        search_distance_m,
+        &search_snap,
         false,
     )?;
     execute_route_with_candidates(
@@ -559,6 +592,10 @@ pub(crate) fn execute_route_with_candidates(
                         length_m: (edge.length_m as f64 * factor).round() as u32,
                         travel_time_s: metric.travel_time_s.unwrap_or_default() * factor,
                         generalized_cost: metric.generalized_cost.unwrap_or_default() * factor,
+                        components: static_edge_components(metrics, edge_index, factor),
+                        waiting_time_s: 0.0,
+                        entry_time: None,
+                        exit_time: None,
                         road_class: edge.road_class,
                         surface: edge.surface,
                         name: edge
@@ -764,6 +801,31 @@ pub(crate) fn merge_warnings(mut warnings: Vec<String>, extra: Vec<String>) -> V
     warnings
 }
 
+pub(crate) fn static_edge_components(
+    metrics: &CompiledProfileBundle,
+    edge_index: usize,
+    factor: f64,
+) -> BTreeMap<String, f64> {
+    metrics
+        .components
+        .iter()
+        .filter_map(|component| {
+            let overlay_multiplier =
+                if component.overlay_name.is_some() && !component.invert_overlay {
+                    0.0
+                } else {
+                    1.0
+                };
+            component.edge_values.get(edge_index).map(|value| {
+                (
+                    component.name.clone(),
+                    f64::from(*value) * factor * overlay_multiplier,
+                )
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn analyze_route_path(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
@@ -776,6 +838,11 @@ pub(crate) fn analyze_route_path(
     let mut network_distance_m = 0_u64;
     let mut network_travel_time_s = 0.0;
     let mut network_generalized_cost = 0.0;
+    let mut component_totals = metrics
+        .components
+        .iter()
+        .map(|component| (component.name.clone(), 0.0))
+        .collect::<std::collections::BTreeMap<_, _>>();
     let mut penalty_s = 0.0;
     let mut penalty_cost = 0.0;
     let mut previous_edge_index = None;
@@ -793,6 +860,18 @@ pub(crate) fn analyze_route_path(
         network_distance_m += (edge.length_m as f64 * factor).round() as u64;
         network_travel_time_s += metric.travel_time_s.unwrap_or_default() * factor;
         network_generalized_cost += metric.generalized_cost.unwrap_or_default() * factor;
+        for component in &metrics.components {
+            let overlay_multiplier =
+                if component.overlay_name.is_some() && !component.invert_overlay {
+                    0.0
+                } else {
+                    1.0
+                };
+            if let Some(value) = component.edge_values.get(edge_index) {
+                *component_totals.entry(component.name.clone()).or_default() +=
+                    f64::from(*value) * factor * overlay_multiplier;
+            }
+        }
 
         if let Some(original_edge_index) = routing_graph
             .virtual_reverse_of
@@ -966,6 +1045,11 @@ pub(crate) fn analyze_route_path(
             network_distance_m,
             network_travel_time_s,
             network_generalized_cost,
+            components: component_totals,
+            waiting_time_s: 0.0,
+            departure_time: None,
+            arrival_time: None,
+            scenario_id: None,
             illegal_movement_penalty_s: penalty_s,
             illegal_movement_penalty_cost: penalty_cost,
             violation_count: violations.len(),
@@ -1012,6 +1096,11 @@ pub(crate) fn ignored_unreachable_route_result(
             network_distance_m: 0,
             network_travel_time_s: 0.0,
             network_generalized_cost: 0.0,
+            components: BTreeMap::new(),
+            waiting_time_s: 0.0,
+            departure_time: None,
+            arrival_time: None,
+            scenario_id: None,
             illegal_movement_penalty_s: 0.0,
             illegal_movement_penalty_cost: 0.0,
             violation_count: 0,
@@ -1072,8 +1161,8 @@ pub(crate) fn hop_info_for_pair(
             endpoint: HopEndpoint::Origin,
             distance_m: origin.snap_distance_m,
             geometry: vec![
-                [origin.requested_lon, origin.requested_lat],
-                [origin.snapped_lon, origin.snapped_lat],
+                [origin.requested_lon, origin.requested_lat, origin.snapped_z],
+                [origin.snapped_lon, origin.snapped_lat, origin.snapped_z],
             ],
         });
         diagnostics.push(AnalysisDiagnostic {
@@ -1098,8 +1187,16 @@ pub(crate) fn hop_info_for_pair(
             endpoint: HopEndpoint::Destination,
             distance_m: destination.snap_distance_m,
             geometry: vec![
-                [destination.snapped_lon, destination.snapped_lat],
-                [destination.requested_lon, destination.requested_lat],
+                [
+                    destination.snapped_lon,
+                    destination.snapped_lat,
+                    destination.snapped_z,
+                ],
+                [
+                    destination.requested_lon,
+                    destination.requested_lat,
+                    destination.snapped_z,
+                ],
             ],
         });
         diagnostics.push(AnalysisDiagnostic {

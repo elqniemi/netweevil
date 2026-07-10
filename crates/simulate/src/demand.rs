@@ -243,11 +243,13 @@ fn dispatch_request(
             id: "origin".to_string(),
             lon: origin[0],
             lat: origin[1],
+            z: None,
         },
         destination: LabeledPoint {
             id: "destination".to_string(),
             lon: destination[0],
             lat: destination[1],
+            z: None,
         },
         snap: SnapOptions::default(),
         connectivity: Default::default(),
@@ -270,6 +272,7 @@ fn dispatch_request(
         } else {
             AlternativeRouteOptions::default()
         },
+        temporal: Default::default(),
     }
 }
 
@@ -440,6 +443,7 @@ pub(crate) fn route_drafts(
                     id: if is_origin { "origin" } else { "destination" }.to_string(),
                     lon: point[0],
                     lat: point[1],
+                    z: None,
                 };
                 let snapped = engine
                     .snap_route_candidates(&labeled, search_distance_m, is_origin)

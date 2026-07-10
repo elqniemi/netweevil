@@ -1,0 +1,8 @@
+{
+  "route_id": "groningen_route_compare",
+  "origin": { "id": "centre", "lon": 6.5665, "lat": 53.2194 },
+  "destination": { "id": "haren_south", "lon": 6.6055, "lat": 53.1620 },
+  "snap": { "max_distance_m": 500.0 },
+  "returns": { "geometry": "full", "segment_rows": true },
+  "alternatives": { "max_routes": 3, "max_cost_ratio": 1.6, "min_jaccard_distance": 0.25 }
+}

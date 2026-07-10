@@ -50,6 +50,7 @@ impl PreparedRoutingEngine {
                     RoutingGraphBuildOptions {
                         ignore_multi_edge_restriction_sequences: true,
                         search_time_turn_restrictions: false,
+                        include_temporal_materialized_directions: false,
                     },
                 )?)
             } else {
@@ -126,17 +127,36 @@ impl PreparedRoutingEngine {
         )
     }
 
+    /// Snap with the full 3D and semantic-filter contract used by route
+    /// requests. This is useful for transit stop bindings and other callers
+    /// that need reusable candidates without executing a route.
+    pub fn snap_route_candidates_with_options(
+        &self,
+        point: &LabeledPoint,
+        options: &SnapOptions,
+        is_origin: bool,
+    ) -> Result<Vec<SnappedPoint>> {
+        snap_candidates_with_options(
+            self.topology.as_ref(),
+            &self.default_routing_graph,
+            point,
+            options,
+            is_origin,
+        )
+    }
+
     /// Execute a route between pre-snapped candidate sets produced by
-    /// [`Self::snap_route_candidates`]. Requests with failure modes fall
-    /// back to the full snap-and-route path so degraded-graph semantics
-    /// stay identical to [`Self::execute_route`].
+    /// [`Self::snap_route_candidates`]. Requests with failure modes or exact
+    /// temporal/component labels fall back to the full snap-and-route path so
+    /// their runtime graph and label semantics stay identical to
+    /// [`Self::execute_route`].
     pub fn execute_route_between_candidates(
         &self,
         request: &RouteRequest,
         origin_candidates: &[SnappedPoint],
         destination_candidates: &[SnappedPoint],
     ) -> Result<RouteResult> {
-        if has_failure_modes(&request.fallback) {
+        if has_failure_modes(&request.fallback) || request.temporal.requires_exact_labels() {
             return self.execute_route(request);
         }
         execute_route_with_candidates(
@@ -297,6 +317,41 @@ impl PreparedRoutingEngine {
         self.execute_service_area_with_mode(request, EngineMode::Auto)
     }
 
+    pub fn execute_service_area_sequence(
+        &self,
+        request: &ServiceAreaSequenceRequest,
+    ) -> Result<ServiceAreaSequenceResult> {
+        execute_service_area_sequence_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            request,
+        )
+    }
+
+    pub fn execute_betweenness(&self, request: &BetweennessRequest) -> Result<BetweennessResult> {
+        execute_betweenness_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            request,
+            false,
+        )
+    }
+
+    pub(crate) fn execute_betweenness_with_pair_results(
+        &self,
+        request: &BetweennessRequest,
+    ) -> Result<BetweennessResult> {
+        execute_betweenness_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            request,
+            true,
+        )
+    }
+
     pub fn execute_service_area_with_mode(
         &self,
         request: &ServiceAreaRequest,
@@ -313,6 +368,26 @@ impl PreparedRoutingEngine {
 
     pub fn effective_engine_description(&self, mode: EngineMode) -> EffectiveEngineDescription {
         self.routing_graph_for_mode(mode).1
+    }
+
+    /// Describe the engine that a particular route request will actually
+    /// execute. Temporal and component-label requests intentionally bypass
+    /// static CCH acceleration even when it is available on the prepared
+    /// graph.
+    pub fn effective_route_engine_description(
+        &self,
+        request: &RouteRequest,
+        mode: EngineMode,
+    ) -> EffectiveEngineDescription {
+        let mut description = self.effective_engine_description(mode);
+        if !request.temporal.constraints.is_empty() || request.temporal.pareto.is_some() {
+            description.route_engine = "component_nondominated_label_setting";
+            description.acceleration = "spatial_index+edge_phantoms+turn_automaton";
+        } else if request.temporal.is_temporal() {
+            description.route_engine = "time_dependent_nondominated_label_setting";
+            description.acceleration = "spatial_index+edge_phantoms+turn_automaton";
+        }
+        description
     }
 
     fn routing_graph_for_mode(
@@ -432,17 +507,25 @@ pub(crate) fn build_route_geometry(
     edge_indexes: &[usize],
     origin: &SnappedPoint,
     destination: &SnappedPoint,
-) -> Vec<[f64; 2]> {
+) -> Vec<[f64; 3]> {
     let mut geometry = Vec::with_capacity(edge_indexes.len() + 2);
-    geometry.push([origin.snapped_lon, origin.snapped_lat]);
+    geometry.push([origin.snapped_lon, origin.snapped_lat, origin.snapped_z]);
     for &edge_index in edge_indexes {
         let node = &topology.nodes[topology.routing_edge(edge_index).to.0 as usize];
-        geometry.push([node.lon, node.lat]);
+        geometry.push([
+            node.lon,
+            node.lat,
+            if node.z.is_finite() { node.z } else { 0.0 },
+        ]);
     }
     if geometry.last().is_none_or(|point| {
         point[0] != destination.snapped_lon || point[1] != destination.snapped_lat
     }) {
-        geometry.push([destination.snapped_lon, destination.snapped_lat]);
+        geometry.push([
+            destination.snapped_lon,
+            destination.snapped_lat,
+            destination.snapped_z,
+        ]);
     }
     geometry
 }

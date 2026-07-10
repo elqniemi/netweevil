@@ -1,9 +1,19 @@
 use serde::{Deserialize, Serialize};
 
+use crate::{FeatureAttributeTable, FeatureAttributeValueRef, NO_FEATURE_ROW, TemporalRuleSet};
+
 pub const EDGE_FLAG_ROUNDABOUT: u32 = 1 << 0;
 pub const EDGE_FLAG_TARGET_TRAFFIC_SIGNAL: u32 = 1 << 1;
 pub const EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY: u32 = 1 << 2;
 pub const EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW: u32 = 1 << 3;
+/// The edge exists so a request-owned temporal direction override can enable
+/// it, but it is not part of the source feature's static travel direction.
+/// Static routing and static CCH customization must keep it gated.
+pub const EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION: u32 = 1 << 4;
+
+fn unknown_elevation() -> f64 {
+    f64::NAN
+}
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
@@ -154,7 +164,27 @@ pub struct DirectedEdge {
     pub from: NodeId,
     pub to: NodeId,
     pub source_way_id: i64,
+    /// Three-dimensional segment length in metres, rounded to the nearest
+    /// whole metre. When either endpoint has unknown elevation this is the
+    /// horizontal great-circle length.
     pub length_m: u32,
+    /// Positive elevation gain in this travel direction.
+    #[serde(default)]
+    pub ascent_m: f32,
+    /// Positive elevation loss in this travel direction.
+    #[serde(default)]
+    pub descent_m: f32,
+    /// Row in the source feature attribute table shared by every segment
+    /// derived from the same source feature.
+    #[serde(default = "no_feature_row")]
+    pub feature_row: u32,
+    /// `1` follows source geometry, `-1` traverses it backwards, and `0`
+    /// denotes legacy/unknown orientation.
+    #[serde(default)]
+    pub source_direction: i8,
+    /// Optional edge schedule imported from the mapped source feature.
+    #[serde(default)]
+    pub temporal_rule_id: Option<u32>,
     #[serde(default)]
     pub duration_s: Option<f64>,
     pub road_class: RoadClass,
@@ -178,14 +208,58 @@ pub struct DirectedEdge {
     pub flags: u32,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RoutingEdge {
     pub edge_id: EdgeId,
     pub from: NodeId,
     pub to: NodeId,
     pub source_way_id: i64,
+    /// Three-dimensional segment length in metres, rounded to the nearest
+    /// whole metre. When either endpoint has unknown elevation this is the
+    /// horizontal great-circle length.
     pub length_m: u32,
+    /// Positive elevation gain in this travel direction.
+    #[serde(default)]
+    pub ascent_m: f32,
+    /// Positive elevation loss in this travel direction.
+    #[serde(default)]
+    pub descent_m: f32,
+    #[serde(default = "no_feature_row")]
+    pub feature_row: u32,
+    #[serde(default)]
+    pub source_direction: i8,
+    #[serde(default)]
+    pub temporal_rule_id: Option<u32>,
     pub flags: u32,
+}
+
+impl Default for RoutingEdge {
+    fn default() -> Self {
+        Self {
+            edge_id: EdgeId::default(),
+            from: NodeId::default(),
+            to: NodeId::default(),
+            source_way_id: 0,
+            length_m: 0,
+            ascent_m: 0.0,
+            descent_m: 0.0,
+            feature_row: NO_FEATURE_ROW,
+            source_direction: 0,
+            temporal_rule_id: None,
+            flags: 0,
+        }
+    }
+}
+
+fn no_feature_row() -> u32 {
+    NO_FEATURE_ROW
+}
+
+impl RoutingEdge {
+    /// Signed elevation change in this travel direction.
+    pub fn elevation_delta_m(self) -> f32 {
+        self.ascent_m - self.descent_m
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -236,6 +310,11 @@ impl TopologyEdgeLayers {
                 to: edge.to,
                 source_way_id: edge.source_way_id,
                 length_m: edge.length_m,
+                ascent_m: edge.ascent_m,
+                descent_m: edge.descent_m,
+                feature_row: edge.feature_row,
+                source_direction: edge.source_direction,
+                temporal_rule_id: edge.temporal_rule_id,
                 flags: edge.flags,
             });
             profile.push(EdgeProfileAttributes {
@@ -331,6 +410,17 @@ pub struct TopologyNode {
     pub node_id: NodeId,
     pub lon: f64,
     pub lat: f64,
+    /// Elevation in the source dataset's vertical datum, in metres.
+    /// `NaN` means that the elevation is unknown.
+    #[serde(default = "unknown_elevation")]
+    pub z: f64,
+}
+
+impl TopologyNode {
+    /// Returns the elevation when the source supplied a finite value.
+    pub fn elevation_m(&self) -> Option<f64> {
+        self.z.is_finite().then_some(self.z)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -390,6 +480,14 @@ pub struct TopologyBundle {
     pub node_component_ids: Vec<u32>,
     #[serde(default)]
     pub edge_component_ids: Vec<u32>,
+    /// Losslessly retained, typed source attributes. Routing edges refer to
+    /// rows by `feature_row` so segmented features do not duplicate values.
+    #[serde(default)]
+    pub feature_attributes: FeatureAttributeTable,
+    /// Dataset-owned opening/direction/speed schedules referenced by routing
+    /// edges. Runtime scenario overlays remain request-owned.
+    #[serde(default)]
+    pub temporal_rule_sets: Vec<TemporalRuleSet>,
 }
 
 impl TopologyBundle {
@@ -399,6 +497,18 @@ impl TopologyBundle {
         } else {
             self.edges.len()
         }
+    }
+
+    /// Returns rise over horizontal run for an edge whose endpoint
+    /// elevations are both known. Vertical or zero-length segments have no
+    /// finite gradient and return `None`.
+    pub fn edge_gradient(&self, edge_index: usize) -> Option<f64> {
+        let edge = self.routing_edge(edge_index);
+        let from = self.nodes.get(edge.from.0 as usize)?;
+        let to = self.nodes.get(edge.to.0 as usize)?;
+        let delta_z = to.elevation_m()? - from.elevation_m()?;
+        let horizontal_m = crate::geo::haversine_meters(from.lon, from.lat, to.lon, to.lat);
+        (horizontal_m > f64::EPSILON).then_some(delta_z / horizontal_m)
     }
 
     pub fn routing_edge(&self, edge_index: usize) -> RoutingEdge {
@@ -412,6 +522,11 @@ impl TopologyBundle {
                 to: edge.to,
                 source_way_id: edge.source_way_id,
                 length_m: edge.length_m,
+                ascent_m: edge.ascent_m,
+                descent_m: edge.descent_m,
+                feature_row: edge.feature_row,
+                source_direction: edge.source_direction,
+                temporal_rule_id: edge.temporal_rule_id,
                 flags: edge.flags,
             }
         }
@@ -462,6 +577,11 @@ impl TopologyBundle {
                 to: routing.to,
                 source_way_id: routing.source_way_id,
                 length_m: routing.length_m,
+                ascent_m: routing.ascent_m,
+                descent_m: routing.descent_m,
+                feature_row: routing.feature_row,
+                source_direction: routing.source_direction,
+                temporal_rule_id: routing.temporal_rule_id,
                 duration_s: profile.duration_s,
                 road_class: profile.road_class,
                 surface: profile.surface,
@@ -489,6 +609,11 @@ impl TopologyBundle {
                 to: edge.to,
                 source_way_id: edge.source_way_id,
                 length_m: edge.length_m,
+                ascent_m: edge.ascent_m,
+                descent_m: edge.descent_m,
+                feature_row: edge.feature_row,
+                source_direction: edge.source_direction,
+                temporal_rule_id: edge.temporal_rule_id,
                 flags: edge.flags,
             });
             self.edge_layers.profile.push(EdgeProfileAttributes {
@@ -517,6 +642,22 @@ impl TopologyBundle {
         if let Some(edge) = self.edge_layers.presentation.get_mut(edge_index) {
             edge.name_index = name_index;
         }
+    }
+
+    pub fn edge_attribute_value(
+        &self,
+        edge_index: usize,
+        name: &str,
+    ) -> Option<FeatureAttributeValueRef<'_>> {
+        let row = self.routing_edge(edge_index).feature_row;
+        (row != NO_FEATURE_ROW)
+            .then(|| self.feature_attributes.value(row, name))
+            .flatten()
+    }
+
+    pub fn edge_attribute_matches(&self, edge_index: usize, name: &str, expected: &str) -> bool {
+        let row = self.routing_edge(edge_index).feature_row;
+        row != NO_FEATURE_ROW && self.feature_attributes.value_matches(row, name, expected)
     }
 
     pub fn set_edge_flags(&mut self, edge_index: usize, flags: u32) {

@@ -9,8 +9,8 @@ use time::Date;
 use zip::ZipArchive;
 
 use crate::model::{
-    TransitBundle, TransitConnection, TransitImportOptions, TransitImportSummary, TransitMode,
-    TransitRoute, TransitShape, TransitStop, TransitTrip,
+    TRANSIT_BUNDLE_SCHEMA_VERSION, TransitBundle, TransitConnection, TransitImportOptions,
+    TransitImportSummary, TransitMode, TransitRoute, TransitShape, TransitStop, TransitTrip,
 };
 
 pub fn import_gtfs(path: impl AsRef<Path>, options: TransitImportOptions) -> Result<TransitBundle> {
@@ -22,6 +22,13 @@ pub fn import_gtfs(path: impl AsRef<Path>, options: TransitImportOptions) -> Res
 
 pub fn write_transit_bundle(path: impl AsRef<Path>, bundle: &TransitBundle) -> Result<()> {
     let path = path.as_ref();
+    if bundle.schema_version != TRANSIT_BUNDLE_SCHEMA_VERSION {
+        bail!(
+            "cannot write transit bundle schema version {}; expected {}",
+            bundle.schema_version,
+            TRANSIT_BUNDLE_SCHEMA_VERSION
+        );
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("creating directory {}", parent.display()))?;
@@ -34,8 +41,17 @@ pub fn write_transit_bundle(path: impl AsRef<Path>, bundle: &TransitBundle) -> R
 pub fn read_transit_bundle(path: impl AsRef<Path>) -> Result<TransitBundle> {
     let path = path.as_ref();
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    bincode::deserialize(&bytes)
-        .with_context(|| format!("parsing transit bundle {}", path.display()))
+    let bundle: TransitBundle = bincode::deserialize(&bytes)
+        .with_context(|| format!("parsing transit bundle {}", path.display()))?;
+    if bundle.schema_version != TRANSIT_BUNDLE_SCHEMA_VERSION {
+        bail!(
+            "transit bundle {} has schema version {}; expected {}; re-import the GTFS feed",
+            path.display(),
+            bundle.schema_version,
+            TRANSIT_BUNDLE_SCHEMA_VERSION
+        );
+    }
+    Ok(bundle)
 }
 
 pub fn transit_import_summary(bundle: &TransitBundle) -> TransitImportSummary {
@@ -139,7 +155,10 @@ impl GtfsFiles {
     }
 
     pub(crate) fn insert(&mut self, name: &'static str, text: String) {
-        self.inner.insert(name, text);
+        // UTF-8 BOMs are common in feeds exported by spreadsheet/database
+        // tooling. Strip only a leading marker; embedded U+FEFF is data.
+        self.inner
+            .insert(name, text.trim_start_matches('\u{feff}').to_string());
     }
 
     fn get(&self, name: &'static str) -> Option<&str> {
@@ -186,10 +205,11 @@ pub(crate) fn build_bundle_from_files(
     )?;
 
     Ok(TransitBundle {
-        schema_version: 2,
+        schema_version: TRANSIT_BUNDLE_SCHEMA_VERSION,
         feed_id: options.name,
         source_label: options.source_label,
         source_sha256,
+        stop_binding_sha256: None,
         service_dates: service_dates
             .iter()
             .map(|date| date.to_string())
@@ -234,6 +254,7 @@ fn parse_stops(raw: &str) -> Result<(Vec<TransitStop>, HashMap<String, u32>)> {
                 .to_string(),
             lon,
             lat,
+            binding: None,
         };
         stop_by_id.insert(stop_id, stops.len() as u32);
         stops.push(stop);
@@ -401,8 +422,8 @@ fn parse_connections(
                 .unwrap_or_default()
                 .parse::<u32>()
                 .unwrap_or_default(),
-            arrival_s: parse_gtfs_time(record.get(arrival_time).unwrap_or_default())?,
-            departure_s: parse_gtfs_time(record.get(departure_time).unwrap_or_default())?,
+            arrival_s: parse_optional_gtfs_time(record.get(arrival_time).unwrap_or_default())?,
+            departure_s: parse_optional_gtfs_time(record.get(departure_time).unwrap_or_default())?,
         };
         stop_times_by_trip.entry(trip_index).or_default().push(row);
     }
@@ -414,23 +435,29 @@ fn parse_connections(
     for (trip_index, mut rows) in stop_times_by_trip {
         rows.sort_by_key(|row| row.sequence);
         let trip = &trips[trip_index as usize];
+        interpolate_stop_times(&trip.trip_id, &mut rows)?;
         let date_offsets = retained_gtfs_trips
             .get(&trip.trip_id)
             .cloned()
             .unwrap_or_default();
-        let anchor_departure_s = rows.first().map(|row| row.departure_s).unwrap_or_default();
+        let anchor_departure_s = rows
+            .first()
+            .and_then(|row| row.departure_s)
+            .unwrap_or_default();
         let windows = frequency_windows.get(&trip_index);
         for pair in rows.windows(2) {
             let from = pair[0];
             let to = pair[1];
-            if to.arrival_s < from.departure_s {
+            let from_departure_s = from.departure_s.unwrap_or_default();
+            let to_arrival_s = to.arrival_s.unwrap_or_default();
+            if to_arrival_s < from_departure_s {
                 continue;
             }
             for date_offset in &date_offsets {
                 let base = date_offset.saturating_mul(86_400);
                 if let Some(windows) = windows {
-                    let from_offset_s = from.departure_s.saturating_sub(anchor_departure_s);
-                    let to_offset_s = to.arrival_s.saturating_sub(anchor_departure_s);
+                    let from_offset_s = from_departure_s.saturating_sub(anchor_departure_s);
+                    let to_offset_s = to_arrival_s.saturating_sub(anchor_departure_s);
                     for window in windows {
                         let mut trip_start_s = window.start_s;
                         while trip_start_s < window.end_s {
@@ -455,8 +482,8 @@ fn parse_connections(
                         route_index: trip.route_index,
                         from_stop_index: from.stop_index,
                         to_stop_index: to.stop_index,
-                        departure_s: base.saturating_add(from.departure_s),
-                        arrival_s: base.saturating_add(to.arrival_s),
+                        departure_s: base.saturating_add(from_departure_s),
+                        arrival_s: base.saturating_add(to_arrival_s),
                     });
                 }
             }
@@ -470,8 +497,63 @@ fn parse_connections(
 struct StopTimeRow {
     stop_index: u32,
     sequence: u32,
-    arrival_s: u32,
-    departure_s: u32,
+    arrival_s: Option<u32>,
+    departure_s: Option<u32>,
+}
+
+/// Fills GTFS non-timepoint rows by linearly interpolating between successive
+/// timed rows. The HK feed has explicit first/last stop times and blank
+/// interiors; multiple timing points and endpoint dwell times are retained.
+fn interpolate_stop_times(trip_id: &str, rows: &mut [StopTimeRow]) -> Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    for row in rows.iter_mut() {
+        match (row.arrival_s, row.departure_s) {
+            (Some(arrival), None) => row.departure_s = Some(arrival),
+            (None, Some(departure)) => row.arrival_s = Some(departure),
+            _ => {}
+        }
+    }
+    let anchors = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| row.arrival_s.zip(row.departure_s).map(|_| index))
+        .collect::<Vec<_>>();
+    if anchors.first().copied() != Some(0) || anchors.last().copied() != Some(rows.len() - 1) {
+        bail!(
+            "GTFS trip '{trip_id}' has blank stop times outside timed endpoints; only intermediate blanks can be interpolated"
+        );
+    }
+
+    for anchors in anchors.windows(2) {
+        let from_index = anchors[0];
+        let to_index = anchors[1];
+        if to_index == from_index + 1 {
+            continue;
+        }
+        let from_s = rows[from_index].departure_s.unwrap_or_default();
+        let to_s = rows[to_index].arrival_s.unwrap_or_default();
+        if to_s < from_s {
+            bail!(
+                "GTFS trip '{trip_id}' has decreasing timing points at stop_sequence {} and {}",
+                rows[from_index].sequence,
+                rows[to_index].sequence
+            );
+        }
+        let steps = (to_index - from_index) as u64;
+        let duration = (to_s - from_s) as u64;
+        for (relative_index, row) in rows[(from_index + 1)..to_index].iter_mut().enumerate() {
+            let step = relative_index as u64 + 1;
+            // Round to the nearest second while preserving monotonicity.
+            let interpolated = from_s as u64 + (duration * step + steps / 2) / steps;
+            let interpolated = u32::try_from(interpolated)
+                .with_context(|| format!("interpolating GTFS trip '{trip_id}'"))?;
+            row.arrival_s = Some(interpolated);
+            row.departure_s = Some(interpolated);
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -532,6 +614,10 @@ fn active_services_by_date(
     }
     if let Some(raw) = files.get("calendar_dates.txt") {
         parse_calendar_dates(raw, service_dates, &mut service_dates_by_id)?;
+    }
+    for dates in service_dates_by_id.values_mut() {
+        dates.sort_unstable();
+        dates.dedup();
     }
     service_dates_by_id.retain(|_, dates| !dates.is_empty());
     Ok(service_dates_by_id)
@@ -649,6 +735,7 @@ fn parse_gtfs_date(raw: &str) -> Result<Date> {
 }
 
 fn parse_gtfs_time(raw: &str) -> Result<u32> {
+    let raw = raw.trim();
     let parts = raw
         .split(':')
         .map(str::parse::<u32>)
@@ -656,7 +743,18 @@ fn parse_gtfs_time(raw: &str) -> Result<u32> {
     if parts.len() != 3 || parts[1] >= 60 || parts[2] >= 60 {
         bail!("invalid GTFS time '{raw}', expected HH:MM:SS");
     }
-    Ok(parts[0] * 3600 + parts[1] * 60 + parts[2])
+    parts[0]
+        .checked_mul(3600)
+        .and_then(|hours| hours.checked_add(parts[1] * 60 + parts[2]))
+        .ok_or_else(|| anyhow!("GTFS time '{raw}' exceeds the supported range"))
+}
+
+fn parse_optional_gtfs_time(raw: &str) -> Result<Option<u32>> {
+    if raw.trim().is_empty() {
+        Ok(None)
+    } else {
+        parse_gtfs_time(raw).map(Some)
+    }
 }
 
 fn header_index(headers: &csv::StringRecord, name: &str) -> Result<usize> {

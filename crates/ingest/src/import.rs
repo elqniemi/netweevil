@@ -1,6 +1,6 @@
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -24,11 +24,13 @@ pub struct DatasetImportOptions {
     pub source: String,
     /// Source file format; detected from the path when not set.
     pub format: Option<SourceFormat>,
+    /// Required for GeoPackage sources; ignored by other readers.
+    pub mapping: Option<PathBuf>,
 }
 
 /// Infers the source format from the path: a directory or a
-/// `.parquet`/`.geoparquet` file is Overture GeoParquet, anything else is
-/// treated as an OSM PBF extract (the historical default).
+/// `.parquet`/`.geoparquet` file is Overture GeoParquet, `.gpkg` is an OGC
+/// GeoPackage, and anything else is treated as an OSM PBF extract.
 pub fn detect_source_format(source_path: &Path) -> SourceFormat {
     if source_path.is_dir() {
         return SourceFormat::OvertureParquet;
@@ -40,6 +42,7 @@ pub fn detect_source_format(source_path: &Path) -> SourceFormat {
         .as_deref()
     {
         Some("parquet") | Some("geoparquet") => SourceFormat::OvertureParquet,
+        Some("gpkg") => SourceFormat::GeoPackage,
         _ => SourceFormat::OsmPbf,
     }
 }
@@ -90,26 +93,70 @@ pub fn import_dataset_with_progress<F>(
     paths: &WorkspacePaths,
     source_path: impl AsRef<Path>,
     options: DatasetImportOptions,
+    progress: F,
+) -> Result<DatasetManifest>
+where
+    F: FnMut(DatasetImportProgress),
+{
+    import_dataset_sources_with_progress(
+        paths,
+        &[source_path.as_ref().to_path_buf()],
+        options,
+        progress,
+    )
+}
+
+pub fn import_dataset_sources(
+    paths: &WorkspacePaths,
+    source_paths: &[PathBuf],
+    options: DatasetImportOptions,
+) -> Result<DatasetManifest> {
+    import_dataset_sources_with_progress(paths, source_paths, options, |_| {})
+}
+
+pub fn import_dataset_sources_with_progress<F>(
+    paths: &WorkspacePaths,
+    source_paths: &[PathBuf],
+    options: DatasetImportOptions,
     mut progress: F,
 ) -> Result<DatasetManifest>
 where
     F: FnMut(DatasetImportProgress),
 {
-    let source_path = source_path.as_ref();
-    if !source_path.exists() {
-        bail!("dataset source does not exist: {}", source_path.display());
+    if source_paths.is_empty() {
+        bail!("dataset import requires at least one source");
+    }
+    for source_path in source_paths {
+        if !source_path.exists() {
+            bail!("dataset source does not exist: {}", source_path.display());
+        }
     }
     let source_format = options
         .format
-        .unwrap_or_else(|| detect_source_format(source_path));
+        .unwrap_or_else(|| detect_source_format(&source_paths[0]));
+    if source_format != SourceFormat::GeoPackage && source_paths.len() != 1 {
+        bail!("multi-source dataset import is currently supported only for GeoPackage inputs");
+    }
+    if source_paths
+        .iter()
+        .any(|path| detect_source_format(path) != source_format)
+    {
+        bail!("all dataset sources must use the selected source format");
+    }
+    let mapping = match (&options.mapping, source_format) {
+        (Some(path), SourceFormat::GeoPackage) => Some(crate::load_gpkg_mapping(path)?),
+        (None, SourceFormat::GeoPackage) => bail!("GeoPackage import requires `--mapping <path>`"),
+        (Some(_), _) => bail!("an ingest mapping is only valid for GeoPackage sources"),
+        (None, _) => None,
+    };
 
     emit_progress(
         &mut progress,
         DatasetImportStage::HashSource,
         Some(0.0),
-        format!("Hashing source {}", source_path.display()),
+        format!("Hashing {} source(s)", source_paths.len()),
     );
-    let (sha256, size) = sha256_source(source_path, &mut progress)?;
+    let (sha256, size) = sha256_sources(source_paths, &mut progress)?;
     let dataset_id = DatasetId::new(options.name);
     let bundle_id = CacheBundleId::new(format!("topology-{}-{}", dataset_id.0, &sha256[..12]));
     let bundle_path = paths
@@ -125,8 +172,14 @@ where
     let acceleration_bundle_path = paths
         .acceleration_bundles_dir
         .join(format!("{}.bin", acceleration_bundle_id.0));
-    let (bundle, edge_name_bundle, topology_meta) =
-        build_topology_bundle(source_path, size, &sha256, source_format, &mut progress)?;
+    let (bundle, edge_name_bundle, topology_meta) = build_topology_bundle(
+        source_paths,
+        size,
+        &sha256,
+        source_format,
+        mapping.as_ref(),
+        &mut progress,
+    )?;
     let acceleration_bundle =
         build_dataset_acceleration_bundle_with_progress(&bundle, bundle_id.clone(), &mut progress);
     emit_progress(
@@ -160,7 +213,11 @@ where
     let manifest = DatasetManifest {
         dataset_id,
         label: options.source,
-        source_path: source_path.display().to_string(),
+        source_path: source_paths[0].display().to_string(),
+        source_paths: source_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
         source_sha256: sha256,
         source_size_bytes: size,
         source_format,
@@ -209,6 +266,34 @@ where
         ),
     );
     Ok(manifest)
+}
+
+fn sha256_sources<F>(source_paths: &[PathBuf], progress: &mut F) -> Result<(String, u64)>
+where
+    F: FnMut(DatasetImportProgress),
+{
+    if source_paths.len() == 1 {
+        return sha256_source(&source_paths[0], progress);
+    }
+    let mut sources = source_paths.to_vec();
+    sources.sort();
+    let mut aggregate = Sha256::new();
+    let mut total_size = 0_u64;
+    for source in sources {
+        let (digest, size) = sha256_source(&source, progress)?;
+        aggregate.update(source.to_string_lossy().as_bytes());
+        aggregate.update([0]);
+        aggregate.update(digest.as_bytes());
+        aggregate.update([0]);
+        total_size = total_size.saturating_add(size);
+    }
+    emit_progress(
+        progress,
+        DatasetImportStage::HashSource,
+        Some(100.0),
+        "Hashing sources 100%".to_string(),
+    );
+    Ok((hex::encode(aggregate.finalize()), total_size))
 }
 
 /// Hashes the dataset source: a single file directly, or every parquet file

@@ -32,6 +32,10 @@ class SettingsIoMixin:
             "route_surface_time": self.route_surface_time_check.isChecked(),
             "route_penalty_breakdown": self.route_penalty_breakdown_check.isChecked(),
             "route_explain_cost_derivation": self.route_explain_cost_derivation_check.isChecked(),
+            "route_departure_time": self.route_departure_time_edit.text().strip(),
+            "route_scenario": self.route_scenario_edit.text().strip(),
+            "route_holiday_calendar": self.route_holiday_calendar_edit.text().strip(),
+            "route_overlays": self.route_overlays_edit.toPlainText().strip(),
             "origin_id": self.origin_id_edit.text().strip(),
             "origin_lon": self.origin_lon_edit.text().strip(),
             "origin_lat": self.origin_lat_edit.text().strip(),
@@ -104,6 +108,10 @@ class SettingsIoMixin:
             "service_area_hull_aggressiveness": self.service_area_hull_aggressiveness_edit.text().strip(),
             "service_area_simplification": self.service_area_simplification_edit.text().strip(),
             "service_area_origins": self.service_area_origins_edit.toPlainText().strip(),
+            "service_area_departure_time": self.service_area_departure_time_edit.text().strip(),
+            "service_area_scenario": self.service_area_scenario_edit.text().strip(),
+            "service_area_holiday_calendar": self.service_area_holiday_calendar_edit.text().strip(),
+            "service_area_overlays": self.service_area_overlays_edit.toPlainText().strip(),
         }
         for key, value in values.items():
             settings.setValue("{}/{}".format(SETTINGS_PREFIX, key), value)
@@ -194,6 +202,14 @@ class SettingsIoMixin:
         self.route_explain_cost_derivation_check.setChecked(
             self.read_bool_setting("route_explain_cost_derivation", True)
         )
+        self.route_departure_time_edit.setText(
+            self.read_setting("route_departure_time", "")
+        )
+        self.route_scenario_edit.setText(self.read_setting("route_scenario", ""))
+        self.route_holiday_calendar_edit.setText(
+            self.read_setting("route_holiday_calendar", "")
+        )
+        self.route_overlays_edit.setPlainText(self.read_setting("route_overlays", ""))
         self.origin_id_edit.setText(
             self.read_setting("origin_id", self.origin_id_edit.text())
         )
@@ -405,6 +421,18 @@ class SettingsIoMixin:
         )
         self.service_area_origins_edit.setPlainText(
             self.read_setting("service_area_origins", self.service_area_origins_edit.toPlainText())
+        )
+        self.service_area_departure_time_edit.setText(
+            self.read_setting("service_area_departure_time", "")
+        )
+        self.service_area_scenario_edit.setText(
+            self.read_setting("service_area_scenario", "")
+        )
+        self.service_area_holiday_calendar_edit.setText(
+            self.read_setting("service_area_holiday_calendar", "")
+        )
+        self.service_area_overlays_edit.setPlainText(
+            self.read_setting("service_area_overlays", "")
         )
         self.matrix_origins_path_edit.setText(
             self.read_setting("matrix_origins_path", self.matrix_origins_path_edit.text())

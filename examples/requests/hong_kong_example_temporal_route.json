@@ -1,0 +1,35 @@
+{
+  "route_id": "hk_example_temporal_route",
+  "origin": {
+    "id": "illustrative_central_origin",
+    "lon": 114.1548,
+    "lat": 22.2818,
+    "z": 8.0
+  },
+  "destination": {
+    "id": "illustrative_mid_levels_destination",
+    "lon": 114.1517,
+    "lat": 22.2839,
+    "z": 34.0
+  },
+  "snap": {
+    "max_distance_m": 250.0,
+    "z_window_m": 4.0,
+    "attribute_filters": {
+      "indoor_location": "outdoor"
+    }
+  },
+  "departure_time": "2026-07-10T09:55:00+08:00",
+  "scenario": "examples/scenarios/hong_kong_central_escalator_example.yml",
+  "holiday_calendar": "examples/temporal/example_holidays.yml",
+  "overlay": [
+    "examples/temporal/shade_fraction.csv"
+  ],
+  "max_labels_per_state": 24,
+  "returns": {
+    "geometry": "full",
+    "segment_rows": true,
+    "penalty_breakdown": true,
+    "explain_cost_derivation": true
+  }
+}

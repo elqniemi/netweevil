@@ -23,18 +23,21 @@ use anyhow::{Context, Result, bail};
 use bytemuck::Pod;
 use memmap2::Mmap;
 use netweevil_core::{
-    AccessMask, CacheBundleId, CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle,
-    CompiledTurnCostConfig, DatasetAccelerationBundle, EdgeId, EdgeProfileAttributes, HighwayClass,
-    NodeId, RoadClass, RoutingEdge, SmoothnessClass, SurfaceClass, TopologyBundle,
-    TopologyEdgeLayers, TopologyNode, TravelMode,
+    AccessMask, CacheBundleId, CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric,
+    CompiledProfileBundle, CompiledTemporalProfile, CompiledTurnCostConfig,
+    DatasetAccelerationBundle, EdgeId, EdgeProfileAttributes, HighwayClass, NO_FEATURE_ROW, NodeId,
+    RoadClass, RoutingEdge, SmoothnessClass, SurfaceClass, TopologyBundle, TopologyEdgeLayers,
+    TopologyNode, TravelMode,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 const MAGIC_PREFIX: &[u8; 6] = b"NWSECB";
 const MAGIC_LEN: usize = 8;
-/// Version 2 drops the topology `osm_node_id` column; version 1 files are
-/// still read (the column is discarded).
-const CURRENT_MAGIC: &[u8; 8] = b"NWSECB02";
+/// Version 2 dropped the topology `osm_node_id` column. Version 3 adds node
+/// elevation and directional ascent/descent topology columns. Version 4
+/// adds source-feature/orientation/schedule columns plus retained feature
+/// attributes and temporal rule tables. Older files are read with defaults.
+const CURRENT_MAGIC: &[u8; 8] = b"NWSECB04";
 
 pub(crate) fn is_sectioned(bytes: &[u8]) -> bool {
     bytes.len() >= MAGIC_LEN && &bytes[..MAGIC_PREFIX.len()] == MAGIC_PREFIX
@@ -44,6 +47,8 @@ fn format_version(bytes: &[u8]) -> Result<u8> {
     match &bytes[MAGIC_PREFIX.len()..MAGIC_LEN] {
         b"01" => Ok(1),
         b"02" => Ok(2),
+        b"03" => Ok(3),
+        b"04" => Ok(4),
         other => bail!(
             "unsupported sectioned bundle version '{}'",
             String::from_utf8_lossy(other)
@@ -227,6 +232,15 @@ struct CompiledAccelerationHeader {
     algorithm: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct CompiledCostComponentHeader {
+    name: String,
+    weight: f64,
+    scales_with_travel_time: bool,
+    overlay_name: Option<String>,
+    invert_overlay: bool,
+}
+
 pub(crate) fn write_compiled_profile_sectioned(
     path: &Path,
     bundle: &CompiledProfileBundle,
@@ -293,6 +307,23 @@ pub(crate) fn write_compiled_profile_sectioned(
             writer.write_raw(EMPTY_F64)?;
         }
     }
+    writer.write_bincode(&bundle.temporal)?;
+    writer.write_bincode(
+        &bundle
+            .components
+            .iter()
+            .map(|component| CompiledCostComponentHeader {
+                name: component.name.clone(),
+                weight: component.weight,
+                scales_with_travel_time: component.scales_with_travel_time,
+                overlay_name: component.overlay_name.clone(),
+                invert_overlay: component.invert_overlay,
+            })
+            .collect::<Vec<_>>(),
+    )?;
+    for component in &bundle.components {
+        writer.write_raw(&component.edge_values)?;
+    }
     writer.finish()
 }
 
@@ -310,7 +341,7 @@ pub(crate) fn read_compiled_profile_sectioned(bytes: &[u8]) -> Result<CompiledPr
     if edge_ids.len() != travel_times.len() || edge_ids.len() != costs.len() {
         bail!("compiled profile metric sections have inconsistent lengths");
     }
-    let edge_metrics = edge_ids
+    let edge_metrics: Vec<CompiledEdgeMetric> = edge_ids
         .into_iter()
         .zip(travel_times)
         .zip(costs)
@@ -358,6 +389,33 @@ pub(crate) fn read_compiled_profile_sectioned(bytes: &[u8]) -> Result<CompiledPr
             distance_upward_weight,
             distance_downward_weight,
         });
+    let (temporal, components) = if reader.version >= 3 {
+        let temporal = reader.read_bincode()?;
+        let component_headers: Vec<CompiledCostComponentHeader> = reader.read_bincode()?;
+        let mut components = Vec::with_capacity(component_headers.len());
+        for component in component_headers {
+            let edge_values: Vec<f32> = reader.read_raw()?;
+            if edge_values.len() != edge_metrics.len() {
+                bail!(
+                    "compiled profile component '{}' has {} values for {} edge metrics",
+                    component.name,
+                    edge_values.len(),
+                    edge_metrics.len()
+                );
+            }
+            components.push(CompiledCostComponent {
+                name: component.name,
+                weight: component.weight,
+                edge_values,
+                scales_with_travel_time: component.scales_with_travel_time,
+                overlay_name: component.overlay_name,
+                invert_overlay: component.invert_overlay,
+            });
+        }
+        (temporal, components)
+    } else {
+        (CompiledTemporalProfile::default(), Vec::new())
+    };
 
     Ok(CompiledProfileBundle {
         schema_version: header.schema_version,
@@ -365,6 +423,8 @@ pub(crate) fn read_compiled_profile_sectioned(bytes: &[u8]) -> Result<CompiledPr
         profile_hash: header.profile_hash,
         mode: header.mode,
         turn_costs: header.turn_costs,
+        components,
+        temporal,
         source_topology_bundle_id: header.source_topology_bundle_id,
         acceleration,
         edge_metrics,
@@ -452,9 +512,11 @@ pub(crate) fn write_topology_sectioned(path: &Path, bundle: &TopologyBundle) -> 
     let node_ids: Vec<u32> = bundle.nodes.iter().map(|node| node.node_id.0).collect();
     let lons: Vec<f64> = bundle.nodes.iter().map(|node| node.lon).collect();
     let lats: Vec<f64> = bundle.nodes.iter().map(|node| node.lat).collect();
+    let elevations: Vec<f64> = bundle.nodes.iter().map(|node| node.z).collect();
     writer.write_raw(&node_ids)?;
     writer.write_raw(&lons)?;
     writer.write_raw(&lats)?;
+    writer.write_raw(&elevations)?;
 
     // Routing edges as columnar raw arrays.
     let edge_ids: Vec<u32> = layers.routing.iter().map(|edge| edge.edge_id.0).collect();
@@ -466,13 +528,31 @@ pub(crate) fn write_topology_sectioned(path: &Path, bundle: &TopologyBundle) -> 
         .map(|edge| edge.source_way_id)
         .collect();
     let lengths: Vec<u32> = layers.routing.iter().map(|edge| edge.length_m).collect();
+    let ascents: Vec<f32> = layers.routing.iter().map(|edge| edge.ascent_m).collect();
+    let descents: Vec<f32> = layers.routing.iter().map(|edge| edge.descent_m).collect();
     let flags: Vec<u32> = layers.routing.iter().map(|edge| edge.flags).collect();
+    let feature_rows: Vec<u32> = layers.routing.iter().map(|edge| edge.feature_row).collect();
+    let source_directions: Vec<i8> = layers
+        .routing
+        .iter()
+        .map(|edge| edge.source_direction)
+        .collect();
+    let temporal_rule_ids: Vec<u32> = layers
+        .routing
+        .iter()
+        .map(|edge| edge.temporal_rule_id.unwrap_or(u32::MAX))
+        .collect();
     writer.write_raw(&edge_ids)?;
     writer.write_raw(&froms)?;
     writer.write_raw(&tos)?;
     writer.write_raw(&way_ids)?;
     writer.write_raw(&lengths)?;
+    writer.write_raw(&ascents)?;
+    writer.write_raw(&descents)?;
     writer.write_raw(&flags)?;
+    writer.write_raw(&feature_rows)?;
+    writer.write_raw(&source_directions)?;
+    writer.write_raw(&temporal_rule_ids)?;
 
     // Attribute layers stay bincode: they are enum-heavy and comparatively
     // small next to the numeric arrays. Bundles carrying a pre-10 schema
@@ -496,6 +576,8 @@ pub(crate) fn write_topology_sectioned(path: &Path, bundle: &TopologyBundle) -> 
     writer.write_raw(&bundle.edge_based_topology.edge_transition_edges)?;
     writer.write_raw(&bundle.node_component_ids)?;
     writer.write_raw(&bundle.edge_component_ids)?;
+    writer.write_bincode(&bundle.feature_attributes)?;
+    writer.write_bincode(&bundle.temporal_rule_sets)?;
     writer.finish()
 }
 
@@ -514,17 +596,27 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8]) -> Result<TopologyBundle> {
     }
     let lons: Vec<f64> = reader.read_raw()?;
     let lats: Vec<f64> = reader.read_raw()?;
-    if node_ids.len() != lons.len() || node_ids.len() != lats.len() {
+    let elevations: Vec<f64> = if reader.version >= 3 {
+        reader.read_raw()?
+    } else {
+        vec![0.0; node_ids.len()]
+    };
+    if node_ids.len() != lons.len()
+        || node_ids.len() != lats.len()
+        || node_ids.len() != elevations.len()
+    {
         bail!("topology node sections have inconsistent lengths");
     }
     let nodes = node_ids
         .into_iter()
         .zip(lons)
         .zip(lats)
-        .map(|((node_id, lon), lat)| TopologyNode {
+        .zip(elevations)
+        .map(|(((node_id, lon), lat), z)| TopologyNode {
             node_id: NodeId(node_id),
             lon,
             lat,
+            z,
         })
         .collect();
 
@@ -533,32 +625,55 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8]) -> Result<TopologyBundle> {
     let tos: Vec<u32> = reader.read_raw()?;
     let way_ids: Vec<i64> = reader.read_raw()?;
     let lengths: Vec<u32> = reader.read_raw()?;
+    let ascents: Vec<f32> = if reader.version >= 3 {
+        reader.read_raw()?
+    } else {
+        vec![0.0; edge_ids.len()]
+    };
+    let descents: Vec<f32> = if reader.version >= 3 {
+        reader.read_raw()?
+    } else {
+        vec![0.0; edge_ids.len()]
+    };
     let flags: Vec<u32> = reader.read_raw()?;
+    let (feature_rows, source_directions, temporal_rule_ids): (Vec<u32>, Vec<i8>, Vec<u32>) =
+        if reader.version >= 4 {
+            (reader.read_raw()?, reader.read_raw()?, reader.read_raw()?)
+        } else {
+            (
+                vec![NO_FEATURE_ROW; edge_ids.len()],
+                vec![0; edge_ids.len()],
+                vec![u32::MAX; edge_ids.len()],
+            )
+        };
     if edge_ids.len() != froms.len()
         || edge_ids.len() != tos.len()
         || edge_ids.len() != way_ids.len()
         || edge_ids.len() != lengths.len()
+        || edge_ids.len() != ascents.len()
+        || edge_ids.len() != descents.len()
         || edge_ids.len() != flags.len()
+        || edge_ids.len() != feature_rows.len()
+        || edge_ids.len() != source_directions.len()
+        || edge_ids.len() != temporal_rule_ids.len()
     {
         bail!("topology routing-edge sections have inconsistent lengths");
     }
-    let routing = edge_ids
-        .into_iter()
-        .zip(froms)
-        .zip(tos)
-        .zip(way_ids)
-        .zip(lengths)
-        .zip(flags)
-        .map(
-            |(((((edge_id, from), to), source_way_id), length_m), flags)| RoutingEdge {
-                edge_id: EdgeId(edge_id),
-                from: NodeId(from),
-                to: NodeId(to),
-                source_way_id,
-                length_m,
-                flags,
-            },
-        )
+    let routing = (0..edge_ids.len())
+        .map(|index| RoutingEdge {
+            edge_id: EdgeId(edge_ids[index]),
+            from: NodeId(froms[index]),
+            to: NodeId(tos[index]),
+            source_way_id: way_ids[index],
+            length_m: lengths[index],
+            ascent_m: ascents[index],
+            descent_m: descents[index],
+            feature_row: feature_rows[index],
+            source_direction: source_directions[index],
+            temporal_rule_id: (temporal_rule_ids[index] != u32::MAX)
+                .then_some(temporal_rule_ids[index]),
+            flags: flags[index],
+        })
         .collect();
 
     // Schema 10 added max_speed/lanes to the profile layer; bincode is not
@@ -575,6 +690,20 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8]) -> Result<TopologyBundle> {
     };
     let presentation = reader.read_bincode()?;
 
+    let edge_based_topology = netweevil_core::EdgeBasedTopology {
+        node_first_out: reader.read_raw()?,
+        node_edge_order: reader.read_raw()?,
+        edge_transition_first_out: reader.read_raw()?,
+        edge_transition_edges: reader.read_raw()?,
+    };
+    let node_component_ids = reader.read_raw()?;
+    let edge_component_ids = reader.read_raw()?;
+    let (feature_attributes, temporal_rule_sets) = if reader.version >= 4 {
+        (reader.read_bincode()?, reader.read_bincode()?)
+    } else {
+        (Default::default(), Vec::new())
+    };
+
     Ok(TopologyBundle {
         schema_version: header.schema_version,
         source_path: header.source_path,
@@ -588,14 +717,67 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8]) -> Result<TopologyBundle> {
         edges: Vec::new(),
         turn_restrictions: header.turn_restrictions,
         names: header.names,
-        edge_based_topology: netweevil_core::EdgeBasedTopology {
-            node_first_out: reader.read_raw()?,
-            node_edge_order: reader.read_raw()?,
-            edge_transition_first_out: reader.read_raw()?,
-            edge_transition_edges: reader.read_raw()?,
-        },
+        edge_based_topology,
         spatial_index: header.spatial_index,
-        node_component_ids: reader.read_raw()?,
-        edge_component_ids: reader.read_raw()?,
+        node_component_ids,
+        edge_component_ids,
+        feature_attributes,
+        temporal_rule_sets,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TopologyHeader, read_topology_sectioned};
+    use netweevil_core::{EdgePresentation, EdgeProfileAttributes};
+    use serde::Serialize;
+
+    fn push_bincode<T: Serialize>(bytes: &mut Vec<u8>, value: &T) {
+        let section = bincode::serialize(value).expect("section serializes");
+        bytes.extend_from_slice(&(section.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&section);
+    }
+
+    fn push_raw<T: bytemuck::Pod>(bytes: &mut Vec<u8>, value: &[T]) {
+        let section = bytemuck::cast_slice(value);
+        bytes.extend_from_slice(&(section.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(section);
+    }
+
+    #[test]
+    fn reads_version_two_topology_with_flat_3d_defaults() {
+        let mut bytes = b"NWSECB02".to_vec();
+        push_bincode(&mut bytes, &"topology");
+        push_bincode(
+            &mut bytes,
+            &TopologyHeader {
+                schema_version: 10,
+                source_path: "legacy.osm.pbf".to_string(),
+                source_sha256: "abc".to_string(),
+                turn_restrictions: Vec::new(),
+                names: Vec::new(),
+                spatial_index: None,
+            },
+        );
+        push_raw(&mut bytes, &[0_u32, 1]);
+        push_raw(&mut bytes, &[114.1_f64, 114.2]);
+        push_raw(&mut bytes, &[22.3_f64, 22.4]);
+        push_raw(&mut bytes, &[0_u32]);
+        push_raw(&mut bytes, &[0_u32]);
+        push_raw(&mut bytes, &[1_u32]);
+        push_raw(&mut bytes, &[42_i64]);
+        push_raw(&mut bytes, &[100_u32]);
+        push_raw(&mut bytes, &[0_u32]);
+        push_bincode(&mut bytes, &vec![EdgeProfileAttributes::default()]);
+        push_bincode(&mut bytes, &vec![EdgePresentation::default()]);
+        for _ in 0..6 {
+            push_raw::<u32>(&mut bytes, &[]);
+        }
+
+        let bundle = read_topology_sectioned(&bytes).expect("version 2 topology reads");
+        assert_eq!(bundle.nodes[0].z, 0.0);
+        assert_eq!(bundle.nodes[1].z, 0.0);
+        assert_eq!(bundle.routing_edge(0).ascent_m, 0.0);
+        assert_eq!(bundle.routing_edge(0).descent_m, 0.0);
+    }
 }

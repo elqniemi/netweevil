@@ -6,9 +6,11 @@ use anyhow::{Context, Result, bail};
 use netweevil_query::{
     MatrixResult, OdPairsDocument, OdResult, PointSetDocument, RouteBatchDocument,
     RouteBatchResult, RouteRequest, RouteResult, ServiceAreaRequest, ServiceAreaResult,
+    ServiceAreaSequenceResult,
 };
 use serde::Serialize;
 
+mod betweenness;
 mod common;
 mod gpkg;
 mod matrix;
@@ -16,7 +18,9 @@ mod od;
 mod route;
 mod route_batch;
 mod service_area;
+mod service_area_sequence;
 
+use betweenness::{write_betweenness_csv, write_betweenness_geojson, write_betweenness_gpkg};
 use common::ensure_parent_dir;
 use matrix::{
     write_matrix_csv, write_matrix_geojson, write_matrix_geoparquet, write_matrix_gpkg,
@@ -32,6 +36,7 @@ use service_area::{
     write_service_area_csv, write_service_area_geojson, write_service_area_geoparquet,
     write_service_area_gpkg, write_service_area_parquet,
 };
+use service_area_sequence::write_service_area_sequence_geojson;
 
 pub fn write_route_result(
     path: impl AsRef<Path>,
@@ -111,6 +116,38 @@ pub fn write_service_area_result(
         OutputFormat::GeoPackage => write_service_area_gpkg(path, request, result),
         OutputFormat::Parquet => write_service_area_parquet(path, request, result),
         OutputFormat::GeoParquet => write_service_area_geoparquet(path, request, result),
+    }
+}
+
+pub fn write_service_area_sequence_result(
+    path: impl AsRef<Path>,
+    result: &ServiceAreaSequenceResult,
+) -> Result<()> {
+    let path = path.as_ref();
+    match output_format(path)? {
+        OutputFormat::Json => write_json(path, result),
+        OutputFormat::GeoJson => write_service_area_sequence_geojson(path, result),
+        other => bail!(
+            "service-area sequence output does not support {:?}; use .json or .geojson",
+            other
+        ),
+    }
+}
+
+pub fn write_betweenness_result(
+    path: impl AsRef<Path>,
+    result: &netweevil_query::BetweennessResult,
+) -> Result<()> {
+    let path = path.as_ref();
+    match output_format(path)? {
+        OutputFormat::Json => write_json(path, result),
+        OutputFormat::Csv => write_betweenness_csv(path, result),
+        OutputFormat::GeoJson => write_betweenness_geojson(path, result),
+        OutputFormat::GeoPackage => write_betweenness_gpkg(path, result),
+        other => bail!(
+            "betweenness output does not support {:?}; use .json, .csv, .geojson, or .gpkg",
+            other
+        ),
     }
 }
 

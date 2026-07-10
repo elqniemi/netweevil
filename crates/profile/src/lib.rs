@@ -4,6 +4,7 @@
 //! weights for a specific dataset.
 
 mod compile;
+mod components;
 mod edge_cost;
 mod load;
 mod progress;
@@ -17,7 +18,8 @@ pub use compile::{
 pub use load::load_profile;
 pub use progress::{ProfileCompileProgress, ProfileCompileStage};
 pub use schema::{
-    BreakdownMetric, CostConfig, DirectionConfig, ExcludeRule, FactorRule, FerryConfig, Objective,
-    PostedLimitPolicy, PreferencesConfig, ProfileDocument, ProfileHeader, ReturnConfig,
-    ReturnGeometry, SpeedRule, SpeedsConfig, TagMatch, TurnConfig,
+    BreakdownMetric, CostComponentConfig, CostConfig, DirectionConfig, ExcludeRule, FacilityConfig,
+    FacilityCost, FactorRule, FerryConfig, Objective, PostedLimitPolicy, PreferencesConfig,
+    ProfileDocument, ProfileHeader, ReturnConfig, ReturnGeometry, SlopeModelConfig, SlopePoint,
+    SpeedRule, SpeedsConfig, TagMatch, TemporalProfileConfig, TurnConfig,
 };

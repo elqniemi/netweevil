@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Result, bail};
 use netweevil_core::{CompiledProfileBundle, TopologyBundle};
@@ -12,6 +12,18 @@ pub(crate) fn execute_od_with_graph(
     routing_graph: &RoutingGraph,
     document: &OdPairsDocument,
 ) -> Result<OdResult> {
+    if document.temporal.requires_exact_labels() {
+        let temporal_routing_graph;
+        let routing_graph = if document.temporal.is_temporal()
+            && !routing_graph.includes_temporal_materialized_directions
+        {
+            temporal_routing_graph = build_temporal_routing_graph(topology, metrics)?;
+            &temporal_routing_graph
+        } else {
+            routing_graph
+        };
+        return execute_od_per_pair_exact(topology, metrics, routing_graph, document);
+    }
     let mut snap_cache = HashMap::new();
     let origin_snaps = document
         .pairs
@@ -22,7 +34,7 @@ pub(crate) fn execute_od_with_graph(
                 topology,
                 routing_graph,
                 &pair.origin,
-                document.snap.max_distance_m,
+                &document.snap,
                 true,
             )
         })
@@ -36,7 +48,7 @@ pub(crate) fn execute_od_with_graph(
                 topology,
                 routing_graph,
                 &pair.destination,
-                document.snap.max_distance_m,
+                &document.snap,
                 false,
             )
         })
@@ -115,6 +127,11 @@ pub(crate) fn execute_od_with_graph(
                     total_travel_time_s: (!ignored).then_some(route.summary.total_travel_time_s),
                     total_generalized_cost: (!ignored)
                         .then_some(route.summary.total_generalized_cost),
+                    components: if ignored {
+                        BTreeMap::new()
+                    } else {
+                        route.summary.components.clone()
+                    },
                     illegal_movement_penalty_s: (!ignored)
                         .then_some(route.summary.illegal_movement_penalty_s),
                     illegal_movement_penalty_cost: (!ignored)
@@ -145,6 +162,7 @@ pub(crate) fn execute_od_with_graph(
                     total_distance_m: None,
                     total_travel_time_s: None,
                     total_generalized_cost: None,
+                    components: BTreeMap::new(),
                     illegal_movement_penalty_s: None,
                     illegal_movement_penalty_cost: None,
                     violation_count: 0,
@@ -158,7 +176,11 @@ pub(crate) fn execute_od_with_graph(
         }
     }
 
+    let provenance = temporal_result_provenance(&document.temporal)?;
     Ok(OdResult {
+        departure_time: provenance.departure_time,
+        arrive_by: provenance.arrive_by,
+        scenario_id: provenance.scenario_id,
         pair_count: pairs.len(),
         succeeded_count,
         failed_count: pairs.len() - succeeded_count - ignored_count,
@@ -185,6 +207,24 @@ pub(crate) fn execute_matrix_with_graph(
     origins: &PointSetDocument,
     destinations: &PointSetDocument,
 ) -> Result<MatrixResult> {
+    if origins.temporal.requires_exact_labels() || destinations.temporal.requires_exact_labels() {
+        let is_temporal = origins.temporal.is_temporal() || destinations.temporal.is_temporal();
+        let temporal_routing_graph;
+        let routing_graph =
+            if is_temporal && !routing_graph.includes_temporal_materialized_directions {
+                temporal_routing_graph = build_temporal_routing_graph(topology, metrics)?;
+                &temporal_routing_graph
+            } else {
+                routing_graph
+            };
+        return execute_matrix_per_pair_exact(
+            topology,
+            metrics,
+            routing_graph,
+            origins,
+            destinations,
+        );
+    }
     // Cells are fully materialized in memory; refuse unbounded results
     // instead of exhausting memory on oversized requests.
     const MAX_MATRIX_CELLS: usize = 4_000_000;
@@ -211,7 +251,7 @@ pub(crate) fn execute_matrix_with_graph(
         topology,
         routing_graph,
         &origins.points,
-        snap_max_distance_m,
+        &origins.snap,
         true,
     );
     let (origin_refs, unique_origin_candidates) = intern_candidate_sets(origin_snaps);
@@ -219,7 +259,7 @@ pub(crate) fn execute_matrix_with_graph(
         topology,
         routing_graph,
         &destinations.points,
-        snap_max_distance_m,
+        &destinations.snap,
         false,
     );
     let (destination_refs, unique_destination_candidates) =
@@ -291,6 +331,11 @@ pub(crate) fn execute_matrix_with_graph(
                             .then_some(route.summary.total_travel_time_s),
                         total_generalized_cost: (!ignored)
                             .then_some(route.summary.total_generalized_cost),
+                        components: if ignored {
+                            BTreeMap::new()
+                        } else {
+                            route.summary.components.clone()
+                        },
                         illegal_movement_penalty_s: (!ignored)
                             .then_some(route.summary.illegal_movement_penalty_s),
                         illegal_movement_penalty_cost: (!ignored)
@@ -320,6 +365,7 @@ pub(crate) fn execute_matrix_with_graph(
                         total_distance_m: None,
                         total_travel_time_s: None,
                         total_generalized_cost: None,
+                        components: BTreeMap::new(),
                         illegal_movement_penalty_s: None,
                         illegal_movement_penalty_cost: None,
                         violation_count: 0,
@@ -335,6 +381,9 @@ pub(crate) fn execute_matrix_with_graph(
     }
 
     Ok(MatrixResult {
+        departure_time: None,
+        arrive_by: None,
+        scenario_id: None,
         origin_count: origins.points.len(),
         destination_count: destinations.points.len(),
         cell_count: cells.len(),
@@ -353,6 +402,277 @@ pub(crate) fn execute_matrix_with_graph(
             warnings.extend(execution_warnings(metrics));
             warnings
         },
+    })
+}
+
+fn execute_od_per_pair_exact(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    document: &OdPairsDocument,
+) -> Result<OdResult> {
+    let mut pairs = Vec::with_capacity(document.pairs.len());
+    let mut succeeded_count = 0;
+    let mut ignored_count = 0;
+    for pair in &document.pairs {
+        let request = RouteRequest {
+            route_id: pair.pair_id.clone(),
+            origin: pair.origin.clone(),
+            destination: pair.destination.clone(),
+            snap: document.snap.clone(),
+            connectivity: document.connectivity.clone(),
+            fallback: document.fallback.clone(),
+            returns: document.returns.clone(),
+            alternatives: document.alternatives.clone(),
+            temporal: document.temporal.clone(),
+        };
+        match execute_route_with_graph(topology, metrics, routing_graph, &request, None) {
+            Ok(route) => {
+                let status = batch_status_for_route(&route);
+                if matches!(status, BatchItemStatus::Succeeded) {
+                    succeeded_count += 1;
+                } else {
+                    ignored_count += 1;
+                }
+                let ignored = matches!(status, BatchItemStatus::Ignored);
+                let alternatives = batch_alternatives_from_route(&route, ignored);
+                let error = batch_ignored_message(&route);
+                pairs.push(OdPairResult {
+                    pair_id: pair.pair_id.clone(),
+                    origin_id: pair.origin.id.clone(),
+                    destination_id: pair.destination.id.clone(),
+                    status,
+                    outcome: route.outcome,
+                    fallback_used: route.fallback_used,
+                    origin_component_id: route.origin.component_id,
+                    destination_component_id: route.destination.component_id,
+                    origin_hop_distance_m: route.origin_hop_distance_m,
+                    destination_hop_distance_m: route.destination_hop_distance_m,
+                    origin_snap_distance_m: Some(route.origin.snap_distance_m),
+                    destination_snap_distance_m: Some(route.destination.snap_distance_m),
+                    total_distance_m: (!ignored).then_some(route.summary.total_distance_m),
+                    total_travel_time_s: (!ignored).then_some(route.summary.total_travel_time_s),
+                    total_generalized_cost: (!ignored)
+                        .then_some(route.summary.total_generalized_cost),
+                    components: if ignored {
+                        Default::default()
+                    } else {
+                        route.summary.components.clone()
+                    },
+                    illegal_movement_penalty_s: (!ignored)
+                        .then_some(route.summary.illegal_movement_penalty_s),
+                    illegal_movement_penalty_cost: (!ignored)
+                        .then_some(route.summary.illegal_movement_penalty_cost),
+                    violation_count: route.summary.violation_count,
+                    violation_types: route.summary.violation_types.clone(),
+                    geometry: route.geometry,
+                    diagnostics: route.diagnostics,
+                    error,
+                    alternatives,
+                });
+            }
+            Err(error) => {
+                let (outcome, diagnostics) = failure_outcome_and_diagnostics(&error);
+                pairs.push(OdPairResult {
+                    pair_id: pair.pair_id.clone(),
+                    origin_id: pair.origin.id.clone(),
+                    destination_id: pair.destination.id.clone(),
+                    status: BatchItemStatus::Failed,
+                    outcome,
+                    fallback_used: false,
+                    origin_component_id: None,
+                    destination_component_id: None,
+                    origin_hop_distance_m: None,
+                    destination_hop_distance_m: None,
+                    origin_snap_distance_m: None,
+                    destination_snap_distance_m: None,
+                    total_distance_m: None,
+                    total_travel_time_s: None,
+                    total_generalized_cost: None,
+                    components: BTreeMap::new(),
+                    illegal_movement_penalty_s: None,
+                    illegal_movement_penalty_cost: None,
+                    violation_count: 0,
+                    violation_types: Vec::new(),
+                    geometry: None,
+                    diagnostics,
+                    error: Some(error.to_string()),
+                    alternatives: Vec::new(),
+                });
+            }
+        }
+    }
+    let provenance = temporal_result_provenance(&document.temporal)?;
+    Ok(OdResult {
+        departure_time: provenance.departure_time,
+        arrive_by: provenance.arrive_by,
+        scenario_id: provenance.scenario_id,
+        pair_count: pairs.len(),
+        succeeded_count,
+        failed_count: pairs.len() - succeeded_count - ignored_count,
+        ignored_count,
+        pairs,
+        diagnostics: Vec::new(),
+        warnings: vec![
+            "Temporal/component OD execution used independent exact label-setting searches per pair."
+                .to_string(),
+        ],
+    })
+}
+
+fn execute_matrix_per_pair_exact(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    origins: &PointSetDocument,
+    destinations: &PointSetDocument,
+) -> Result<MatrixResult> {
+    const MAX_MATRIX_CELLS: usize = 4_000_000;
+    let requested_cells = origins
+        .points
+        .len()
+        .saturating_mul(destinations.points.len());
+    if requested_cells > MAX_MATRIX_CELLS {
+        bail!("matrix request exceeds the {MAX_MATRIX_CELLS} cell safety limit");
+    }
+    let temporal = match (
+        origins.temporal.requires_exact_labels(),
+        destinations.temporal.requires_exact_labels(),
+    ) {
+        (true, true) if origins.temporal != destinations.temporal => {
+            bail!("origin and destination point sets specify conflicting temporal options")
+        }
+        (true, _) => origins.temporal.clone(),
+        (_, true) => destinations.temporal.clone(),
+        _ => TemporalRequestOptions::default(),
+    };
+    let snap = SnapOptions {
+        max_distance_m: origins
+            .snap
+            .max_distance_m
+            .max(destinations.snap.max_distance_m),
+        z_window_m: origins.snap.z_window_m.or(destinations.snap.z_window_m),
+        attribute_filters: if origins.snap.attribute_filters.is_empty() {
+            destinations.snap.attribute_filters.clone()
+        } else {
+            origins.snap.attribute_filters.clone()
+        },
+    };
+    let connectivity =
+        merge_point_set_connectivity_policy(&origins.connectivity, &destinations.connectivity);
+    let fallback = merge_point_set_fallback_policy(&origins.fallback, &destinations.fallback);
+    let returns = merge_point_set_returns(&origins.returns, &destinations.returns);
+    let alternatives =
+        merge_point_set_alternatives(&origins.alternatives, &destinations.alternatives);
+    let mut cells = Vec::with_capacity(requested_cells);
+    let mut succeeded_count = 0;
+    let mut ignored_count = 0;
+    for origin in &origins.points {
+        for destination in &destinations.points {
+            let request = RouteRequest {
+                route_id: format!("{}__{}", origin.id, destination.id),
+                origin: origin.clone(),
+                destination: destination.clone(),
+                snap: snap.clone(),
+                connectivity: connectivity.clone(),
+                fallback: fallback.clone(),
+                returns: returns.clone(),
+                alternatives: alternatives.clone(),
+                temporal: temporal.clone(),
+            };
+            match execute_route_with_graph(topology, metrics, routing_graph, &request, None) {
+                Ok(route) => {
+                    let status = batch_status_for_route(&route);
+                    if matches!(status, BatchItemStatus::Succeeded) {
+                        succeeded_count += 1;
+                    } else {
+                        ignored_count += 1;
+                    }
+                    let ignored = matches!(status, BatchItemStatus::Ignored);
+                    let alternatives = batch_alternatives_from_route(&route, ignored);
+                    let error = batch_ignored_message(&route);
+                    cells.push(MatrixCellResult {
+                        origin_id: origin.id.clone(),
+                        destination_id: destination.id.clone(),
+                        status,
+                        outcome: route.outcome,
+                        fallback_used: route.fallback_used,
+                        origin_component_id: route.origin.component_id,
+                        destination_component_id: route.destination.component_id,
+                        origin_hop_distance_m: route.origin_hop_distance_m,
+                        destination_hop_distance_m: route.destination_hop_distance_m,
+                        origin_snap_distance_m: Some(route.origin.snap_distance_m),
+                        destination_snap_distance_m: Some(route.destination.snap_distance_m),
+                        total_distance_m: (!ignored).then_some(route.summary.total_distance_m),
+                        total_travel_time_s: (!ignored)
+                            .then_some(route.summary.total_travel_time_s),
+                        total_generalized_cost: (!ignored)
+                            .then_some(route.summary.total_generalized_cost),
+                        components: if ignored {
+                            Default::default()
+                        } else {
+                            route.summary.components.clone()
+                        },
+                        illegal_movement_penalty_s: (!ignored)
+                            .then_some(route.summary.illegal_movement_penalty_s),
+                        illegal_movement_penalty_cost: (!ignored)
+                            .then_some(route.summary.illegal_movement_penalty_cost),
+                        violation_count: route.summary.violation_count,
+                        violation_types: route.summary.violation_types.clone(),
+                        geometry: route.geometry,
+                        diagnostics: route.diagnostics,
+                        error,
+                        alternatives,
+                    });
+                }
+                Err(error) => {
+                    let (outcome, diagnostics) = failure_outcome_and_diagnostics(&error);
+                    cells.push(MatrixCellResult {
+                        origin_id: origin.id.clone(),
+                        destination_id: destination.id.clone(),
+                        status: BatchItemStatus::Failed,
+                        outcome,
+                        fallback_used: false,
+                        origin_component_id: None,
+                        destination_component_id: None,
+                        origin_hop_distance_m: None,
+                        destination_hop_distance_m: None,
+                        origin_snap_distance_m: None,
+                        destination_snap_distance_m: None,
+                        total_distance_m: None,
+                        total_travel_time_s: None,
+                        total_generalized_cost: None,
+                        components: BTreeMap::new(),
+                        illegal_movement_penalty_s: None,
+                        illegal_movement_penalty_cost: None,
+                        violation_count: 0,
+                        violation_types: Vec::new(),
+                        geometry: None,
+                        diagnostics,
+                        error: Some(error.to_string()),
+                        alternatives: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+    let provenance = temporal_result_provenance(&temporal)?;
+    Ok(MatrixResult {
+        departure_time: provenance.departure_time,
+        arrive_by: provenance.arrive_by,
+        scenario_id: provenance.scenario_id,
+        origin_count: origins.points.len(),
+        destination_count: destinations.points.len(),
+        cell_count: cells.len(),
+        succeeded_count,
+        failed_count: cells.len() - succeeded_count - ignored_count,
+        ignored_count,
+        cells,
+        diagnostics: Vec::new(),
+        warnings: vec![
+            "Temporal/component matrix execution used independent exact label-setting searches per cell."
+                .to_string(),
+        ],
     })
 }
 
@@ -440,6 +760,7 @@ fn batch_alternatives_from_route(
             total_distance_m: Some(alternative.summary.total_distance_m),
             total_travel_time_s: Some(alternative.summary.total_travel_time_s),
             total_generalized_cost: Some(alternative.summary.total_generalized_cost),
+            components: alternative.summary.components.clone(),
             geometry: alternative.geometry.clone(),
             violation_count: alternative.summary.violation_count,
             violation_types: alternative.summary.violation_types.clone(),
@@ -787,6 +1108,10 @@ fn batch_route_result_for_path(
                             length_m: (edge.length_m as f64 * factor).round() as u32,
                             travel_time_s: metric.travel_time_s.unwrap_or_default() * factor,
                             generalized_cost: metric.generalized_cost.unwrap_or_default() * factor,
+                            components: static_edge_components(metrics, edge_index, factor),
+                            waiting_time_s: 0.0,
+                            entry_time: None,
+                            exit_time: None,
                             road_class: edge.road_class,
                             surface: edge.surface,
                             name: edge
@@ -884,7 +1209,7 @@ fn cached_single_source_edge_tree<'a>(
     }
 }
 
-fn build_single_source_edge_tree(
+pub(crate) fn build_single_source_edge_tree(
     topology: &TopologyBundle,
     routing_graph: &RoutingGraph,
     origin: &SnappedPoint,
@@ -939,7 +1264,7 @@ fn build_single_source_edge_tree(
     })
 }
 
-fn best_path_from_origin_tree(
+pub(crate) fn best_path_from_origin_tree(
     routing_graph: &RoutingGraph,
     tree: &SingleSourceEdgeTree,
     origin: &SnappedPoint,

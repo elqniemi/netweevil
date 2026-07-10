@@ -1,0 +1,94 @@
+# Hong Kong-shaped example only. Coordinates and feature ids are illustrative.
+batch_id: hk_example_asset_scenarios
+departure_time: "2026-07-10T09:55:00+08:00"
+
+scenarios:
+  - id: central_escalator_direction
+    overlay: ../scenarios/hong_kong_central_escalator_example.yml
+  - id: asset_failure
+    overlay: ../scenarios/generic_asset_failure.yml
+
+routes:
+  - route_id: illustrative_hillside_to_station
+    origin:
+      id: hillside
+      lon: 114.1517
+      lat: 22.2839
+      z: 34.0
+    destination:
+      id: station
+      lon: 114.1577
+      lat: 22.2820
+      z: 3.0
+    snap:
+      max_distance_m: 300.0
+      z_window_m: 5.0
+    holiday_calendar: ../temporal/example_holidays.yml
+    overlay:
+      - ../temporal/shade_fraction.csv
+    returns:
+      geometry: full
+      segment_rows: true
+
+  - route_id: illustrative_station_to_hillside
+    origin:
+      id: station
+      lon: 114.1577
+      lat: 22.2820
+      z: 3.0
+    destination:
+      id: hillside
+      lon: 114.1517
+      lat: 22.2839
+      z: 34.0
+    snap:
+      max_distance_m: 300.0
+      z_window_m: 5.0
+    holiday_calendar: ../temporal/example_holidays.yml
+    returns:
+      geometry: full
+
+od:
+  - analysis_id: illustrative_bidirectional_od
+    request:
+      pairs:
+        - pair_id: hillside_to_station
+          origin: {id: hillside, lon: 114.1517, lat: 22.2839, z: 34.0}
+          destination: {id: station, lon: 114.1577, lat: 22.2820, z: 3.0}
+        - pair_id: station_to_hillside
+          origin: {id: station, lon: 114.1577, lat: 22.2820, z: 3.0}
+          destination: {id: hillside, lon: 114.1517, lat: 22.2839, z: 34.0}
+      snap:
+        max_distance_m: 300.0
+        z_window_m: 5.0
+      holiday_calendar: ../temporal/example_holidays.yml
+
+matrices:
+  - analysis_id: illustrative_hillside_station_matrix
+    origins:
+      points:
+        - {id: hillside_a, lon: 114.1517, lat: 22.2839, z: 34.0}
+        - {id: hillside_b, lon: 114.1530, lat: 22.2846, z: 42.0}
+      snap:
+        max_distance_m: 300.0
+        z_window_m: 5.0
+      holiday_calendar: ../temporal/example_holidays.yml
+    destinations:
+      points:
+        - {id: station, lon: 114.1577, lat: 22.2820, z: 3.0}
+      snap:
+        max_distance_m: 300.0
+        z_window_m: 5.0
+
+betweenness:
+  - analysis_id: illustrative_scenario_criticality
+    origins:
+      - {id: hillside_a, lon: 114.1517, lat: 22.2839, z: 34.0, weight: 120.0}
+      - {id: hillside_b, lon: 114.1530, lat: 22.2846, z: 42.0, weight: 80.0}
+    destinations:
+      - {id: station, lon: 114.1577, lat: 22.2820, z: 3.0, weight: 1.0}
+    snap:
+      max_distance_m: 300.0
+      z_window_m: 5.0
+    holiday_calendar: ../temporal/example_holidays.yml
+    max_od_pairs: 10000

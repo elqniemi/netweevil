@@ -1,0 +1,27 @@
+# Representative Central-Mid-Levels feature from the Hong Kong source snapshot
+# audited in July 2026. PedestrianRouteID 250009423 is digitized uphill (Z
+# 108.249 -> 116.281), so backward is downhill and forward is uphill.
+#
+# The snapshot contains separate scheduled-direction feature rows that may
+# already encode this operating pattern at import. replace_rules intentionally
+# demonstrates a runtime override: downhill from 06:00 to 10:00, uphill from
+# 10:00 to midnight, and unavailable from midnight to 06:00. day_mask 255
+# includes Monday-Sunday and public holidays. Re-audit the source ID and
+# geometry direction after any source refresh; see the adjacent source CSV.
+id: hk_central_mid_levels_operating_direction
+features:
+  - source_feature_id: 250009423
+    replace_rules: true
+    rules:
+      - day_mask: 255
+        intervals:
+          - {start_minute: 360, end_minute: 1440}
+        effect: open_only
+      - day_mask: 255
+        intervals:
+          - {start_minute: 360, end_minute: 600}
+        effect: backward_only
+      - day_mask: 255
+        intervals:
+          - {start_minute: 600, end_minute: 1440}
+        effect: forward_only

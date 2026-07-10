@@ -1,7 +1,9 @@
 use netweevil_core::{ConnectedComponentsMeta, TopologyBounds};
 use netweevil_query::{
-    EngineMode, MatrixResult, OdPairsDocument, OdResult, PointSetDocument, RouteRequest,
-    RouteResult, ServiceAreaRequest, ServiceAreaResult,
+    AccessibilityRequest, AccessibilityResult, BetweennessRequest, BetweennessResult, EngineMode,
+    MatrixResult, OdPairsDocument, OdResult, PointSetDocument, RouteRequest, RouteResult,
+    ScenarioBatchRequest, ScenarioBatchResult, ServiceAreaRequest, ServiceAreaResult,
+    ServiceAreaSequenceRequest, ServiceAreaSequenceResult,
 };
 use netweevil_transit::{
     TransitRouteRequest, TransitRouteResult, TransitServiceAreaRequest, TransitServiceAreaResult,
@@ -68,6 +70,8 @@ pub struct TransitFeedInfo {
     pub(crate) route_count: u64,
     pub(crate) trip_count: u64,
     pub(crate) connection_count: u64,
+    pub(crate) bound_stop_count: u64,
+    pub(crate) transfer_profile_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,6 +102,15 @@ pub struct MatrixExecutionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct AccessibilityExecutionRequest {
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    #[serde(default)]
+    pub engine_mode: EngineMode,
+    pub request: AccessibilityRequest,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ServiceAreaExecutionRequest {
     #[serde(default)]
     pub profile_id: Option<String>,
@@ -105,8 +118,32 @@ pub struct ServiceAreaExecutionRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ServiceAreaSequenceExecutionRequest {
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub request: ServiceAreaSequenceRequest,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BetweennessExecutionRequest {
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub request: BetweennessRequest,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ScenarioBatchExecutionRequest {
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    pub request: ScenarioBatchRequest,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct TransitRouteExecutionRequest {
     pub feed_id: String,
+    /// Optional shorthand for `request.modes.transfer_profile_id`.
+    #[serde(default)]
+    pub transfer_profile_id: Option<String>,
     #[serde(default)]
     pub pedestrian_profile_id: Option<String>,
     /// Profile used to draw network geometry for non-walk access legs
@@ -123,6 +160,9 @@ pub struct TransitRouteExecutionRequest {
 #[derive(Debug, Deserialize)]
 pub struct TransitServiceAreaExecutionRequest {
     pub feed_id: String,
+    /// Optional shorthand for `request.modes.transfer_profile_id`.
+    #[serde(default)]
+    pub transfer_profile_id: Option<String>,
     pub request: TransitServiceAreaRequest,
 }
 
@@ -151,9 +191,33 @@ pub struct MatrixExecutionResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct AccessibilityExecutionResponse {
+    pub(crate) service: ExecutionContext,
+    pub(crate) result: AccessibilityResult,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ServiceAreaExecutionResponse {
     pub(crate) service: ExecutionContext,
     pub(crate) result: ServiceAreaResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ServiceAreaSequenceExecutionResponse {
+    pub(crate) service: ExecutionContext,
+    pub(crate) result: ServiceAreaSequenceResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BetweennessExecutionResponse {
+    pub(crate) service: ExecutionContext,
+    pub(crate) result: BetweennessResult,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ScenarioBatchExecutionResponse {
+    pub(crate) service: ExecutionContext,
+    pub(crate) result: ScenarioBatchResult,
 }
 
 #[derive(Debug, Serialize)]
@@ -191,9 +255,43 @@ pub struct TransitExecutionContext {
     pub(crate) route_engine: String,
     pub(crate) walking_geometry: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) transfer_profile_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pedestrian_profile_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) access_profile_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) egress_profile_id: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accessibility_execution_request_accepts_temporal_origin_options() {
+        let payload: AccessibilityExecutionRequest = serde_json::from_value(serde_json::json!({
+            "profile_id": "pedestrian_multilayer",
+            "request": {
+                "origins": {
+                    "points": [{"id":"origin","lon":114.15,"lat":22.28,"z":12.0}],
+                    "departure_time": "2026-07-10T09:55:00+08:00",
+                    "scenario": "central.yml"
+                },
+                "categories": [{
+                    "category_id": "stations",
+                    "destinations": {"points":[{"id":"station","lon":114.16,"lat":22.29}]}
+                }],
+                "thresholds_s": [300.0, 600.0],
+                "max_travel_time_s": 600.0
+            }
+        }))
+        .expect("accessibility request parses");
+        assert_eq!(payload.profile_id.as_deref(), Some("pedestrian_multilayer"));
+        assert_eq!(
+            payload.request.origins.temporal.departure_time.as_deref(),
+            Some("2026-07-10T09:55:00+08:00")
+        );
+        assert_eq!(payload.request.categories.len(), 1);
+    }
 }

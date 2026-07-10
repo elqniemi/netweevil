@@ -34,7 +34,7 @@ pub(crate) enum ViaSpec {
 pub(crate) fn build_turn_restrictions(
     candidates: &[TurnRestrictionCandidate],
     ways: &[PendingWay],
-    node_lookup: &FxHashMap<i64, (NodeId, f64, f64)>,
+    node_lookup: &FxHashMap<i64, (NodeId, f64, f64, f64)>,
     edges: &[DirectedEdge],
 ) -> Vec<TurnRestriction> {
     let mut incoming_by_way_and_node: HashMap<(i64, NodeId), Vec<EdgeId>> = HashMap::new();
@@ -67,7 +67,7 @@ pub(crate) fn build_turn_restrictions(
     for candidate in candidates {
         match &candidate.via {
             ViaSpec::Node(via_node_id) => {
-                let Some(&(via_node, _, _)) = node_lookup.get(via_node_id) else {
+                let Some(&(via_node, _, _, _)) = node_lookup.get(via_node_id) else {
                     continue;
                 };
                 let Some(incoming_edges) =
@@ -111,10 +111,11 @@ pub(crate) fn build_turn_restrictions(
                 let Some(shared_nodes) = via_shared_nodes(from_way, &via_ways, to_way) else {
                     continue;
                 };
-                let Some(&(entry_node, _, _)) = node_lookup.get(&shared_nodes[0]) else {
+                let Some(&(entry_node, _, _, _)) = node_lookup.get(&shared_nodes[0]) else {
                     continue;
                 };
-                let Some(&(exit_node, _, _)) = node_lookup.get(shared_nodes.last().unwrap()) else {
+                let Some(&(exit_node, _, _, _)) = node_lookup.get(shared_nodes.last().unwrap())
+                else {
                     continue;
                 };
                 let Some(incoming_edges) =
@@ -321,7 +322,7 @@ fn way_edge_sequence_between(
     way: &PendingWay,
     start_osm_node_id: i64,
     end_osm_node_id: i64,
-    node_lookup: &FxHashMap<i64, (NodeId, f64, f64)>,
+    node_lookup: &FxHashMap<i64, (NodeId, f64, f64, f64)>,
     edge_by_way_and_nodes: &HashMap<(i64, NodeId, NodeId), EdgeId>,
 ) -> Option<Vec<EdgeId>> {
     if start_osm_node_id == end_osm_node_id {
@@ -356,11 +357,11 @@ fn way_edge_sequence_between(
                 let next = cursor + step;
                 let from_osm = way.node_ids[cursor as usize];
                 let to_osm = way.node_ids[next as usize];
-                let Some(&(from_node, _, _)) = node_lookup.get(&from_osm) else {
+                let Some(&(from_node, _, _, _)) = node_lookup.get(&from_osm) else {
                     valid = false;
                     break;
                 };
-                let Some(&(to_node, _, _)) = node_lookup.get(&to_osm) else {
+                let Some(&(to_node, _, _, _)) = node_lookup.get(&to_osm) else {
                     valid = false;
                     break;
                 };
@@ -586,7 +587,7 @@ mod tests {
             mode_mask: AccessMask::new(AccessMask::CAR),
         }];
         let ways = vec![];
-        let node_lookup = super::FxHashMap::from_iter([(100_i64, (NodeId(1), 0.0, 0.0))]);
+        let node_lookup = super::FxHashMap::from_iter([(100_i64, (NodeId(1), 0.0, 0.0, 0.0))]);
         let edges = vec![edge(0, 0, 1, 10), edge(1, 1, 2, 11), edge(2, 1, 3, 12)];
 
         let restrictions = build_turn_restrictions(&candidates, &ways, &node_lookup, &edges);
@@ -645,12 +646,12 @@ mod tests {
             pending_way(30, &[4, 5]),
         ];
         let node_lookup = super::FxHashMap::from_iter([
-            (1_i64, (NodeId(0), 0.0, 0.0)),
-            (2_i64, (NodeId(1), 0.0, 0.0)),
-            (3_i64, (NodeId(2), 0.0, 0.0)),
-            (4_i64, (NodeId(3), 0.0, 0.0)),
-            (5_i64, (NodeId(4), 0.0, 0.0)),
-            (6_i64, (NodeId(5), 0.0, 0.0)),
+            (1_i64, (NodeId(0), 0.0, 0.0, 0.0)),
+            (2_i64, (NodeId(1), 0.0, 0.0, 0.0)),
+            (3_i64, (NodeId(2), 0.0, 0.0, 0.0)),
+            (4_i64, (NodeId(3), 0.0, 0.0, 0.0)),
+            (5_i64, (NodeId(4), 0.0, 0.0, 0.0)),
+            (6_i64, (NodeId(5), 0.0, 0.0, 0.0)),
         ]);
         let edges = vec![
             edge(0, 0, 1, 10),

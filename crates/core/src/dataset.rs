@@ -51,6 +51,8 @@ pub enum SourceFormat {
     /// Overture Maps transportation theme GeoParquet (a `.parquet` /
     /// `.geoparquet` file or a directory of them).
     OvertureParquet,
+    /// One or more OGC GeoPackage files read with an explicit ingest mapping.
+    GeoPackage,
 }
 
 impl SourceFormat {
@@ -58,6 +60,7 @@ impl SourceFormat {
         match self {
             Self::OsmPbf => "osm-pbf",
             Self::OvertureParquet => "overture-parquet",
+            Self::GeoPackage => "geopackage",
         }
     }
 }

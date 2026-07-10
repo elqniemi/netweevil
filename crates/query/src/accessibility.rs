@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 
 use crate::*;
@@ -13,6 +13,34 @@ pub(crate) fn execute_accessibility_with_graph(
     request: &AccessibilityRequest,
 ) -> Result<AccessibilityResult> {
     validate_execution_inputs(topology, metrics)?;
+    let temporal_runtime = if request.origins.temporal.is_temporal() {
+        if request.origins.temporal.arrive_by.is_some() {
+            bail!("time-dependent accessibility supports departure_time, not arrive_by");
+        }
+        let departure = request
+            .origins
+            .temporal
+            .departure_time
+            .as_deref()
+            .context("temporal accessibility requires departure_time")?;
+        Some((
+            crate::temporal::context_from_request(&request.origins.temporal)?,
+            parse_datetime(departure)?,
+        ))
+    } else {
+        None
+    };
+    if let Some((context, _)) = &temporal_runtime {
+        crate::temporal::validate_speed_factor_wait_policy(topology, metrics, context)?;
+    }
+    let temporal_routing_graph;
+    let routing_graph =
+        if temporal_runtime.is_some() && !routing_graph.includes_temporal_materialized_directions {
+            temporal_routing_graph = build_temporal_routing_graph(topology, metrics)?;
+            &temporal_routing_graph
+        } else {
+            routing_graph
+        };
     if request.origins.points.is_empty() {
         bail!("accessibility origins must contain at least one point");
     }
@@ -38,6 +66,10 @@ pub(crate) fn execute_accessibility_with_graph(
         .unwrap_or(request.origins.snap.max_distance_m)
         .max(request.origins.snap.max_distance_m);
     let mut snap_cache = HashMap::new();
+    let search_snap = SnapOptions {
+        max_distance_m: search_distance_m,
+        ..request.origins.snap.clone()
+    };
     let origin_candidate_sets = request
         .origins
         .points
@@ -48,7 +80,7 @@ pub(crate) fn execute_accessibility_with_graph(
                 topology,
                 routing_graph,
                 origin,
-                search_distance_m,
+                &search_snap,
                 true,
             )
         })
@@ -63,7 +95,7 @@ pub(crate) fn execute_accessibility_with_graph(
                 topology,
                 routing_graph,
                 &category.destinations.points,
-                category.destinations.snap.max_distance_m,
+                &category.destinations.snap,
                 false,
             );
             let snapped_count = snaps.iter().filter(|snap| snap.is_ok()).count();
@@ -95,17 +127,32 @@ pub(crate) fn execute_accessibility_with_graph(
     > = expansion_jobs
         .into_par_iter()
         .map(|(origin_set_id, origin)| {
-            let expansion = build_service_area_expansion(
-                topology,
-                metrics,
-                routing_graph,
-                origin,
-                &unique_origin_candidates[origin_set_id],
-                request.origins.snap.max_distance_m,
-                &request.origins.connectivity,
-                ServiceAreaMetricKind::TravelTimeS,
-                request.max_travel_time_s,
-            )
+            let expansion = if let Some((context, departure)) = temporal_runtime.as_ref() {
+                build_temporal_service_area_expansion(
+                    topology,
+                    metrics,
+                    routing_graph,
+                    origin,
+                    &unique_origin_candidates[origin_set_id],
+                    request.origins.snap.max_distance_m,
+                    &request.origins.connectivity,
+                    *departure,
+                    request.max_travel_time_s,
+                    context,
+                )
+            } else {
+                build_service_area_expansion(
+                    topology,
+                    metrics,
+                    routing_graph,
+                    origin,
+                    &unique_origin_candidates[origin_set_id],
+                    request.origins.snap.max_distance_m,
+                    &request.origins.connectivity,
+                    ServiceAreaMetricKind::TravelTimeS,
+                    request.max_travel_time_s,
+                )
+            }
             .map(std::sync::Arc::new)
             .map_err(|error| {
                 analysis_failure(&error).cloned().unwrap_or_else(|| {
@@ -180,6 +227,7 @@ pub(crate) fn execute_accessibility_with_graph(
                 category,
                 &thresholds,
                 request.max_travel_time_s,
+                temporal_runtime.as_ref(),
             ));
         }
     }
@@ -198,6 +246,11 @@ pub(crate) fn execute_accessibility_with_graph(
         .sum();
 
     Ok(AccessibilityResult {
+        departure_time: request.origins.temporal.departure_time.clone(),
+        arrive_by: request.origins.temporal.arrive_by.clone(),
+        scenario_id: temporal_runtime
+            .as_ref()
+            .and_then(|(context, _)| context.scenario_id.clone()),
         origin_count: request.origins.points.len(),
         category_count: request.categories.len(),
         destination_count,
@@ -257,6 +310,7 @@ fn accessibility_row_for_category(
     category: &CategoryDestinationSnaps,
     thresholds: &[f64],
     max_travel_time_s: f64,
+    temporal_runtime: Option<&(crate::temporal::TemporalContext, time::OffsetDateTime)>,
 ) -> AccessibilityCategoryResult {
     let mut counts = empty_accessibility_counts(thresholds);
     let mut nearest_destination_id = None;
@@ -270,9 +324,14 @@ fn accessibility_row_for_category(
         let mut best_destination_time = f64::INFINITY;
         let mut best_destination_snap_distance = None;
         for candidate in candidates {
-            let Some(travel_time_s) =
-                travel_time_to_destination(topology, metrics, routing_graph, expansion, candidate)
-            else {
+            let Some(travel_time_s) = travel_time_to_destination(
+                topology,
+                metrics,
+                routing_graph,
+                expansion,
+                candidate,
+                temporal_runtime,
+            ) else {
                 continue;
             };
             if travel_time_s + f64::EPSILON < best_destination_time {
@@ -351,6 +410,7 @@ fn travel_time_to_destination(
     routing_graph: &RoutingGraph,
     expansion: &ServiceAreaOriginExpansion,
     destination: &SnappedPoint,
+    temporal_runtime: Option<&(crate::temporal::TemporalContext, time::OffsetDateTime)>,
 ) -> Option<f64> {
     if let (Some(edge_id), Some(fraction)) = (
         destination.snapped_edge_id,
@@ -365,13 +425,31 @@ fn travel_time_to_destination(
         if !before_cost.is_finite() {
             return None;
         }
+        let remaining_fraction = fraction - start_fraction;
+        if let Some((context, departure)) = temporal_runtime {
+            // Temporal expansions store `before_cost` after any wait on this
+            // edge, so this reconstructs the exact edge-entry instant chosen
+            // by the expansion. Re-evaluating only the destination fraction
+            // preserves edge-entry speed/rule semantics instead of mixing a
+            // temporal prefix with the compiled static edge time.
+            let entry_time = *departure + time::Duration::seconds_f64(before_cost);
+            let edge_cost = crate::temporal::evaluate_edge_at(
+                topology,
+                metrics,
+                context,
+                edge_index,
+                entry_time,
+                remaining_fraction,
+            )?;
+            return Some(before_cost + edge_cost.wait_s + edge_cost.travel_time_s);
+        }
         let edge_cost = service_area_edge_cost(
             topology,
             metrics,
             edge_index,
             ServiceAreaMetricKind::TravelTimeS,
         )?;
-        return Some(before_cost + edge_cost * (fraction - start_fraction));
+        return Some(before_cost + edge_cost * remaining_fraction);
     }
 
     routing_graph

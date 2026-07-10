@@ -22,17 +22,21 @@ use netweevil_report::SoftwareInfo;
 use tracing_subscriber::EnvFilter;
 
 use crate::analyze::{
-    AnalyzeCommand, analyze_accessibility, analyze_matrix, analyze_od, analyze_route,
-    analyze_route_batch, analyze_service_area, analyze_transit_batch, analyze_transit_route,
+    AnalyzeCommand, analyze_accessibility, analyze_betweenness, analyze_matrix, analyze_od,
+    analyze_route, analyze_route_batch, analyze_scenario_batch, analyze_service_area,
+    analyze_service_area_sequence, analyze_transit_batch, analyze_transit_route,
 };
 use crate::api::{ApiCommand, api_serve};
 use crate::cache::{CacheCommand, cache_list};
-use crate::dataset::{DatasetCommand, dataset_import, dataset_list};
+use crate::dataset::{DatasetCommand, dataset_audit, dataset_import, dataset_list};
 use crate::experiment::{ExperimentCommand, experiment_run};
 use crate::profile::{ProfileCommand, profile_compile, profile_validate};
 use crate::report::{ReportCommand, report_render};
 use crate::simulate::{SimulateCommand, simulate_run, simulate_validate};
-use crate::transit::{TransitCommand, transit_import, transit_list};
+use crate::transit::{
+    TransitBindingsCommand, TransitCommand, TransitTransfersCommand, transit_apply_bindings,
+    transit_build_transfers, transit_import, transit_list,
+};
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -48,10 +52,17 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Dataset { command: dataset } => match dataset {
             DatasetCommand::Import(args) => dataset_import(&paths, args),
+            DatasetCommand::Audit(args) => dataset_audit(&paths, args),
             DatasetCommand::List => dataset_list(&paths),
         },
         Command::Transit { command: transit } => match transit {
             TransitCommand::Import(args) => transit_import(&paths, args),
+            TransitCommand::Bindings { command } => match command {
+                TransitBindingsCommand::Apply(args) => transit_apply_bindings(&paths, args),
+            },
+            TransitCommand::Transfers { command } => match command {
+                TransitTransfersCommand::Build(args) => transit_build_transfers(&paths, args),
+            },
             TransitCommand::List => transit_list(&paths),
         },
         Command::Profile { command: profile } => match profile {
@@ -67,6 +78,11 @@ fn main() -> Result<()> {
             AnalyzeCommand::Matrix(args) => analyze_matrix(&paths, args),
             AnalyzeCommand::Accessibility(args) => analyze_accessibility(&paths, args),
             AnalyzeCommand::ServiceArea(args) => analyze_service_area(&paths, args),
+            AnalyzeCommand::ServiceAreaSequence(args) => {
+                analyze_service_area_sequence(&paths, args)
+            }
+            AnalyzeCommand::Betweenness(args) => analyze_betweenness(&paths, args),
+            AnalyzeCommand::ScenarioBatch(args) => analyze_scenario_batch(&paths, args),
             AnalyzeCommand::TransitRoute(args) => analyze_transit_route(&paths, args),
             AnalyzeCommand::TransitBatch(args) => analyze_transit_batch(&paths, args),
         },

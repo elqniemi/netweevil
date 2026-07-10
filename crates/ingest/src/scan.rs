@@ -6,7 +6,10 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result};
-use netweevil_core::{AccessMask, HighwayClass, RoadClass, SmoothnessClass, SurfaceClass};
+use netweevil_core::{
+    AccessMask, FeatureAttributeTable, HighwayClass, NO_FEATURE_ROW, RoadClass, SmoothnessClass,
+    SurfaceClass, TemporalRuleSet,
+};
 use osmpbfreader::{OsmObj, OsmPbfReader};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -39,6 +42,8 @@ pub(crate) struct PendingWay {
     pub(crate) forward_lanes: Option<u8>,
     pub(crate) reverse_lanes: Option<u8>,
     pub(crate) name: Option<String>,
+    pub(crate) feature_row: u32,
+    pub(crate) temporal_rule_id: Option<u32>,
 }
 
 /// Source-agnostic scan result consumed by the topology build. The OSM and
@@ -48,9 +53,14 @@ pub(crate) struct PendingWay {
 pub(crate) struct ScanOutput {
     pub(crate) pending_ways: Vec<PendingWay>,
     pub(crate) restriction_candidates: Vec<TurnRestrictionCandidate>,
-    pub(crate) node_coords: FxHashMap<i64, (f64, f64)>,
+    /// Longitude, latitude and elevation in metres. Sources without
+    /// elevation data explicitly use zero; `NaN` is reserved for readers
+    /// that need to represent an unknown source value.
+    pub(crate) node_coords: FxHashMap<i64, (f64, f64, f64)>,
     pub(crate) traffic_signal_nodes: FxHashSet<i64>,
     pub(crate) counts: ObjectCounts,
+    pub(crate) feature_attributes: FeatureAttributeTable,
+    pub(crate) temporal_rule_sets: Vec<TemporalRuleSet>,
 }
 
 #[derive(Debug, Default)]
@@ -129,6 +139,8 @@ pub(crate) fn scan_routable_objects(
                     forward_lanes: speed_lanes.forward_lanes,
                     reverse_lanes: speed_lanes.reverse_lanes,
                     name: way.tags.get("name").map(ToString::to_string),
+                    feature_row: NO_FEATURE_ROW,
+                    temporal_rule_id: None,
                 };
 
                 for node_id in &pending.node_ids {
@@ -188,7 +200,7 @@ pub(crate) fn load_node_coords(
     _source_size_bytes: u64,
     needed_nodes: &FxHashSet<i64>,
     progress: &mut impl FnMut(DatasetImportProgress),
-) -> Result<FxHashMap<i64, (f64, f64)>> {
+) -> Result<FxHashMap<i64, (f64, f64, f64)>> {
     let file = File::open(source_path)
         .with_context(|| format!("opening dataset source {}", source_path.display()))?;
     let bytes_read = Arc::new(AtomicU64::new(0));
@@ -210,7 +222,7 @@ pub(crate) fn load_node_coords(
         };
         let node_id = node.id.0;
         if needed_nodes.contains(&node_id) {
-            coords.insert(node_id, (node.lon(), node.lat()));
+            coords.insert(node_id, (node.lon(), node.lat(), 0.0));
             if coords.len() == needed_nodes.len() {
                 break;
             }
@@ -261,5 +273,7 @@ pub(crate) fn scan_osm(
         node_coords,
         traffic_signal_nodes,
         counts,
+        feature_attributes: Default::default(),
+        temporal_rule_sets: Vec::new(),
     })
 }
