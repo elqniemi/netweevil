@@ -142,15 +142,16 @@ netweevil transit transfers build \
 ```
 
 The API loads tables registered for its active dataset. A transit route or
-service-area payload can select one at the execution-envelope level:
+service-area payload selects one in `request.modes`:
 
 ```json
 {
   "feed_id": "hk_example_mtr",
-  "transfer_profile_id": "pedestrian_step_free_multilayer",
-  "request": {"modes": {"street_access": "network"}}
+  "request": {
+    "modes": {
+      "street_access": "network",
+      "transfer_profile_id": "pedestrian_step_free_multilayer"
+    }
+  }
 }
 ```
-
-The same value may instead be placed in
-`request.modes.transfer_profile_id`; conflicting values are rejected.

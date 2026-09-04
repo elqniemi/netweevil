@@ -375,9 +375,9 @@ disconnected component, paid-area barrier, or missing profile cannot become a
 straight-line teleport. Use `street_access: "straight_line"` explicitly when
 geometric access is desired. Transit service areas accept the same option.
 
-For API requests, `transfer_profile_id` may be supplied either beside
-`feed_id` or as `request.modes.transfer_profile_id`. `/v1/service` reports each
-feed's bound-stop count and available transfer profile IDs.
+For API requests, `transfer_profile_id` must be supplied as
+`request.modes.transfer_profile_id`. `/v1/service` reports each feed's
+bound-stop count and available transfer profile IDs.
 
 Preload a transit feed into the API:
 

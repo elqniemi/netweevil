@@ -14,10 +14,10 @@ publish = false
 anyhow.workspace = true
 axum.workspace = true
 netweevil-core = { path = "../core" }
+netweevil-manifest = { path = "../manifest" }
 netweevil-persist = { path = "../persist" }
 netweevil-profile = { path = "../profile" }
 netweevil-query = { path = "../query" }
-netweevil-report = { path = "../report" }
 netweevil-simulate = { path = "../simulate" }
 netweevil-transit = { path = "../transit" }
 serde.workspace = true

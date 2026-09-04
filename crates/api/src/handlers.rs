@@ -1,5 +1,12 @@
+//! Routing-analysis endpoints. Every POST handler follows the same lifecycle:
+//! resolve the profile, log the request, upgrade geometry when GeoJSON was
+//! asked for, describe the effective engine, run the analysis on the routing
+//! worker pool ([`run_analysis`]), then render JSON or GeoJSON
+//! ([`analysis_response`]).
+
 use std::sync::Arc;
 
+use anyhow::Result;
 use axum::Json;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::response::{IntoResponse, Response};
@@ -7,16 +14,16 @@ use netweevil_profile::ReturnGeometry;
 use netweevil_query::{
     EffectiveEngineDescription, EngineMode, TemporalRequestOptions, execute_scenario_batch,
 };
+use serde::Serialize;
+use serde_json::Value;
 use tracing::{info, warn};
 
 use crate::dto::{
-    AccessibilityExecutionRequest, AccessibilityExecutionResponse, BetweennessExecutionRequest,
-    BetweennessExecutionResponse, DatasetInfo, ExecutionContext, HealthResponse,
-    MatrixExecutionRequest, MatrixExecutionResponse, OdExecutionRequest, OdExecutionResponse,
-    ProfileInfo, ResponseFormatQuery, RouteExecutionRequest, RouteExecutionResponse,
-    ScenarioBatchExecutionRequest, ScenarioBatchExecutionResponse, ServiceAreaExecutionRequest,
-    ServiceAreaExecutionResponse, ServiceAreaSequenceExecutionRequest,
-    ServiceAreaSequenceExecutionResponse, ServiceInfoResponse, TransitFeedInfo,
+    AccessibilityExecutionRequest, AnalysisResponse, BetweennessExecutionRequest, DatasetInfo,
+    ExecutionContext, HealthResponse, MatrixExecutionRequest, OdExecutionRequest, ProfileInfo,
+    ResponseFormatQuery, RouteExecutionRequest, ScenarioBatchExecutionRequest,
+    ServiceAreaExecutionRequest, ServiceAreaSequenceExecutionRequest, ServiceInfoResponse,
+    TransitFeedInfo,
 };
 use crate::error::ApiError;
 use crate::geojson::{
@@ -57,16 +64,53 @@ pub(crate) async fn get_profile(
     Ok(Json(profile_info(profile)))
 }
 
+/// Runs one analysis on the routing worker pool, logging and translating a
+/// failure the way every analysis endpoint does.
+async fn run_analysis<T>(
+    state: &ApiState,
+    endpoint: &'static str,
+    analysis_id: Option<&str>,
+    job: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+{
+    execute_on_routing_worker(state.service.as_ref(), job)
+        .await
+        .map_err(|error| {
+            warn!(
+                endpoint,
+                analysis_id = analysis_id.unwrap_or("-"),
+                %error,
+                "request failed"
+            );
+            ApiError::from_execution_error(error)
+        })
+}
+
+/// Renders an analysis result as the `{service, result}` JSON envelope, or as
+/// the endpoint's GeoJSON when `?format=geojson` was requested.
+fn analysis_response<T: Serialize>(
+    query: &ResponseFormatQuery,
+    service: ExecutionContext,
+    result: T,
+    to_geojson: impl FnOnce(&ExecutionContext, &T) -> Value,
+) -> Result<Response, ApiError> {
+    if wants_geojson(query) {
+        return geojson_response(to_geojson(&service, &result));
+    }
+    Ok(Json(AnalysisResponse { service, result }).into_response())
+}
+
 pub(crate) async fn route_handler(
     State(state): State<ApiState>,
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<RouteExecutionRequest>,
 ) -> Result<Response, ApiError> {
     let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
-    let profile_id = &profile.document.profile.id;
     info!(
         endpoint = "route",
-        profile_id = %profile_id,
+        profile_id = %profile.document.profile.id,
         route_id = %payload.request.route_id,
         engine_mode = ?payload.engine_mode,
         format = query.format.as_deref().unwrap_or("json"),
@@ -88,18 +132,14 @@ pub(crate) async fn route_handler(
     } else {
         None
     };
-    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+    let result = run_analysis(&state, "route", Some(&route_id), move || {
         if let Some(edge_names) = edge_names.as_deref() {
             engine.execute_route_with_edge_names_and_mode(&request, edge_names, engine_mode)
         } else {
             engine.execute_route_with_mode(&request, engine_mode)
         }
     })
-    .await
-    .map_err(|error| {
-        warn!(endpoint = "route", route_id = %route_id, %error, "request failed");
-        ApiError::from_execution_error(error)
-    })?;
+    .await?;
     info!(
         endpoint = "route",
         route_id = %result.route_id,
@@ -108,14 +148,9 @@ pub(crate) async fn route_handler(
         segments = result.summary.segment_count,
         "response"
     );
-    if wants_geojson(&query) {
-        return geojson_response(route_result_geojson(
-            state.service.as_ref(),
-            &service,
-            &result,
-        ));
-    }
-    Ok(Json(RouteExecutionResponse { service, result }).into_response())
+    analysis_response(&query, service, result, |context, result| {
+        route_result_geojson(state.service.as_ref(), context, result)
+    })
 }
 
 pub(crate) async fn od_handler(
@@ -124,12 +159,10 @@ pub(crate) async fn od_handler(
     Json(payload): Json<OdExecutionRequest>,
 ) -> Result<Response, ApiError> {
     let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
-    let profile_id = &profile.document.profile.id;
-    let pair_count = payload.request.pairs.len();
     info!(
         endpoint = "od",
-        profile_id = %profile_id,
-        pair_count = pair_count,
+        profile_id = %profile.document.profile.id,
+        pair_count = payload.request.pairs.len(),
         engine_mode = ?payload.engine_mode,
         format = query.format.as_deref().unwrap_or("json"),
         "request"
@@ -146,14 +179,10 @@ pub(crate) async fn od_handler(
     );
     let service = execution_context(state.service.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
-    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+    let result = run_analysis(&state, "od", None, move || {
         engine.execute_od_with_mode(&request, engine_mode)
     })
-    .await
-    .map_err(|error| {
-        warn!(endpoint = "od", %error, "request failed");
-        ApiError::from_execution_error(error)
-    })?;
+    .await?;
     info!(
         endpoint = "od",
         pair_count = result.pair_count,
@@ -162,10 +191,7 @@ pub(crate) async fn od_handler(
         failed = result.failed_count,
         "response"
     );
-    if wants_geojson(&query) {
-        return geojson_response(od_result_geojson(&service, &result));
-    }
-    Ok(Json(OdExecutionResponse { service, result }).into_response())
+    analysis_response(&query, service, result, od_result_geojson)
 }
 
 pub(crate) async fn matrix_handler(
@@ -174,12 +200,11 @@ pub(crate) async fn matrix_handler(
     Json(payload): Json<MatrixExecutionRequest>,
 ) -> Result<Response, ApiError> {
     let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
-    let profile_id = &profile.document.profile.id;
     let origin_count = payload.request.origins.points.len();
     let destination_count = payload.request.destinations.points.len();
     info!(
         endpoint = "matrix",
-        profile_id = %profile_id,
+        profile_id = %profile.document.profile.id,
         engine_mode = ?payload.engine_mode,
         origins = origin_count,
         destinations = destination_count,
@@ -205,14 +230,10 @@ pub(crate) async fn matrix_handler(
     );
     let service = execution_context(state.service.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
-    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+    let result = run_analysis(&state, "matrix", None, move || {
         engine.execute_matrix_with_mode(&request.origins, &request.destinations, engine_mode)
     })
-    .await
-    .map_err(|error| {
-        warn!(endpoint = "matrix", %error, "request failed");
-        ApiError::from_execution_error(error)
-    })?;
+    .await?;
     info!(
         endpoint = "matrix",
         cells = result.cell_count,
@@ -221,10 +242,7 @@ pub(crate) async fn matrix_handler(
         failed = result.failed_count,
         "response"
     );
-    if wants_geojson(&query) {
-        return geojson_response(matrix_result_geojson(&service, &result));
-    }
-    Ok(Json(MatrixExecutionResponse { service, result }).into_response())
+    analysis_response(&query, service, result, matrix_result_geojson)
 }
 
 pub(crate) async fn accessibility_handler(
@@ -251,14 +269,10 @@ pub(crate) async fn accessibility_handler(
     let engine = Arc::clone(&profile.engine);
     let engine_mode = payload.engine_mode;
     let request = payload.request;
-    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+    let result = run_analysis(&state, "accessibility", None, move || {
         engine.execute_accessibility_with_mode(&request, engine_mode)
     })
-    .await
-    .map_err(|error| {
-        warn!(endpoint = "accessibility", %error, "request failed");
-        ApiError::from_execution_error(error)
-    })?;
+    .await?;
     info!(
         endpoint = "accessibility",
         rows = result.row_count,
@@ -266,7 +280,7 @@ pub(crate) async fn accessibility_handler(
         failed = result.failed_count,
         "response"
     );
-    Ok(Json(AccessibilityExecutionResponse { service, result }).into_response())
+    Ok(Json(AnalysisResponse { service, result }).into_response())
 }
 
 pub(crate) async fn service_area_handler(
@@ -275,10 +289,9 @@ pub(crate) async fn service_area_handler(
     Json(payload): Json<ServiceAreaExecutionRequest>,
 ) -> Result<Response, ApiError> {
     let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
-    let profile_id = &profile.document.profile.id;
     info!(
         endpoint = "service_area",
-        profile_id = %profile_id,
+        profile_id = %profile.document.profile.id,
         analysis_id = %payload.request.analysis_id,
         origins = payload.request.origins.len(),
         thresholds = payload.request.thresholds.len(),
@@ -298,14 +311,11 @@ pub(crate) async fn service_area_handler(
     );
     let service = execution_context(state.service.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
-    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+    let analysis_id = request.analysis_id.clone();
+    let result = run_analysis(&state, "service_area", Some(&analysis_id), move || {
         engine.execute_service_area(&request)
     })
-    .await
-    .map_err(|error| {
-        warn!(endpoint = "service_area", %error, "request failed");
-        ApiError::from_execution_error(error)
-    })?;
+    .await?;
     info!(
         endpoint = "service_area",
         analysis_id = %result.analysis_id,
@@ -314,10 +324,7 @@ pub(crate) async fn service_area_handler(
         skipped_origins = result.skipped_origin_count,
         "response"
     );
-    if wants_geojson(&query) {
-        return geojson_response(service_area_result_geojson(&service, &result));
-    }
-    Ok(Json(ServiceAreaExecutionResponse { service, result }).into_response())
+    analysis_response(&query, service, result, service_area_result_geojson)
 }
 
 pub(crate) async fn service_area_sequence_handler(
@@ -326,6 +333,13 @@ pub(crate) async fn service_area_sequence_handler(
     Json(payload): Json<ServiceAreaSequenceExecutionRequest>,
 ) -> Result<Response, ApiError> {
     let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    info!(
+        endpoint = "service_area_sequence",
+        profile_id = %profile.document.profile.id,
+        sequence_id = %payload.request.sequence_id,
+        format = query.format.as_deref().unwrap_or("json"),
+        "request"
+    );
     let mut request = payload.request;
     if wants_geojson(&query) {
         request.request.returns.geometry = true;
@@ -336,27 +350,21 @@ pub(crate) async fn service_area_sequence_handler(
         acceleration: "spatial_index+edge_phantoms+turn_automaton",
     };
     let service = execution_context(state.service.as_ref(), profile, effective_engine);
-    let sequence_id = request.sequence_id.clone();
     let engine = Arc::clone(&profile.engine);
-    info!(
-        endpoint = "service_area_sequence",
-        profile_id = %profile.document.profile.id,
-        sequence_id = %sequence_id,
-        format = query.format.as_deref().unwrap_or("json"),
-        "request"
-    );
-    let result = execute_on_routing_worker(state.service.as_ref(), move || {
-        engine.execute_service_area_sequence(&request)
-    })
-    .await
-    .map_err(|error| {
-        warn!(endpoint = "service_area_sequence", sequence_id = %sequence_id, %error, "request failed");
-        ApiError::from_execution_error(error)
-    })?;
-    if wants_geojson(&query) {
-        return geojson_response(service_area_sequence_result_geojson(&service, &result));
-    }
-    Ok(Json(ServiceAreaSequenceExecutionResponse { service, result }).into_response())
+    let sequence_id = request.sequence_id.clone();
+    let result = run_analysis(
+        &state,
+        "service_area_sequence",
+        Some(&sequence_id),
+        move || engine.execute_service_area_sequence(&request),
+    )
+    .await?;
+    analysis_response(
+        &query,
+        service,
+        result,
+        service_area_sequence_result_geojson,
+    )
 }
 
 pub(crate) async fn betweenness_handler(
@@ -382,15 +390,13 @@ pub(crate) async fn betweenness_handler(
     );
     let service = execution_context(state.service.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
-    let result = execute_on_routing_worker(state.service.as_ref(), move || {
-        engine.execute_betweenness(&payload.request)
+    let request = payload.request;
+    let analysis_id = request.analysis_id.clone();
+    let result = run_analysis(&state, "betweenness", Some(&analysis_id), move || {
+        engine.execute_betweenness(&request)
     })
-    .await
-    .map_err(ApiError::from_execution_error)?;
-    if wants_geojson(&query) {
-        return geojson_response(betweenness_result_geojson(&service, &result));
-    }
-    Ok(Json(BetweennessExecutionResponse { service, result }).into_response())
+    .await?;
+    analysis_response(&query, service, result, betweenness_result_geojson)
 }
 
 pub(crate) async fn scenario_batch_handler(
@@ -436,22 +442,13 @@ pub(crate) async fn scenario_batch_handler(
     let service = execution_context(state.service.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
     let batch_id = request.batch_id.clone();
-    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+    let result = run_analysis(&state, "scenario_batch", Some(&batch_id), move || {
         execute_scenario_batch(engine.as_ref(), &request)
     })
-    .await
-    .map_err(|error| {
-        warn!(endpoint = "scenario_batch", batch_id = %batch_id, %error, "request failed");
-        ApiError::from_execution_error(error)
-    })?;
-    if wants_geojson(&query) {
-        return geojson_response(scenario_batch_result_geojson(
-            state.service.as_ref(),
-            &service,
-            &result,
-        ));
-    }
-    Ok(Json(ScenarioBatchExecutionResponse { service, result }).into_response())
+    .await?;
+    analysis_response(&query, service, result, |context, result| {
+        scenario_batch_result_geojson(state.service.as_ref(), context, result)
+    })
 }
 
 fn effective_engine_for_temporal_options(
@@ -505,11 +502,11 @@ pub(crate) fn build_service_info(service: &ServiceRuntime) -> ServiceInfoRespons
     }
 }
 
-pub(crate) fn build_profile_infos(service: &ServiceRuntime) -> Vec<ProfileInfo> {
+fn build_profile_infos(service: &ServiceRuntime) -> Vec<ProfileInfo> {
     service.profiles.values().map(profile_info).collect()
 }
 
-pub(crate) fn build_transit_feed_infos(service: &ServiceRuntime) -> Vec<TransitFeedInfo> {
+fn build_transit_feed_infos(service: &ServiceRuntime) -> Vec<TransitFeedInfo> {
     service
         .transit_feeds
         .values()
@@ -533,7 +530,7 @@ pub(crate) fn build_transit_feed_infos(service: &ServiceRuntime) -> Vec<TransitF
         .collect()
 }
 
-pub(crate) fn profile_info(profile: &LoadedProfile) -> ProfileInfo {
+fn profile_info(profile: &LoadedProfile) -> ProfileInfo {
     ProfileInfo {
         profile_id: profile.document.profile.id.clone(),
         label: profile.document.profile.label.clone(),
@@ -550,7 +547,7 @@ pub(crate) fn profile_info(profile: &LoadedProfile) -> ProfileInfo {
     }
 }
 
-pub(crate) fn execution_context(
+fn execution_context(
     service: &ServiceRuntime,
     profile: &LoadedProfile,
     engine: EffectiveEngineDescription,

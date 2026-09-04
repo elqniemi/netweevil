@@ -19,18 +19,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
-use crate::{ApiError, ApiState, geojson_response};
+use crate::error::ApiError;
+use crate::geojson::geojson_response;
+use crate::state::ApiState;
 
-pub struct SimulationEntry {
-    pub simulation_id: String,
-    pub scenario_id: String,
-    pub created_at: String,
-    pub handle: SimulationHandle,
-    pub result: Arc<OnceLock<Result<Arc<SimulationResult>, String>>>,
+pub(crate) struct SimulationEntry {
+    pub(crate) simulation_id: String,
+    pub(crate) scenario_id: String,
+    pub(crate) created_at: String,
+    pub(crate) handle: SimulationHandle,
+    pub(crate) result: Arc<OnceLock<Result<Arc<SimulationResult>, String>>>,
 }
 
 #[derive(Default)]
-pub struct SimulationRegistry {
+pub(crate) struct SimulationRegistry {
     counter: AtomicU64,
     entries: Mutex<BTreeMap<String, Arc<SimulationEntry>>>,
 }
@@ -74,26 +76,26 @@ impl SimulationRegistry {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct SimulationCreateRequest {
-    pub scenario: SimulationScenario,
+pub(crate) struct SimulationCreateRequest {
+    pub(crate) scenario: SimulationScenario,
 }
 
 #[derive(Debug, Serialize)]
-pub struct SimulationCreateResponse {
-    pub simulation_id: String,
-    pub status: SimulationStatus,
+pub(crate) struct SimulationCreateResponse {
+    pub(crate) simulation_id: String,
+    pub(crate) status: SimulationStatus,
 }
 
 #[derive(Debug, Serialize)]
-pub struct SimulationInfo {
-    pub simulation_id: String,
-    pub scenario_id: String,
-    pub created_at: String,
-    pub status: SimulationStatus,
+pub(crate) struct SimulationInfo {
+    pub(crate) simulation_id: String,
+    pub(crate) scenario_id: String,
+    pub(crate) created_at: String,
+    pub(crate) status: SimulationStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub(crate) error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub summary: Option<Value>,
+    pub(crate) summary: Option<Value>,
 }
 
 fn entry_info(entry: &SimulationEntry, include_summary: bool) -> SimulationInfo {
@@ -127,7 +129,7 @@ fn entry_info(entry: &SimulationEntry, include_summary: bool) -> SimulationInfo 
     }
 }
 
-pub async fn create_simulation(
+pub(crate) async fn create_simulation(
     State(state): State<ApiState>,
     Json(payload): Json<SimulationCreateRequest>,
 ) -> Result<Json<SimulationCreateResponse>, ApiError> {
@@ -164,7 +166,7 @@ pub async fn create_simulation(
     let entry = Arc::new(SimulationEntry {
         simulation_id: simulation_id.clone(),
         scenario_id,
-        created_at: netweevil_report::now_rfc3339().unwrap_or_else(|_| "unknown".to_string()),
+        created_at: netweevil_manifest::now_rfc3339().unwrap_or_else(|_| "unknown".to_string()),
         handle: handle.clone(),
         result: Arc::new(OnceLock::new()),
     });
@@ -194,7 +196,7 @@ pub async fn create_simulation(
     }))
 }
 
-pub async fn list_simulations(State(state): State<ApiState>) -> Json<Vec<SimulationInfo>> {
+pub(crate) async fn list_simulations(State(state): State<ApiState>) -> Json<Vec<SimulationInfo>> {
     let mut infos: Vec<SimulationInfo> = state
         .simulations
         .list()
@@ -212,7 +214,7 @@ fn lookup(state: &ApiState, simulation_id: &str) -> Result<Arc<SimulationEntry>,
         .ok_or_else(|| ApiError::not_found(format!("unknown simulation '{simulation_id}'")))
 }
 
-pub async fn get_simulation(
+pub(crate) async fn get_simulation(
     State(state): State<ApiState>,
     AxumPath(simulation_id): AxumPath<String>,
 ) -> Result<Json<SimulationInfo>, ApiError> {
@@ -220,7 +222,7 @@ pub async fn get_simulation(
     Ok(Json(entry_info(&entry, true)))
 }
 
-pub async fn delete_simulation(
+pub(crate) async fn delete_simulation(
     State(state): State<ApiState>,
     AxumPath(simulation_id): AxumPath<String>,
 ) -> Result<Json<Value>, ApiError> {
@@ -232,7 +234,7 @@ pub async fn delete_simulation(
     ))
 }
 
-pub async fn control_simulation(
+pub(crate) async fn control_simulation(
     State(state): State<ApiState>,
     AxumPath(simulation_id): AxumPath<String>,
     Json(command): Json<SimulationCommand>,
@@ -250,17 +252,17 @@ pub async fn control_simulation(
     Ok(Json(entry_info(&entry, false)))
 }
 
-#[derive(Debug, Deserialize, Default)]
-pub struct FrameQuery {
-    pub start_s: Option<f64>,
-    pub end_s: Option<f64>,
+#[derive(Debug, Deserialize)]
+pub(crate) struct FrameQuery {
+    pub(crate) start_s: Option<f64>,
+    pub(crate) end_s: Option<f64>,
     /// Cap agents per frame (deterministic stride subsample).
-    pub max_agents: Option<usize>,
+    pub(crate) max_agents: Option<usize>,
     /// "json" (columnar, default) or "geojson" (last frame only).
-    pub format: Option<String>,
+    pub(crate) format: Option<String>,
 }
 
-pub async fn simulation_frames(
+pub(crate) async fn simulation_frames(
     State(state): State<ApiState>,
     AxumPath(simulation_id): AxumPath<String>,
     Query(query): Query<FrameQuery>,
@@ -351,18 +353,18 @@ pub async fn simulation_frames(
     Ok(Json(body).into_response())
 }
 
-#[derive(Debug, Deserialize, Default)]
-pub struct EdgeStatsQuery {
-    pub start_s: Option<f64>,
-    pub end_s: Option<f64>,
+#[derive(Debug, Deserialize)]
+pub(crate) struct EdgeStatsQuery {
+    pub(crate) start_s: Option<f64>,
+    pub(crate) end_s: Option<f64>,
     /// Skip edges quieter than this mean occupancy (PCU).
-    pub min_occupancy: Option<f64>,
+    pub(crate) min_occupancy: Option<f64>,
     /// "bins" (time window, default) or "summary" (whole run busy segments).
-    pub mode: Option<String>,
-    pub min_traversals: Option<u32>,
+    pub(crate) mode: Option<String>,
+    pub(crate) min_traversals: Option<u32>,
 }
 
-pub async fn simulation_edges(
+pub(crate) async fn simulation_edges(
     State(state): State<ApiState>,
     AxumPath(simulation_id): AxumPath<String>,
     Query(query): Query<EdgeStatsQuery>,
@@ -399,16 +401,16 @@ pub async fn simulation_edges(
     geojson_response(geojson)
 }
 
-#[derive(Debug, Deserialize, Default)]
-pub struct TemporalQuery {
-    pub start_s: Option<f64>,
-    pub end_s: Option<f64>,
-    pub max_agents: Option<usize>,
+#[derive(Debug, Deserialize)]
+pub(crate) struct TemporalQuery {
+    pub(crate) start_s: Option<f64>,
+    pub(crate) end_s: Option<f64>,
+    pub(crate) max_agents: Option<usize>,
     /// Reference instant for frame timestamps (ISO, default 2026-01-01T00:00:00).
-    pub base_datetime: Option<String>,
+    pub(crate) base_datetime: Option<String>,
 }
 
-pub async fn simulation_temporal(
+pub(crate) async fn simulation_temporal(
     State(state): State<ApiState>,
     AxumPath(simulation_id): AxumPath<String>,
     Query(query): Query<TemporalQuery>,
@@ -458,7 +460,7 @@ pub async fn simulation_temporal(
     geojson_response(geojson)
 }
 
-pub async fn simulation_agent(
+pub(crate) async fn simulation_agent(
     State(state): State<ApiState>,
     AxumPath((simulation_id, agent_id)): AxumPath<(String, u32)>,
 ) -> Result<Json<Value>, ApiError> {

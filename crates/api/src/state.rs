@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use netweevil_core::{CacheBundleId, DatasetAccelerationBundle, DatasetId, TopologyBundle};
+use netweevil_manifest::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
 use netweevil_persist::{
     WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
     read_compiled_profile_manifests, read_dataset_manifest, read_edge_name_bundle, read_json,
@@ -12,7 +13,6 @@ use netweevil_persist::{
 };
 use netweevil_profile::{ProfileDocument, compile_profile_bundle_with_acceleration, load_profile};
 use netweevil_query::PreparedRoutingEngine;
-use netweevil_report::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
 use netweevil_transit::{
     PreparedTransitRouter, TransitFeedManifest, read_transit_bundle, read_transit_transfer_table,
 };

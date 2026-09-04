@@ -7,7 +7,7 @@ use serde::Serialize;
 #[derive(Debug, Serialize)]
 struct ErrorResponse {
     error: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     diagnostics: Vec<AnalysisDiagnostic>,
 }
 

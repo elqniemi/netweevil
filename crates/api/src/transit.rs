@@ -45,7 +45,6 @@ pub(crate) async fn transit_route_handler(
         "request"
     );
     let mut request = payload.request;
-    apply_transfer_profile_shorthand(&mut request.modes, payload.transfer_profile_id)?;
     let transfer_profile_id = request.modes.transfer_profile_id.clone();
     let walking_geometry = request.returns.walking_geometry;
     let network_street_access = matches!(
@@ -143,8 +142,7 @@ pub(crate) async fn transit_service_area_handler(
     );
     let manifest = feed.manifest.clone();
     let router = Arc::clone(&feed.router);
-    let mut request = payload.request;
-    apply_transfer_profile_shorthand(&mut request.modes, payload.transfer_profile_id)?;
+    let request = payload.request;
     let transfer_profile_id = request.modes.transfer_profile_id.clone();
     let network_street_access = matches!(
         request.modes.street_access,
@@ -197,25 +195,6 @@ pub(crate) async fn transit_service_area_handler(
         return geojson_response(transit_service_area_result_geojson(&service, &result));
     }
     Ok(Json(TransitServiceAreaExecutionResponse { service, result }).into_response())
-}
-
-fn apply_transfer_profile_shorthand(
-    modes: &mut TransitModeOptions,
-    shorthand: Option<String>,
-) -> Result<(), ApiError> {
-    let Some(shorthand) = shorthand else {
-        return Ok(());
-    };
-    if let Some(nested) = modes.transfer_profile_id.as_deref()
-        && nested != shorthand
-    {
-        return Err(ApiError::bad_request(format!(
-            "transfer_profile_id '{}' conflicts with request.modes.transfer_profile_id '{}'",
-            shorthand, nested
-        )));
-    }
-    modes.transfer_profile_id = Some(shorthand);
-    Ok(())
 }
 
 fn resolve_transit_pedestrian_profile<'a>(
@@ -831,29 +810,5 @@ fn replace_transit_street_leg_geometries_for_legs(
                 ));
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn transfer_profile_shorthand_populates_nested_modes() {
-        let mut modes = TransitModeOptions::default();
-        apply_transfer_profile_shorthand(&mut modes, Some("step_free".to_string()))
-            .expect("shorthand applies");
-        assert_eq!(modes.transfer_profile_id.as_deref(), Some("step_free"));
-    }
-
-    #[test]
-    fn transfer_profile_shorthand_rejects_conflict() {
-        let mut modes = TransitModeOptions {
-            transfer_profile_id: Some("walk".to_string()),
-            ..TransitModeOptions::default()
-        };
-        assert!(
-            apply_transfer_profile_shorthand(&mut modes, Some("step_free".to_string())).is_err()
-        );
     }
 }
