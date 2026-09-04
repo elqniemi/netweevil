@@ -48,6 +48,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- API transit payloads: `transfer_profile_id` is accepted only under
+  `request.modes.transfer_profile_id`; the top-level shorthand beside
+  `feed_id` was removed.
+- `netweevil-api` exposes only `serve` and `ApiServeOptions`; request and
+  response DTOs are crate-private and the crate depends on
+  `netweevil-manifest` instead of `netweevil-report`.
+- `netweevil_ingest::import_dataset` is the single import entry point
+  (multiple sources plus a progress callback); the single-source and
+  no-progress variants were removed.
+- `new_run_manifest` requires the completed algorithm info and methods
+  summary instead of filling placeholder text.
+
+### Removed
+
+- Presentation decks and their build assets are no longer tracked
+  (`/pitch_assets/`, `/*.pptx`), along with the obsolete extension plan
+  document and an unreferenced QGIS symbology database.
+- Unused dependencies (`directories`, `flate2`, `arrow-array` in query,
+  `uuid`/`time` in report, `time` in core, `tracing` in the CLI) and dead
+  code in query, ingest, transit, and the QGIS plugin, including the
+  disabled arrive-by transit checkbox.
+
 - Service-area polygons are now concave: reachable segments are traced on
   a metric grid into boundary rings that hug the network, and enclosed
   unreachable pockets (water, restricted areas) become GeoJSON holes
