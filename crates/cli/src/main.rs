@@ -1,10 +1,11 @@
 //! `netweevil` — the command-line interface for OSM routing research:
 //! dataset import, profile compilation, analyses (route/OD/matrix/service
-//! areas/accessibility), GTFS transit, traffic simulation, reports, and the
-//! local HTTP API server.
+//! areas/accessibility), GTFS transit, traffic simulation, reports,
+//! performance benchmarks, and the local HTTP API server.
 
 mod analyze;
 mod api;
+mod bench;
 mod cache;
 mod dataset;
 mod experiment;
@@ -27,6 +28,7 @@ use crate::analyze::{
     analyze_service_area_sequence, analyze_transit_batch, analyze_transit_route,
 };
 use crate::api::{ApiCommand, api_serve};
+use crate::bench::{BenchCommand, bench_compare, bench_corpus, bench_http, bench_run};
 use crate::cache::{CacheCommand, cache_list};
 use crate::dataset::{DatasetCommand, dataset_audit, dataset_import, dataset_list};
 use crate::experiment::{ExperimentCommand, experiment_run};
@@ -101,6 +103,12 @@ fn main() -> Result<()> {
         Command::Cache { command: cache } => match cache {
             CacheCommand::List => cache_list(&paths),
         },
+        Command::Bench { command: bench } => match bench {
+            BenchCommand::Corpus(args) => bench_corpus(&paths, args),
+            BenchCommand::Run(args) => bench_run(&paths, args),
+            BenchCommand::Http(args) => bench_http(args),
+            BenchCommand::Compare(args) => bench_compare(args),
+        },
         Command::Api { command: api } => match api {
             ApiCommand::Serve(args) => api_serve(paths, args),
         },
@@ -151,6 +159,10 @@ enum Command {
     Cache {
         #[command(subcommand)]
         command: CacheCommand,
+    },
+    Bench {
+        #[command(subcommand)]
+        command: BenchCommand,
     },
     Api {
         #[command(subcommand)]

@@ -1,25 +1,91 @@
-# Performance Examples
+# Performance Corpora
 
-This directory holds deterministic benchmark inputs for repeatable performance runs.
+Deterministic benchmark inputs for `netweevil bench`. See the Benchmarking
+section of the top-level `README.md` for the full command surface.
 
-Recommended corpora:
+## Corpora
 
-- `ile_de_france_routes.csv`: medium and long-range car routes for regional benchmarking
-- `../requests/paris_routes.csv`: short urban routes for city-scale benchmarking
+| File | Area | Notes |
+| --- | --- | --- |
+| `north_nl_routes.csv` | Northern Netherlands | 1000 pairs, seed 42, stratified short/medium/long |
+| `ile_de_france_routes.csv` | Île-de-France | medium and long-range car routes |
+| `groningen_routes.csv` | Groningen | short urban routes |
+| `../requests/paris_routes.csv` | Paris | short urban routes |
 
-Run the reproducible API benchmark harness with a fixed corpus:
+## Format
 
-```bash
-CORPUS_PATH=examples/perf/ile_de_france_routes.csv \
-DATASET_ID=ile_2026_03 \
-PROFILE_PATH=examples/profiles/car_research_v1.yml \
-scripts/perf_api_route_corpus.sh
+Generated corpora use:
+
+```text
+id,source_lon,source_lat,target_lon,target_lat,bucket
 ```
 
-The corpus format is:
+`bucket` is the straight-line distance class: `short` (< 5 km), `medium`
+(5–30 km), or `long` (> 30 km). Reports group latency by bucket, so mixing the
+three keeps a single number from being dominated by one route length.
+
+The older layout is still accepted as input, and its bucket is derived from the
+straight-line distance:
 
 ```text
 id,source_x,source_y,target_x,target_y
 ```
 
-The benchmark runner defaults to summary-only route responses so the timing focuses on the routing path rather than geometry serialization. On the current API path that also omits `node_path` and `edge_path` from JSON, keeping the benchmark aligned with the intended low-payload warm-query mode.
+## Regenerating
+
+`bench corpus` samples coordinates inside the topology bounds (or `--bbox`),
+snaps both endpoints with the engine's own snapping, and keeps a pair only when
+both ends snap and share a connected component. Sampling is driven by a seeded
+SplitMix64 generator, so the same `--seed`, dataset, and profile reproduce the
+same file.
+
+```bash
+netweevil bench corpus \
+  --dataset north_nl_2026_05_10 \
+  --profile examples/profiles/car_north_nl_2026_05.yml \
+  --count 1000 \
+  --seed 42 \
+  --out examples/perf/north_nl_routes.csv
+```
+
+Corpora are tied to the dataset they were sampled from: coordinates outside a
+dataset's coverage will fail to snap at query time and be counted as failures.
+
+## Using a corpus
+
+```bash
+# In-process, 16 threads over one shared engine.
+netweevil bench run \
+  --dataset north_nl_2026_05_10 \
+  --profile examples/profiles/car_north_nl_2026_05.yml \
+  --corpus examples/perf/north_nl_routes.csv \
+  --concurrency 16 \
+  --json /tmp/netweevil-route-c16.json
+
+# Against a running server, same corpus.
+netweevil bench http \
+  --url http://127.0.0.1:8080 \
+  --corpus examples/perf/north_nl_routes.csv \
+  --backend netweevil \
+  --concurrency 16 \
+  --json /tmp/netweevil-http-c16.json
+
+# Against OSRM, then diff latency and route agreement.
+netweevil bench http \
+  --url http://127.0.0.1:5000 \
+  --corpus examples/perf/north_nl_routes.csv \
+  --backend osrm \
+  --osrm-profile driving \
+  --concurrency 16 \
+  --json /tmp/osrm-http-c16.json
+
+netweevil bench compare \
+  --baseline /tmp/netweevil-http-c16.json \
+  --candidate /tmp/osrm-http-c16.json
+```
+
+Route workloads request summaries only, so timings measure the search rather
+than geometry serialization. Use `--workload route-geometry` to measure the
+geometry path on purpose.
+
+Write JSON reports outside the repository; they are run artifacts, not inputs.

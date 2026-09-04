@@ -29,7 +29,7 @@ The production surface is the `netweevil` CLI plus a preloadable HTTP API. The Q
 - `examples/transit`: stop-to-network binding examples
 - `examples/api`: API payload examples
 - `examples/perf`: performance route corpora
-- `scripts`: QGIS packaging and performance scripts
+- `scripts`: QGIS packaging and data-preparation scripts
 - `datasets`: local development OSM extracts and GTFS archives
 
 ## Requirements
@@ -509,6 +509,87 @@ Performance notes:
 - `segment_rows: true` loads the cold edge-name bundle.
 - `geometry: none` minimizes geometry work.
 - `geometry: full` and `geometry: segments` return route coordinates and cost more.
+
+Benchmark the API with `netweevil bench http` rather than a shell loop; see
+Benchmarking below.
+
+## Benchmarking
+
+`netweevil bench` measures routing throughput and latency reproducibly, in
+process or over HTTP, and can diff two runs. It writes nothing into
+`.netweevil/`, so it is safe to point at a workspace you are also serving.
+
+Generate a deterministic corpus. Coordinates are sampled inside the topology
+bounds (or `--bbox`), snapped with the engine's own snapping, and kept only when
+both ends share a connected component. Pairs are stratified into `short`
+(< 5 km), `medium` (5-30 km), and `long` (> 30 km) straight-line buckets so one
+route length cannot dominate the aggregate:
+
+```bash
+netweevil bench corpus \
+  --dataset north_nl_2026_05_10 \
+  --profile examples/profiles/car_north_nl_2026_05.yml \
+  --count 1000 --seed 42 \
+  --out examples/perf/north_nl_routes.csv
+```
+
+Run a workload in process against one shared engine. `--concurrency` uses scoped
+threads over that single engine, so the numbers reflect the engine under load
+rather than N independent processes:
+
+```bash
+netweevil bench run \
+  --dataset north_nl_2026_05_10 \
+  --profile examples/profiles/car_north_nl_2026_05.yml \
+  --corpus examples/perf/north_nl_routes.csv \
+  --engine accelerated \
+  --workload route \
+  --concurrency 16 --warmup 50 \
+  --json /tmp/route-c16.json
+```
+
+Workloads:
+
+- `route`: point-to-point, summary only.
+- `route-geometry`: point-to-point with full geometry.
+- `matrix`: one NxN matrix over the first `--matrix-size` corpus origins.
+- `service-area`: one service area per corpus row at `--threshold-s`.
+
+`--engine exact` ignores the dataset's CCH acceleration bundle, which is the
+honest way to see what acceleration buys. `--limit N` trims the corpus, useful
+when the exact engine is slow. Every run reports request count, failures, wall
+time, throughput, p50/p90/p95/p99/max latency, cold engine-load time, and peak
+RSS (`VmHWM`), broken down per distance bucket.
+
+Benchmark a running server with the same corpus:
+
+```bash
+netweevil bench http --url http://127.0.0.1:8080 \
+  --corpus examples/perf/north_nl_routes.csv \
+  --backend netweevil --concurrency 16 --json /tmp/http-c16.json
+
+netweevil bench http --url http://127.0.0.1:5000 \
+  --corpus examples/perf/north_nl_routes.csv \
+  --backend osrm --osrm-profile driving --concurrency 16 --json /tmp/osrm-c16.json
+```
+
+The `osrm` backend calls
+`GET /route/v1/{profile}/{lon},{lat};{lon},{lat}?overview=false` and reads
+`routes[0].duration` and `routes[0].distance`. HTTP status failures are counted
+separately from routing failures, so a broken server does not read as a fast
+one. The client is built without TLS; use plain `http://` endpoints.
+
+Compare two reports produced from the same corpus. This prints per-bucket
+latency alongside route-quality agreement, so a speed win that silently changes
+the routes is visible:
+
+```bash
+netweevil bench compare --baseline /tmp/http-c16.json --candidate /tmp/osrm-c16.json
+```
+
+JSON reports carry the git commit, dataset, profile, engine, every setting, and
+one record per request (`id`, `ok`, `latency_ms`, `duration_s`, `distance_m`).
+Keep them outside the repository.
 
 ## QGIS Plugin
 
