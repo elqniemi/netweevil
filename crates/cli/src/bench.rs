@@ -1922,13 +1922,13 @@ mod tests {
             std::env::temp_dir().join(format!("netweevil-bench-corpus-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
 
-        let legacy = dir.join("legacy.csv");
+        let xy_header = dir.join("xy_header.csv");
         std::fs::write(
-            &legacy,
+            &xy_header,
             "id,source_x,source_y,target_x,target_y\na,6.5665,53.2194,6.5641,53.2108\n",
         )
         .unwrap();
-        let rows = read_corpus(&legacy).unwrap();
+        let rows = read_corpus(&xy_header).unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].id, "a");
         assert!((rows[0].source_lon - 6.5665).abs() < 1e-9);

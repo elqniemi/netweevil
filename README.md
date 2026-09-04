@@ -248,7 +248,7 @@ All CLI and API state is under `.netweevil/` in the current workspace:
 - `.netweevil/runs`: route, OD, matrix, service-area, experiment, and simulation outputs
 - `.netweevil/reports`: rendered reports
 
-Current imports write `.bin` bundles. If you have old gzip topology bundles, re-import the source `.osm.pbf`; the current reader rejects legacy gzip topology files.
+Imports write `.bin` bundles in the sectioned format; a bundle from another format is rejected with a re-import message.
 
 ## CLI Commands
 
