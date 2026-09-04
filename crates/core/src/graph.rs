@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::{FeatureAttributeTable, FeatureAttributeValueRef, NO_FEATURE_ROW, TemporalRuleSet};
 
+/// Schema version of [`TopologyBundle`]. Readers accept this value only.
+pub const TOPOLOGY_BUNDLE_SCHEMA_VERSION: u32 = 13;
+
 pub const EDGE_FLAG_ROUNDABOUT: u32 = 1 << 0;
 pub const EDGE_FLAG_TARGET_TRAFFIC_SIGNAL: u32 = 1 << 1;
 pub const EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY: u32 = 1 << 2;
@@ -10,10 +13,6 @@ pub const EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW: u32 = 1 << 3;
 /// it, but it is not part of the source feature's static travel direction.
 /// Static routing and static CCH customization must keep it gated.
 pub const EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION: u32 = 1 << 4;
-
-fn unknown_elevation() -> f64 {
-    f64::NAN
-}
 
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, Default,
@@ -169,38 +168,28 @@ pub struct DirectedEdge {
     /// horizontal great-circle length.
     pub length_m: u32,
     /// Positive elevation gain in this travel direction.
-    #[serde(default)]
     pub ascent_m: f32,
     /// Positive elevation loss in this travel direction.
-    #[serde(default)]
     pub descent_m: f32,
     /// Row in the source feature attribute table shared by every segment
     /// derived from the same source feature.
-    #[serde(default = "no_feature_row")]
     pub feature_row: u32,
     /// `1` follows source geometry, `-1` traverses it backwards, and `0`
-    /// denotes legacy/unknown orientation.
-    #[serde(default)]
+    /// means the orientation is unknown.
     pub source_direction: i8,
     /// Optional edge schedule imported from the mapped source feature.
-    #[serde(default)]
     pub temporal_rule_id: Option<u32>,
-    #[serde(default)]
     pub duration_s: Option<f64>,
     pub road_class: RoadClass,
     pub surface: SurfaceClass,
-    #[serde(default)]
     pub smoothness: SmoothnessClass,
     pub access_mask: AccessMask,
-    #[serde(default)]
     pub is_toll: bool,
     /// Posted speed limit in km/h for this travel direction, when the
     /// source data carries one (OSM `maxspeed`, Overture `speed_limits`).
-    #[serde(default)]
     pub max_speed_kph: Option<f32>,
     /// Lane count for this travel direction, when the source data carries
     /// one (OSM `lanes`, Overture `lanes` where present).
-    #[serde(default)]
     pub lanes: Option<u8>,
     pub name_index: Option<u32>,
     pub geometry_offset: u64,
@@ -219,16 +208,11 @@ pub struct RoutingEdge {
     /// horizontal great-circle length.
     pub length_m: u32,
     /// Positive elevation gain in this travel direction.
-    #[serde(default)]
     pub ascent_m: f32,
     /// Positive elevation loss in this travel direction.
-    #[serde(default)]
     pub descent_m: f32,
-    #[serde(default = "no_feature_row")]
     pub feature_row: u32,
-    #[serde(default)]
     pub source_direction: i8,
-    #[serde(default)]
     pub temporal_rule_id: Option<u32>,
     pub flags: u32,
 }
@@ -251,10 +235,6 @@ impl Default for RoutingEdge {
     }
 }
 
-fn no_feature_row() -> u32 {
-    NO_FEATURE_ROW
-}
-
 impl RoutingEdge {
     /// Signed elevation change in this travel direction.
     pub fn elevation_delta_m(self) -> f32 {
@@ -264,20 +244,14 @@ impl RoutingEdge {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct EdgeProfileAttributes {
-    #[serde(default)]
     pub duration_s: Option<f64>,
     pub road_class: RoadClass,
-    #[serde(default)]
     pub highway: HighwayClass,
     pub surface: SurfaceClass,
-    #[serde(default)]
     pub smoothness: SmoothnessClass,
     pub access_mask: AccessMask,
-    #[serde(default)]
     pub is_toll: bool,
-    #[serde(default)]
     pub max_speed_kph: Option<f32>,
-    #[serde(default)]
     pub lanes: Option<u8>,
 }
 
@@ -288,57 +262,61 @@ pub struct EdgePresentation {
     pub geometry_len: u32,
 }
 
+/// The three parallel per-edge columns of a [`TopologyBundle`]: routing
+/// geometry and flags, profile attributes, and presentation metadata. All
+/// three are indexed by the same edge index.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TopologyEdgeLayers {
-    #[serde(default)]
     pub routing: Vec<RoutingEdge>,
-    #[serde(default)]
     pub profile: Vec<EdgeProfileAttributes>,
-    #[serde(default)]
     pub presentation: Vec<EdgePresentation>,
 }
 
 impl TopologyEdgeLayers {
+    /// Splits `edges` into the three parallel layers.
     pub fn from_directed_edges(edges: &[DirectedEdge]) -> Self {
-        let mut routing = Vec::with_capacity(edges.len());
-        let mut profile = Vec::with_capacity(edges.len());
-        let mut presentation = Vec::with_capacity(edges.len());
+        let mut layers = Self {
+            routing: Vec::with_capacity(edges.len()),
+            profile: Vec::with_capacity(edges.len()),
+            presentation: Vec::with_capacity(edges.len()),
+        };
         for edge in edges {
-            routing.push(RoutingEdge {
-                edge_id: edge.edge_id,
-                from: edge.from,
-                to: edge.to,
-                source_way_id: edge.source_way_id,
-                length_m: edge.length_m,
-                ascent_m: edge.ascent_m,
-                descent_m: edge.descent_m,
-                feature_row: edge.feature_row,
-                source_direction: edge.source_direction,
-                temporal_rule_id: edge.temporal_rule_id,
-                flags: edge.flags,
-            });
-            profile.push(EdgeProfileAttributes {
-                duration_s: edge.duration_s,
-                road_class: edge.road_class,
-                highway: HighwayClass::from_road_class(edge.road_class),
-                surface: edge.surface,
-                smoothness: edge.smoothness,
-                access_mask: edge.access_mask,
-                is_toll: edge.is_toll,
-                max_speed_kph: edge.max_speed_kph,
-                lanes: edge.lanes,
-            });
-            presentation.push(EdgePresentation {
-                name_index: edge.name_index,
-                geometry_offset: edge.geometry_offset,
-                geometry_len: edge.geometry_len,
-            });
+            layers.push_directed_edge(edge);
         }
-        Self {
-            routing,
-            profile,
-            presentation,
-        }
+        layers
+    }
+
+    /// Appends one edge to each layer.
+    pub fn push_directed_edge(&mut self, edge: &DirectedEdge) {
+        self.routing.push(RoutingEdge {
+            edge_id: edge.edge_id,
+            from: edge.from,
+            to: edge.to,
+            source_way_id: edge.source_way_id,
+            length_m: edge.length_m,
+            ascent_m: edge.ascent_m,
+            descent_m: edge.descent_m,
+            feature_row: edge.feature_row,
+            source_direction: edge.source_direction,
+            temporal_rule_id: edge.temporal_rule_id,
+            flags: edge.flags,
+        });
+        self.profile.push(EdgeProfileAttributes {
+            duration_s: edge.duration_s,
+            road_class: edge.road_class,
+            highway: HighwayClass::from_road_class(edge.road_class),
+            surface: edge.surface,
+            smoothness: edge.smoothness,
+            access_mask: edge.access_mask,
+            is_toll: edge.is_toll,
+            max_speed_kph: edge.max_speed_kph,
+            lanes: edge.lanes,
+        });
+        self.presentation.push(EdgePresentation {
+            name_index: edge.name_index,
+            geometry_offset: edge.geometry_offset,
+            geometry_len: edge.geometry_len,
+        });
     }
 }
 
@@ -354,7 +332,6 @@ pub struct TurnRestriction {
     pub relation_id: i64,
     pub kind: TurnRestrictionKind,
     pub edge_path: Vec<EdgeId>,
-    #[serde(default)]
     pub mode_mask: AccessMask,
 }
 
@@ -364,17 +341,11 @@ pub struct TopologyBundleMeta {
     pub edge_count: u64,
     pub geometry_bytes: u64,
     pub turn_count: u64,
-    #[serde(default)]
     pub connected_components: Option<ConnectedComponentsMeta>,
-    #[serde(default)]
     pub source_node_count: u64,
-    #[serde(default)]
     pub source_way_count: u64,
-    #[serde(default)]
     pub source_relation_count: u64,
-    #[serde(default)]
     pub routable_way_count: u64,
-    #[serde(default)]
     pub skipped_way_count: u64,
 }
 
@@ -387,13 +358,9 @@ pub enum ConnectedComponentKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConnectedComponentsMeta {
-    #[serde(default)]
     pub kind: ConnectedComponentKind,
-    #[serde(default)]
     pub component_count: u32,
-    #[serde(default)]
     pub largest_component_node_count: u64,
-    #[serde(default)]
     pub largest_component_edge_count: u64,
 }
 
@@ -412,7 +379,6 @@ pub struct TopologyNode {
     pub lat: f64,
     /// Elevation in the source dataset's vertical datum, in metres.
     /// `NaN` means that the elevation is unknown.
-    #[serde(default = "unknown_elevation")]
     pub z: f64,
 }
 
@@ -442,19 +408,14 @@ pub struct NodeSpatialIndex {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EdgeNameBundle {
-    #[serde(default)]
     pub names: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct EdgeBasedTopology {
-    #[serde(default)]
     pub node_first_out: Vec<u32>,
-    #[serde(default)]
     pub node_edge_order: Vec<u32>,
-    #[serde(default)]
     pub edge_transition_first_out: Vec<u32>,
-    #[serde(default)]
     pub edge_transition_edges: Vec<u32>,
 }
 
@@ -464,39 +425,24 @@ pub struct TopologyBundle {
     pub source_path: String,
     pub source_sha256: String,
     pub nodes: Vec<TopologyNode>,
-    #[serde(default)]
     pub edge_layers: TopologyEdgeLayers,
-    #[serde(default)]
-    pub edges: Vec<DirectedEdge>,
-    #[serde(default)]
     pub turn_restrictions: Vec<TurnRestriction>,
-    #[serde(default)]
     pub names: Vec<String>,
-    #[serde(default)]
     pub edge_based_topology: EdgeBasedTopology,
-    #[serde(default)]
     pub spatial_index: Option<NodeSpatialIndex>,
-    #[serde(default)]
     pub node_component_ids: Vec<u32>,
-    #[serde(default)]
     pub edge_component_ids: Vec<u32>,
     /// Losslessly retained, typed source attributes. Routing edges refer to
     /// rows by `feature_row` so segmented features do not duplicate values.
-    #[serde(default)]
     pub feature_attributes: FeatureAttributeTable,
     /// Dataset-owned opening/direction/speed schedules referenced by routing
     /// edges. Runtime scenario overlays remain request-owned.
-    #[serde(default)]
     pub temporal_rule_sets: Vec<TemporalRuleSet>,
 }
 
 impl TopologyBundle {
     pub fn edge_count(&self) -> usize {
-        if !self.edge_layers.routing.is_empty() {
-            self.edge_layers.routing.len()
-        } else {
-            self.edges.len()
-        }
+        self.edge_layers.routing.len()
     }
 
     /// Returns rise over horizontal run for an edge whose endpoint
@@ -512,133 +458,54 @@ impl TopologyBundle {
     }
 
     pub fn routing_edge(&self, edge_index: usize) -> RoutingEdge {
-        if let Some(edge) = self.edge_layers.routing.get(edge_index) {
-            *edge
-        } else {
-            let edge = self.edges[edge_index];
-            RoutingEdge {
-                edge_id: edge.edge_id,
-                from: edge.from,
-                to: edge.to,
-                source_way_id: edge.source_way_id,
-                length_m: edge.length_m,
-                ascent_m: edge.ascent_m,
-                descent_m: edge.descent_m,
-                feature_row: edge.feature_row,
-                source_direction: edge.source_direction,
-                temporal_rule_id: edge.temporal_rule_id,
-                flags: edge.flags,
-            }
-        }
+        self.edge_layers.routing[edge_index]
     }
 
     pub fn edge_profile(&self, edge_index: usize) -> EdgeProfileAttributes {
-        if let Some(edge) = self.edge_layers.profile.get(edge_index) {
-            *edge
-        } else {
-            let edge = self.edges[edge_index];
-            EdgeProfileAttributes {
-                duration_s: edge.duration_s,
-                road_class: edge.road_class,
-                highway: HighwayClass::from_road_class(edge.road_class),
-                surface: edge.surface,
-                smoothness: edge.smoothness,
-                access_mask: edge.access_mask,
-                is_toll: edge.is_toll,
-                max_speed_kph: edge.max_speed_kph,
-                lanes: edge.lanes,
-            }
-        }
+        self.edge_layers.profile[edge_index]
     }
 
     pub fn edge_presentation(&self, edge_index: usize) -> EdgePresentation {
-        if let Some(edge) = self.edge_layers.presentation.get(edge_index) {
-            *edge
-        } else {
-            let edge = self.edges[edge_index];
-            EdgePresentation {
-                name_index: edge.name_index,
-                geometry_offset: edge.geometry_offset,
-                geometry_len: edge.geometry_len,
-            }
-        }
+        self.edge_layers.presentation[edge_index]
     }
 
+    /// Gathers the three edge layers at `edge_index` into one value.
     pub fn edge(&self, edge_index: usize) -> DirectedEdge {
-        if let Some(edge) = self.edges.get(edge_index) {
-            *edge
-        } else {
-            let routing = self.routing_edge(edge_index);
-            let profile = self.edge_profile(edge_index);
-            let presentation = self.edge_presentation(edge_index);
-            DirectedEdge {
-                edge_id: routing.edge_id,
-                from: routing.from,
-                to: routing.to,
-                source_way_id: routing.source_way_id,
-                length_m: routing.length_m,
-                ascent_m: routing.ascent_m,
-                descent_m: routing.descent_m,
-                feature_row: routing.feature_row,
-                source_direction: routing.source_direction,
-                temporal_rule_id: routing.temporal_rule_id,
-                duration_s: profile.duration_s,
-                road_class: profile.road_class,
-                surface: profile.surface,
-                smoothness: profile.smoothness,
-                access_mask: profile.access_mask,
-                is_toll: profile.is_toll,
-                max_speed_kph: profile.max_speed_kph,
-                lanes: profile.lanes,
-                name_index: presentation.name_index,
-                geometry_offset: presentation.geometry_offset,
-                geometry_len: presentation.geometry_len,
-                flags: routing.flags,
-            }
+        let routing = self.routing_edge(edge_index);
+        let profile = self.edge_profile(edge_index);
+        let presentation = self.edge_presentation(edge_index);
+        DirectedEdge {
+            edge_id: routing.edge_id,
+            from: routing.from,
+            to: routing.to,
+            source_way_id: routing.source_way_id,
+            length_m: routing.length_m,
+            ascent_m: routing.ascent_m,
+            descent_m: routing.descent_m,
+            feature_row: routing.feature_row,
+            source_direction: routing.source_direction,
+            temporal_rule_id: routing.temporal_rule_id,
+            duration_s: profile.duration_s,
+            road_class: profile.road_class,
+            surface: profile.surface,
+            smoothness: profile.smoothness,
+            access_mask: profile.access_mask,
+            is_toll: profile.is_toll,
+            max_speed_kph: profile.max_speed_kph,
+            lanes: profile.lanes,
+            name_index: presentation.name_index,
+            geometry_offset: presentation.geometry_offset,
+            geometry_len: presentation.geometry_len,
+            flags: routing.flags,
         }
     }
 
+    /// Appends `edge` to each edge layer.
     pub fn push_edge(&mut self, edge: DirectedEdge) {
-        if !self.edges.is_empty() || self.edge_layers.routing.is_empty() {
-            self.edges.push(edge);
-        }
-        if !self.edge_layers.routing.is_empty() || self.edges.is_empty() {
-            self.edge_layers.routing.push(RoutingEdge {
-                edge_id: edge.edge_id,
-                from: edge.from,
-                to: edge.to,
-                source_way_id: edge.source_way_id,
-                length_m: edge.length_m,
-                ascent_m: edge.ascent_m,
-                descent_m: edge.descent_m,
-                feature_row: edge.feature_row,
-                source_direction: edge.source_direction,
-                temporal_rule_id: edge.temporal_rule_id,
-                flags: edge.flags,
-            });
-            self.edge_layers.profile.push(EdgeProfileAttributes {
-                duration_s: edge.duration_s,
-                road_class: edge.road_class,
-                highway: HighwayClass::from_road_class(edge.road_class),
-                surface: edge.surface,
-                smoothness: edge.smoothness,
-                access_mask: edge.access_mask,
-                is_toll: edge.is_toll,
-                max_speed_kph: edge.max_speed_kph,
-                lanes: edge.lanes,
-            });
-            self.edge_layers.presentation.push(EdgePresentation {
-                name_index: edge.name_index,
-                geometry_offset: edge.geometry_offset,
-                geometry_len: edge.geometry_len,
-            });
-        }
+        self.edge_layers.push_directed_edge(&edge);
     }
 
     pub fn set_edge_name_index(&mut self, edge_index: usize, name_index: Option<u32>) {
-        if let Some(edge) = self.edges.get_mut(edge_index) {
-            edge.name_index = name_index;
-        }
         if let Some(edge) = self.edge_layers.presentation.get_mut(edge_index) {
             edge.name_index = name_index;
         }
@@ -661,9 +528,6 @@ impl TopologyBundle {
     }
 
     pub fn set_edge_flags(&mut self, edge_index: usize, flags: u32) {
-        if let Some(edge) = self.edges.get_mut(edge_index) {
-            edge.flags = flags;
-        }
         if let Some(edge) = self.edge_layers.routing.get_mut(edge_index) {
             edge.flags = flags;
         }

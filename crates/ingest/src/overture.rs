@@ -1387,7 +1387,7 @@ mod tests {
         .expect("bundle reads back");
         assert_eq!(
             bundle.schema_version,
-            crate::topology::TOPOLOGY_BUNDLE_SCHEMA_VERSION
+            netweevil_core::TOPOLOGY_BUNDLE_SCHEMA_VERSION
         );
         assert_eq!(bundle.edge_profile(0).max_speed_kph, Some(60.0));
 

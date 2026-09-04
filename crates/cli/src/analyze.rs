@@ -2050,7 +2050,6 @@ fn outcome_name(outcome: netweevil_query::AnalysisOutcome) -> &'static str {
         netweevil_query::AnalysisOutcome::Degraded => "degraded",
         netweevil_query::AnalysisOutcome::Partial => "partial",
         netweevil_query::AnalysisOutcome::Unreachable => "unreachable",
-        netweevil_query::AnalysisOutcome::NotImplemented => "not_implemented",
     }
 }
 

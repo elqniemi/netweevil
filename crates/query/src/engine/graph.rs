@@ -83,8 +83,8 @@ pub(crate) struct AccelerationGraph {
 
 impl AccelerationGraph {
     /// Customized weight sets for a service-area metric over the hierarchy
-    /// arcs, or `None` when the profile was compiled before per-metric
-    /// weights existed.
+    /// arcs, or `None` when the compiled profile carries no arc-aligned
+    /// weights for that metric. Callers fall back to Dijkstra on `None`.
     pub(crate) fn metric_weights(
         &self,
         metric_kind: crate::service_area::ServiceAreaMetricKind,

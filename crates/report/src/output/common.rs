@@ -148,7 +148,6 @@ pub(super) fn outcome_name(outcome: AnalysisOutcome) -> &'static str {
         AnalysisOutcome::Degraded => "degraded",
         AnalysisOutcome::Partial => "partial",
         AnalysisOutcome::Unreachable => "unreachable",
-        AnalysisOutcome::NotImplemented => "not_implemented",
     }
 }
 

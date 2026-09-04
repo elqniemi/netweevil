@@ -1,9 +1,8 @@
 //! Local state layout and IO for the `.netweevil/` directory: dataset,
 //! profile, and run manifests plus binary bundle reading and writing.
 //!
-//! Large bundles use a sectioned fast-load format whose
-//! big primitive arrays load with one memcpy per array from the mapped
-//! file; bundles written by earlier versions fall back to bincode parsing.
+//! Large bundles use one sectioned fast-load format whose big primitive
+//! arrays load with a single memcpy per array from the mapped file.
 
 mod sectioned;
 
@@ -12,11 +11,10 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use memmap2::Mmap;
 use netweevil_core::{
-    CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, DatasetAccelerationBundle,
-    EdgeNameBundle, TopologyBundle, TopologyEdgeLayers, TravelMode,
+    CompiledProfileBundle, DatasetAccelerationBundle, EdgeNameBundle, TopologyBundle,
 };
 use netweevil_manifest::{CompiledProfileManifest, DatasetManifest, RunManifest};
 use serde::Serialize;
@@ -131,25 +129,8 @@ pub fn write_acceleration_bundle(
 
 pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
     let path = path.as_ref();
-    if path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
-    {
-        bail!(
-            "legacy gzip topology bundles are no longer supported; re-import the dataset to write the current .bin topology format"
-        );
-    }
     let mmap = sectioned::map_file(path)?;
-    if sectioned::is_sectioned(&mmap) {
-        return sectioned::read_topology_sectioned(&mmap)
-            .with_context(|| format!("parsing topology bundle {}", path.display()));
-    }
-    // Bincode-era files carry the old node layout (with import-only OSM
-    // ids), so they parse through mirror structs, never the live types.
-    bincode::deserialize::<BincodeTopologyBundle>(&mmap)
-        .map(TopologyBundle::from)
-        .or_else(|_| bincode::deserialize::<LegacyTopologyBundle>(&mmap).map(TopologyBundle::from))
+    sectioned::read_topology_sectioned(&mmap, path)
         .with_context(|| format!("parsing topology bundle {}", path.display()))
 }
 
@@ -160,11 +141,7 @@ pub fn read_edge_name_bundle(path: impl AsRef<Path>) -> Result<EdgeNameBundle> {
 pub fn read_acceleration_bundle(path: impl AsRef<Path>) -> Result<DatasetAccelerationBundle> {
     let path = path.as_ref();
     let mmap = sectioned::map_file(path)?;
-    if sectioned::is_sectioned(&mmap) {
-        return sectioned::read_acceleration_sectioned(&mmap)
-            .with_context(|| format!("parsing acceleration bundle {}", path.display()));
-    }
-    bincode::deserialize(&mmap)
+    sectioned::read_acceleration_sectioned(&mmap, path)
         .with_context(|| format!("parsing acceleration bundle {}", path.display()))
 }
 
@@ -178,44 +155,8 @@ pub fn write_compiled_profile_bundle(
 pub fn read_compiled_profile_bundle(path: impl AsRef<Path>) -> Result<CompiledProfileBundle> {
     let path = path.as_ref();
     let mmap = sectioned::map_file(path)?;
-    if sectioned::is_sectioned(&mmap) {
-        return sectioned::read_compiled_profile_sectioned(&mmap)
-            .with_context(|| format!("parsing compiled profile bundle {}", path.display()));
-    }
-    bincode::deserialize(&mmap)
-        .or_else(|_| {
-            bincode::deserialize::<LegacyCompiledProfileBundle>(&mmap)
-                .map(CompiledProfileBundle::from)
-        })
+    sectioned::read_compiled_profile_sectioned(&mmap, path)
         .with_context(|| format!("parsing compiled profile bundle {}", path.display()))
-}
-
-#[derive(serde::Deserialize)]
-struct LegacyCompiledProfileBundle {
-    schema_version: u32,
-    profile_id: String,
-    profile_hash: String,
-    #[serde(default)]
-    mode: TravelMode,
-    source_topology_bundle_id: CacheBundleId,
-    edge_metrics: Vec<CompiledEdgeMetric>,
-}
-
-impl From<LegacyCompiledProfileBundle> for CompiledProfileBundle {
-    fn from(value: LegacyCompiledProfileBundle) -> Self {
-        Self {
-            schema_version: value.schema_version,
-            profile_id: value.profile_id,
-            profile_hash: value.profile_hash,
-            mode: value.mode,
-            turn_costs: Default::default(),
-            components: Vec::new(),
-            temporal: Default::default(),
-            source_topology_bundle_id: value.source_topology_bundle_id,
-            acceleration: None,
-            edge_metrics: value.edge_metrics,
-        }
-    }
 }
 
 fn write_binary<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Result<()> {
@@ -239,301 +180,6 @@ fn read_binary_mmap<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
     let mmap = unsafe { Mmap::map(&file) }
         .with_context(|| format!("memory-mapping {}", path.display()))?;
     bincode::deserialize(&mmap).with_context(|| format!("parsing binary bundle {}", path.display()))
-}
-
-/// Node layout used by every bincode-era bundle: the OSM node id was
-/// persisted although only the import pipeline reads it.
-#[derive(serde::Deserialize)]
-struct LegacyTopologyNode {
-    node_id: netweevil_core::NodeId,
-    #[allow(dead_code)]
-    osm_node_id: i64,
-    lon: f64,
-    lat: f64,
-}
-
-impl From<LegacyTopologyNode> for netweevil_core::TopologyNode {
-    fn from(value: LegacyTopologyNode) -> Self {
-        Self {
-            node_id: value.node_id,
-            lon: value.lon,
-            lat: value.lat,
-            z: 0.0,
-        }
-    }
-}
-
-/// Mirror of the pre-sectioned `TopologyBundle` bincode layout.
-#[derive(serde::Deserialize)]
-struct BincodeTopologyBundle {
-    schema_version: u32,
-    source_path: String,
-    source_sha256: String,
-    nodes: Vec<LegacyTopologyNode>,
-    #[serde(default)]
-    edge_layers: BincodeTopologyEdgeLayers,
-    #[serde(default)]
-    edges: Vec<BincodeDirectedEdge>,
-    #[serde(default)]
-    turn_restrictions: Vec<netweevil_core::TurnRestriction>,
-    #[serde(default)]
-    names: Vec<String>,
-    #[serde(default)]
-    edge_based_topology: netweevil_core::EdgeBasedTopology,
-    #[serde(default)]
-    spatial_index: Option<netweevil_core::NodeSpatialIndex>,
-    #[serde(default)]
-    node_component_ids: Vec<u32>,
-    #[serde(default)]
-    edge_component_ids: Vec<u32>,
-}
-
-impl From<BincodeTopologyBundle> for TopologyBundle {
-    fn from(value: BincodeTopologyBundle) -> Self {
-        let edges = value.edges.into_iter().map(Into::into).collect();
-        Self {
-            schema_version: value.schema_version,
-            source_path: value.source_path,
-            source_sha256: value.source_sha256,
-            nodes: value.nodes.into_iter().map(Into::into).collect(),
-            edge_layers: value.edge_layers.into(),
-            edges,
-            turn_restrictions: value.turn_restrictions,
-            names: value.names,
-            edge_based_topology: value.edge_based_topology,
-            spatial_index: value.spatial_index,
-            node_component_ids: value.node_component_ids,
-            edge_component_ids: value.edge_component_ids,
-            feature_attributes: Default::default(),
-            temporal_rule_sets: Vec::new(),
-        }
-    }
-}
-
-/// Mirrors the final pre-sectioned columnar topology layout. Keeping these
-/// types separate from the live structs lets new raw columns be added
-/// without breaking fallback reads of bincode-era datasets.
-#[derive(serde::Deserialize, Default)]
-struct BincodeTopologyEdgeLayers {
-    #[serde(default)]
-    routing: Vec<BincodeRoutingEdge>,
-    #[serde(default)]
-    profile: Vec<BincodeEdgeProfileAttributes>,
-    #[serde(default)]
-    presentation: Vec<netweevil_core::EdgePresentation>,
-}
-
-#[derive(serde::Deserialize)]
-struct BincodeRoutingEdge {
-    edge_id: netweevil_core::EdgeId,
-    from: netweevil_core::NodeId,
-    to: netweevil_core::NodeId,
-    source_way_id: i64,
-    length_m: u32,
-    flags: u32,
-}
-
-#[derive(serde::Deserialize)]
-struct BincodeEdgeProfileAttributes {
-    duration_s: Option<f64>,
-    road_class: netweevil_core::RoadClass,
-    highway: netweevil_core::HighwayClass,
-    surface: netweevil_core::SurfaceClass,
-    smoothness: netweevil_core::SmoothnessClass,
-    access_mask: netweevil_core::AccessMask,
-    is_toll: bool,
-    max_speed_kph: Option<f32>,
-    lanes: Option<u8>,
-}
-
-#[derive(serde::Deserialize)]
-struct BincodeDirectedEdge {
-    edge_id: netweevil_core::EdgeId,
-    from: netweevil_core::NodeId,
-    to: netweevil_core::NodeId,
-    source_way_id: i64,
-    length_m: u32,
-    duration_s: Option<f64>,
-    road_class: netweevil_core::RoadClass,
-    surface: netweevil_core::SurfaceClass,
-    smoothness: netweevil_core::SmoothnessClass,
-    access_mask: netweevil_core::AccessMask,
-    is_toll: bool,
-    max_speed_kph: Option<f32>,
-    lanes: Option<u8>,
-    name_index: Option<u32>,
-    geometry_offset: u64,
-    geometry_len: u32,
-    flags: u32,
-}
-
-impl From<BincodeTopologyEdgeLayers> for TopologyEdgeLayers {
-    fn from(value: BincodeTopologyEdgeLayers) -> Self {
-        Self {
-            routing: value
-                .routing
-                .into_iter()
-                .map(|edge| netweevil_core::RoutingEdge {
-                    edge_id: edge.edge_id,
-                    from: edge.from,
-                    to: edge.to,
-                    source_way_id: edge.source_way_id,
-                    length_m: edge.length_m,
-                    ascent_m: 0.0,
-                    descent_m: 0.0,
-                    feature_row: netweevil_core::NO_FEATURE_ROW,
-                    source_direction: 0,
-                    temporal_rule_id: None,
-                    flags: edge.flags,
-                })
-                .collect(),
-            profile: value.profile.into_iter().map(Into::into).collect(),
-            presentation: value.presentation,
-        }
-    }
-}
-
-impl From<BincodeEdgeProfileAttributes> for netweevil_core::EdgeProfileAttributes {
-    fn from(value: BincodeEdgeProfileAttributes) -> Self {
-        Self {
-            duration_s: value.duration_s,
-            road_class: value.road_class,
-            highway: value.highway,
-            surface: value.surface,
-            smoothness: value.smoothness,
-            access_mask: value.access_mask,
-            is_toll: value.is_toll,
-            max_speed_kph: value.max_speed_kph,
-            lanes: value.lanes,
-        }
-    }
-}
-
-impl From<BincodeDirectedEdge> for netweevil_core::DirectedEdge {
-    fn from(value: BincodeDirectedEdge) -> Self {
-        Self {
-            edge_id: value.edge_id,
-            from: value.from,
-            to: value.to,
-            source_way_id: value.source_way_id,
-            length_m: value.length_m,
-            ascent_m: 0.0,
-            descent_m: 0.0,
-            feature_row: netweevil_core::NO_FEATURE_ROW,
-            source_direction: 0,
-            temporal_rule_id: None,
-            duration_s: value.duration_s,
-            road_class: value.road_class,
-            surface: value.surface,
-            smoothness: value.smoothness,
-            access_mask: value.access_mask,
-            is_toll: value.is_toll,
-            max_speed_kph: value.max_speed_kph,
-            lanes: value.lanes,
-            name_index: value.name_index,
-            geometry_offset: value.geometry_offset,
-            geometry_len: value.geometry_len,
-            flags: value.flags,
-        }
-    }
-}
-
-#[derive(serde::Deserialize)]
-struct LegacyTopologyBundle {
-    schema_version: u32,
-    source_path: String,
-    source_sha256: String,
-    nodes: Vec<LegacyTopologyNode>,
-    edges: Vec<LegacyDirectedEdge>,
-    #[serde(default)]
-    turn_restrictions: Vec<netweevil_core::TurnRestriction>,
-    #[serde(default)]
-    names: Vec<String>,
-    #[serde(default)]
-    edge_based_topology: netweevil_core::EdgeBasedTopology,
-    #[serde(default)]
-    spatial_index: Option<netweevil_core::NodeSpatialIndex>,
-    #[serde(default)]
-    node_component_ids: Vec<u32>,
-    #[serde(default)]
-    edge_component_ids: Vec<u32>,
-}
-
-/// Edge layout of AoS topology bundles written before schema 10 (no
-/// max_speed/lanes fields).
-#[derive(serde::Deserialize)]
-struct LegacyDirectedEdge {
-    edge_id: netweevil_core::EdgeId,
-    from: netweevil_core::NodeId,
-    to: netweevil_core::NodeId,
-    source_way_id: i64,
-    length_m: u32,
-    duration_s: Option<f64>,
-    road_class: netweevil_core::RoadClass,
-    surface: netweevil_core::SurfaceClass,
-    smoothness: netweevil_core::SmoothnessClass,
-    access_mask: netweevil_core::AccessMask,
-    is_toll: bool,
-    name_index: Option<u32>,
-    geometry_offset: u64,
-    geometry_len: u32,
-    flags: u32,
-}
-
-impl From<LegacyDirectedEdge> for netweevil_core::DirectedEdge {
-    fn from(value: LegacyDirectedEdge) -> Self {
-        Self {
-            edge_id: value.edge_id,
-            from: value.from,
-            to: value.to,
-            source_way_id: value.source_way_id,
-            length_m: value.length_m,
-            ascent_m: 0.0,
-            descent_m: 0.0,
-            feature_row: netweevil_core::NO_FEATURE_ROW,
-            source_direction: 0,
-            temporal_rule_id: None,
-            duration_s: value.duration_s,
-            road_class: value.road_class,
-            surface: value.surface,
-            smoothness: value.smoothness,
-            access_mask: value.access_mask,
-            is_toll: value.is_toll,
-            max_speed_kph: None,
-            lanes: None,
-            name_index: value.name_index,
-            geometry_offset: value.geometry_offset,
-            geometry_len: value.geometry_len,
-            flags: value.flags,
-        }
-    }
-}
-
-impl From<LegacyTopologyBundle> for TopologyBundle {
-    fn from(value: LegacyTopologyBundle) -> Self {
-        let edges: Vec<netweevil_core::DirectedEdge> = value
-            .edges
-            .into_iter()
-            .map(netweevil_core::DirectedEdge::from)
-            .collect();
-        let edge_layers = TopologyEdgeLayers::from_directed_edges(&edges);
-        Self {
-            schema_version: value.schema_version,
-            source_path: value.source_path,
-            source_sha256: value.source_sha256,
-            nodes: value.nodes.into_iter().map(Into::into).collect(),
-            edge_layers,
-            edges: Vec::new(),
-            turn_restrictions: value.turn_restrictions,
-            names: value.names,
-            edge_based_topology: value.edge_based_topology,
-            spatial_index: value.spatial_index,
-            node_component_ids: value.node_component_ids,
-            edge_component_ids: value.edge_component_ids,
-            feature_attributes: Default::default(),
-            temporal_rule_sets: Vec::new(),
-        }
-    }
 }
 
 pub fn write_dataset_manifest(
@@ -607,17 +253,18 @@ pub fn read_run_manifest(path: impl AsRef<Path>) -> Result<RunManifest> {
 mod tests {
     use super::{
         read_acceleration_bundle, read_compiled_profile_bundle, read_edge_name_bundle,
-        read_topology_bundle, write_acceleration_bundle, write_binary, write_edge_name_bundle,
-        write_topology_bundle,
+        read_topology_bundle, write_acceleration_bundle, write_compiled_profile_bundle,
+        write_edge_name_bundle, write_topology_bundle,
     };
-    use netweevil_core::DatasetAccelerationBundle;
     use netweevil_core::{
-        AccessMask, CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle,
-        CompiledTurnCostConfig, DirectedEdge, EdgeId, EdgeNameBundle, FeatureAttributeColumn,
+        ACCELERATION_BUNDLE_SCHEMA_VERSION, AccessMask, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
+        CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, CompiledTurnCostConfig,
+        DatasetAccelerationBundle, DirectedEdge, EdgeId, EdgeNameBundle, FeatureAttributeColumn,
         FeatureAttributeColumnData, FeatureAttributeDefinition, FeatureAttributeTable,
         FeatureAttributeType, MinuteInterval, NodeId, RoadClass, SmoothnessClass, SurfaceClass,
-        TemporalEffect, TemporalRule, TemporalRuleSet, TopologyBundle, TopologyNode, TravelMode,
-        TurnRestriction, TurnRestrictionKind,
+        TOPOLOGY_BUNDLE_SCHEMA_VERSION, TemporalEffect, TemporalRule, TemporalRuleSet,
+        TopologyBundle, TopologyEdgeLayers, TopologyNode, TravelMode, TurnRestriction,
+        TurnRestrictionKind,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -625,7 +272,7 @@ mod tests {
     #[test]
     fn round_trips_topology_bundle_binary() {
         let bundle = TopologyBundle {
-            schema_version: 12,
+            schema_version: TOPOLOGY_BUNDLE_SCHEMA_VERSION,
             source_path: "dataset.osm.pbf".to_string(),
             source_sha256: "abc123".to_string(),
             nodes: vec![
@@ -642,8 +289,7 @@ mod tests {
                     z: 18.0,
                 },
             ],
-            edge_layers: Default::default(),
-            edges: vec![
+            edge_layers: TopologyEdgeLayers::from_directed_edges(&[
                 DirectedEdge {
                     edge_id: EdgeId(0),
                     from: NodeId(0),
@@ -692,7 +338,7 @@ mod tests {
                     geometry_len: 0,
                     flags: 1,
                 },
-            ],
+            ]),
             turn_restrictions: vec![TurnRestriction {
                 relation_id: 300,
                 kind: TurnRestrictionKind::NoTurn,
@@ -802,7 +448,7 @@ mod tests {
     #[test]
     fn round_trips_acceleration_bundle_binary() {
         let bundle = DatasetAccelerationBundle {
-            schema_version: netweevil_core::ACCELERATION_BUNDLE_SCHEMA_VERSION,
+            schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
             source_topology_bundle_id: CacheBundleId::new("topology-test"),
             algorithm: netweevil_core::CCH_ALGORITHM.to_string(),
             stats: Default::default(),
@@ -837,52 +483,9 @@ mod tests {
     }
 
     #[test]
-    fn reads_legacy_compiled_profile_bundle_binary() {
-        #[derive(serde::Serialize)]
-        struct LegacyCompiledProfileBundle {
-            schema_version: u32,
-            profile_id: String,
-            profile_hash: String,
-            mode: TravelMode,
-            source_topology_bundle_id: CacheBundleId,
-            edge_metrics: Vec<CompiledEdgeMetric>,
-        }
-
-        let bundle = LegacyCompiledProfileBundle {
-            schema_version: 2,
-            profile_id: "test".to_string(),
-            profile_hash: "abc".to_string(),
-            mode: TravelMode::Car,
-            source_topology_bundle_id: CacheBundleId::new("topology-test"),
-            edge_metrics: vec![CompiledEdgeMetric {
-                edge_id: EdgeId(0),
-                travel_time_s: Some(12.0),
-                generalized_cost: Some(12.0),
-            }],
-        };
-
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
-            .as_nanos();
-        let path =
-            std::env::temp_dir().join(format!("netweevil-persist-metrics-legacy-{unique}.bin"));
-
-        write_binary(&path, &bundle).expect("bundle should serialize");
-        let round_tripped =
-            read_compiled_profile_bundle(&path).expect("legacy bundle should deserialize");
-
-        assert_eq!(round_tripped.profile_id, "test");
-        assert_eq!(round_tripped.turn_costs.left_penalty_s, 0.0);
-        assert_eq!(round_tripped.edge_metrics.len(), 1);
-
-        fs::remove_file(path).expect("temporary bundle should be removed");
-    }
-
-    #[test]
     fn round_trips_compiled_profile_bundle_with_turn_costs() {
         let bundle = CompiledProfileBundle {
-            schema_version: 3,
+            schema_version: COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
             profile_id: "test".to_string(),
             profile_hash: "abc".to_string(),
             mode: TravelMode::Car,
@@ -912,125 +515,13 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("netweevil-persist-metrics-turns-{unique}.bin"));
 
-        write_binary(&path, &bundle).expect("bundle should serialize");
+        write_compiled_profile_bundle(&path, &bundle).expect("bundle should serialize");
         let round_tripped = read_compiled_profile_bundle(&path).expect("bundle should deserialize");
 
         assert_eq!(round_tripped.turn_costs.left_penalty_s, 7.0);
         assert_eq!(round_tripped.turn_costs.cost_time_weight, 1.5);
         assert_eq!(round_tripped.edge_metrics.len(), 1);
 
-        fs::remove_file(path).expect("temporary bundle should be removed");
-    }
-}
-
-#[cfg(test)]
-mod sectioned_compat_tests {
-    use super::*;
-    use netweevil_core::DatasetAccelerationBundle;
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    fn temp_path(label: &str) -> PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock should be after unix epoch")
-            .as_nanos();
-        std::env::temp_dir().join(format!("netweevil-persist-{label}-{unique}.bin"))
-    }
-
-    #[test]
-    fn round_trips_speed_and_lane_attributes_across_schema_versions() {
-        use netweevil_core::{
-            AccessMask, DirectedEdge, EdgeId, NodeId, RoadClass, SmoothnessClass, SurfaceClass,
-            TopologyBundle, TopologyNode,
-        };
-
-        let node = |id: u32, lon: f64| TopologyNode {
-            node_id: NodeId(id),
-            lon,
-            lat: 53.2,
-            z: id as f64 * 4.0,
-        };
-        let edge = DirectedEdge {
-            edge_id: EdgeId(0),
-            from: NodeId(0),
-            to: NodeId(1),
-            source_way_id: 7,
-            length_m: 120,
-            ascent_m: 4.0,
-            descent_m: 0.0,
-            feature_row: netweevil_core::NO_FEATURE_ROW,
-            source_direction: 0,
-            temporal_rule_id: None,
-            duration_s: None,
-            road_class: RoadClass::Primary,
-            surface: SurfaceClass::Asphalt,
-            smoothness: SmoothnessClass::Unknown,
-            access_mask: AccessMask::new(AccessMask::CAR),
-            is_toll: false,
-            max_speed_kph: Some(70.0),
-            lanes: Some(2),
-            name_index: None,
-            geometry_offset: 0,
-            geometry_len: 0,
-            flags: 0,
-        };
-        let mut bundle = TopologyBundle {
-            schema_version: 10,
-            source_path: "segments.parquet".to_string(),
-            source_sha256: "abc".to_string(),
-            feature_attributes: Default::default(),
-            temporal_rule_sets: Vec::new(),
-            nodes: vec![node(0, 6.5), node(1, 6.6)],
-            edge_layers: netweevil_core::TopologyEdgeLayers::from_directed_edges(&[edge]),
-            edges: Vec::new(),
-            turn_restrictions: Vec::new(),
-            names: Vec::new(),
-            edge_based_topology: Default::default(),
-            spatial_index: None,
-            node_component_ids: vec![0, 0],
-            edge_component_ids: vec![0],
-        };
-
-        let path = temp_path("topology-speed-lanes");
-        write_topology_bundle(&path, &bundle).expect("schema-10 bundle writes");
-        let round_tripped = read_topology_bundle(&path).expect("schema-10 bundle reads");
-        assert_eq!(round_tripped.edge_profile(0).max_speed_kph, Some(70.0));
-        assert_eq!(round_tripped.edge_profile(0).lanes, Some(2));
-        assert_eq!(round_tripped.nodes[1].z, 4.0);
-        assert_eq!(round_tripped.routing_edge(0).ascent_m, 4.0);
-        fs::remove_file(&path).expect("temporary bundle should be removed");
-
-        // Pre-10 bundles round-trip through the legacy profile layout and
-        // surface no speed/lane data.
-        bundle.schema_version = 9;
-        write_topology_bundle(&path, &bundle).expect("schema-9 bundle writes");
-        let legacy = read_topology_bundle(&path).expect("schema-9 bundle reads");
-        assert_eq!(legacy.edge_profile(0).max_speed_kph, None);
-        assert_eq!(legacy.edge_profile(0).lanes, None);
-        assert_eq!(legacy.edge_profile(0).road_class, RoadClass::Primary);
-        fs::remove_file(path).expect("temporary bundle should be removed");
-    }
-
-    #[test]
-    fn reads_bincode_acceleration_bundles_written_before_the_sectioned_format() {
-        let bundle = DatasetAccelerationBundle {
-            schema_version: netweevil_core::ACCELERATION_BUNDLE_SCHEMA_VERSION,
-            source_topology_bundle_id: CacheBundleId::new("topology-test"),
-            algorithm: netweevil_core::CCH_ALGORITHM.to_string(),
-            stats: Default::default(),
-            edge_order: vec![0, 2, 1],
-            edge_rank: vec![0, 2, 1],
-            upward_first_out: vec![0, 1, 1, 1],
-            upward_head: vec![2],
-            downward_first_out: vec![0, 0, 1, 1],
-            downward_head: vec![0],
-        };
-        let path = temp_path("acceleration-bincode-compat");
-        write_binary(&path, &bundle).expect("bincode bundle should serialize");
-        let round_tripped =
-            read_acceleration_bundle(&path).expect("bincode-format bundle should still load");
-        assert_eq!(round_tripped.edge_order, bundle.edge_order);
-        assert_eq!(round_tripped.upward_head, bundle.upward_head);
         fs::remove_file(path).expect("temporary bundle should be removed");
     }
 }

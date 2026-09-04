@@ -482,7 +482,6 @@ mod tests {
             temporal_rule_sets: Vec::new(),
             nodes: vec![],
             edge_layers: Default::default(),
-            edges: vec![],
             turn_restrictions: vec![],
             names: vec![],
             edge_based_topology: EdgeBasedTopology::default(),

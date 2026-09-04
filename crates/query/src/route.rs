@@ -223,10 +223,10 @@ fn failure_mode_key(
     )
 }
 
-/// Degraded bundles are expensive (a full topology clone plus a CSR graph
-/// rebuild) and were previously rebuilt on every failure-mode request. Keep
-/// the few most recent variants; each (dataset, profile) pair has at most
-/// two (with and without reverse-oneway edges).
+/// Degraded bundles are expensive to build (a full topology clone plus a CSR
+/// graph rebuild), so the few most recent variants are cached; each
+/// (dataset, profile) pair has at most two (with and without reverse-oneway
+/// edges).
 const FAILURE_MODE_CACHE_CAPACITY: usize = 8;
 
 static FAILURE_MODE_CACHE: std::sync::Mutex<

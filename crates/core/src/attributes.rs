@@ -2,8 +2,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Sentinel used by edges that were not derived from a source feature row
-/// (for example, legacy OSM bundles).
+/// Sentinel used by edges that are not derived from a source feature row.
 pub const NO_FEATURE_ROW: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,11 +22,9 @@ pub struct FeatureAttributeDefinition {
     pub name: String,
     /// Optional stable name used by profiles and other engine surfaces
     /// (`covered`, `feature_type`, `indoor_location`, ...).
-    #[serde(default)]
     pub semantic_role: Option<String>,
     pub value_type: FeatureAttributeType,
     /// Coded-value labels keyed by the source value's canonical string form.
-    #[serde(default)]
     pub domain: BTreeMap<String, String>,
 }
 
@@ -66,12 +63,9 @@ pub struct FeatureAttributeColumn {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct FeatureAttributeTable {
-    #[serde(default)]
     pub row_count: u32,
     /// Shared string dictionary for string and raw-JSON columns.
-    #[serde(default)]
     pub strings: Vec<String>,
-    #[serde(default)]
     pub columns: Vec<FeatureAttributeColumn>,
 }
 

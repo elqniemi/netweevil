@@ -707,9 +707,7 @@ fn tally_outcomes(items: impl IntoIterator<Item = (AnalysisOutcome, usize)>) -> 
             AnalysisOutcome::Legal => tally.legal_count += 1,
             AnalysisOutcome::Degraded => tally.degraded_count += 1,
             AnalysisOutcome::Partial => tally.partial_count += 1,
-            AnalysisOutcome::Unreachable | AnalysisOutcome::NotImplemented => {
-                tally.unreachable_count += 1
-            }
+            AnalysisOutcome::Unreachable => tally.unreachable_count += 1,
         }
         tally.diagnostics_count += diagnostics_count;
     }
@@ -722,7 +720,6 @@ fn analysis_outcome_name(outcome: AnalysisOutcome) -> &'static str {
         AnalysisOutcome::Degraded => "degraded",
         AnalysisOutcome::Partial => "partial",
         AnalysisOutcome::Unreachable => "unreachable",
-        AnalysisOutcome::NotImplemented => "not_implemented",
     }
 }
 

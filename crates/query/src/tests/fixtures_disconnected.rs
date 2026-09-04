@@ -1,7 +1,7 @@
 use netweevil_core::{
     AccessMask, CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, CompiledTurnCostConfig,
     DirectedEdge, EdgeId, NodeId, RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle,
-    TopologyNode, TravelMode,
+    TopologyEdgeLayers, TopologyNode, TravelMode,
 };
 
 use std::fs;
@@ -43,8 +43,7 @@ pub(super) fn disconnected_topology() -> TopologyBundle {
                 z: 0.0,
             },
         ],
-        edge_layers: Default::default(),
-        edges: vec![
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[
             DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
@@ -93,7 +92,7 @@ pub(super) fn disconnected_topology() -> TopologyBundle {
                 geometry_len: 0,
                 flags: 0,
             },
-        ],
+        ]),
         turn_restrictions: vec![],
         names: vec![],
         edge_based_topology: Default::default(),
@@ -136,8 +135,7 @@ pub(super) fn hop_disconnected_topology() -> TopologyBundle {
                 z: 0.0,
             },
         ],
-        edge_layers: Default::default(),
-        edges: vec![
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[
             DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
@@ -186,7 +184,7 @@ pub(super) fn hop_disconnected_topology() -> TopologyBundle {
                 geometry_len: 0,
                 flags: 0,
             },
-        ],
+        ]),
         turn_restrictions: vec![],
         names: vec![],
         edge_based_topology: Default::default(),

@@ -1,12 +1,11 @@
 use std::path::{Path, PathBuf};
 
-pub(crate) const TOPOLOGY_BUNDLE_SCHEMA_VERSION: u32 = 12;
-
 use anyhow::Result;
 use netweevil_core::{
     ConnectedComponentKind, ConnectedComponentsMeta, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
     EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId, EdgeNameBundle, NodeId,
-    SpatialIndexCell, TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyNode,
+    SpatialIndexCell, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBounds, TopologyBundle,
+    TopologyBundleMeta, TopologyNode,
 };
 use std::collections::BTreeMap;
 
@@ -251,7 +250,6 @@ pub(crate) fn build_topology_from_scan(
         source_sha256: source_sha256.to_string(),
         nodes,
         edge_layers,
-        edges: Vec::new(),
         turn_restrictions,
         names: Vec::new(),
         edge_based_topology,

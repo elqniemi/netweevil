@@ -2665,7 +2665,8 @@ mod tests {
         AccessMask, CacheBundleId, CompiledCostComponent, CompiledEdgeMetric,
         CompiledProfileBundle, CompiledTemporalProfile, DirectedEdge,
         EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, EdgeId, MinuteInterval, NodeId, RoadClass,
-        SmoothnessClass, SurfaceClass, TopologyBundle, TopologyNode, TravelMode,
+        SmoothnessClass, SurfaceClass, TopologyBundle, TopologyEdgeLayers, TopologyNode,
+        TravelMode,
     };
 
     #[test]
@@ -2769,8 +2770,8 @@ mod tests {
                 },
             ],
         }];
-        topology.edges[0].temporal_rule_id = Some(0);
-        topology.edges[0].source_direction = 1;
+        topology.edge_layers.routing[0].temporal_rule_id = Some(0);
+        topology.edge_layers.routing[0].source_direction = 1;
         let metrics = temporal_test_metrics(false);
 
         let before = crate::execute_route(
@@ -2823,7 +2824,7 @@ mod tests {
                 effect: TemporalEffect::OpenOnly,
             }],
         }];
-        topology.edges[0].temporal_rule_id = Some(0);
+        topology.edge_layers.routing[0].temporal_rule_id = Some(0);
         let metrics = temporal_test_metrics(true);
         let route = crate::execute_route(
             &topology,
@@ -2864,7 +2865,7 @@ mod tests {
                 },
             ],
         }];
-        topology.edges[0].temporal_rule_id = Some(0);
+        topology.edge_layers.routing[0].temporal_rule_id = Some(0);
         let mut metrics = temporal_test_metrics(true);
         metrics.temporal.max_wait_s = 120.0;
         let route = crate::execute_route(
@@ -2896,7 +2897,7 @@ mod tests {
                 effect: TemporalEffect::SpeedFactor(2.0),
             }],
         }];
-        topology.edges[0].temporal_rule_id = Some(0);
+        topology.edge_layers.routing[0].temporal_rule_id = Some(0);
         let metrics = temporal_test_metrics(false);
         let error = crate::execute_route(
             &topology,
@@ -2934,7 +2935,7 @@ mod tests {
                 },
             ],
         }];
-        topology.edges[0].temporal_rule_id = Some(0);
+        topology.edge_layers.routing[0].temporal_rule_id = Some(0);
         let mut metrics = temporal_test_metrics(true);
         metrics.components = vec![CompiledCostComponent {
             name: "exposure".to_string(),
@@ -3035,7 +3036,7 @@ mod tests {
                 },
             ],
         }];
-        topology.edges[0].temporal_rule_id = Some(0);
+        topology.edge_layers.routing[0].temporal_rule_id = Some(0);
         let mut metrics = temporal_test_metrics(true);
         metrics.temporal.max_wait_s = 120.0;
         let context = TemporalContext::default();
@@ -3081,7 +3082,7 @@ mod tests {
                 effect: TemporalEffect::OpenOnly,
             }],
         }];
-        for edge in &mut topology.edges {
+        for edge in &mut topology.edge_layers.routing {
             edge.temporal_rule_id = Some(0);
         }
         let metrics = temporal_test_metrics(false);
@@ -3122,7 +3123,7 @@ mod tests {
                 },
             ],
         }];
-        for edge in &mut topology.edges {
+        for edge in &mut topology.edge_layers.routing {
             edge.temporal_rule_id = Some(0);
         }
         let metrics = temporal_test_metrics(false);
@@ -3141,10 +3142,10 @@ mod tests {
     #[test]
     fn arrive_by_breaks_equal_latest_departures_by_generalized_cost() {
         let mut topology = temporal_test_topology();
-        let mut cheaper_parallel_edge = topology.edges[1];
+        let mut cheaper_parallel_edge = topology.edge(1);
         cheaper_parallel_edge.edge_id = EdgeId(3);
         cheaper_parallel_edge.source_way_id = 4;
-        topology.edges.push(cheaper_parallel_edge);
+        topology.push_edge(cheaper_parallel_edge);
         topology.edge_based_topology = crate::build_edge_based_topology_fallback(&topology);
 
         let mut metrics = temporal_test_metrics(false);
@@ -3177,7 +3178,7 @@ mod tests {
     #[test]
     fn temporal_scenario_can_enable_a_materialized_direction_hidden_from_static_routing() {
         let mut topology = temporal_test_topology();
-        topology.edges.push(DirectedEdge {
+        topology.push_edge(DirectedEdge {
             edge_id: EdgeId(3),
             from: NodeId(1),
             to: NodeId(0),
@@ -3411,8 +3412,11 @@ mod tests {
             source_path: "test".to_string(),
             source_sha256: "abc".to_string(),
             nodes,
-            edge_layers: Default::default(),
-            edges: vec![edge(0, 0, 1, 100), edge(1, 1, 2, 100), edge(2, 0, 2, 300)],
+            edge_layers: TopologyEdgeLayers::from_directed_edges(&[
+                edge(0, 0, 1, 100),
+                edge(1, 1, 2, 100),
+                edge(2, 0, 2, 300),
+            ]),
             turn_restrictions: Vec::new(),
             names: Vec::new(),
             edge_based_topology: Default::default(),

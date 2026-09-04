@@ -30,10 +30,12 @@ pub use graph::{
     EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL,
     EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, EdgeBasedTopology, EdgeId, EdgeNameBundle,
     EdgePresentation, EdgeProfileAttributes, HighwayClass, NodeId, NodeSpatialIndex, RoadClass,
-    RoutingEdge, SmoothnessClass, SpatialIndexCell, SurfaceClass, TopologyBounds, TopologyBundle,
-    TopologyBundleMeta, TopologyEdgeLayers, TopologyNode, TurnRestriction, TurnRestrictionKind,
+    RoutingEdge, SmoothnessClass, SpatialIndexCell, SurfaceClass, TOPOLOGY_BUNDLE_SCHEMA_VERSION,
+    TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyEdgeLayers, TopologyNode,
+    TurnRestriction, TurnRestrictionKind,
 };
 pub use metrics::{
+    COMPILED_ACCELERATION_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
     CompiledTemporalProfile, CompiledTurnCostConfig, NO_MIDDLE,
 };

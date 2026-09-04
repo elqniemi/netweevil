@@ -13,7 +13,6 @@ pub enum AnalysisOutcome {
     Degraded,
     Partial,
     Unreachable,
-    NotImplemented,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,7 +30,6 @@ pub enum AnalysisDiagnosticCode {
     DisconnectedComponents,
     LegalRouteUnreachable,
     FallbackUsed,
-    AnalysisNotImplemented,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

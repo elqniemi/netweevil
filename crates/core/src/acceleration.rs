@@ -10,11 +10,8 @@ pub const ACCELERATION_BUNDLE_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AccelerationBundleStats {
-    #[serde(default)]
     pub base_arc_count: u64,
-    #[serde(default)]
     pub shortcut_arc_count: u64,
-    #[serde(default)]
     pub total_arc_count: u64,
 }
 
@@ -30,19 +27,12 @@ pub struct DatasetAccelerationBundle {
     pub schema_version: u32,
     pub source_topology_bundle_id: CacheBundleId,
     pub algorithm: String,
-    #[serde(default)]
     pub stats: AccelerationBundleStats,
-    #[serde(default)]
     pub edge_order: Vec<u32>,
-    #[serde(default)]
     pub edge_rank: Vec<u32>,
-    #[serde(default)]
     pub upward_first_out: Vec<u32>,
-    #[serde(default)]
     pub upward_head: Vec<u32>,
-    #[serde(default)]
     pub downward_first_out: Vec<u32>,
-    #[serde(default)]
     pub downward_head: Vec<u32>,
 }
 

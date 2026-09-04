@@ -1099,38 +1099,23 @@ fn diff_betweenness_results(
         let scenario_result = scenario_analyses
             .get(baseline_analysis.analysis_id.as_str())
             .and_then(|value| value.result.as_ref());
-        if baseline_result.pairs.is_empty() {
-            // Compatibility for results serialized before pair outcomes were
-            // added. New executions use the exact baseline-pair comparison.
-            if let Some(scenario_result) = scenario_result {
-                diff.disconnected_betweenness_pair_count += baseline_result
-                    .routed_pair_count
-                    .saturating_sub(scenario_result.routed_pair_count);
-                diff.weighted_disconnected_demand +=
-                    (baseline_result.routed_demand - scenario_result.routed_demand).max(0.0);
-            } else {
-                diff.disconnected_betweenness_pair_count += baseline_result.routed_pair_count;
-                diff.weighted_disconnected_demand += baseline_result.routed_demand;
-            }
-        } else {
-            let scenario_pairs = scenario_result
-                .map(|result| {
-                    result
-                        .pairs
-                        .iter()
-                        .map(|pair| ((pair.origin_index, pair.destination_index), pair.routed))
-                        .collect::<HashMap<_, _>>()
-                })
-                .unwrap_or_default();
-            for baseline_pair in baseline_result.pairs.iter().filter(|pair| pair.routed) {
-                if !scenario_pairs
-                    .get(&(baseline_pair.origin_index, baseline_pair.destination_index))
-                    .copied()
-                    .unwrap_or(false)
-                {
-                    diff.disconnected_betweenness_pair_count += 1;
-                    diff.weighted_disconnected_demand += baseline_pair.demand;
-                }
+        let scenario_pairs = scenario_result
+            .map(|result| {
+                result
+                    .pairs
+                    .iter()
+                    .map(|pair| ((pair.origin_index, pair.destination_index), pair.routed))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        for baseline_pair in baseline_result.pairs.iter().filter(|pair| pair.routed) {
+            if !scenario_pairs
+                .get(&(baseline_pair.origin_index, baseline_pair.destination_index))
+                .copied()
+                .unwrap_or(false)
+            {
+                diff.disconnected_betweenness_pair_count += 1;
+                diff.weighted_disconnected_demand += baseline_pair.demand;
             }
         }
         let Some(scenario_result) = scenario_result else {
@@ -1165,10 +1150,7 @@ fn reachable_batch_time(status: BatchItemStatus, travel_time_s: Option<f64>) -> 
 }
 
 fn route_reachable(result: &RouteResult) -> bool {
-    !matches!(
-        result.outcome,
-        AnalysisOutcome::Unreachable | AnalysisOutcome::NotImplemented
-    )
+    !matches!(result.outcome, AnalysisOutcome::Unreachable)
 }
 
 fn max_service_area_network_length(result: &ServiceAreaResult) -> f64 {
@@ -1631,7 +1613,12 @@ routes: []
             unreachable_pair_count,
             routed_demand,
             time_dependent: true,
-            pairs: Vec::new(),
+            pairs: vec![crate::BetweennessPairResult {
+                origin_index: 0,
+                destination_index: 0,
+                demand: routed_demand.max(6.0),
+                routed: routed_pair_count > 0,
+            }],
             edges: edges
                 .into_iter()
                 .map(

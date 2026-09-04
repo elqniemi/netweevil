@@ -2,10 +2,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
 use netweevil_core::{
-    CacheBundleId, CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric,
-    CompiledProfileBundle, CompiledTemporalProfile, CompiledTurnCostConfig,
-    DatasetAccelerationBundle, EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, NO_FEATURE_ROW,
-    NO_MIDDLE, RoadClass, TopologyBundle,
+    COMPILED_ACCELERATION_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId,
+    CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
+    CompiledTemporalProfile, CompiledTurnCostConfig, DatasetAccelerationBundle,
+    EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, NO_FEATURE_ROW, NO_MIDDLE, RoadClass,
+    TopologyBundle,
 };
 
 use crate::components::{ParsedCostComponent, parse_component_expression};
@@ -269,7 +270,7 @@ where
     );
 
     Ok(CompiledProfileBundle {
-        schema_version: 4,
+        schema_version: COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
         profile_id: profile.profile.id.clone(),
         profile_hash,
         mode: profile.profile.mode,
@@ -417,7 +418,7 @@ fn compile_acceleration_with_progress(
                            downward_weight: Vec<f64>,
                            downward_middle: Vec<u32>| {
         CompiledAcceleration {
-            schema_version: 3,
+            schema_version: COMPILED_ACCELERATION_SCHEMA_VERSION,
             source_acceleration_bundle_id: source_acceleration_bundle_id.clone(),
             algorithm: bundle.algorithm.clone(),
             upward_weight,
@@ -754,7 +755,7 @@ fn compile_acceleration_with_progress(
     );
 
     CompiledAcceleration {
-        schema_version: 3,
+        schema_version: COMPILED_ACCELERATION_SCHEMA_VERSION,
         source_acceleration_bundle_id,
         algorithm: bundle.algorithm.clone(),
         upward_weight,
@@ -801,7 +802,7 @@ mod tests {
         AccessMask, CacheBundleId, DatasetAccelerationBundle, DirectedEdge, EdgeBasedTopology,
         EdgeId, FeatureAttributeColumn, FeatureAttributeColumnData, FeatureAttributeDefinition,
         FeatureAttributeTable, FeatureAttributeType, NodeId, RoadClass, SmoothnessClass,
-        SurfaceClass, TopologyBundle, TopologyNode, TravelMode,
+        SurfaceClass, TopologyBundle, TopologyEdgeLayers, TopologyNode, TravelMode,
     };
     use std::collections::BTreeMap;
 
@@ -845,8 +846,7 @@ mod tests {
             source_path: "test.osm.pbf".to_string(),
             source_sha256: "abc".to_string(),
             nodes: vec![],
-            edge_layers: Default::default(),
-            edges: vec![DirectedEdge {
+            edge_layers: TopologyEdgeLayers::from_directed_edges(&[DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
                 to: NodeId(1),
@@ -869,7 +869,7 @@ mod tests {
                 geometry_offset: 0,
                 geometry_len: 0,
                 flags: 0,
-            }],
+            }]),
             turn_restrictions: vec![],
             names: vec![],
             edge_based_topology: EdgeBasedTopology::default(),
@@ -926,8 +926,7 @@ temporal:
             source_path: "station.gpkg".to_string(),
             source_sha256: "abc".to_string(),
             nodes: vec![],
-            edge_layers: Default::default(),
-            edges: vec![DirectedEdge {
+            edge_layers: TopologyEdgeLayers::from_directed_edges(&[DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
                 to: NodeId(1),
@@ -950,7 +949,7 @@ temporal:
                 geometry_offset: 0,
                 geometry_len: 0,
                 flags: 0,
-            }],
+            }]),
             turn_restrictions: vec![],
             names: vec![],
             edge_based_topology: EdgeBasedTopology::default(),
@@ -1035,7 +1034,6 @@ temporal:
             source_sha256: "abc".to_string(),
             nodes: vec![],
             edge_layers: Default::default(),
-            edges: vec![],
             turn_restrictions: vec![],
             names: vec![],
             edge_based_topology: EdgeBasedTopology::default(),
@@ -1088,8 +1086,7 @@ temporal:
             source_path: "test.osm.pbf".to_string(),
             source_sha256: "abc".to_string(),
             nodes: vec![],
-            edge_layers: Default::default(),
-            edges: vec![
+            edge_layers: TopologyEdgeLayers::from_directed_edges(&[
                 DirectedEdge {
                     edge_id: EdgeId(0),
                     from: NodeId(0),
@@ -1138,7 +1135,7 @@ temporal:
                     geometry_len: 0,
                     flags: 0,
                 },
-            ],
+            ]),
             turn_restrictions: vec![],
             names: vec![],
             edge_based_topology: EdgeBasedTopology::default(),
@@ -1238,8 +1235,7 @@ temporal:
                     z: 0.0,
                 },
             ],
-            edge_layers: Default::default(),
-            edges: vec![
+            edge_layers: TopologyEdgeLayers::from_directed_edges(&[
                 DirectedEdge {
                     edge_id: EdgeId(0),
                     from: NodeId(0),
@@ -1288,7 +1284,7 @@ temporal:
                     geometry_len: 0,
                     flags: 0,
                 },
-            ],
+            ]),
             turn_restrictions: vec![],
             names: vec![],
             edge_based_topology: EdgeBasedTopology {
@@ -1344,7 +1340,8 @@ temporal:
         assert!(compiled_acceleration.time_downward_weight.is_empty());
         assert!(compiled_acceleration.distance_downward_weight.is_empty());
 
-        topology.edges[1].flags = netweevil_core::EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION;
+        topology.edge_layers.routing[1].flags =
+            netweevil_core::EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION;
         let compiled = compile_profile_bundle_with_acceleration(
             &profile,
             &topology,
@@ -1409,8 +1406,7 @@ temporal:
             source_path: "test.osm.pbf".to_string(),
             source_sha256: "abc".to_string(),
             nodes: vec![],
-            edge_layers: Default::default(),
-            edges: vec![DirectedEdge {
+            edge_layers: TopologyEdgeLayers::from_directed_edges(&[DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
                 to: NodeId(1),
@@ -1433,7 +1429,7 @@ temporal:
                 geometry_offset: 0,
                 geometry_len: 0,
                 flags: 0,
-            }],
+            }]),
             turn_restrictions: vec![],
             names: vec![],
             edge_based_topology: EdgeBasedTopology::default(),

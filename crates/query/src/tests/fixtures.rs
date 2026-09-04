@@ -2,7 +2,8 @@ use netweevil_core::{
     AccessMask, CacheBundleId, CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle,
     CompiledTurnCostConfig, DirectedEdge, EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL,
     EdgeId, NodeId, NodeSpatialIndex, RoadClass, SmoothnessClass, SpatialIndexCell, SurfaceClass,
-    TopologyBounds, TopologyBundle, TopologyNode, TravelMode, TurnRestriction, TurnRestrictionKind,
+    TopologyBounds, TopologyBundle, TopologyEdgeLayers, TopologyNode, TravelMode, TurnRestriction,
+    TurnRestrictionKind,
 };
 
 pub(super) fn test_topology() -> TopologyBundle {
@@ -30,8 +31,7 @@ pub(super) fn test_topology() -> TopologyBundle {
                 z: 0.0,
             },
         ],
-        edge_layers: Default::default(),
-        edges: vec![
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[
             DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
@@ -104,7 +104,7 @@ pub(super) fn test_topology() -> TopologyBundle {
                 geometry_len: 0,
                 flags: 0,
             },
-        ],
+        ]),
         turn_restrictions: vec![],
         names: vec![],
         edge_based_topology: Default::default(),
@@ -172,8 +172,7 @@ pub(super) fn service_area_linear_topology() -> TopologyBundle {
                 z: 0.0,
             },
         ],
-        edge_layers: Default::default(),
-        edges: vec![
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[
             DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
@@ -222,7 +221,7 @@ pub(super) fn service_area_linear_topology() -> TopologyBundle {
                 geometry_len: 0,
                 flags: 0,
             },
-        ],
+        ]),
         turn_restrictions: vec![],
         names: vec![],
         edge_based_topology: Default::default(),
@@ -483,8 +482,7 @@ pub(super) fn restricted_topology() -> TopologyBundle {
                 z: 0.0,
             },
         ],
-        edge_layers: Default::default(),
-        edges: vec![
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[
             DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
@@ -605,7 +603,7 @@ pub(super) fn restricted_topology() -> TopologyBundle {
                 geometry_len: 0,
                 flags: 0,
             },
-        ],
+        ]),
         turn_restrictions: vec![TurnRestriction {
             relation_id: 99,
             kind: TurnRestrictionKind::NoTurn,
@@ -726,8 +724,7 @@ pub(super) fn turn_penalty_topology() -> TopologyBundle {
                 z: 0.0,
             },
         ],
-        edge_layers: Default::default(),
-        edges: vec![
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[
             DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
@@ -848,7 +845,7 @@ pub(super) fn turn_penalty_topology() -> TopologyBundle {
                 geometry_len: 0,
                 flags: 0,
             },
-        ],
+        ]),
         turn_restrictions: vec![],
         names: vec![],
         edge_based_topology: Default::default(),
@@ -908,8 +905,7 @@ pub(super) fn roundabout_entry_penalty_topology() -> TopologyBundle {
                 z: 0.0,
             },
         ],
-        edge_layers: Default::default(),
-        edges: vec![
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[
             DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
@@ -1006,7 +1002,7 @@ pub(super) fn roundabout_entry_penalty_topology() -> TopologyBundle {
                 geometry_len: 0,
                 flags: 0,
             },
-        ],
+        ]),
         turn_restrictions: vec![],
         names: vec![],
         edge_based_topology: Default::default(),
@@ -1095,8 +1091,7 @@ pub(super) fn snap_test_topology() -> TopologyBundle {
         source_path: "test".to_string(),
         source_sha256: "abc".to_string(),
         nodes,
-        edge_layers: Default::default(),
-        edges,
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&edges),
         turn_restrictions: vec![],
         names: vec![],
         edge_based_topology: Default::default(),
@@ -1235,8 +1230,7 @@ pub(super) fn one_way_dead_end_topology() -> TopologyBundle {
                 z: 0.0,
             },
         ],
-        edge_layers: Default::default(),
-        edges: vec![
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[
             DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
@@ -1285,7 +1279,7 @@ pub(super) fn one_way_dead_end_topology() -> TopologyBundle {
                 geometry_len: 0,
                 flags: 0,
             },
-        ],
+        ]),
         turn_restrictions: vec![],
         names: vec![],
         edge_based_topology: Default::default(),
@@ -1333,8 +1327,7 @@ pub(super) fn dead_node_snap_topology() -> TopologyBundle {
                 z: 0.0,
             },
         ],
-        edge_layers: Default::default(),
-        edges: vec![DirectedEdge {
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[DirectedEdge {
             edge_id: EdgeId(0),
             from: NodeId(1),
             to: NodeId(2),
@@ -1357,7 +1350,7 @@ pub(super) fn dead_node_snap_topology() -> TopologyBundle {
             geometry_offset: 0,
             geometry_len: 0,
             flags: 0,
-        }],
+        }]),
         turn_restrictions: vec![],
         names: vec![],
         edge_based_topology: Default::default(),
@@ -1400,8 +1393,7 @@ pub(super) fn ignored_restriction_only_topology() -> TopologyBundle {
                 z: 0.0,
             },
         ],
-        edge_layers: Default::default(),
-        edges: vec![
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[
             DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
@@ -1474,7 +1466,7 @@ pub(super) fn ignored_restriction_only_topology() -> TopologyBundle {
                 geometry_len: 0,
                 flags: 0,
             },
-        ],
+        ]),
         turn_restrictions: vec![TurnRestriction {
             relation_id: 201,
             kind: TurnRestrictionKind::NoTurn,
@@ -1516,8 +1508,7 @@ pub(super) fn forbidden_uturn_topology() -> TopologyBundle {
                 z: 0.0,
             },
         ],
-        edge_layers: Default::default(),
-        edges: vec![
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[
             DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
@@ -1590,7 +1581,7 @@ pub(super) fn forbidden_uturn_topology() -> TopologyBundle {
                 geometry_len: 0,
                 flags: 0,
             },
-        ],
+        ]),
         turn_restrictions: vec![TurnRestriction {
             relation_id: 202,
             kind: TurnRestrictionKind::NoTurn,
@@ -1638,8 +1629,7 @@ pub(super) fn ferry_only_subnetwork_topology() -> TopologyBundle {
                 z: 0.0,
             },
         ],
-        edge_layers: Default::default(),
-        edges: vec![
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[
             DirectedEdge {
                 edge_id: EdgeId(0),
                 from: NodeId(0),
@@ -1688,7 +1678,7 @@ pub(super) fn ferry_only_subnetwork_topology() -> TopologyBundle {
                 geometry_len: 0,
                 flags: 0,
             },
-        ],
+        ]),
         turn_restrictions: vec![],
         names: vec![],
         edge_based_topology: Default::default(),

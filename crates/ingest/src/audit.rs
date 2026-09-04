@@ -525,8 +525,7 @@ mod tests {
             source_path: String::new(),
             source_sha256: String::new(),
             nodes,
-            edge_layers: TopologyEdgeLayers::default(),
-            edges,
+            edge_layers: TopologyEdgeLayers::from_directed_edges(&edges),
             turn_restrictions: Vec::new(),
             names: Vec::new(),
             edge_based_topology: EdgeBasedTopology::default(),
@@ -594,7 +593,7 @@ mod tests {
     #[test]
     fn detects_an_edge_linked_to_the_wrong_feature_row() {
         let mut topology = topology(&[(0, 1)]);
-        topology.edges[0].feature_row = 0;
+        topology.edge_layers.routing[0].feature_row = 0;
         topology.feature_attributes = FeatureAttributeTable {
             row_count: 1,
             strings: Vec::new(),

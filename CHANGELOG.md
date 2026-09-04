@@ -16,8 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   heading-scoped oneways), speed limits, surfaces, prohibited transitions,
   and — on releases that carry the column — lanes are mapped into the
   shared topology model. Dataset manifests record the source format.
-- Per-direction `max_speed_kph` and `lanes` edge attributes (topology
-  schema 10; older bundles still load, without the new attributes). OSM
+- Per-direction `max_speed_kph` and `lanes` edge attributes. OSM
   imports fill them from `maxspeed`/`lanes` tags, Overture imports from
   `speed_limits`/`lanes`. Real lane counts drive simulation capacity.
 - Profile setting `speeds.posted_limits` (`prefer` | `cap` | `ignore`,
@@ -48,6 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Bundle persistence has one format. Topology, acceleration, and
+  compiled-profile bundles are written and read as sectioned `NWSECB05`
+  files; anything else is rejected with an error telling you to re-import
+  the dataset and recompile profiles. Upgrading requires re-importing every
+  dataset and recompiling every profile.
+- `TopologyBundle` stores edges only as `edge_layers`
+  (`TopologyEdgeLayers`); build them with
+  `TopologyEdgeLayers::from_directed_edges` or `TopologyBundle::push_edge`.
+- Each bundle type carries a single schema version constant
+  (`TOPOLOGY_BUNDLE_SCHEMA_VERSION`, `COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION`,
+  `ACCELERATION_BUNDLE_SCHEMA_VERSION`) that readers check on load.
 - API transit payloads: `transfer_profile_id` is accepted only under
   `request.modes.transfer_profile_id`; the top-level shorthand beside
   `feed_id` was removed.
@@ -62,6 +72,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- The bincode bundle readers and every mirror struct that parsed them.
+- The `AnalysisOutcome::NotImplemented` and
+  `AnalysisDiagnosticCode::AnalysisNotImplemented` variants, which no
+  analysis produced.
+- The `TopologyBundle::edges` array-of-structs edge list.
 - Presentation decks and their build assets are no longer tracked
   (`/pitch_assets/`, `/*.pptx`), along with the obsolete extension plan
   document and an unreferenced QGIS symbology database.
@@ -79,17 +94,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and distance) alongside the generalized-cost weights; service areas and
   accessibility adaptively switch from the bounded Dijkstra to an exact
   PHAST hierarchy sweep once the reachable ball exceeds an eighth of the
-  graph. Old compiled profiles keep the Dijkstra path until recompiled.
+  graph. Profiles compiled without those weight sets keep the Dijkstra
+  path.
 - Failure-mode requests on pairwise-only-restriction datasets route over
   penalty-customized CCH weights instead of graph-wide A*; multi-edge
   restriction datasets and reverse-oneway variants keep the exact A* path.
-- Query-time topology nodes no longer carry the import-only OSM node id
-  (sectioned bundle format v2; older bundles keep loading).
+- Query-time topology nodes do not carry the import-only OSM node id.
 
 - Bundle persistence: topology, acceleration, and compiled-profile bundles
   use a sectioned fast-load format whose large primitive arrays are read
-  with one memcpy per array from the memory-mapped file; bundles written
-  by earlier versions still load via the bincode fallback.
+  with one memcpy per array from the memory-mapped file.
 - CCH preprocessing: the contraction now stores arcs in per-state sorted
   pending lists (no global hash set, no arc table), cutting peak memory
   roughly 4x, and the recursive-bisection ordering and CSR sorts run in

@@ -89,7 +89,7 @@ pub struct BetweennessResult {
     pub routed_demand: f64,
     pub time_dependent: bool,
     /// Positive-demand pair outcomes used for exact scenario comparisons.
-    /// Older serialized results remain readable because this defaults empty.
+    /// Empty when the caller does not ask for per-pair results.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pairs: Vec<BetweennessPairResult>,
     pub edges: Vec<BetweennessEdgeScore>,

@@ -53,7 +53,6 @@ pub struct TemporalRule {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct TemporalRuleSet {
-    #[serde(default)]
     pub rules: Vec<TemporalRule>,
 }
 

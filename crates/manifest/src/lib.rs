@@ -77,7 +77,7 @@ pub struct RunManifest {
     pub compiled_profile_bundle_id: Option<String>,
     pub request_source: String,
     /// Fully resolved request executed by the CLI after command-line
-    /// overrides. Older manifests omit this field and remain readable.
+    /// overrides. Omitted from the manifest when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effective_request: Option<serde_json::Value>,
     #[serde(default)]
@@ -193,9 +193,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_run_manifest_without_effective_request_still_deserializes() {
+    fn run_manifest_omits_an_absent_effective_request() {
         let raw = r#"{
-            "run_id":"legacy",
+            "run_id":"run-1",
             "run_kind":"route",
             "status":"succeeded",
             "created_at":"2026-07-10T00:00:00Z",
@@ -204,10 +204,10 @@ mod tests {
             "request_source":"request.json",
             "software":{"executable":"netweevil","version":"0.1.0","git_commit":null},
             "algorithm":{"engine":"exact","graph_model":"directed_edge_graph","acceleration":"none"},
-            "methods_summary":{"plain_language":"legacy"},
+            "methods_summary":{"plain_language":"shortest path"},
             "message":"ok"
         }"#;
-        let manifest: RunManifest = serde_json::from_str(raw).expect("legacy manifest parses");
+        let manifest: RunManifest = serde_json::from_str(raw).expect("manifest parses");
         assert!(manifest.effective_request.is_none());
         assert!(
             !serde_json::to_string(&manifest)

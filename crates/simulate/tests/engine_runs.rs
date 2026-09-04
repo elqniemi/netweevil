@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use netweevil_core::{
     AccessMask, CacheBundleId, CompiledEdgeMetric, CompiledProfileBundle, DirectedEdge,
-    EdgeBasedTopology, EdgeId, NodeId, RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle,
-    TopologyNode, TravelMode,
+    EdgeBasedTopology, EdgeId, NodeId, RoadClass, RoutingEdge, SmoothnessClass, SurfaceClass,
+    TopologyBundle, TopologyNode, TravelMode,
 };
 use netweevil_query::PreparedRoutingEngine;
 use netweevil_simulate::{
@@ -62,7 +62,6 @@ fn grid_engine_for(
         source_sha256: "synthetic".to_string(),
         nodes,
         edge_layers: Default::default(),
-        edges: Vec::new(),
         turn_restrictions: Vec::new(),
         names: Vec::new(),
         edge_based_topology: Default::default(),
@@ -115,7 +114,8 @@ fn grid_engine_for(
         }
     }
 
-    bundle.edge_based_topology = build_edge_based_topology(GRID * GRID, &bundle.edges);
+    bundle.edge_based_topology =
+        build_edge_based_topology(GRID * GRID, &bundle.edge_layers.routing);
 
     let edge_metrics: Vec<CompiledEdgeMetric> = (0..bundle.edge_count())
         .map(|index| {
@@ -148,7 +148,7 @@ fn grid_engine_for(
 
 /// Same shape as the ingest crate's builder: node CSR + full transition
 /// table (every outgoing edge at the head node).
-fn build_edge_based_topology(node_count: usize, edges: &[DirectedEdge]) -> EdgeBasedTopology {
+fn build_edge_based_topology(node_count: usize, edges: &[RoutingEdge]) -> EdgeBasedTopology {
     let mut node_first_out = vec![0u32; node_count + 1];
     for edge in edges {
         node_first_out[edge.from.0 as usize + 1] += 1;

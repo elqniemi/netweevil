@@ -52,7 +52,7 @@ fn temporal_reachability_prepass_returns_unreachable_before_tradeoff_overflow() 
             effect: netweevil_core::TemporalEffect::Closed,
         }],
     }];
-    topology.edges[5].temporal_rule_id = Some(0);
+    topology.edge_layers.routing[5].temporal_rule_id = Some(0);
     for (index, (travel_time_s, generalized_cost)) in [
         (10.0, 1.0),
         (10.0, 1.0),
@@ -197,7 +197,7 @@ fn component_label_overflow_fixture() -> (
             ..node_template
         })
         .collect();
-    let edge_template = topology.edges[0];
+    let edge_template = topology.edge(0);
     let edge = |edge_id: u32, from: u32, to: u32| netweevil_core::DirectedEdge {
         edge_id: EdgeId(edge_id),
         from: netweevil_core::NodeId(from),
@@ -206,14 +206,14 @@ fn component_label_overflow_fixture() -> (
         length_m: 10,
         ..edge_template
     };
-    topology.edges = vec![
+    topology.edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&[
         edge(0, 0, 1),
         edge(1, 1, 3),
         edge(2, 0, 2),
         edge(3, 2, 3),
         edge(4, 3, 4),
         edge(5, 4, 5),
-    ];
+    ]);
     topology.edge_based_topology = crate::build_edge_based_topology_fallback(&topology);
     topology.spatial_index = None;
     topology.node_component_ids = vec![0; topology.nodes.len()];
@@ -402,7 +402,7 @@ fn temporal_component_arrive_by_finds_narrow_later_window_without_waiting() {
             },
         ],
     }];
-    for edge in &mut topology.edges {
+    for edge in &mut topology.edge_layers.routing {
         edge.temporal_rule_id = Some(0);
     }
     let mut metrics = test_metrics();
@@ -573,7 +573,7 @@ fn temporal_component_arrive_by_maps_overlay_boundary_across_edge_waiting() {
             },
         ],
     }];
-    topology.edges[1].temporal_rule_id = Some(0);
+    topology.edge_layers.routing[1].temporal_rule_id = Some(0);
     let mut metrics = test_metrics();
     metrics.edge_metrics[2].travel_time_s = None;
     metrics.edge_metrics[2].generalized_cost = None;
@@ -644,9 +644,9 @@ fn temporal_component_arrive_by_maps_overlay_boundary_across_edge_waiting() {
 #[test]
 fn executes_scenario_batch_and_diffs_rerouting_burden() {
     let mut topology = test_topology();
-    topology.edges[0].feature_row = 0;
-    topology.edges[1].feature_row = 0;
-    topology.edges[2].feature_row = 1;
+    topology.edge_layers.routing[0].feature_row = 0;
+    topology.edge_layers.routing[1].feature_row = 0;
+    topology.edge_layers.routing[2].feature_row = 1;
     topology.feature_attributes = netweevil_core::FeatureAttributeTable {
         row_count: 2,
         strings: vec!["mall".to_string(), "street".to_string()],
@@ -1384,9 +1384,9 @@ fn snap_respects_elevation_window_and_feature_attribute_filters() {
     topology.nodes[1].lat = topology.nodes[0].lat;
     topology.nodes[0].z = 0.0;
     topology.nodes[1].z = 20.0;
-    topology.edges[0].feature_row = 0;
-    topology.edges[1].feature_row = 1;
-    topology.edges[2].feature_row = 0;
+    topology.edge_layers.routing[0].feature_row = 0;
+    topology.edge_layers.routing[1].feature_row = 1;
+    topology.edge_layers.routing[2].feature_row = 0;
     topology.feature_attributes = netweevil_core::FeatureAttributeTable {
         row_count: 2,
         strings: vec!["outdoor".to_string(), "indoor".to_string()],

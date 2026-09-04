@@ -1,16 +1,13 @@
 //! Fast-load sectioned bundle format.
 //!
-//! Bincode decodes every array element through the serde machinery, which
-//! makes loading a continent-sized bundle a parse of tens of gigabytes. This
-//! format keeps small/complex fields in a bincode header but stores the big
-//! primitive arrays as raw little-endian sections, so reading them is one
-//! `memcpy` per array from the memory-mapped file.
+//! Small and enum-heavy fields live in a bincode header section; the big
+//! primitive arrays are stored as raw little-endian sections, so reading one
+//! is a single `memcpy` from the memory-mapped file rather than a per-element
+//! serde decode.
 //!
-//! Layout: an 8-byte magic (`NWSECB` + 2-digit version) followed by
-//! length-prefixed sections (`u64` little-endian byte length + payload). The
-//! section order is fixed per bundle type; readers fall back to plain
-//! bincode when the magic is absent, so bundles written before this format
-//! keep loading.
+//! Layout: the 8-byte magic [`CURRENT_MAGIC`] followed by length-prefixed
+//! sections (`u64` little-endian byte length + payload). The section order is
+//! fixed per bundle type.
 
 #[cfg(target_endian = "big")]
 compile_error!("the sectioned bundle format stores raw little-endian arrays");
@@ -23,37 +20,25 @@ use anyhow::{Context, Result, bail};
 use bytemuck::Pod;
 use memmap2::Mmap;
 use netweevil_core::{
-    AccessMask, CacheBundleId, CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric,
-    CompiledProfileBundle, CompiledTemporalProfile, CompiledTurnCostConfig,
-    DatasetAccelerationBundle, EdgeId, EdgeProfileAttributes, HighwayClass, NO_FEATURE_ROW, NodeId,
-    RoadClass, RoutingEdge, SmoothnessClass, SurfaceClass, TopologyBundle, TopologyEdgeLayers,
-    TopologyNode, TravelMode,
+    ACCELERATION_BUNDLE_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId,
+    CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
+    CompiledTemporalProfile, CompiledTurnCostConfig, DatasetAccelerationBundle, EdgeId,
+    EdgeProfileAttributes, NodeId, RoutingEdge, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle,
+    TopologyEdgeLayers, TopologyNode, TravelMode,
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-const MAGIC_PREFIX: &[u8; 6] = b"NWSECB";
-const MAGIC_LEN: usize = 8;
-/// Version 2 dropped the topology `osm_node_id` column. Version 3 adds node
-/// elevation and directional ascent/descent topology columns. Version 4
-/// adds source-feature/orientation/schedule columns plus retained feature
-/// attributes and temporal rule tables. Older files are read with defaults.
-const CURRENT_MAGIC: &[u8; 8] = b"NWSECB04";
+/// The magic every bundle carries. Files that do not start with it are
+/// rejected; there is no second format to fall back to.
+const CURRENT_MAGIC: &[u8; 8] = b"NWSECB05";
+const MAGIC_LEN: usize = CURRENT_MAGIC.len();
 
-pub(crate) fn is_sectioned(bytes: &[u8]) -> bool {
-    bytes.len() >= MAGIC_LEN && &bytes[..MAGIC_PREFIX.len()] == MAGIC_PREFIX
-}
-
-fn format_version(bytes: &[u8]) -> Result<u8> {
-    match &bytes[MAGIC_PREFIX.len()..MAGIC_LEN] {
-        b"01" => Ok(1),
-        b"02" => Ok(2),
-        b"03" => Ok(3),
-        b"04" => Ok(4),
-        other => bail!(
-            "unsupported sectioned bundle version '{}'",
-            String::from_utf8_lossy(other)
-        ),
-    }
+/// Error for a file that is not a current sectioned bundle.
+pub(crate) fn unsupported_format_error(path: &Path) -> anyhow::Error {
+    anyhow::anyhow!(
+        "bundle {} uses an unsupported format; re-import the dataset and recompile profiles",
+        path.display()
+    )
 }
 
 struct SectionWriter<W: Write> {
@@ -92,18 +77,16 @@ impl<W: Write> SectionWriter<W> {
 struct SectionReader<'a> {
     bytes: &'a [u8],
     offset: usize,
-    version: u8,
 }
 
 impl<'a> SectionReader<'a> {
-    fn new(bytes: &'a [u8]) -> Result<Self> {
-        if !is_sectioned(bytes) {
-            bail!("missing sectioned bundle magic");
+    fn new(bytes: &'a [u8], path: &Path) -> Result<Self> {
+        if bytes.len() < MAGIC_LEN || &bytes[..MAGIC_LEN] != CURRENT_MAGIC {
+            return Err(unsupported_format_error(path));
         }
         Ok(Self {
             bytes,
             offset: MAGIC_LEN,
-            version: format_version(bytes)?,
         })
     }
 
@@ -191,13 +174,19 @@ pub(crate) fn write_acceleration_sectioned(
     writer.finish()
 }
 
-pub(crate) fn read_acceleration_sectioned(bytes: &[u8]) -> Result<DatasetAccelerationBundle> {
-    let mut reader = SectionReader::new(bytes)?;
+pub(crate) fn read_acceleration_sectioned(
+    bytes: &[u8],
+    path: &Path,
+) -> Result<DatasetAccelerationBundle> {
+    let mut reader = SectionReader::new(bytes, path)?;
     let tag: String = reader.read_bincode()?;
     if tag != "acceleration" {
         bail!("expected an acceleration bundle, found '{tag}'");
     }
     let header: AccelerationHeader = reader.read_bincode()?;
+    if header.schema_version != ACCELERATION_BUNDLE_SCHEMA_VERSION {
+        return Err(unsupported_format_error(path));
+    }
     Ok(DatasetAccelerationBundle {
         schema_version: header.schema_version,
         source_topology_bundle_id: header.source_topology_bundle_id,
@@ -327,13 +316,19 @@ pub(crate) fn write_compiled_profile_sectioned(
     writer.finish()
 }
 
-pub(crate) fn read_compiled_profile_sectioned(bytes: &[u8]) -> Result<CompiledProfileBundle> {
-    let mut reader = SectionReader::new(bytes)?;
+pub(crate) fn read_compiled_profile_sectioned(
+    bytes: &[u8],
+    path: &Path,
+) -> Result<CompiledProfileBundle> {
+    let mut reader = SectionReader::new(bytes, path)?;
     let tag: String = reader.read_bincode()?;
     if tag != "compiled_profile" {
         bail!("expected a compiled profile bundle, found '{tag}'");
     }
     let header: CompiledProfileHeader = reader.read_bincode()?;
+    if header.schema_version != COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION {
+        return Err(unsupported_format_error(path));
+    }
 
     let edge_ids: Vec<u32> = reader.read_raw()?;
     let travel_times: Vec<f64> = reader.read_raw()?;
@@ -358,22 +353,10 @@ pub(crate) fn read_compiled_profile_sectioned(bytes: &[u8]) -> Result<CompiledPr
     let upward_middle: Vec<u32> = reader.read_raw()?;
     let downward_weight: Vec<f64> = reader.read_raw()?;
     let downward_middle: Vec<u32> = reader.read_raw()?;
-    // Version 1 predates the per-metric weight sections.
-    let (
-        time_upward_weight,
-        time_downward_weight,
-        distance_upward_weight,
-        distance_downward_weight,
-    ) = if reader.version >= 2 {
-        (
-            reader.read_raw()?,
-            reader.read_raw()?,
-            reader.read_raw()?,
-            reader.read_raw()?,
-        )
-    } else {
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
-    };
+    let time_upward_weight: Vec<f64> = reader.read_raw()?;
+    let time_downward_weight: Vec<f64> = reader.read_raw()?;
+    let distance_upward_weight: Vec<f64> = reader.read_raw()?;
+    let distance_downward_weight: Vec<f64> = reader.read_raw()?;
     let acceleration = header
         .acceleration
         .map(|acceleration| CompiledAcceleration {
@@ -389,33 +372,28 @@ pub(crate) fn read_compiled_profile_sectioned(bytes: &[u8]) -> Result<CompiledPr
             distance_upward_weight,
             distance_downward_weight,
         });
-    let (temporal, components) = if reader.version >= 3 {
-        let temporal = reader.read_bincode()?;
-        let component_headers: Vec<CompiledCostComponentHeader> = reader.read_bincode()?;
-        let mut components = Vec::with_capacity(component_headers.len());
-        for component in component_headers {
-            let edge_values: Vec<f32> = reader.read_raw()?;
-            if edge_values.len() != edge_metrics.len() {
-                bail!(
-                    "compiled profile component '{}' has {} values for {} edge metrics",
-                    component.name,
-                    edge_values.len(),
-                    edge_metrics.len()
-                );
-            }
-            components.push(CompiledCostComponent {
-                name: component.name,
-                weight: component.weight,
-                edge_values,
-                scales_with_travel_time: component.scales_with_travel_time,
-                overlay_name: component.overlay_name,
-                invert_overlay: component.invert_overlay,
-            });
+    let temporal: CompiledTemporalProfile = reader.read_bincode()?;
+    let component_headers: Vec<CompiledCostComponentHeader> = reader.read_bincode()?;
+    let mut components = Vec::with_capacity(component_headers.len());
+    for component in component_headers {
+        let edge_values: Vec<f32> = reader.read_raw()?;
+        if edge_values.len() != edge_metrics.len() {
+            bail!(
+                "compiled profile component '{}' has {} values for {} edge metrics",
+                component.name,
+                edge_values.len(),
+                edge_metrics.len()
+            );
         }
-        (temporal, components)
-    } else {
-        (CompiledTemporalProfile::default(), Vec::new())
-    };
+        components.push(CompiledCostComponent {
+            name: component.name,
+            weight: component.weight,
+            edge_values,
+            scales_with_travel_time: component.scales_with_travel_time,
+            overlay_name: component.overlay_name,
+            invert_overlay: component.invert_overlay,
+        });
+    }
 
     Ok(CompiledProfileBundle {
         schema_version: header.schema_version,
@@ -431,48 +409,6 @@ pub(crate) fn read_compiled_profile_sectioned(bytes: &[u8]) -> Result<CompiledPr
     })
 }
 
-/// Profile-layer layout of topology bundles written before schema 10.
-#[derive(Serialize, Deserialize)]
-struct LegacyEdgeProfileAttributes {
-    duration_s: Option<f64>,
-    road_class: RoadClass,
-    highway: HighwayClass,
-    surface: SurfaceClass,
-    smoothness: SmoothnessClass,
-    access_mask: AccessMask,
-    is_toll: bool,
-}
-
-impl From<&EdgeProfileAttributes> for LegacyEdgeProfileAttributes {
-    fn from(value: &EdgeProfileAttributes) -> Self {
-        Self {
-            duration_s: value.duration_s,
-            road_class: value.road_class,
-            highway: value.highway,
-            surface: value.surface,
-            smoothness: value.smoothness,
-            access_mask: value.access_mask,
-            is_toll: value.is_toll,
-        }
-    }
-}
-
-impl From<LegacyEdgeProfileAttributes> for EdgeProfileAttributes {
-    fn from(value: LegacyEdgeProfileAttributes) -> Self {
-        Self {
-            duration_s: value.duration_s,
-            road_class: value.road_class,
-            highway: value.highway,
-            surface: value.surface,
-            smoothness: value.smoothness,
-            access_mask: value.access_mask,
-            is_toll: value.is_toll,
-            max_speed_kph: None,
-            lanes: None,
-        }
-    }
-}
-
 // --- Topology bundle --------------------------------------------------------
 
 #[derive(Serialize, Deserialize)]
@@ -486,17 +422,7 @@ struct TopologyHeader {
 }
 
 pub(crate) fn write_topology_sectioned(path: &Path, bundle: &TopologyBundle) -> Result<()> {
-    // Legacy in-memory bundles carry AoS `edges`; convert to the SoA layers
-    // without cloning the rest of the bundle.
-    let converted_layers;
-    let layers: &TopologyEdgeLayers =
-        if bundle.edge_layers.routing.is_empty() && !bundle.edges.is_empty() {
-            converted_layers = TopologyEdgeLayers::from_directed_edges(&bundle.edges);
-            &converted_layers
-        } else {
-            &bundle.edge_layers
-        };
-
+    let layers = &bundle.edge_layers;
     let mut writer = create_writer(path)?;
     writer.write_bincode(&"topology")?;
     writer.write_bincode(&TopologyHeader {
@@ -555,19 +481,8 @@ pub(crate) fn write_topology_sectioned(path: &Path, bundle: &TopologyBundle) -> 
     writer.write_raw(&temporal_rule_ids)?;
 
     // Attribute layers stay bincode: they are enum-heavy and comparatively
-    // small next to the numeric arrays. Bundles carrying a pre-10 schema
-    // version keep the pre-10 field layout so version-gated reads stay
-    // consistent.
-    if bundle.schema_version >= 10 {
-        writer.write_bincode(&layers.profile)?;
-    } else {
-        let legacy: Vec<LegacyEdgeProfileAttributes> = layers
-            .profile
-            .iter()
-            .map(LegacyEdgeProfileAttributes::from)
-            .collect();
-        writer.write_bincode(&legacy)?;
-    }
+    // small next to the numeric arrays.
+    writer.write_bincode(&layers.profile)?;
     writer.write_bincode(&layers.presentation)?;
 
     writer.write_raw(&bundle.edge_based_topology.node_first_out)?;
@@ -581,26 +496,21 @@ pub(crate) fn write_topology_sectioned(path: &Path, bundle: &TopologyBundle) -> 
     writer.finish()
 }
 
-pub(crate) fn read_topology_sectioned(bytes: &[u8]) -> Result<TopologyBundle> {
-    let mut reader = SectionReader::new(bytes)?;
+pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<TopologyBundle> {
+    let mut reader = SectionReader::new(bytes, path)?;
     let tag: String = reader.read_bincode()?;
     if tag != "topology" {
         bail!("expected a topology bundle, found '{tag}'");
     }
     let header: TopologyHeader = reader.read_bincode()?;
+    if header.schema_version != TOPOLOGY_BUNDLE_SCHEMA_VERSION {
+        return Err(unsupported_format_error(path));
+    }
 
     let node_ids: Vec<u32> = reader.read_raw()?;
-    if reader.version == 1 {
-        // Version 1 stored the import-only OSM node ids; discard them.
-        let _osm_node_ids: Vec<i64> = reader.read_raw()?;
-    }
     let lons: Vec<f64> = reader.read_raw()?;
     let lats: Vec<f64> = reader.read_raw()?;
-    let elevations: Vec<f64> = if reader.version >= 3 {
-        reader.read_raw()?
-    } else {
-        vec![0.0; node_ids.len()]
-    };
+    let elevations: Vec<f64> = reader.read_raw()?;
     if node_ids.len() != lons.len()
         || node_ids.len() != lats.len()
         || node_ids.len() != elevations.len()
@@ -625,27 +535,12 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8]) -> Result<TopologyBundle> {
     let tos: Vec<u32> = reader.read_raw()?;
     let way_ids: Vec<i64> = reader.read_raw()?;
     let lengths: Vec<u32> = reader.read_raw()?;
-    let ascents: Vec<f32> = if reader.version >= 3 {
-        reader.read_raw()?
-    } else {
-        vec![0.0; edge_ids.len()]
-    };
-    let descents: Vec<f32> = if reader.version >= 3 {
-        reader.read_raw()?
-    } else {
-        vec![0.0; edge_ids.len()]
-    };
+    let ascents: Vec<f32> = reader.read_raw()?;
+    let descents: Vec<f32> = reader.read_raw()?;
     let flags: Vec<u32> = reader.read_raw()?;
-    let (feature_rows, source_directions, temporal_rule_ids): (Vec<u32>, Vec<i8>, Vec<u32>) =
-        if reader.version >= 4 {
-            (reader.read_raw()?, reader.read_raw()?, reader.read_raw()?)
-        } else {
-            (
-                vec![NO_FEATURE_ROW; edge_ids.len()],
-                vec![0; edge_ids.len()],
-                vec![u32::MAX; edge_ids.len()],
-            )
-        };
+    let feature_rows: Vec<u32> = reader.read_raw()?;
+    let source_directions: Vec<i8> = reader.read_raw()?;
+    let temporal_rule_ids: Vec<u32> = reader.read_raw()?;
     if edge_ids.len() != froms.len()
         || edge_ids.len() != tos.len()
         || edge_ids.len() != way_ids.len()
@@ -676,18 +571,7 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8]) -> Result<TopologyBundle> {
         })
         .collect();
 
-    // Schema 10 added max_speed/lanes to the profile layer; bincode is not
-    // self-describing, so bundles written before that decode through the old
-    // field layout.
-    let profile: Vec<EdgeProfileAttributes> = if header.schema_version >= 10 {
-        reader.read_bincode()?
-    } else {
-        reader
-            .read_bincode::<Vec<LegacyEdgeProfileAttributes>>()?
-            .into_iter()
-            .map(EdgeProfileAttributes::from)
-            .collect()
-    };
+    let profile: Vec<EdgeProfileAttributes> = reader.read_bincode()?;
     let presentation = reader.read_bincode()?;
 
     let edge_based_topology = netweevil_core::EdgeBasedTopology {
@@ -698,11 +582,8 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8]) -> Result<TopologyBundle> {
     };
     let node_component_ids = reader.read_raw()?;
     let edge_component_ids = reader.read_raw()?;
-    let (feature_attributes, temporal_rule_sets) = if reader.version >= 4 {
-        (reader.read_bincode()?, reader.read_bincode()?)
-    } else {
-        (Default::default(), Vec::new())
-    };
+    let feature_attributes = reader.read_bincode()?;
+    let temporal_rule_sets = reader.read_bincode()?;
 
     Ok(TopologyBundle {
         schema_version: header.schema_version,
@@ -714,7 +595,6 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8]) -> Result<TopologyBundle> {
             profile,
             presentation,
         },
-        edges: Vec::new(),
         turn_restrictions: header.turn_restrictions,
         names: header.names,
         edge_based_topology,
@@ -728,9 +608,8 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8]) -> Result<TopologyBundle> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TopologyHeader, read_topology_sectioned};
-    use netweevil_core::{EdgePresentation, EdgeProfileAttributes};
-    use serde::Serialize;
+    use super::*;
+    use netweevil_core::EdgePresentation;
 
     fn push_bincode<T: Serialize>(bytes: &mut Vec<u8>, value: &T) {
         let section = bincode::serialize(value).expect("section serializes");
@@ -744,15 +623,15 @@ mod tests {
         bytes.extend_from_slice(section);
     }
 
-    #[test]
-    fn reads_version_two_topology_with_flat_3d_defaults() {
-        let mut bytes = b"NWSECB02".to_vec();
+    /// Builds a topology bundle whose header carries `schema_version`.
+    fn topology_bytes(magic: &[u8; 8], schema_version: u32) -> Vec<u8> {
+        let mut bytes = magic.to_vec();
         push_bincode(&mut bytes, &"topology");
         push_bincode(
             &mut bytes,
             &TopologyHeader {
-                schema_version: 10,
-                source_path: "legacy.osm.pbf".to_string(),
+                schema_version,
+                source_path: "city.osm.pbf".to_string(),
                 source_sha256: "abc".to_string(),
                 turn_restrictions: Vec::new(),
                 names: Vec::new(),
@@ -762,22 +641,60 @@ mod tests {
         push_raw(&mut bytes, &[0_u32, 1]);
         push_raw(&mut bytes, &[114.1_f64, 114.2]);
         push_raw(&mut bytes, &[22.3_f64, 22.4]);
+        push_raw(&mut bytes, &[0.0_f64, 0.0]);
         push_raw(&mut bytes, &[0_u32]);
         push_raw(&mut bytes, &[0_u32]);
         push_raw(&mut bytes, &[1_u32]);
         push_raw(&mut bytes, &[42_i64]);
         push_raw(&mut bytes, &[100_u32]);
+        push_raw(&mut bytes, &[0.0_f32]);
+        push_raw(&mut bytes, &[0.0_f32]);
         push_raw(&mut bytes, &[0_u32]);
+        push_raw(&mut bytes, &[netweevil_core::NO_FEATURE_ROW]);
+        push_raw(&mut bytes, &[0_i8]);
+        push_raw(&mut bytes, &[u32::MAX]);
         push_bincode(&mut bytes, &vec![EdgeProfileAttributes::default()]);
         push_bincode(&mut bytes, &vec![EdgePresentation::default()]);
         for _ in 0..6 {
             push_raw::<u32>(&mut bytes, &[]);
         }
+        push_bincode(
+            &mut bytes,
+            &netweevil_core::FeatureAttributeTable::default(),
+        );
+        push_bincode(&mut bytes, &Vec::<netweevil_core::TemporalRuleSet>::new());
+        bytes
+    }
 
-        let bundle = read_topology_sectioned(&bytes).expect("version 2 topology reads");
-        assert_eq!(bundle.nodes[0].z, 0.0);
-        assert_eq!(bundle.nodes[1].z, 0.0);
-        assert_eq!(bundle.routing_edge(0).ascent_m, 0.0);
-        assert_eq!(bundle.routing_edge(0).descent_m, 0.0);
+    #[test]
+    fn reads_a_current_topology_bundle() {
+        let bytes = topology_bytes(CURRENT_MAGIC, TOPOLOGY_BUNDLE_SCHEMA_VERSION);
+        let bundle = read_topology_sectioned(&bytes, Path::new("topology.bin"))
+            .expect("current topology reads");
+        assert_eq!(bundle.nodes.len(), 2);
+        assert_eq!(bundle.edge_count(), 1);
+        assert_eq!(bundle.routing_edge(0).length_m, 100);
+    }
+
+    #[test]
+    fn rejects_an_unrecognized_magic() {
+        let bytes = topology_bytes(b"NWSECB04", TOPOLOGY_BUNDLE_SCHEMA_VERSION);
+        let error = read_topology_sectioned(&bytes, Path::new("topology.bin"))
+            .expect_err("an unrecognized magic is rejected");
+        assert!(
+            error.to_string().contains("re-import the dataset"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_a_mismatched_schema_version() {
+        let bytes = topology_bytes(CURRENT_MAGIC, TOPOLOGY_BUNDLE_SCHEMA_VERSION - 1);
+        let error = read_topology_sectioned(&bytes, Path::new("topology.bin"))
+            .expect_err("a mismatched schema version is rejected");
+        assert!(
+            error.to_string().contains("re-import the dataset"),
+            "{error}"
+        );
     }
 }
