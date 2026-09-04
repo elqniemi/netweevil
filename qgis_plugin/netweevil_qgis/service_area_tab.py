@@ -307,9 +307,6 @@ class ServiceAreaTabMixin:
             "Cleared the service-area origin list."
         )
 
-    def service_area_origin_count(self):
-        return len(self.parse_service_area_origin_lines())
-
     def parse_service_area_origin_lines(self):
         origins = []
         for raw_line in self.service_area_origins_edit.toPlainText().splitlines():

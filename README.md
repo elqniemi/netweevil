@@ -86,11 +86,11 @@ sources together and audit the retained fields and segment geometry:
 
 ```bash
 scripts/prepare_hong_kong_pedestrian.sh \
-  /home/elmeriniemi/stuff/hong-kong-analysis
+  /path/to/hong-kong-analysis
 
 cargo run -p netweevil-cli -- dataset import \
-  /home/elmeriniemi/stuff/hong-kong-analysis/prepared/3D_Pedestrian_Network.gpkg \
-  /home/elmeriniemi/stuff/hong-kong-analysis/prepared/3D_Indoor_Network.gpkg \
+  /path/to/hong-kong-analysis/prepared/3D_Pedestrian_Network.gpkg \
+  /path/to/hong-kong-analysis/prepared/3D_Indoor_Network.gpkg \
   --name hk_pedestrian_3d \
   --format gpkg \
   --mapping examples/ingest/hong_kong_pedestrian_mapping.yml
@@ -98,8 +98,8 @@ cargo run -p netweevil-cli -- dataset import \
 cargo run -p netweevil-cli -- dataset audit \
   --dataset hk_pedestrian_3d \
   --against \
-    /home/elmeriniemi/stuff/hong-kong-analysis/prepared/3D_Pedestrian_Network.gpkg \
-    /home/elmeriniemi/stuff/hong-kong-analysis/prepared/3D_Indoor_Network.gpkg \
+    /path/to/hong-kong-analysis/prepared/3D_Pedestrian_Network.gpkg \
+    /path/to/hong-kong-analysis/prepared/3D_Indoor_Network.gpkg \
   --mapping examples/ingest/hong_kong_pedestrian_mapping.yml
 
 cargo run -p netweevil-cli -- profile compile \

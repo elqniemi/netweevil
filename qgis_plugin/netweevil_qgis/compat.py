@@ -28,7 +28,6 @@ __all__ = [
     "MSG_CRITICAL",
     "GEOM_POINT",
     "GEOM_LINE",
-    "GEOM_POLYGON",
     "LAYER_FILTER_POINT",
     "LAYER_FILTER_POLYGON",
 ]
@@ -116,7 +115,6 @@ MSG_CRITICAL = _message_level("Critical")
 
 GEOM_POINT = _geometry_type("Point")
 GEOM_LINE = _geometry_type("Line")
-GEOM_POLYGON = _geometry_type("Polygon")
 
 LAYER_FILTER_POINT = _layer_filter("PointLayer")
 LAYER_FILTER_POLYGON = _layer_filter("PolygonLayer")

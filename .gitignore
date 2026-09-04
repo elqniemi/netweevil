@@ -37,6 +37,9 @@ index.html
 /qgis_plugin/README.pdf
 /scripts/build_readme_pdfs.sh
 /scripts/build_pitch_deck.py
+# Decks and their build assets live outside version control.
+/pitch_assets/
+/*.pptx
 
 # Private planning/status documents
 /PROGRESS.md
@@ -57,8 +60,6 @@ index.html
 !examples/experiments/**/*.ndjson
 
 # Generated API examples and benchmark outputs are reproducible local artifacts.
-examples/api/groningen_*.json
-examples/api/groningen_*.geojson
 examples/api/*_result*.json
 examples/api/*_results*.json
 examples/api/*_output*.json

@@ -395,9 +395,3 @@ class ConnectionMixin:
         if output_path.suffix.lower() != ".json":
             return output_path.with_suffix(".json")
         return output_path
-
-    def save_response(self, output_path, content_type, body):
-        output_path = self.response_output_path(output_path, content_type)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(body)
-        return output_path

@@ -46,7 +46,6 @@ class SettingsIoMixin:
             "transit_route_id": self.transit_route_id_edit.text().strip(),
             "transit_auto_increment": self.transit_auto_increment_check.isChecked(),
             "transit_datetime": self.transit_datetime_edit.text().strip(),
-            "transit_arrive_by": self.transit_arrive_by_check.isChecked(),
             "transit_search_window": self.transit_search_window_edit.text().strip(),
             "transit_output_path": self.transit_output_path_edit.text().strip(),
             "transit_request_path": self.transit_request_path_edit.text().strip(),
@@ -228,9 +227,6 @@ class SettingsIoMixin:
         )
         self.transit_datetime_edit.setText(
             self.read_setting("transit_datetime", self.transit_datetime_edit.text())
-        )
-        self.transit_arrive_by_check.setChecked(
-            False
         )
         self.transit_search_window_edit.setText(
             self.read_setting("transit_search_window", self.transit_search_window_edit.text())

@@ -70,8 +70,6 @@ class TransitTabMixin:
             "Departure time as an RFC 3339 timestamp inside the feed's service "
             "calendar, for example 2026-05-11T08:30:00+02:00."
         )
-        self.transit_arrive_by_check = QCheckBox("Arrive by this time (not yet supported)")
-        self.transit_arrive_by_check.setEnabled(False)
         self.transit_search_window_edit = QLineEdit("7200")
         self.transit_search_window_edit.setToolTip(
             "Seconds after the departure time in which trips may start."
@@ -96,7 +94,6 @@ class TransitTabMixin:
         options_form.addRow("Route id", transit_id_row)
         options_form.addRow("", self.transit_auto_increment_check)
         options_form.addRow("Departure time", self.transit_datetime_edit)
-        options_form.addRow("", self.transit_arrive_by_check)
         options_form.addRow("Search window s", self.transit_search_window_edit)
         options_form.addRow(
             "Response path",
