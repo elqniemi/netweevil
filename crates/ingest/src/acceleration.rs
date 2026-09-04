@@ -20,12 +20,12 @@ pub(crate) fn build_dataset_acceleration_bundle(
 
 /// Builds the metric-independent CCH topology for a dataset.
 ///
-/// Edge states are ordered by recursive geometric bisection (separators
-/// last), then contracted in that order via the elimination game: contracting
-/// state `v` inserts a shortcut `x -> y` for every pair of arcs `x -> v` and
-/// `v -> y` whose other endpoints outrank `v`. The insertion is complete (no
-/// budgets), which is what makes hierarchy queries exact without any
-/// follow-up search on the base graph.
+/// Edge states are ordered by nested dissection (separators last), then
+/// contracted in that order via the elimination game: contracting state `v`
+/// inserts a shortcut `x -> y` for every pair of arcs `x -> v` and `v -> y`
+/// whose other endpoints outrank `v`. The insertion is complete (no budgets),
+/// which is what makes hierarchy queries exact without any follow-up search
+/// on the base graph.
 pub(crate) fn build_dataset_acceleration_bundle_with_progress(
     topology: &TopologyBundle,
     source_topology_bundle_id: CacheBundleId,
@@ -50,7 +50,14 @@ pub(crate) fn build_dataset_acceleration_bundle_with_progress(
         }
     }
 
-    let edge_order = build_recursive_spatial_edge_order(topology, &in_degree, &out_degree);
+    emit_progress(
+        progress,
+        DatasetImportStage::BuildAcceleration,
+        Some(0.0),
+        format!("Ordering {edge_count} edge states by nested dissection"),
+    );
+
+    let edge_order = build_nested_dissection_edge_order(topology, &in_degree, &out_degree);
 
     let mut edge_rank = vec![0_u32; edge_count];
     for (rank, &edge_index) in edge_order.iter().enumerate() {
@@ -225,131 +232,659 @@ fn arcs_to_csr(sorted_arcs: &[(u32, u32)], edge_count: usize) -> (Vec<u32>, Vec<
     (first_out, heads)
 }
 
-fn build_recursive_spatial_edge_order(
+/// Node count below which a cell is ordered directly by minimum degree.
+const LEAF_NODES: usize = 256;
+/// Fraction of a cell placed in the flow source set and in the sink set.
+const FLOW_SIDE_FRACTION: f64 = 0.25;
+/// Capacity marking arcs that must never appear in a minimum cut.
+const INFINITE_CAPACITY: u8 = u8::MAX;
+/// Flow node id of the contracted source set.
+const FLOW_SOURCE: usize = 0;
+/// Flow node id of the contracted sink set.
+const FLOW_SINK: usize = 1;
+/// Cell node roles for one inertial-flow direction.
+const ROLE_INNER: u8 = 0;
+const ROLE_SOURCE: u8 = 1;
+const ROLE_SINK: u8 = 2;
+/// Projection directions tried per cell; the smallest separator wins.
+const FLOW_DIRECTIONS: [(f32, f32); 4] = [(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, -1.0)];
+
+/// Undirected working graph for one nested-dissection cell.
+///
+/// `ids` maps a local index back to a topology node id, adjacency rows hold
+/// sorted local ids, and `x`/`y` are equirectangular projections of the node
+/// coordinates so that projecting onto a direction is metric.
+struct Cell {
+    ids: Vec<u32>,
+    first_out: Vec<u32>,
+    heads: Vec<u32>,
+    x: Vec<f32>,
+    y: Vec<f32>,
+}
+
+impl Cell {
+    fn len(&self) -> usize {
+        self.ids.len()
+    }
+
+    fn neighbours(&self, node: usize) -> &[u32] {
+        &self.heads[self.first_out[node] as usize..self.first_out[node + 1] as usize]
+    }
+
+    /// Builds the subgraph induced by `members`, a sorted list of local ids.
+    fn induced(&self, members: &[u32]) -> Cell {
+        let mut mapping = vec![u32::MAX; self.len()];
+        for (local, &member) in members.iter().enumerate() {
+            mapping[member as usize] = local as u32;
+        }
+        let mut ids = Vec::with_capacity(members.len());
+        let mut x = Vec::with_capacity(members.len());
+        let mut y = Vec::with_capacity(members.len());
+        let mut first_out = Vec::with_capacity(members.len() + 1);
+        let mut heads = Vec::new();
+        first_out.push(0);
+        for &member in members {
+            let member = member as usize;
+            ids.push(self.ids[member]);
+            x.push(self.x[member]);
+            y.push(self.y[member]);
+            for &neighbour in self.neighbours(member) {
+                let mapped = mapping[neighbour as usize];
+                if mapped != u32::MAX {
+                    heads.push(mapped);
+                }
+            }
+            first_out.push(heads.len() as u32);
+        }
+        Cell {
+            ids,
+            first_out,
+            heads,
+            x,
+            y,
+        }
+    }
+}
+
+/// A cell partitioned into two sides that share no arc, plus the vertex
+/// separator removed to keep them apart.
+struct Split {
+    side_a: Vec<u32>,
+    side_b: Vec<u32>,
+    separator: Vec<u32>,
+}
+
+/// Builds the simple undirected node graph spanned by the routing edges.
+fn build_node_cell(topology: &TopologyBundle) -> Cell {
+    let node_count = topology.nodes.len();
+    let edge_count = topology.edge_count();
+    let mut pairs = Vec::with_capacity(edge_count * 2);
+    for edge_index in 0..edge_count {
+        let edge = topology.routing_edge(edge_index);
+        let (from, to) = (edge.from.0 as usize, edge.to.0 as usize);
+        if from == to || from >= node_count || to >= node_count {
+            continue;
+        }
+        pairs.push((from as u32, to as u32));
+        pairs.push((to as u32, from as u32));
+    }
+    pairs.par_sort_unstable();
+    pairs.dedup();
+
+    let mut first_out = vec![0_u32; node_count + 1];
+    for &(tail, _) in &pairs {
+        first_out[tail as usize + 1] += 1;
+    }
+    for node in 0..node_count {
+        first_out[node + 1] += first_out[node];
+    }
+    let heads = pairs.iter().map(|&(_, head)| head).collect::<Vec<_>>();
+    drop(pairs);
+
+    let mean_lat = if node_count == 0 {
+        0.0
+    } else {
+        topology.nodes.iter().map(|node| node.lat).sum::<f64>() / node_count as f64
+    };
+    let longitude_scale = mean_lat.to_radians().cos().abs().max(0.05);
+    let x = topology
+        .nodes
+        .iter()
+        .map(|node| (node.lon * longitude_scale) as f32)
+        .collect::<Vec<_>>();
+    let y = topology
+        .nodes
+        .iter()
+        .map(|node| node.lat as f32)
+        .collect::<Vec<_>>();
+
+    Cell {
+        ids: (0..node_count as u32).collect(),
+        first_out,
+        heads,
+        x,
+        y,
+    }
+}
+
+/// Splits a cell into two size-balanced groups of whole connected
+/// components. Returns `None` when the cell is connected.
+fn split_components(cell: &Cell) -> Option<(Vec<u32>, Vec<u32>)> {
+    let node_count = cell.len();
+    let mut component = vec![u32::MAX; node_count];
+    let mut sizes = Vec::<u32>::new();
+    let mut stack = Vec::<u32>::new();
+    for root in 0..node_count {
+        if component[root] != u32::MAX {
+            continue;
+        }
+        let label = sizes.len() as u32;
+        let mut size = 0_u32;
+        component[root] = label;
+        stack.push(root as u32);
+        while let Some(node) = stack.pop() {
+            size += 1;
+            for &neighbour in cell.neighbours(node as usize) {
+                if component[neighbour as usize] == u32::MAX {
+                    component[neighbour as usize] = label;
+                    stack.push(neighbour);
+                }
+            }
+        }
+        sizes.push(size);
+    }
+    if sizes.len() < 2 {
+        return None;
+    }
+
+    // Largest component first into the currently lighter group.
+    let mut labels = (0..sizes.len() as u32).collect::<Vec<_>>();
+    labels.sort_unstable_by_key(|&label| (std::cmp::Reverse(sizes[label as usize]), label));
+    let mut group = vec![0_u8; sizes.len()];
+    let mut load = [0_u64; 2];
+    for &label in &labels {
+        let target = usize::from(load[1] < load[0]);
+        group[label as usize] = target as u8;
+        load[target] += u64::from(sizes[label as usize]);
+    }
+
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for (node, &label) in component.iter().enumerate() {
+        if group[label as usize] == 0 {
+            left.push(node as u32);
+        } else {
+            right.push(node as u32);
+        }
+    }
+    if left.is_empty() || right.is_empty() {
+        return None;
+    }
+    Some((left, right))
+}
+
+/// Enumerates the arc pairs of the vertex-capacity flow network for one
+/// source/sink assignment, calling `visit(tail, head, capacity)` once per
+/// pair of mutually reverse arcs.
+///
+/// Inner nodes are split into an entry node `2 + 2 * local` and an exit node
+/// `3 + 2 * local` joined by a unit arc, so every finite minimum cut is a
+/// vertex separator. Cell arcs run from exits to entries with infinite
+/// capacity. The source and sink sets are contracted into [`FLOW_SOURCE`] and
+/// [`FLOW_SINK`]. Returns `false` when a source node touches a sink node, in
+/// which case no vertex separator exists for this assignment.
+fn visit_flow_arcs(cell: &Cell, role: &[u8], mut visit: impl FnMut(usize, usize, u8)) -> bool {
+    for node in 0..cell.len() {
+        if role[node] == ROLE_INNER {
+            visit(2 + 2 * node, 3 + 2 * node, 1);
+        }
+        for &neighbour in cell.neighbours(node) {
+            let neighbour = neighbour as usize;
+            if neighbour <= node {
+                continue;
+            }
+            match (role[node], role[neighbour]) {
+                (ROLE_SOURCE, ROLE_SINK) | (ROLE_SINK, ROLE_SOURCE) => return false,
+                (ROLE_INNER, ROLE_INNER) => {
+                    visit(3 + 2 * node, 2 + 2 * neighbour, INFINITE_CAPACITY);
+                    visit(3 + 2 * neighbour, 2 + 2 * node, INFINITE_CAPACITY);
+                }
+                (ROLE_SOURCE, ROLE_INNER) => {
+                    visit(FLOW_SOURCE, 2 + 2 * neighbour, INFINITE_CAPACITY)
+                }
+                (ROLE_INNER, ROLE_SOURCE) => visit(FLOW_SOURCE, 2 + 2 * node, INFINITE_CAPACITY),
+                (ROLE_SINK, ROLE_INNER) => visit(3 + 2 * neighbour, FLOW_SINK, INFINITE_CAPACITY),
+                (ROLE_INNER, ROLE_SINK) => visit(3 + 2 * node, FLOW_SINK, INFINITE_CAPACITY),
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
+/// Residual network in CSR form; arc `arc` is undone by arc `rev[arc]`.
+struct FlowNetwork {
+    first_out: Vec<u32>,
+    head: Vec<u32>,
+    cap: Vec<u8>,
+    rev: Vec<u32>,
+}
+
+fn build_flow_network(cell: &Cell, role: &[u8]) -> Option<FlowNetwork> {
+    let flow_nodes = 2 + 2 * cell.len();
+    let mut first_out = vec![0_u32; flow_nodes + 1];
+    let mut arc_count = 0_usize;
+    let feasible = visit_flow_arcs(cell, role, |tail, target, _| {
+        first_out[tail + 1] += 1;
+        first_out[target + 1] += 1;
+        arc_count += 2;
+    });
+    if !feasible {
+        return None;
+    }
+    for node in 0..flow_nodes {
+        first_out[node + 1] += first_out[node];
+    }
+
+    let mut cursor = first_out[..flow_nodes].to_vec();
+    let mut head = vec![0_u32; arc_count];
+    let mut cap = vec![0_u8; arc_count];
+    let mut rev = vec![0_u32; arc_count];
+    visit_flow_arcs(cell, role, |tail, target, capacity| {
+        let forward = cursor[tail] as usize;
+        cursor[tail] += 1;
+        let backward = cursor[target] as usize;
+        cursor[target] += 1;
+        head[forward] = target as u32;
+        cap[forward] = capacity;
+        rev[forward] = backward as u32;
+        head[backward] = tail as u32;
+        cap[backward] = 0;
+        rev[backward] = forward as u32;
+    });
+
+    Some(FlowNetwork {
+        first_out,
+        head,
+        cap,
+        rev,
+    })
+}
+
+/// Runs Dinic's algorithm and returns the residual BFS levels of the final
+/// phase, in which the non-negative entries are exactly the source side of
+/// the minimum cut.
+///
+/// Returns `None` once the flow reaches `limit`: the minimum cut is at least
+/// the flow pushed so far, so the cut can no longer beat `limit`.
+fn max_flow(network: &mut FlowNetwork, limit: u32) -> Option<Vec<i32>> {
+    if limit == 0 {
+        return None;
+    }
+    let flow_nodes = network.first_out.len() - 1;
+    let mut level = vec![-1_i32; flow_nodes];
+    let mut queue = Vec::<u32>::with_capacity(flow_nodes);
+    let mut iter = vec![0_u32; flow_nodes];
+    let mut path_arcs = Vec::<u32>::new();
+    let mut path_tails = Vec::<u32>::new();
+    let mut flow = 0_u32;
+
+    loop {
+        level.iter_mut().for_each(|entry| *entry = -1);
+        queue.clear();
+        level[FLOW_SOURCE] = 0;
+        queue.push(FLOW_SOURCE as u32);
+        let mut read = 0;
+        while read < queue.len() {
+            let node = queue[read] as usize;
+            read += 1;
+            for arc in network.first_out[node] as usize..network.first_out[node + 1] as usize {
+                if network.cap[arc] == 0 {
+                    continue;
+                }
+                let target = network.head[arc] as usize;
+                if level[target] < 0 {
+                    level[target] = level[node] + 1;
+                    queue.push(target as u32);
+                }
+            }
+        }
+        if level[FLOW_SINK] < 0 {
+            return Some(level);
+        }
+
+        iter.copy_from_slice(&network.first_out[..flow_nodes]);
+        path_arcs.clear();
+        path_tails.clear();
+        let mut node = FLOW_SOURCE;
+        loop {
+            if node == FLOW_SINK {
+                // Every source-to-sink path leaves an entry node through an
+                // arc of residual capacity one, so a unit push always
+                // saturates at least one arc of the path.
+                for &arc in &path_arcs {
+                    let arc = arc as usize;
+                    if network.cap[arc] != INFINITE_CAPACITY {
+                        network.cap[arc] -= 1;
+                    }
+                    let back = network.rev[arc] as usize;
+                    if network.cap[back] != INFINITE_CAPACITY {
+                        network.cap[back] += 1;
+                    }
+                }
+                flow += 1;
+                if flow >= limit {
+                    return None;
+                }
+                let saturated = path_arcs
+                    .iter()
+                    .position(|&arc| network.cap[arc as usize] == 0)
+                    .unwrap_or(0);
+                node = path_tails[saturated] as usize;
+                path_arcs.truncate(saturated);
+                path_tails.truncate(saturated);
+                continue;
+            }
+
+            let mut advanced = false;
+            while iter[node] < network.first_out[node + 1] {
+                let arc = iter[node] as usize;
+                let target = network.head[arc] as usize;
+                if network.cap[arc] > 0 && level[target] == level[node] + 1 {
+                    path_arcs.push(arc as u32);
+                    path_tails.push(node as u32);
+                    node = target;
+                    advanced = true;
+                    break;
+                }
+                iter[node] += 1;
+            }
+            if advanced {
+                continue;
+            }
+            level[node] = -1;
+            if path_arcs.pop().is_some() {
+                let tail = path_tails.pop().expect("arc and tail stacks stay aligned");
+                iter[tail as usize] += 1;
+                node = tail as usize;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+/// Splits a cell along one source/sink assignment with a minimum vertex cut.
+fn flow_split(cell: &Cell, role: &[u8], limit: u32) -> Option<Split> {
+    let mut network = build_flow_network(cell, role)?;
+    let level = max_flow(&mut network, limit)?;
+    drop(network);
+
+    let mut side_a = Vec::new();
+    let mut side_b = Vec::new();
+    let mut separator = Vec::new();
+    for (node, &node_role) in role.iter().enumerate() {
+        match node_role {
+            ROLE_SOURCE => side_a.push(node as u32),
+            ROLE_SINK => side_b.push(node as u32),
+            _ if level[3 + 2 * node] >= 0 => side_a.push(node as u32),
+            _ if level[2 + 2 * node] >= 0 => separator.push(node as u32),
+            _ => side_b.push(node as u32),
+        }
+    }
+    Some(Split {
+        side_a,
+        side_b,
+        separator,
+    })
+}
+
+/// Chooses the smallest inertial-flow separator over the projection
+/// directions. Each side keeps at least [`FLOW_SIDE_FRACTION`] of the cell
+/// because source and sink nodes have infinite vertex capacity and therefore
+/// never enter the separator.
+fn inertial_flow_split(cell: &Cell) -> Option<Split> {
+    let node_count = cell.len();
+    let side = (node_count as f64 * FLOW_SIDE_FRACTION) as usize;
+    if side == 0 || 2 * side >= node_count {
+        return None;
+    }
+
+    let mut order = (0..node_count as u32).collect::<Vec<_>>();
+    let mut best: Option<Split> = None;
+    let mut best_size = u32::MAX;
+    for &(dx, dy) in FLOW_DIRECTIONS.iter() {
+        let projection = (0..node_count)
+            .map(|node| dx * cell.x[node] + dy * cell.y[node])
+            .collect::<Vec<_>>();
+        order.sort_unstable_by(|&left, &right| {
+            projection[left as usize]
+                .total_cmp(&projection[right as usize])
+                .then_with(|| cell.ids[left as usize].cmp(&cell.ids[right as usize]))
+        });
+        let mut role = vec![ROLE_INNER; node_count];
+        for &node in &order[..side] {
+            role[node as usize] = ROLE_SOURCE;
+        }
+        for &node in &order[node_count - side..] {
+            role[node as usize] = ROLE_SINK;
+        }
+
+        let Some(split) = flow_split(cell, &role, best_size) else {
+            continue;
+        };
+        let size = split.separator.len() as u32;
+        if size < best_size {
+            best_size = size;
+            best = Some(split);
+        }
+        if best_size == 0 {
+            break;
+        }
+    }
+    best
+}
+
+/// Splits a cell at the median of its widest coordinate axis and keeps the
+/// boundary of the lower half as the separator.
+fn coordinate_split(cell: &Cell) -> Split {
+    let node_count = cell.len();
+    let extent = |values: &[f32]| {
+        values
+            .iter()
+            .copied()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |bounds, value| {
+                (bounds.0.min(value), bounds.1.max(value))
+            })
+    };
+    let (min_x, max_x) = extent(&cell.x);
+    let (min_y, max_y) = extent(&cell.y);
+    let axis = if (max_x - min_x) >= (max_y - min_y) {
+        &cell.x
+    } else {
+        &cell.y
+    };
+
+    let mut order = (0..node_count as u32).collect::<Vec<_>>();
+    order.sort_unstable_by(|&left, &right| {
+        axis[left as usize]
+            .total_cmp(&axis[right as usize])
+            .then_with(|| cell.ids[left as usize].cmp(&cell.ids[right as usize]))
+    });
+    let mut lower = vec![false; node_count];
+    for &node in &order[..node_count / 2] {
+        lower[node as usize] = true;
+    }
+
+    let mut side_a = Vec::new();
+    let mut side_b = Vec::new();
+    let mut separator = Vec::new();
+    for (node, &in_lower) in lower.iter().enumerate() {
+        if !in_lower {
+            side_b.push(node as u32);
+        } else if cell
+            .neighbours(node)
+            .iter()
+            .any(|&neighbour| !lower[neighbour as usize])
+        {
+            separator.push(node as u32);
+        } else {
+            side_a.push(node as u32);
+        }
+    }
+    Split {
+        side_a,
+        side_b,
+        separator,
+    }
+}
+
+/// Orders a small cell by repeatedly eliminating a node of minimum degree in
+/// the fill-in graph.
+fn minimum_degree_order(cell: &Cell) -> Vec<u32> {
+    fn insert_sorted(row: &mut Vec<u32>, value: u32) {
+        if let Err(position) = row.binary_search(&value) {
+            row.insert(position, value);
+        }
+    }
+
+    let node_count = cell.len();
+    let mut adjacency = (0..node_count)
+        .map(|node| cell.neighbours(node).to_vec())
+        .collect::<Vec<_>>();
+    let mut queue = std::collections::BinaryHeap::with_capacity(node_count);
+    for (node, row) in adjacency.iter().enumerate() {
+        queue.push(std::cmp::Reverse((row.len() as u32, node as u32)));
+    }
+    let mut eliminated = vec![false; node_count];
+    let mut order = Vec::with_capacity(node_count);
+
+    while let Some(std::cmp::Reverse((degree, node))) = queue.pop() {
+        let node = node as usize;
+        if eliminated[node] || adjacency[node].len() as u32 != degree {
+            continue;
+        }
+        eliminated[node] = true;
+        order.push(cell.ids[node]);
+        let neighbours = std::mem::take(&mut adjacency[node]);
+        for (position, &left) in neighbours.iter().enumerate() {
+            let row = &mut adjacency[left as usize];
+            if let Ok(slot) = row.binary_search(&(node as u32)) {
+                row.remove(slot);
+            }
+            for &right in &neighbours[position + 1..] {
+                insert_sorted(&mut adjacency[left as usize], right);
+                insert_sorted(&mut adjacency[right as usize], left);
+            }
+        }
+        for &neighbour in &neighbours {
+            queue.push(std::cmp::Reverse((
+                adjacency[neighbour as usize].len() as u32,
+                neighbour,
+            )));
+        }
+    }
+    order
+}
+
+/// Produces a nested-dissection elimination order for one cell: both sides
+/// first, then the separator that keeps them apart.
+fn dissect(cell: Cell) -> Vec<u32> {
+    let node_count = cell.len();
+    if node_count == 0 {
+        return Vec::new();
+    }
+    if node_count <= LEAF_NODES {
+        return minimum_degree_order(&cell);
+    }
+
+    if let Some((left, right)) = split_components(&cell) {
+        let left_cell = cell.induced(&left);
+        let right_cell = cell.induced(&right);
+        drop(cell);
+        let (mut left_order, mut right_order) =
+            rayon::join(|| dissect(left_cell), || dissect(right_cell));
+        left_order.append(&mut right_order);
+        return left_order;
+    }
+
+    let split = inertial_flow_split(&cell).unwrap_or_else(|| coordinate_split(&cell));
+    let side_a = cell.induced(&split.side_a);
+    let side_b = cell.induced(&split.side_b);
+    let separator = cell.induced(&split.separator);
+    drop(cell);
+    let ((mut a_order, mut b_order), mut separator_order) = rayon::join(
+        || rayon::join(|| dissect(side_a), || dissect(side_b)),
+        || dissect(separator),
+    );
+    a_order.append(&mut b_order);
+    a_order.append(&mut separator_order);
+    a_order
+}
+
+/// Nested-dissection elimination order over the topology nodes.
+fn build_nested_dissection_node_order(topology: &TopologyBundle) -> Vec<u32> {
+    let cell = build_node_cell(topology);
+    let mut order = Vec::with_capacity(cell.len());
+    let mut connected = Vec::with_capacity(cell.len());
+    for node in 0..cell.len() {
+        if cell.neighbours(node).is_empty() {
+            order.push(cell.ids[node]);
+        } else {
+            connected.push(node as u32);
+        }
+    }
+    let root = cell.induced(&connected);
+    drop(cell);
+    order.append(&mut dissect(root));
+    order
+}
+
+/// Orders edge states by the nested-dissection rank of their head node.
+///
+/// Every transition out of an edge state is decided at that state's head
+/// node, so the states sharing a head node are contracted consecutively and
+/// the states heading into a node separator form a separator of the
+/// transition graph: any transition path leaving one side reaches the other
+/// only after entering a state whose head is a separator node. Ties inside
+/// one node are broken by transition degree so sparse states go first.
+fn build_nested_dissection_edge_order(
     topology: &TopologyBundle,
     in_degree: &[u32],
     out_degree: &[u32],
 ) -> Vec<u32> {
-    const LEAF_SIZE: usize = 1_024;
+    let node_order = build_nested_dissection_node_order(topology);
+    let mut node_rank = vec![u32::MAX; topology.nodes.len()];
+    for (rank, &node) in node_order.iter().enumerate() {
+        node_rank[node as usize] = rank as u32;
+    }
+    drop(node_order);
 
-    fn sort_small_block(
-        edges: &mut [u32],
-        topology: &TopologyBundle,
-        in_degree: &[u32],
-        out_degree: &[u32],
-    ) {
-        edges.sort_unstable_by_key(|&edge_index| {
-            let edge = topology.routing_edge(edge_index as usize);
+    let mut keyed = (0..topology.edge_count())
+        .into_par_iter()
+        .map(|edge_index| {
+            let edge = topology.routing_edge(edge_index);
+            let rank = node_rank
+                .get(edge.to.0 as usize)
+                .copied()
+                .unwrap_or(u32::MAX);
             (
-                out_degree[edge_index as usize] + in_degree[edge_index as usize],
-                out_degree[edge_index as usize],
-                in_degree[edge_index as usize],
-                edge.from.0,
-                edge.to.0,
-                edge_index,
+                rank,
+                in_degree[edge_index] + out_degree[edge_index],
+                edge_index as u32,
             )
-        });
-    }
-
-    fn recurse(
-        topology: &TopologyBundle,
-        in_degree: &[u32],
-        out_degree: &[u32],
-        edges: &mut [u32],
-        output: &mut Vec<u32>,
-    ) {
-        if edges.len() <= LEAF_SIZE {
-            sort_small_block(edges, topology, in_degree, out_degree);
-            output.extend_from_slice(edges);
-            return;
-        }
-
-        let mut min_lon = f64::INFINITY;
-        let mut max_lon = f64::NEG_INFINITY;
-        let mut min_lat = f64::INFINITY;
-        let mut max_lat = f64::NEG_INFINITY;
-        let mut coords = Vec::with_capacity(edges.len());
-        for &edge_index in edges.iter() {
-            let edge = topology.routing_edge(edge_index as usize);
-            let from = &topology.nodes[edge.from.0 as usize];
-            let to = &topology.nodes[edge.to.0 as usize];
-            let lon = (from.lon + to.lon) * 0.5;
-            let lat = (from.lat + to.lat) * 0.5;
-            min_lon = min_lon.min(lon);
-            max_lon = max_lon.max(lon);
-            min_lat = min_lat.min(lat);
-            max_lat = max_lat.max(lat);
-            coords.push((edge_index, lon, lat));
-        }
-
-        let split_lon = (max_lon - min_lon) >= (max_lat - min_lat);
-        let mut axis_values = coords
-            .iter()
-            .map(|(_, lon, lat)| if split_lon { *lon } else { *lat })
-            .collect::<Vec<_>>();
-        axis_values
-            .sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
-        let pivot = axis_values[axis_values.len() / 2];
-
-        let mut left = Vec::new();
-        let mut right = Vec::new();
-        let mut separator = Vec::new();
-        for (edge_index, _, _) in coords {
-            let edge = topology.routing_edge(edge_index as usize);
-            let from = &topology.nodes[edge.from.0 as usize];
-            let to = &topology.nodes[edge.to.0 as usize];
-            let from_axis = if split_lon { from.lon } else { from.lat };
-            let to_axis = if split_lon { to.lon } else { to.lat };
-            if from_axis <= pivot && to_axis <= pivot {
-                left.push(edge_index);
-            } else if from_axis > pivot && to_axis > pivot {
-                right.push(edge_index);
-            } else {
-                separator.push(edge_index);
-            }
-        }
-
-        if left.is_empty() || right.is_empty() || separator.len() == edges.len() {
-            sort_small_block(edges, topology, in_degree, out_degree);
-            output.extend_from_slice(edges);
-            return;
-        }
-
-        // The two halves are independent; order them in parallel and append
-        // left, right, separator to keep the sequential order deterministic.
-        let (mut left_output, mut right_output) = rayon::join(
-            || {
-                let mut out = Vec::with_capacity(left.len());
-                recurse(topology, in_degree, out_degree, &mut left, &mut out);
-                out
-            },
-            || {
-                let mut out = Vec::with_capacity(right.len());
-                recurse(topology, in_degree, out_degree, &mut right, &mut out);
-                out
-            },
-        );
-        output.append(&mut left_output);
-        output.append(&mut right_output);
-        sort_small_block(&mut separator, topology, in_degree, out_degree);
-        output.extend(separator);
-    }
-
-    let mut edge_order = (0..topology.edge_count() as u32).collect::<Vec<_>>();
-    let mut ordered = Vec::with_capacity(edge_order.len());
-    recurse(
-        topology,
-        in_degree,
-        out_degree,
-        &mut edge_order,
-        &mut ordered,
-    );
-    ordered
+        })
+        .collect::<Vec<_>>();
+    keyed.par_sort_unstable();
+    keyed
+        .into_iter()
+        .map(|(_, _, edge_index)| edge_index)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_dataset_acceleration_bundle;
+    use super::{Cell, build_dataset_acceleration_bundle, inertial_flow_split};
     use crate::test_util::edge;
     use crate::topology::build_edge_based_topology;
     use netweevil_core::{
@@ -401,6 +936,85 @@ mod tests {
         }
     }
 
+    /// Square grid with both travel directions between neighbouring nodes.
+    fn grid_topology(side: u32) -> TopologyBundle {
+        let mut edges = Vec::new();
+        let mut edge_id = 0_u32;
+        let mut connect = |a: u32, b: u32, edges: &mut Vec<netweevil_core::DirectedEdge>| {
+            edges.push(edge(edge_id, a, b, 1000 + edge_id as i64));
+            edge_id += 1;
+            edges.push(edge(edge_id, b, a, 1000 + edge_id as i64));
+            edge_id += 1;
+        };
+        for row in 0..side {
+            for col in 0..side {
+                let node = row * side + col;
+                if col + 1 < side {
+                    connect(node, node + 1, &mut edges);
+                }
+                if row + 1 < side {
+                    connect(node, node + side, &mut edges);
+                }
+            }
+        }
+        let nodes = (0..side * side)
+            .map(|node| TopologyNode {
+                node_id: NodeId(node),
+                lon: (node % side) as f64 * 0.001,
+                lat: (node / side) as f64 * 0.001,
+                z: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let node_count = nodes.len();
+        let edge_count = edges.len();
+        TopologyBundle {
+            schema_version: 1,
+            source_path: "test".to_string(),
+            source_sha256: "abc".to_string(),
+            nodes,
+            edge_layers: netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges),
+            turn_restrictions: vec![],
+            names: vec![],
+            edge_based_topology: build_edge_based_topology(node_count, &edges),
+            spatial_index: None,
+            node_component_ids: vec![0; node_count],
+            edge_component_ids: vec![0; edge_count],
+            feature_attributes: Default::default(),
+            temporal_rule_sets: Vec::new(),
+        }
+    }
+
+    /// Grid cell of `side * side` nodes with unit spacing.
+    fn grid_cell(side: usize) -> Cell {
+        let node_count = side * side;
+        let mut first_out = Vec::with_capacity(node_count + 1);
+        let mut heads = Vec::new();
+        first_out.push(0);
+        for node in 0..node_count {
+            let (row, col) = (node / side, node % side);
+            if row > 0 {
+                heads.push((node - side) as u32);
+            }
+            if col > 0 {
+                heads.push((node - 1) as u32);
+            }
+            if col + 1 < side {
+                heads.push((node + 1) as u32);
+            }
+            if row + 1 < side {
+                heads.push((node + side) as u32);
+            }
+            first_out.push(heads.len() as u32);
+        }
+        Cell {
+            ids: (0..node_count as u32).collect(),
+            first_out,
+            heads,
+            x: (0..node_count).map(|node| (node % side) as f32).collect(),
+            y: (0..node_count).map(|node| (node / side) as f32).collect(),
+        }
+    }
+
     #[test]
     fn builds_complete_cch_bundle_for_line_topology() {
         let topology = line_topology();
@@ -410,10 +1024,6 @@ mod tests {
         assert_eq!(bundle.schema_version, ACCELERATION_BUNDLE_SCHEMA_VERSION);
         assert_eq!(bundle.algorithm, CCH_ALGORITHM);
         assert_eq!(bundle.stats.base_arc_count, 2);
-        // Contracting edge state 2 first (lowest degree) joins 1 -> 2 -> none;
-        // contracting 0 next joins nothing new; the line produces exactly one
-        // elimination shortcut candidate only when a middle state has both an
-        // incoming and an outgoing arc to higher-ranked states.
         assert_eq!(
             bundle.stats.total_arc_count,
             bundle.stats.base_arc_count + bundle.stats.shortcut_arc_count
@@ -459,54 +1069,84 @@ mod tests {
     }
 
     #[test]
-    fn contraction_is_complete_on_a_grid() {
-        // 4x4 grid with edges in both directions between neighbours.
-        let side = 4_u32;
-        let mut edges = Vec::new();
-        let mut edge_id = 0_u32;
-        let mut connect = |a: u32, b: u32, edges: &mut Vec<netweevil_core::DirectedEdge>| {
-            edges.push(edge(edge_id, a, b, 1000 + edge_id as i64));
-            edge_id += 1;
-            edges.push(edge(edge_id, b, a, 1000 + edge_id as i64));
-            edge_id += 1;
-        };
-        for row in 0..side {
-            for col in 0..side {
-                let node = row * side + col;
-                if col + 1 < side {
-                    connect(node, node + 1, &mut edges);
-                }
-                if row + 1 < side {
-                    connect(node, node + side, &mut edges);
-                }
+    fn edge_order_is_a_valid_elimination_order() {
+        let topology = grid_topology(12);
+        let edge_count = topology.edge_count();
+        let bundle =
+            build_dataset_acceleration_bundle(&topology, CacheBundleId::new("topology-test"));
+
+        // The order is a permutation of all edge states and the rank table
+        // is exactly its inverse, so contraction visits every state once.
+        assert_eq!(bundle.edge_order.len(), edge_count);
+        let mut seen = vec![false; edge_count];
+        for &edge_index in &bundle.edge_order {
+            assert!(!seen[edge_index as usize]);
+            seen[edge_index as usize] = true;
+        }
+        assert!(seen.into_iter().all(|hit| hit));
+        for (rank, &edge_index) in bundle.edge_order.iter().enumerate() {
+            assert_eq!(bundle.edge_rank[edge_index as usize], rank as u32);
+        }
+        // Arcs are consistent with the order in both directions.
+        for edge_index in 0..edge_count {
+            for slot in bundle.upward_first_out[edge_index] as usize
+                ..bundle.upward_first_out[edge_index + 1] as usize
+            {
+                let head = bundle.upward_head[slot] as usize;
+                assert!(bundle.edge_rank[edge_index] < bundle.edge_rank[head]);
+            }
+            for slot in bundle.downward_first_out[edge_index] as usize
+                ..bundle.downward_first_out[edge_index + 1] as usize
+            {
+                let head = bundle.downward_head[slot] as usize;
+                assert!(bundle.edge_rank[edge_index] > bundle.edge_rank[head]);
             }
         }
-        let nodes = (0..side * side)
-            .map(|node| TopologyNode {
-                node_id: NodeId(node),
-                lon: (node % side) as f64 * 0.001,
-                lat: (node / side) as f64 * 0.001,
-                z: 0.0,
-            })
-            .collect::<Vec<_>>();
-        let node_count = nodes.len();
-        let edge_count = edges.len();
-        let topology = TopologyBundle {
-            schema_version: 1,
-            source_path: "test".to_string(),
-            source_sha256: "abc".to_string(),
-            nodes,
-            edge_layers: netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges),
-            turn_restrictions: vec![],
-            names: vec![],
-            edge_based_topology: build_edge_based_topology(node_count, &edges),
-            spatial_index: None,
-            node_component_ids: vec![0; node_count],
-            edge_component_ids: vec![0; edge_count],
-            feature_attributes: Default::default(),
-            temporal_rule_sets: Vec::new(),
-        };
+    }
 
+    #[test]
+    fn inertial_flow_separates_a_grid() {
+        let side = 24_usize;
+        let cell = grid_cell(side);
+        let split = inertial_flow_split(&cell).expect("grid admits an inertial flow split");
+
+        // A square grid is cut by a single grid line.
+        assert!(
+            split.separator.len() <= side,
+            "separator of {} nodes is larger than a grid line",
+            split.separator.len()
+        );
+        assert!(!split.separator.is_empty());
+        assert_eq!(
+            split.side_a.len() + split.side_b.len() + split.separator.len(),
+            cell.len()
+        );
+        // Both sides keep at least the flow source or sink set.
+        assert!(split.side_a.len() * 4 >= cell.len());
+        assert!(split.side_b.len() * 4 >= cell.len());
+
+        let mut side_of = vec![0_u8; cell.len()];
+        for &node in &split.side_a {
+            side_of[node as usize] = 1;
+        }
+        for &node in &split.side_b {
+            side_of[node as usize] = 2;
+        }
+        for node in 0..cell.len() {
+            for &neighbour in cell.neighbours(node) {
+                let (left, right) = (side_of[node], side_of[neighbour as usize]);
+                assert!(
+                    left == 0 || right == 0 || left == right,
+                    "separator leaves an arc between the two sides"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn contraction_is_complete_on_a_grid() {
+        let topology = grid_topology(4);
+        let edge_count = topology.edge_count();
         let bundle =
             build_dataset_acceleration_bundle(&topology, CacheBundleId::new("topology-test"));
 
