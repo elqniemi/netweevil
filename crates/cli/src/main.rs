@@ -18,7 +18,7 @@ use std::env;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use netweevil_persist::WorkspacePaths;
-use netweevil_report::SoftwareInfo;
+use netweevil_report::{AlgorithmInfo, SoftwareInfo};
 use tracing_subscriber::EnvFilter;
 
 use crate::analyze::{
@@ -163,5 +163,18 @@ pub(crate) fn software_info() -> SoftwareInfo {
         executable: "netweevil".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         git_commit: option_env!("NETWEEVIL_GIT_COMMIT").map(ToString::to_string),
+    }
+}
+
+/// Every CLI run executes over the same directed-edge graph model, so callers
+/// only vary the engine and acceleration labels.
+pub(crate) fn algorithm_info(
+    engine: impl Into<String>,
+    acceleration: impl Into<String>,
+) -> AlgorithmInfo {
+    AlgorithmInfo {
+        engine: engine.into(),
+        graph_model: "directed_edge_graph".to_string(),
+        acceleration: acceleration.into(),
     }
 }

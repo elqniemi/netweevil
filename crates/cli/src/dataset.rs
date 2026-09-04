@@ -5,7 +5,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use netweevil_core::SourceFormat;
 use netweevil_ingest::{
     DatasetImportOptions, DatasetImportProgress, DatasetImportStage, audit_geopackage_dataset,
-    import_dataset_sources_with_progress, load_gpkg_mapping,
+    import_dataset, load_gpkg_mapping,
 };
 use netweevil_persist::{WorkspacePaths, read_dataset_manifests, read_topology_bundle};
 
@@ -71,7 +71,7 @@ pub(crate) fn dataset_import(paths: &WorkspacePaths, args: DatasetImportArgs) ->
         .map(|source| source.display().to_string())
         .collect::<Vec<_>>()
         .join(";");
-    let manifest = import_dataset_sources_with_progress(
+    let manifest = import_dataset(
         paths,
         &args.sources,
         DatasetImportOptions {

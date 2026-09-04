@@ -1269,7 +1269,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        ScenarioAnalysisSnapshot, ScenarioBatchDiff, ScenarioBatchSelector, diff_snapshots,
+        ScenarioAnalysisSnapshot, ScenarioBatchSelector, diff_snapshots,
         load_ranked_source_features, load_scenario_batch_request, threshold_key,
     };
     use crate::{
@@ -1704,7 +1704,4 @@ routes: []
             warnings: Vec::new(),
         }
     }
-
-    #[allow(dead_code)]
-    fn assert_default_diff(_: ScenarioBatchDiff) {}
 }

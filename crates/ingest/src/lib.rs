@@ -22,8 +22,7 @@ pub use audit::{
 };
 pub use import::{
     DatasetImportOptions, DatasetImportProgress, DatasetImportStage, detect_source_format,
-    import_dataset, import_dataset_sources, import_dataset_sources_with_progress,
-    import_dataset_with_progress,
+    import_dataset,
 };
 pub use mapping::{
     CoordinateMapping, CoordinateQuantization, DirectionValue, FieldMapping,

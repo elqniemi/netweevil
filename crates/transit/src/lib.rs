@@ -14,8 +14,7 @@ mod service_area;
 
 pub use fusion::{
     apply_transit_stop_bindings, build_transit_transfer_table, load_transit_stop_bindings,
-    network_transfer, read_transit_transfer_table, transfer_straight_line_distance_m,
-    write_transit_stop_bindings, write_transit_transfer_table,
+    network_transfer, read_transit_transfer_table, write_transit_transfer_table,
 };
 pub use gtfs::{import_gtfs, read_transit_bundle, transit_import_summary, write_transit_bundle};
 pub use model::{

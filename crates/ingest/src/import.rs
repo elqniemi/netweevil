@@ -81,40 +81,9 @@ pub struct DatasetImportProgress {
     pub message: String,
 }
 
-pub fn import_dataset(
-    paths: &WorkspacePaths,
-    source_path: impl AsRef<Path>,
-    options: DatasetImportOptions,
-) -> Result<DatasetManifest> {
-    import_dataset_with_progress(paths, source_path, options, |_| {})
-}
-
-pub fn import_dataset_with_progress<F>(
-    paths: &WorkspacePaths,
-    source_path: impl AsRef<Path>,
-    options: DatasetImportOptions,
-    progress: F,
-) -> Result<DatasetManifest>
-where
-    F: FnMut(DatasetImportProgress),
-{
-    import_dataset_sources_with_progress(
-        paths,
-        &[source_path.as_ref().to_path_buf()],
-        options,
-        progress,
-    )
-}
-
-pub fn import_dataset_sources(
-    paths: &WorkspacePaths,
-    source_paths: &[PathBuf],
-    options: DatasetImportOptions,
-) -> Result<DatasetManifest> {
-    import_dataset_sources_with_progress(paths, source_paths, options, |_| {})
-}
-
-pub fn import_dataset_sources_with_progress<F>(
+/// Imports one or more sources into a single dataset, reporting staged
+/// progress through `progress`. Pass `|_| {}` when progress is not needed.
+pub fn import_dataset<F>(
     paths: &WorkspacePaths,
     source_paths: &[PathBuf],
     options: DatasetImportOptions,

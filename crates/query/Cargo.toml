@@ -11,7 +11,6 @@ categories.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-arrow-array.workspace = true
 arrow-json.workspace = true
 csv.workspace = true
 netweevil-core = { path = "../core" }

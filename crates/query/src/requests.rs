@@ -453,17 +453,6 @@ pub struct AccessibilityRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OdAnalysisRequest {
-    pub pairs_path: PathBuf,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MatrixAnalysisRequest {
-    pub origins_path: PathBuf,
-    pub destinations_path: PathBuf,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExperimentDocument {
     pub experiment: ExperimentHeader,
     #[serde(default)]

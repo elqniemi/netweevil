@@ -148,6 +148,9 @@ pub fn now_rfc3339() -> Result<String> {
         .context("formatting timestamp")
 }
 
+/// Builds a run manifest. `algorithm` and `methods_summary` describe the engine
+/// that actually produced the run, so callers must supply the finished values
+/// rather than patching them onto a freshly constructed manifest.
 pub fn new_run_manifest(
     run_kind: RunKind,
     dataset_id: impl Into<String>,
@@ -157,6 +160,8 @@ pub fn new_run_manifest(
     message: impl Into<String>,
     software: SoftwareInfo,
     compiled_profile_bundle_id: Option<String>,
+    algorithm: AlgorithmInfo,
+    methods_summary: impl Into<String>,
 ) -> Result<RunManifest> {
     Ok(RunManifest {
         run_id: Uuid::new_v4().to_string(),
@@ -171,13 +176,9 @@ pub fn new_run_manifest(
         result_path: None,
         report_path: None,
         software,
-        algorithm: AlgorithmInfo {
-            engine: "edge_based_exact_placeholder".to_string(),
-            graph_model: "directed_edge_graph".to_string(),
-            acceleration: "none".to_string(),
-        },
+        algorithm,
         methods_summary: MethodsSummary {
-            plain_language: "Scaffold manifest only. The routing kernel, snapping, turn restrictions, and path computation are not implemented yet.".to_string(),
+            plain_language: methods_summary.into(),
             locked_profile_hash: Some(profile.fingerprint()?),
             defaults_pack: Some(profile.profile.defaults_pack.clone()),
         },

@@ -210,8 +210,6 @@ struct Speed {
 #[derive(Debug, Default, Deserialize)]
 struct SpeedLimitRule {
     max_speed: Option<Speed>,
-    #[allow(dead_code)]
-    min_speed: Option<Speed>,
     when: Option<When>,
     between: Option<Vec<Option<f64>>>,
 }
@@ -1364,13 +1362,14 @@ mod tests {
             netweevil_persist::WorkspacePaths::discover(&workspace).expect("workspace discovers");
         let manifest = crate::import_dataset(
             &paths,
-            &fixture,
+            std::slice::from_ref(&fixture),
             crate::DatasetImportOptions {
                 name: "overture-test".to_string(),
                 source: fixture.display().to_string(),
                 format: None,
                 mapping: None,
             },
+            |_| {},
         )
         .expect("overture dataset imports");
 

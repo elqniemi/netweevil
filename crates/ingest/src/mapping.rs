@@ -91,21 +91,6 @@ impl GeoPackageMapping {
         }
         Ok(())
     }
-
-    pub fn layer_for<'a>(
-        &'a self,
-        source: &Path,
-        table: &str,
-    ) -> Option<&'a GeoPackageLayerMapping> {
-        let file_name = source.file_name().and_then(|name| name.to_str());
-        self.layers.iter().find(|layer| {
-            layer.table.eq_ignore_ascii_case(table)
-                && layer.source.as_deref().is_none_or(|expected| {
-                    file_name.is_some_and(|actual| actual.eq_ignore_ascii_case(expected))
-                        || source.to_string_lossy().ends_with(expected)
-                })
-        })
-    }
 }
 
 pub fn load_gpkg_mapping(path: impl AsRef<Path>) -> Result<GeoPackageMapping> {

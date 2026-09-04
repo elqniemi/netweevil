@@ -7,7 +7,6 @@ use rayon::prelude::*;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::legs::haversine_m;
 use crate::model::{
     AccessMode, TRANSIT_STOP_BINDING_SCHEMA_VERSION, TRANSIT_TRANSFER_TABLE_SCHEMA_VERSION,
     TransitBundle, TransitNetworkTransfer, TransitStopBinding, TransitStopBindingSummary,
@@ -48,23 +47,6 @@ pub fn load_transit_stop_bindings(path: impl AsRef<Path>) -> Result<TransitStopB
     };
     validate_stop_binding_table(&table)?;
     Ok(table)
-}
-
-pub fn write_transit_stop_bindings(
-    path: impl AsRef<Path>,
-    table: &TransitStopBindingTable,
-) -> Result<()> {
-    validate_stop_binding_table(table)?;
-    let path = path.as_ref();
-    if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
-        bail!("transit stop binding output must use a .json extension");
-    }
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating directory {}", parent.display()))?;
-    }
-    let raw = serde_json::to_string_pretty(table)?;
-    fs::write(path, raw).with_context(|| format!("writing {}", path.display()))
 }
 
 /// Atomically replaces the bundle's stop bindings with the supplied table.
@@ -564,22 +546,4 @@ pub fn network_transfer(
         straight_line_distance_m,
         path,
     }
-}
-
-/// Recomputes the separation used for request-level transfer filtering. This
-/// helper is useful when a generated binding table changes GTFS coordinates.
-pub fn transfer_straight_line_distance_m(
-    bundle: &TransitBundle,
-    from_stop_id: &str,
-    to_stop_id: &str,
-) -> Option<f64> {
-    let from = bundle
-        .stops
-        .iter()
-        .find(|stop| stop.stop_id == from_stop_id)?;
-    let to = bundle
-        .stops
-        .iter()
-        .find(|stop| stop.stop_id == to_stop_id)?;
-    Some(haversine_m(from.lon, from.lat, to.lon, to.lat))
 }

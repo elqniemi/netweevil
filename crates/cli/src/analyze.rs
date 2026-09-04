@@ -30,10 +30,10 @@ use netweevil_transit::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::software_info;
 use crate::transit::{
     prepare_cli_transit_street_estimator, prepare_registered_transit_router, read_transit_manifest,
 };
+use crate::{algorithm_info, software_info};
 
 #[derive(Debug)]
 pub(crate) struct StoredRun {
@@ -946,17 +946,17 @@ fn run_betweenness_analysis(
         ),
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
+        algorithm_info(
+            if request.temporal.is_temporal() {
+                "time_dependent_exact_edge_dijkstra"
+            } else {
+                "demand_weighted_one_to_many_edge_trees"
+            },
+            engine.acceleration,
+        ),
+        "Weighted origin-to-destination shortest paths are accumulated on every traversed directed edge; static unrestricted origins reuse one-to-many trees, while temporal or sequence-restricted requests use exact pairwise routing.",
     )?;
     record_effective_request(&mut manifest, request)?;
-    manifest.algorithm.engine = if request.temporal.is_temporal() {
-        "time_dependent_exact_edge_dijkstra".to_string()
-    } else {
-        "demand_weighted_one_to_many_edge_trees".to_string()
-    };
-    manifest.algorithm.acceleration = engine.acceleration.to_string();
-    manifest.methods_summary.plain_language =
-        "Weighted origin-to-destination shortest paths are accumulated on every traversed directed edge; static unrestricted origins reuse one-to-many trees, while temporal or sequence-restricted requests use exact pairwise routing."
-            .to_string();
     let result_path = out.unwrap_or_else(|| {
         paths
             .runs_dir
@@ -1020,13 +1020,13 @@ fn run_scenario_batch_analysis(
         ),
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
+        algorithm_info(
+            "scenario_batch_exact_overlay_replay",
+            "static_baseline+exact_temporal_scenarios",
+        ),
+        "Each analysis is executed once as a baseline and once per scenario overlay; route time, disconnected demand, reachable network, and accessibility changes are diffed against the baseline.",
     )?;
     record_effective_request(&mut manifest, request)?;
-    manifest.algorithm.engine = "scenario_batch_exact_overlay_replay".to_string();
-    manifest.algorithm.acceleration = "static_baseline+exact_temporal_scenarios".to_string();
-    manifest.methods_summary.plain_language =
-        "Each analysis is executed once as a baseline and once per scenario overlay; route time, disconnected demand, reachable network, and accessibility changes are diffed against the baseline."
-            .to_string();
     let result_path = out.unwrap_or_else(|| {
         paths
             .runs_dir
@@ -1349,13 +1349,13 @@ fn store_service_area_sequence_run(
         ),
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
+        algorithm_info(
+            "time_dependent_exact_fifo_service_area_sequence",
+            "none_temporal_exact",
+        ),
+        "The same service-area request was replayed at each requested departure datetime with exact edge-entry temporal rules; GeoJSON frames carry departure_time for QGIS instant-mode animation.",
     )?;
     record_effective_request(&mut manifest, request)?;
-    manifest.algorithm.engine = "time_dependent_exact_fifo_service_area_sequence".to_string();
-    manifest.algorithm.acceleration = "none_temporal_exact".to_string();
-    manifest.methods_summary.plain_language =
-        "The same service-area request was replayed at each requested departure datetime with exact edge-entry temporal rules; GeoJSON frames carry departure_time for QGIS instant-mode animation."
-            .to_string();
     manifest.connectivity_policy = Some(request.request.connectivity.clone());
     manifest.fallback_policy = Some(request.request.fallback.clone());
     let result_path = out.unwrap_or_else(|| {
@@ -1405,11 +1405,10 @@ fn store_route_run(
         ),
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
+        algorithm_info(engine.route_engine, engine.acceleration),
+        engine.route_summary,
     )?;
     record_effective_request(&mut manifest, request)?;
-    manifest.algorithm.engine = engine.route_engine.to_string();
-    manifest.algorithm.acceleration = engine.acceleration.to_string();
-    manifest.methods_summary.plain_language = engine.route_summary.to_string();
     manifest.connectivity_policy = Some(request.connectivity.clone());
     manifest.fallback_policy = Some(request.fallback.clone());
     let result_path = out.unwrap_or_else(|| {
@@ -1460,14 +1459,13 @@ fn store_route_batch_run(
         ),
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
+        algorithm_info(engine.route_engine, engine.acceleration),
+        format!(
+            "{} Route-batch execution reused one prepared routing engine for {} route requests and wrote one consolidated result file.",
+            engine.route_summary, result.route_count,
+        ),
     )?;
     record_effective_request(&mut manifest, requests)?;
-    manifest.algorithm.engine = engine.route_engine.to_string();
-    manifest.algorithm.acceleration = engine.acceleration.to_string();
-    manifest.methods_summary.plain_language = format!(
-        "{} Route-batch execution reused one prepared routing engine for {} route requests and wrote one consolidated result file.",
-        engine.route_summary, result.route_count,
-    );
     manifest.connectivity_policy = requests
         .requests
         .first()
@@ -1519,11 +1517,10 @@ fn store_od_run(
         ),
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
+        algorithm_info(engine.batch_engine, engine.acceleration),
+        engine.batch_summary,
     )?;
     record_effective_request(&mut manifest, request)?;
-    manifest.algorithm.engine = engine.batch_engine.to_string();
-    manifest.algorithm.acceleration = engine.acceleration.to_string();
-    manifest.methods_summary.plain_language = engine.batch_summary.to_string();
     manifest.connectivity_policy = Some(request.connectivity.clone());
     manifest.fallback_policy = Some(request.fallback.clone());
     let result_path = out.unwrap_or_else(|| {
@@ -1575,14 +1572,13 @@ fn store_matrix_run(
         ),
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
+        algorithm_info(engine.batch_engine, engine.acceleration),
+        engine.batch_summary,
     )?;
     manifest.effective_request = Some(serde_json::json!({
         "origins": origins,
         "destinations": destinations,
     }));
-    manifest.algorithm.engine = engine.batch_engine.to_string();
-    manifest.algorithm.acceleration = engine.acceleration.to_string();
-    manifest.methods_summary.plain_language = engine.batch_summary.to_string();
     manifest.connectivity_policy = Some(
         if origins.connectivity == netweevil_query::ConnectivityPolicy::default() {
             destinations.connectivity.clone()
@@ -1652,18 +1648,20 @@ fn store_accessibility_run(
         ),
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
+        algorithm_info(
+            if request.origins.temporal.is_temporal() {
+                engine.batch_engine
+            } else {
+                "bounded_single_origin_accessibility"
+            },
+            engine.acceleration,
+        ),
+        format!(
+            "{} Accessibility execution performs one exact bounded legal-network expansion per unique snapped origin up to {:.0}s, snaps all destinations once, and reduces each category to nearest destination and threshold counts without materializing all OD cells.",
+            engine.batch_summary, result.max_travel_time_s
+        ),
     )?;
     record_effective_request(&mut manifest, request)?;
-    manifest.algorithm.engine = if request.origins.temporal.is_temporal() {
-        engine.batch_engine.to_string()
-    } else {
-        "bounded_single_origin_accessibility".to_string()
-    };
-    manifest.algorithm.acceleration = engine.acceleration.to_string();
-    manifest.methods_summary.plain_language = format!(
-        "{} Accessibility execution performs one exact bounded legal-network expansion per unique snapped origin up to {:.0}s, snaps all destinations once, and reduces each category to nearest destination and threshold counts without materializing all OD cells.",
-        engine.batch_summary, result.max_travel_time_s
-    );
     manifest.connectivity_policy = Some(request.origins.connectivity.clone());
     manifest.fallback_policy = Some(request.origins.fallback.clone());
     let result_path = out.unwrap_or_else(|| {
@@ -1719,14 +1717,13 @@ fn store_service_area_run(
         ),
         software_info(),
         Some(compiled_manifest.bundle.bundle_id.0.clone()),
+        algorithm_info(engine.batch_engine, engine.acceleration),
+        format!(
+            "{} Service-area execution reuses one exact legal-network expansion per unique snapped origin and threshold metric, then emits cumulative or ring bands as network and/or polygon outputs.",
+            engine.batch_summary
+        ),
     )?;
     record_effective_request(&mut manifest, request)?;
-    manifest.algorithm.engine = engine.batch_engine.to_string();
-    manifest.algorithm.acceleration = engine.acceleration.to_string();
-    manifest.methods_summary.plain_language = format!(
-        "{} Service-area execution reuses one exact legal-network expansion per unique snapped origin and threshold metric, then emits cumulative or ring bands as network and/or polygon outputs.",
-        engine.batch_summary
-    );
     manifest.connectivity_policy = Some(request.connectivity.clone());
     manifest.fallback_policy = Some(request.fallback.clone());
     let result_path = out.unwrap_or_else(|| {

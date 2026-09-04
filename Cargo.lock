@@ -1173,7 +1173,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "tracing",
  "tracing-subscriber",
 ]
 
@@ -1182,7 +1181,6 @@ name = "netweevil-core"
 version = "0.1.0"
 dependencies = [
  "serde",
- "time",
 ]
 
 [[package]]
@@ -1232,7 +1230,6 @@ dependencies = [
  "anyhow",
  "bincode",
  "bytemuck",
- "flate2",
  "memmap2",
  "netweevil-core",
  "netweevil-manifest",
@@ -1259,7 +1256,6 @@ name = "netweevil-query"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "arrow-array",
  "arrow-json",
  "csv",
  "netweevil-core",
@@ -1290,8 +1286,6 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "time",
- "uuid",
 ]
 
 [[package]]

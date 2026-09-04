@@ -19,7 +19,7 @@ use netweevil_simulate::{
     frames_to_temporal_geojson, load_scenario,
 };
 
-use crate::software_info;
+use crate::{algorithm_info, software_info};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum SimulateCommand {
@@ -258,14 +258,11 @@ pub(crate) fn simulate_run(paths: &WorkspacePaths, args: SimulateRunArgs) -> Res
         ),
         software_info(),
         None,
-    )?;
-    manifest.algorithm.engine = "mesoscopic_queue_simulation".to_string();
-    manifest.algorithm.graph_model = "directed_edge_graph".to_string();
-    manifest.methods_summary.plain_language =
+        algorithm_info("mesoscopic_queue_simulation", "none"),
         "Agent-based mesoscopic queue simulation: exact shortest-path dispatch per agent, \
          density-dependent edge speeds, storage/outflow capacities with spillback, traffic \
-         signal gates, and live congested rerouting. Deterministic for a fixed scenario seed."
-            .to_string();
+         signal gates, and live congested rerouting. Deterministic for a fixed scenario seed.",
+    )?;
     manifest.result_path = Some(result_path.display().to_string());
     let manifest_path = write_run_manifest(paths, &manifest)?;
 
