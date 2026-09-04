@@ -319,7 +319,6 @@ struct TransitBatchResult {
     route_count: usize,
     scheduled_count: usize,
     unreachable_count: usize,
-    not_implemented_count: usize,
     failed_count: usize,
     items: Vec<TransitBatchItemResult>,
     failures: Vec<TransitBatchFailure>,
@@ -663,7 +662,6 @@ pub(crate) fn analyze_transit_batch(paths: &WorkspacePaths, args: TransitBatchAr
     let mut failures = Vec::new();
     let mut scheduled_count = 0_usize;
     let mut unreachable_count = 0_usize;
-    let mut not_implemented_count = 0_usize;
 
     for (index, request) in document.requests.iter().enumerate() {
         match router.execute_route_with_street_estimator(
@@ -676,7 +674,6 @@ pub(crate) fn analyze_transit_batch(paths: &WorkspacePaths, args: TransitBatchAr
                 match result.outcome {
                     netweevil_transit::TransitOutcome::Scheduled => scheduled_count += 1,
                     netweevil_transit::TransitOutcome::Unreachable => unreachable_count += 1,
-                    netweevil_transit::TransitOutcome::NotImplemented => not_implemented_count += 1,
                 }
                 items.push(TransitBatchItemResult {
                     request_index: index + 1,
@@ -696,7 +693,6 @@ pub(crate) fn analyze_transit_batch(paths: &WorkspacePaths, args: TransitBatchAr
         route_count: document.requests.len(),
         scheduled_count,
         unreachable_count,
-        not_implemented_count,
         failed_count: failures.len(),
         items,
         failures,
@@ -709,11 +705,8 @@ pub(crate) fn analyze_transit_batch(paths: &WorkspacePaths, args: TransitBatchAr
     write_json(&result_path, &result)?;
     println!("transit batch result written to {}", result_path.display());
     println!(
-        "transit batch completed with {} scheduled, {} unreachable, {} not implemented, and {} failed routes",
-        result.scheduled_count,
-        result.unreachable_count,
-        result.not_implemented_count,
-        result.failed_count
+        "transit batch completed with {} scheduled, {} unreachable, and {} failed routes",
+        result.scheduled_count, result.unreachable_count, result.failed_count
     );
     Ok(())
 }

@@ -783,7 +783,6 @@ pub struct TransitRouteAlternative {
 pub enum TransitOutcome {
     Scheduled,
     Unreachable,
-    NotImplemented,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

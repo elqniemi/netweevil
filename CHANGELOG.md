@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Arrive-by transit search: `time.arrive_by` on transit routes and transit
+  service areas runs a latest-departure scan against the requested arrival
+  deadline, with `search_window_s` bounding how far before that deadline
+  trips may arrive. Boarding and transfer slacks, transfer limits, mode
+  filters, directed transfer tables, and network access/egress pricing apply
+  exactly as they do depart-after. The QGIS transit and service-area tabs
+  expose it as an Arrive by checkbox.
 - Overture Maps support: `dataset import` reads transportation-theme
   GeoParquet (a file or a directory of files) alongside OSM PBF, detected
   from the path or forced with `--format`. Segments are split into

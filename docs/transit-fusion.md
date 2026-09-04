@@ -116,6 +116,34 @@ NetWeevil never substitutes straight-line time inside `street_access:
 full path. Geometric fallback occurs only when the request explicitly selects
 `street_access: "straight_line"`.
 
+## Depart-after and arrive-by searches
+
+Transit routes and transit service areas plan in either direction. With
+`time.arrive_by: false` the scan settles the earliest arrival reachable after
+`time.datetime`, and `search_window_s` bounds how long after that time a trip
+may depart. With `time.arrive_by: true` the scan settles the latest departure
+that still reaches the destination by `time.datetime`, and `search_window_s`
+bounds how far before that deadline a trip may arrive.
+
+The arrive-by scan is the mirror image of the depart-after one and reads the
+same connection arrays. Board slack, transfer slack, `max_transfers`, transit
+mode filters, minimum transit leg constraints, straight-line or `network`
+access/egress pricing, stop bindings, and precomputed transfer tables all
+apply unchanged; a state is kept only while the traveller can still be at that
+stop and reach the target in time. Because transfer tables are directed, the
+reverse scan walks the transfers that *end* at a stop, so a passage priced only
+in the `A -> B` direction is never traversed backwards.
+
+Results keep their usual shape. An arrive-by route returns legs in forward
+chronological order with scheduled timestamps: `summary.departure_s` is the
+latest feasible departure, `summary.arrival_s` is the resulting arrival at or
+before the deadline, the access leg is anchored to the first boarding, and each
+transfer walk starts a transfer slack after the preceding alighting. An
+arrive-by service area reports, per stop, the latest clock time at which a
+traveller can be there in `arrival_s`, with `travel_time_s` measured back from
+the deadline; ridden segments carry the time from their departure to the
+deadline. Journeys that cannot meet the deadline are `unreachable`.
+
 ## CLI and API
 
 Bindings can be attached while importing a feed or applied atomically later:

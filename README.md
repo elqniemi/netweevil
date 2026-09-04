@@ -352,6 +352,13 @@ cargo run -p netweevil-cli -- analyze transit-route \
   --out .netweevil/runs/example-transit-route.json
 ```
 
+Routes and transit service areas plan in either direction. `time.arrive_by:
+false` returns the earliest arrival after `time.datetime`; `time.arrive_by:
+true` returns the latest departure that still arrives by then, with
+`search_window_s` covering the window before the deadline instead of after the
+departure. The QGIS transit and service-area tabs expose the same switch as an
+Arrive by checkbox.
+
 First and last miles are not limited to walking: `modes.access` and
 `modes.egress` accept `walk`, `bicycle`, or `car`, each with its own speed
 (`walk_speed_kph`, `bicycle_speed_kph`, `car_access_speed_kph`) and distance

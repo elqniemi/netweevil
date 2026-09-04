@@ -1473,3 +1473,231 @@ fn network_street_access_prices_legs_with_the_estimator() {
         .expect("bound fallback result is returned");
     assert_eq!(bound_fallback.outcome, TransitOutcome::Unreachable);
 }
+
+/// Bundle-relative seconds back to a request datetime; fixtures stay inside
+/// the first service day.
+fn fixture_datetime(seconds: u32) -> String {
+    format!(
+        "2026-05-11T{:02}:{:02}:{:02}+02:00",
+        seconds / 3600,
+        (seconds % 3600) / 60,
+        seconds % 60
+    )
+}
+
+fn import_fixture(files: GtfsFiles, feed: &str) -> TransitBundle {
+    build_bundle_from_files(
+        files,
+        format!("{feed}-hash"),
+        TransitImportOptions {
+            name: feed.to_string(),
+            source_label: feed.to_string(),
+            service_start_date: "2026-05-11".to_string(),
+            service_days: 7,
+        },
+    )
+    .expect("fixture imports")
+}
+
+fn arrive_by_request(deadline: &str, modes: TransitModeOptions) -> TransitRouteRequest {
+    TransitRouteRequest {
+        route_id: "arrive-by".to_string(),
+        origin: TransitPoint {
+            id: "origin".to_string(),
+            lon: 6.0,
+            lat: 53.0,
+        },
+        destination: TransitPoint {
+            id: "dest".to_string(),
+            lon: 6.02,
+            lat: 53.0,
+        },
+        time: TransitQueryTime {
+            datetime: deadline.to_string(),
+            arrive_by: true,
+            search_window_s: 3600,
+        },
+        modes,
+        returns: TransitReturnOptions::default(),
+        alternatives: TransitAlternativeOptions::default(),
+    }
+}
+
+fn short_access_modes() -> TransitModeOptions {
+    TransitModeOptions {
+        max_access_distance_m: 100.0,
+        max_egress_distance_m: 100.0,
+        ..TransitModeOptions::default()
+    }
+}
+
+#[test]
+fn arrive_by_route_takes_the_latest_departure_that_meets_the_deadline() {
+    // Departures every ten minutes from 08:00; the run leaving A at 08:20
+    // reaches C at 08:30, the last one that clears an 08:35 deadline.
+    let bundle = import_fixture(frequency_fixture_files(), "arrive-by-frequency");
+    let deadline_s = 8 * 3600 + 35 * 60;
+    let request = arrive_by_request(&fixture_datetime(deadline_s), short_access_modes());
+
+    let result = execute_transit_route(&bundle, &request).expect("route executes");
+
+    assert_eq!(result.outcome, TransitOutcome::Scheduled);
+    let arrival_s = result.summary.arrival_s.expect("journey arrives");
+    assert!(
+        arrival_s <= deadline_s,
+        "arrival {arrival_s} must not pass the deadline {deadline_s}"
+    );
+    assert_eq!(result.summary.boarding_count, 1);
+    let boarding = result
+        .legs
+        .iter()
+        .find(|leg| leg.leg_type == TransitLegType::Transit)
+        .expect("journey rides transit");
+    assert_eq!(boarding.departure_s, 8 * 3600 + 20 * 60);
+    assert_eq!(boarding.arrival_s, 8 * 3600 + 30 * 60);
+    // One second of access walking plus the boarding slack in front of the
+    // 08:20 departure.
+    assert_eq!(result.summary.departure_s, 8 * 3600 + 20 * 60 - 30 - 1);
+    let access = result.legs.first().expect("journey starts on foot");
+    assert_eq!(access.leg_type, TransitLegType::Access);
+    assert_eq!(access.departure_s, result.summary.departure_s);
+    assert_eq!(access.arrival_s, 8 * 3600 + 20 * 60 - 30);
+}
+
+#[test]
+fn arrive_by_and_depart_after_agree_on_the_same_journey() {
+    let bundle = import_fixture(frequency_fixture_files(), "arrive-by-symmetry");
+    let deadline_s = 8 * 3600 + 35 * 60;
+    let arrive_by = execute_transit_route(
+        &bundle,
+        &arrive_by_request(&fixture_datetime(deadline_s), short_access_modes()),
+    )
+    .expect("arrive-by route executes");
+    assert_eq!(arrive_by.outcome, TransitOutcome::Scheduled);
+
+    let mut depart_after = arrive_by_request(
+        &fixture_datetime(arrive_by.summary.departure_s),
+        short_access_modes(),
+    );
+    depart_after.time.arrive_by = false;
+    let depart_after = execute_transit_route(&bundle, &depart_after).expect("route executes");
+
+    assert_eq!(depart_after.outcome, TransitOutcome::Scheduled);
+    assert_eq!(depart_after.summary.arrival_s, arrive_by.summary.arrival_s);
+    assert_eq!(
+        depart_after.summary.departure_s,
+        arrive_by.summary.departure_s
+    );
+    assert_eq!(
+        depart_after.summary.boarding_count,
+        arrive_by.summary.boarding_count
+    );
+    let ridden = |result: &TransitRouteResult| {
+        result
+            .legs
+            .iter()
+            .filter(|leg| leg.leg_type == TransitLegType::Transit)
+            .map(|leg| (leg.from_id.clone(), leg.to_id.clone(), leg.departure_s))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ridden(&depart_after), ridden(&arrive_by));
+}
+
+#[test]
+fn arrive_by_transfer_respects_the_minimum_transfer_time() {
+    // T1 reaches platform B1 at 08:10; T2 leaves platform B2 at 08:15, so the
+    // transfer only works while the slack plus the walk fits in five minutes.
+    let bundle = import_fixture(two_line_transfer_fixture_files(), "arrive-by-transfer");
+    let deadline_s = 8 * 3600 + 40 * 60;
+    // The prepared router caches the reverse index across requests.
+    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    let result = router
+        .execute_route(&arrive_by_request(
+            &fixture_datetime(deadline_s),
+            short_access_modes(),
+        ))
+        .expect("route executes");
+
+    assert_eq!(result.outcome, TransitOutcome::Scheduled);
+    assert_eq!(result.summary.boarding_count, 2);
+    let transfer = result
+        .legs
+        .iter()
+        .find(|leg| leg.leg_type == TransitLegType::Transfer)
+        .expect("journey transfers on foot");
+    assert_eq!(transfer.from_id, "B1");
+    assert_eq!(transfer.to_id, "B2");
+    // The walk starts a transfer slack after alighting and has to finish a
+    // boarding slack before the second departure.
+    assert_eq!(transfer.departure_s, 8 * 3600 + 10 * 60 + 120);
+    assert!(transfer.arrival_s <= 8 * 3600 + 15 * 60 - 30);
+    assert!(result.summary.arrival_s.expect("journey arrives") <= deadline_s);
+
+    let mut tight = arrive_by_request(&fixture_datetime(deadline_s), short_access_modes());
+    tight.modes.transfer_slack_s = 400;
+    let tight = router.execute_route(&tight).expect("route executes");
+    assert_eq!(tight.outcome, TransitOutcome::Unreachable);
+}
+
+#[test]
+fn arrive_by_reports_unreachable_when_no_service_meets_the_deadline() {
+    let bundle = import_fixture(fixture_files(), "arrive-by-unreachable");
+    let result = execute_transit_route(
+        &bundle,
+        &arrive_by_request(&fixture_datetime(7 * 3600), short_access_modes()),
+    )
+    .expect("route executes");
+
+    assert_eq!(result.outcome, TransitOutcome::Unreachable);
+    assert!(result.legs.is_empty());
+    assert!(!result.diagnostics.is_empty());
+}
+
+#[test]
+fn arrive_by_service_area_reports_latest_departures_towards_the_target() {
+    let bundle = import_fixture(fixture_files(), "arrive-by-service-area");
+    let deadline_s = 8 * 3600 + 30 * 60;
+    let request = TransitServiceAreaRequest {
+        analysis_id: "arrive-by-service-area".to_string(),
+        origins: vec![TransitPoint {
+            id: "target".to_string(),
+            lon: 6.02,
+            lat: 53.0,
+        }],
+        time: TransitQueryTime {
+            datetime: fixture_datetime(deadline_s),
+            arrive_by: true,
+            search_window_s: 3600,
+        },
+        modes: short_access_modes(),
+        max_travel_time_s: 3600,
+        returns: TransitServiceAreaReturnOptions::default(),
+    };
+
+    let result = execute_transit_service_area(&bundle, &request).expect("service area executes");
+
+    assert_eq!(result.outcome, TransitOutcome::Scheduled);
+    assert_eq!(result.processed_origin_count, 1);
+    let stop_a = result
+        .stops
+        .iter()
+        .find(|stop| stop.stop_id == "A")
+        .expect("stop A reaches the target");
+    // T1 leaves A at 08:10:30, so a traveller has to stand there by 08:10:00.
+    assert_eq!(stop_a.arrival_s, 8 * 3600 + 10 * 60);
+    assert_eq!(stop_a.travel_time_s, deadline_s - stop_a.arrival_s);
+    assert_eq!(stop_a.boarding_count, 1);
+    let stop_c = result
+        .stops
+        .iter()
+        .find(|stop| stop.stop_id == "C")
+        .expect("the target stop is reachable on foot");
+    assert_eq!(stop_c.travel_time_s, deadline_s - stop_c.arrival_s);
+    assert!(stop_c.arrival_s > stop_a.arrival_s);
+    assert!(
+        result
+            .stop_segments
+            .iter()
+            .any(|segment| segment.from_stop_id == "A" && segment.to_stop_id == "B")
+    );
+}

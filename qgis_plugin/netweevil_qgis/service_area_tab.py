@@ -216,8 +216,15 @@ class ServiceAreaTabMixin:
         self.service_area_transit_group = QGroupBox("Transit options")
         transit_form = QFormLayout(self.service_area_transit_group)
         self.service_area_transit_datetime_edit = QLineEdit("2026-05-11T08:30:00+02:00")
-        self.service_area_transit_datetime_edit.setToolTip(
-            "Departure time as an RFC 3339 timestamp inside the feed's service calendar."
+        self.service_area_transit_datetime_label = QLabel("Transit departure")
+        self.service_area_transit_arrive_by_check = QCheckBox(
+            "Arrive by (the time above is an arrival deadline)"
+        )
+        self.service_area_transit_arrive_by_check.setChecked(False)
+        self.service_area_transit_arrive_by_check.setToolTip(
+            "Map the stops a traveller can leave from and still reach the "
+            "origins by the time above; travel times are measured back from "
+            "that deadline."
         )
         self.service_area_transit_max_time_edit = QLineEdit("3600")
         self.service_area_transit_max_time_edit.setToolTip(
@@ -245,7 +252,11 @@ class ServiceAreaTabMixin:
             "Limits; the first mile uses the access mode chosen above."
         )
         transit_note.setWordWrap(True)
-        transit_form.addRow("Transit departure", self.service_area_transit_datetime_edit)
+        transit_form.addRow(
+            self.service_area_transit_datetime_label,
+            self.service_area_transit_datetime_edit,
+        )
+        transit_form.addRow("", self.service_area_transit_arrive_by_check)
         transit_form.addRow("Transit max time s", self.service_area_transit_max_time_edit)
         transit_form.addRow("Access mode", self.service_area_access_mode_combo)
         transit_form.addRow("Access distance m", self.service_area_access_distance_edit)
@@ -254,6 +265,10 @@ class ServiceAreaTabMixin:
         self.service_area_access_mode_combo.currentIndexChanged.connect(
             self.sync_service_area_access_mode_defaults
         )
+        self.service_area_transit_arrive_by_check.toggled.connect(
+            self.update_service_area_transit_time_labels
+        )
+        self.update_service_area_transit_time_labels()
         layout.addWidget(self.service_area_transit_group)
 
         service_area_advanced_widget = self._build_advanced_controls(
@@ -516,14 +531,36 @@ class ServiceAreaTabMixin:
             "bicycle": "max_bicycle_access_distance_m",
             "car": "max_car_access_distance_m",
         }
+        # An arrive-by sweep walks the street leg at the target end, which the
+        # engine prices with the egress limits.
+        egress_distance_keys = {
+            "walk": "max_egress_distance_m",
+            "bicycle": "max_bicycle_egress_distance_m",
+            "car": "max_car_egress_distance_m",
+        }
         speed_keys = {
             "walk": "walk_speed_kph",
             "bicycle": "bicycle_speed_kph",
             "car": "car_access_speed_kph",
         }
         modes[distance_keys[access_mode]] = access_distance
+        modes[egress_distance_keys[access_mode]] = access_distance
         modes[speed_keys[access_mode]] = access_speed
         return modes
+
+    def update_service_area_transit_time_labels(self, *_args):
+        """Retitle the time field for the direction the sweep runs in."""
+        if self.service_area_transit_arrive_by_check.isChecked():
+            self.service_area_transit_datetime_label.setText("Transit arrival deadline")
+            self.service_area_transit_datetime_edit.setToolTip(
+                "Latest acceptable arrival at the origins as an RFC 3339 "
+                "timestamp inside the feed's service calendar."
+            )
+        else:
+            self.service_area_transit_datetime_label.setText("Transit departure")
+            self.service_area_transit_datetime_edit.setToolTip(
+                "Departure time as an RFC 3339 timestamp inside the feed's service calendar."
+            )
 
     def build_service_area_transit_returns(self):
         return {
@@ -552,7 +589,7 @@ class ServiceAreaTabMixin:
                 "origins": self.build_service_area_origins(),
                 "time": {
                     "datetime": self.service_area_transit_datetime_edit.text().strip(),
-                    "arrive_by": False,
+                    "arrive_by": self.service_area_transit_arrive_by_check.isChecked(),
                     "search_window_s": self.parse_int_with_default(
                         self.transit_search_window_edit.text(),
                         "Transit search window",

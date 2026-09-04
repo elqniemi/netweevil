@@ -47,8 +47,8 @@ class TransitTabMixin:
         summary = QLabel(
             "Plan a street access + scheduled transit route through a GTFS "
             "feed loaded by the API. The first mile can be walked, cycled, or "
-            "driven; pick an origin and destination, set the departure time, "
-            "then press Run Transit Route."
+            "driven; pick an origin and destination, set the departure time "
+            "or an arrival deadline, then press Run Transit Route."
         )
         summary.setWordWrap(True)
         layout.addWidget(summary)
@@ -66,14 +66,17 @@ class TransitTabMixin:
         )
         self.transit_auto_increment_check.setChecked(True)
         self.transit_datetime_edit = QLineEdit("2026-05-11T08:30:00+02:00")
-        self.transit_datetime_edit.setToolTip(
-            "Departure time as an RFC 3339 timestamp inside the feed's service "
-            "calendar, for example 2026-05-11T08:30:00+02:00."
+        self.transit_datetime_label = QLabel("Departure time")
+        self.transit_arrive_by_check = QCheckBox(
+            "Arrive by (the time above is an arrival deadline)"
+        )
+        self.transit_arrive_by_check.setChecked(False)
+        self.transit_arrive_by_check.setToolTip(
+            "Search for the latest departure that still reaches the "
+            "destination by the time above, instead of the earliest arrival "
+            "after it."
         )
         self.transit_search_window_edit = QLineEdit("7200")
-        self.transit_search_window_edit.setToolTip(
-            "Seconds after the departure time in which trips may start."
-        )
         self.transit_output_path_edit = QLineEdit(
             ".netweevil/runs/transit/qgis_transit_001.json"
         )
@@ -93,7 +96,8 @@ class TransitTabMixin:
         options_form.addRow("Feed", self.transit_feed_combo)
         options_form.addRow("Route id", transit_id_row)
         options_form.addRow("", self.transit_auto_increment_check)
-        options_form.addRow("Departure time", self.transit_datetime_edit)
+        options_form.addRow(self.transit_datetime_label, self.transit_datetime_edit)
+        options_form.addRow("", self.transit_arrive_by_check)
         options_form.addRow("Search window s", self.transit_search_window_edit)
         options_form.addRow(
             "Response path",
@@ -257,6 +261,8 @@ class TransitTabMixin:
             self.sync_transit_output_path_from_route_id
         )
         self.sync_transit_output_path_from_route_id()
+        self.transit_arrive_by_check.toggled.connect(self.update_transit_time_labels)
+        self.update_transit_time_labels()
         self.transit_separate_egress_check.toggled.connect(
             self.update_transit_egress_mode_state
         )
@@ -370,6 +376,27 @@ class TransitTabMixin:
             return self.transit_egress_mode_combo.currentData() or "walk"
         return self.selected_transit_access_mode()
 
+    def update_transit_time_labels(self, *_args):
+        """Retitle the time field for the direction the search runs in."""
+        if self.transit_arrive_by_check.isChecked():
+            self.transit_datetime_label.setText("Arrival deadline")
+            self.transit_datetime_edit.setToolTip(
+                "Latest acceptable arrival as an RFC 3339 timestamp inside the "
+                "feed's service calendar, for example 2026-05-11T08:30:00+02:00."
+            )
+            self.transit_search_window_edit.setToolTip(
+                "Seconds before the arrival deadline in which trips may arrive."
+            )
+        else:
+            self.transit_datetime_label.setText("Departure time")
+            self.transit_datetime_edit.setToolTip(
+                "Departure time as an RFC 3339 timestamp inside the feed's "
+                "service calendar, for example 2026-05-11T08:30:00+02:00."
+            )
+            self.transit_search_window_edit.setToolTip(
+                "Seconds after the departure time in which trips may start."
+            )
+
     def update_transit_egress_mode_state(self, *_args):
         separate = self.transit_separate_egress_check.isChecked()
         self.transit_egress_mode_combo.setEnabled(separate)
@@ -466,10 +493,13 @@ class TransitTabMixin:
             self.transit_destination_lat_edit,
             "transit destination (Pick On Map)",
         )
-        departure_datetime = self.transit_datetime_edit.text().strip()
-        if not departure_datetime:
+        arrive_by = self.transit_arrive_by_check.isChecked()
+        query_datetime = self.transit_datetime_edit.text().strip()
+        if not query_datetime:
             raise ValueError(
-                "Set a departure time such as 2026-05-11T08:30:00+02:00 first."
+                "Set {} such as 2026-05-11T08:30:00+02:00 first.".format(
+                    "an arrival deadline" if arrive_by else "a departure time"
+                )
             )
         return {
             "route_id": self.transit_route_id_edit.text().strip() or "qgis_transit",
@@ -484,8 +514,8 @@ class TransitTabMixin:
                 "lat": destination_lat,
             },
             "time": {
-                "datetime": departure_datetime,
-                "arrive_by": False,
+                "datetime": query_datetime,
+                "arrive_by": arrive_by,
                 "search_window_s": self.parse_optional_int(
                     self.transit_search_window_edit.text(),
                     "Transit search window",

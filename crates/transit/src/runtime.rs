@@ -4,6 +4,7 @@ use std::collections::{BinaryHeap, HashMap};
 use anyhow::{Context, Result, anyhow};
 use time::{OffsetDateTime, PrimitiveDateTime, Time, format_description::well_known::Rfc3339};
 
+use crate::backward::BackwardIndex;
 use crate::gtfs::parse_iso_date;
 use crate::legs::{haversine_m, seconds_for_distance};
 use crate::model::{
@@ -211,6 +212,10 @@ pub(crate) struct TransitRuntime<'a> {
     transfer_candidates: &'a [Vec<StopCandidate>],
     pub(crate) allowed_routes: Vec<bool>,
     pub(crate) street_estimator: Option<&'a dyn StreetTimeEstimator>,
+    /// Reverse timetable and transfer indexes for arrive-by searches. Hosts
+    /// that serve many requests from one prepared router share a cached index;
+    /// otherwise the arrive-by scan builds its own.
+    pub(crate) backward_index: Option<&'a BackwardIndex>,
 }
 
 impl<'a> TransitRuntime<'a> {
@@ -234,10 +239,19 @@ impl<'a> TransitRuntime<'a> {
             transfer_candidates,
             allowed_routes,
             street_estimator,
+            backward_index: None,
         }
     }
 
-    pub(crate) fn request_departure_seconds(&self, raw: &str) -> Result<u32> {
+    pub(crate) fn with_backward_index(mut self, index: &'a BackwardIndex) -> Self {
+        self.backward_index = Some(index);
+        self
+    }
+
+    /// Resolves a request datetime to bundle-relative seconds. Service days
+    /// are laid out end to end, so an after-midnight time on one service day
+    /// stays ahead of the next day's start.
+    pub(crate) fn request_time_seconds(&self, raw: &str) -> Result<u32> {
         let parsed = match OffsetDateTime::parse(raw, &Rfc3339) {
             Ok(parsed) => parsed,
             Err(_) => parse_naive_datetime(raw)
@@ -279,6 +293,12 @@ impl<'a> TransitRuntime<'a> {
     /// request's transfer distance limit.
     pub(crate) fn transfer_candidates(&self, stop_index: u32) -> &[StopCandidate] {
         &self.transfer_candidates[stop_index as usize]
+    }
+
+    /// Whole transfer table, used to build and read the reverse adjacency an
+    /// arrive-by scan walks.
+    pub(crate) fn all_transfer_candidates(&self) -> &'a [Vec<StopCandidate>] {
+        self.transfer_candidates
     }
 }
 

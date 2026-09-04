@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
+use crate::backward::{BackwardStateKey, BackwardStep};
 use crate::model::{
     AccessMode, TransitBundle, TransitConnection, TransitLeg, TransitLegType, TransitModeOptions,
     TransitRouteRequest, TransitRouteStop, TransitRouteStopSegment, TransitRouteSummary,
-    TransitShape,
+    TransitShape, TransitStreetPath,
 };
 use crate::runtime::{PrevStep, StateKey, TransitRuntime};
 
@@ -151,6 +152,154 @@ pub(crate) fn reconstruct_legs(
     }
     legs.reverse();
     Ok(legs)
+}
+
+/// Materializes an arrive-by journey from the latest-departure scan. The
+/// scan's step chain already runs from the origin towards the destination, so
+/// legs are emitted chronologically and every clock time is the concrete
+/// scheduled one: the access leg is anchored to the first boarding, transfer
+/// walks start a transfer slack after the preceding alighting, and the egress
+/// leg starts at the last alighting. Returns the journey arrival time with the
+/// legs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn reconstruct_arrive_by_legs(
+    bundle: &TransitBundle,
+    request: &TransitRouteRequest,
+    next: &HashMap<BackwardStateKey, BackwardStep>,
+    start_state: BackwardStateKey,
+    departure_s: u32,
+    access_time_s: u32,
+    access_mode: AccessMode,
+    access_network_path: Option<TransitStreetPath>,
+) -> Result<(u32, Vec<TransitLeg>)> {
+    let access_stop = &bundle.stops[start_state.stop_index as usize];
+    let mut previous_arrival_s = departure_s.saturating_add(access_time_s);
+    let mut legs = vec![TransitLeg {
+        leg_type: TransitLegType::Access,
+        from_id: request.origin.id.clone(),
+        to_id: access_stop.stop_id.clone(),
+        from_name: request.origin.id.clone(),
+        to_name: access_stop.name.clone(),
+        departure_s,
+        arrival_s: previous_arrival_s,
+        mode: None,
+        street_mode: Some(access_mode),
+        route_id: None,
+        route_short_name: None,
+        trip_id: None,
+        headsign: None,
+        geometry: street_geometry_if_requested(
+            request,
+            access_network_path.as_ref(),
+            [request.origin.lon, request.origin.lat],
+            [access_stop.lon, access_stop.lat],
+        ),
+        network_path: access_network_path,
+    }];
+
+    let mut cursor = start_state;
+    loop {
+        let Some(step) = next.get(&cursor) else {
+            bail!("arrive-by journey chain ended before reaching the destination");
+        };
+        match step {
+            BackwardStep::Board { next } => cursor = *next,
+            BackwardStep::Ride { connection, next } => {
+                let from = &bundle.stops[connection.from_stop_index as usize];
+                let to = &bundle.stops[connection.to_stop_index as usize];
+                let route = &bundle.routes[connection.route_index as usize];
+                let trip = &bundle.trips[connection.trip_index as usize];
+                legs.push(TransitLeg {
+                    leg_type: TransitLegType::Transit,
+                    from_id: from.stop_id.clone(),
+                    to_id: to.stop_id.clone(),
+                    from_name: from.name.clone(),
+                    to_name: to.name.clone(),
+                    departure_s: connection.departure_s,
+                    arrival_s: connection.arrival_s,
+                    mode: Some(route.mode),
+                    street_mode: None,
+                    route_id: Some(route.route_id.clone()),
+                    route_short_name: Some(route.short_name.clone()),
+                    trip_id: Some(trip.trip_id.clone()),
+                    headsign: Some(trip.headsign.clone()),
+                    geometry: transit_connection_geometry_if_requested(
+                        request,
+                        bundle,
+                        *connection,
+                    ),
+                    network_path: None,
+                });
+                previous_arrival_s = connection.arrival_s;
+                cursor = *next;
+            }
+            BackwardStep::Transfer {
+                next,
+                travel_time_s,
+                network_path,
+            } => {
+                let from = &bundle.stops[cursor.stop_index as usize];
+                let to = &bundle.stops[next.stop_index as usize];
+                let transfer_departure_s =
+                    previous_arrival_s.saturating_add(request.modes.transfer_slack_s);
+                previous_arrival_s = transfer_departure_s.saturating_add(*travel_time_s);
+                legs.push(TransitLeg {
+                    leg_type: TransitLegType::Transfer,
+                    from_id: from.stop_id.clone(),
+                    to_id: to.stop_id.clone(),
+                    from_name: from.name.clone(),
+                    to_name: to.name.clone(),
+                    departure_s: transfer_departure_s,
+                    arrival_s: previous_arrival_s,
+                    mode: None,
+                    street_mode: Some(AccessMode::Walk),
+                    route_id: None,
+                    route_short_name: None,
+                    trip_id: None,
+                    headsign: None,
+                    geometry: street_geometry_if_requested(
+                        request,
+                        network_path.as_ref(),
+                        [from.lon, from.lat],
+                        [to.lon, to.lat],
+                    ),
+                    network_path: network_path.clone(),
+                });
+                cursor = *next;
+            }
+            BackwardStep::Egress {
+                time_s,
+                mode,
+                network_path,
+            } => {
+                let from = &bundle.stops[cursor.stop_index as usize];
+                let arrival_s = previous_arrival_s.saturating_add(*time_s);
+                legs.push(TransitLeg {
+                    leg_type: TransitLegType::Egress,
+                    from_id: from.stop_id.clone(),
+                    to_id: request.destination.id.clone(),
+                    from_name: from.name.clone(),
+                    to_name: request.destination.id.clone(),
+                    departure_s: previous_arrival_s,
+                    arrival_s,
+                    mode: None,
+                    street_mode: Some(*mode),
+                    route_id: None,
+                    route_short_name: None,
+                    trip_id: None,
+                    headsign: None,
+                    geometry: street_geometry_if_requested(
+                        request,
+                        network_path.as_ref(),
+                        [from.lon, from.lat],
+                        [request.destination.lon, request.destination.lat],
+                    ),
+                    network_path: network_path.clone(),
+                });
+                return Ok((arrival_s, legs));
+            }
+        }
+    }
 }
 
 pub(crate) fn coalesce_transit_legs(legs: &mut Vec<TransitLeg>) {

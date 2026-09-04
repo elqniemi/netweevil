@@ -1,9 +1,11 @@
 //! GTFS transit support: feed import into a compact binary bundle plus
 //! scheduled transit routing and transit service areas with walk, bicycle,
-//! and car street access. Street access is priced by straight-line distance
-//! by default; hosts can inject a [`StreetTimeEstimator`] for real network
-//! times.
+//! and car street access. Routes and service areas run either depart-after
+//! (earliest arrival) or arrive-by (latest departure). Street access is priced
+//! by straight-line distance by default; hosts can inject a
+//! [`StreetTimeEstimator`] for real network times.
 
+mod backward;
 mod fusion;
 mod gtfs;
 mod legs;

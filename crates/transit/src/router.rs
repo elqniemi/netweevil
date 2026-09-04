@@ -1,8 +1,9 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 
+use crate::backward::{BackwardIndex, execute_transit_route_arrive_by};
 use crate::fusion::index_transit_transfer_table;
 use crate::legs::{
     build_transit_route_stop_segments, build_transit_route_stops, coalesce_transit_legs,
@@ -10,7 +11,7 @@ use crate::legs::{
     transit_legs_satisfy_minimums,
 };
 use crate::model::{
-    AccessMode, TransitBundle, TransitConnection, TransitLeg, TransitOutcome,
+    AccessMode, TransitBundle, TransitConnection, TransitLeg, TransitModeOptions, TransitOutcome,
     TransitRouteAlternative, TransitRouteRequest, TransitRouteResult, TransitRouteSummary,
     TransitServiceAreaRequest, TransitServiceAreaResult, TransitStreetPath, TransitTransferTable,
 };
@@ -38,6 +39,9 @@ pub struct PreparedTransitRouter {
     stop_index: StopSpatialIndex,
     transfer_candidates: Vec<Vec<StopCandidate>>,
     network_transfer_candidates: HashMap<String, Vec<Vec<StopCandidate>>>,
+    /// Reverse indexes per transfer profile, built on the first arrive-by
+    /// request that needs them and shared by every later request.
+    backward_indexes: Mutex<HashMap<Option<String>, Arc<BackwardIndex>>>,
 }
 
 impl PreparedTransitRouter {
@@ -51,6 +55,7 @@ impl PreparedTransitRouter {
             stop_index,
             transfer_candidates,
             network_transfer_candidates: HashMap::new(),
+            backward_indexes: Mutex::new(HashMap::new()),
         }
     }
 
@@ -81,6 +86,7 @@ impl PreparedTransitRouter {
             stop_index,
             transfer_candidates,
             network_transfer_candidates,
+            backward_indexes: Mutex::new(HashMap::new()),
         })
     }
 
@@ -94,10 +100,30 @@ impl PreparedTransitRouter {
         ids
     }
 
-    fn transfer_candidates_for(
-        &self,
-        modes: &crate::model::TransitModeOptions,
-    ) -> Result<&[Vec<StopCandidate>]> {
+    /// Cached reverse timetable/transfer index for the request's transfer
+    /// profile. Only arrive-by requests need one.
+    fn backward_index_for(&self, modes: &TransitModeOptions) -> Result<Arc<BackwardIndex>> {
+        let key = modes.transfer_profile_id.clone();
+        if let Some(index) = self
+            .backward_indexes
+            .lock()
+            .expect("transit backward index cache is poisoned")
+            .get(&key)
+        {
+            return Ok(Arc::clone(index));
+        }
+        let index = Arc::new(BackwardIndex::build(
+            self.bundle.as_ref(),
+            self.transfer_candidates_for(modes)?,
+        ));
+        self.backward_indexes
+            .lock()
+            .expect("transit backward index cache is poisoned")
+            .insert(key, Arc::clone(&index));
+        Ok(index)
+    }
+
+    fn transfer_candidates_for(&self, modes: &TransitModeOptions) -> Result<&[Vec<StopCandidate>]> {
         let Some(profile_id) = modes.transfer_profile_id.as_deref() else {
             return Ok(&self.transfer_candidates);
         };
@@ -131,6 +157,11 @@ impl PreparedTransitRouter {
         street_estimator: Option<&dyn StreetTimeEstimator>,
     ) -> Result<TransitRouteResult> {
         let transfer_candidates = self.transfer_candidates_for(&request.modes)?;
+        let backward_index = request
+            .time
+            .arrive_by
+            .then(|| self.backward_index_for(&request.modes))
+            .transpose()?;
         let runtime = TransitRuntime::new(
             self.bundle.as_ref(),
             &self.departures_by_stop,
@@ -139,6 +170,10 @@ impl PreparedTransitRouter {
             &request.modes,
             street_estimator,
         );
+        let runtime = match backward_index.as_deref() {
+            Some(index) => runtime.with_backward_index(index),
+            None => runtime,
+        };
         execute_transit_route_with_runtime(&runtime, request)
     }
 
@@ -159,6 +194,11 @@ impl PreparedTransitRouter {
         street_estimator: Option<&dyn StreetTimeEstimator>,
     ) -> Result<TransitServiceAreaResult> {
         let transfer_candidates = self.transfer_candidates_for(&request.modes)?;
+        let backward_index = request
+            .time
+            .arrive_by
+            .then(|| self.backward_index_for(&request.modes))
+            .transpose()?;
         let runtime = TransitRuntime::new(
             self.bundle.as_ref(),
             &self.departures_by_stop,
@@ -167,6 +207,10 @@ impl PreparedTransitRouter {
             &request.modes,
             street_estimator,
         );
+        let runtime = match backward_index.as_deref() {
+            Some(index) => runtime.with_backward_index(index),
+            None => runtime,
+        };
         execute_transit_service_area_with_runtime(&runtime, request)
     }
 }
@@ -201,24 +245,12 @@ fn execute_transit_route_with_runtime(
 ) -> Result<TransitRouteResult> {
     let bundle = runtime.bundle;
     if request.time.arrive_by {
-        return Ok(TransitRouteResult {
-            route_id: request.route_id.clone(),
-            outcome: TransitOutcome::NotImplemented,
-            summary: TransitRouteSummary::default(),
-            legs: Vec::new(),
-            stops: Vec::new(),
-            stop_segments: Vec::new(),
-            diagnostics: vec![
-                "arrive_by transit searches are not implemented yet; use depart-after timing"
-                    .to_string(),
-            ],
-            alternatives: Vec::new(),
-        });
+        return execute_transit_route_arrive_by(runtime, request);
     }
     let access_modes = request.modes.validated_access_modes()?;
     let egress_modes = request.modes.validated_egress_modes()?;
 
-    let departure_s = runtime.request_departure_seconds(&request.time.datetime)?;
+    let departure_s = runtime.request_time_seconds(&request.time.datetime)?;
     let search_end_s = departure_s.saturating_add(request.time.search_window_s);
     let access = best_street_candidates(
         runtime,
@@ -549,7 +581,7 @@ fn select_transit_final_candidate(
     Ok(None)
 }
 
-fn unreachable_transit_route_diagnostic(
+pub(crate) fn unreachable_transit_route_diagnostic(
     request: &TransitRouteRequest,
     found_candidate: bool,
 ) -> String {
@@ -634,7 +666,7 @@ fn build_transit_alternatives(
     Ok(alternatives)
 }
 
-fn transit_leg_signature(legs: &[TransitLeg]) -> String {
+pub(crate) fn transit_leg_signature(legs: &[TransitLeg]) -> String {
     legs.iter()
         .map(|leg| {
             format!(

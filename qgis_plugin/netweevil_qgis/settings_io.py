@@ -46,6 +46,7 @@ class SettingsIoMixin:
             "transit_route_id": self.transit_route_id_edit.text().strip(),
             "transit_auto_increment": self.transit_auto_increment_check.isChecked(),
             "transit_datetime": self.transit_datetime_edit.text().strip(),
+            "transit_arrive_by": self.transit_arrive_by_check.isChecked(),
             "transit_search_window": self.transit_search_window_edit.text().strip(),
             "transit_output_path": self.transit_output_path_edit.text().strip(),
             "transit_request_path": self.transit_request_path_edit.text().strip(),
@@ -89,6 +90,7 @@ class SettingsIoMixin:
             "service_area_analysis_id": self.service_area_analysis_id_edit.text().strip(),
             "service_area_mode": self.service_area_mode_combo.currentData(),
             "service_area_transit_datetime": self.service_area_transit_datetime_edit.text().strip(),
+            "service_area_transit_arrive_by": self.service_area_transit_arrive_by_check.isChecked(),
             "service_area_transit_max_time": self.service_area_transit_max_time_edit.text().strip(),
             "service_area_access_mode": self.service_area_access_mode_combo.currentData(),
             "service_area_access_distance": self.service_area_access_distance_edit.text().strip(),
@@ -228,6 +230,10 @@ class SettingsIoMixin:
         self.transit_datetime_edit.setText(
             self.read_setting("transit_datetime", self.transit_datetime_edit.text())
         )
+        self.transit_arrive_by_check.setChecked(
+            self.read_bool_setting("transit_arrive_by", False)
+        )
+        self.update_transit_time_labels()
         self.transit_search_window_edit.setText(
             self.read_setting("transit_search_window", self.transit_search_window_edit.text())
         )
@@ -367,6 +373,10 @@ class SettingsIoMixin:
                 self.service_area_transit_datetime_edit.text(),
             )
         )
+        self.service_area_transit_arrive_by_check.setChecked(
+            self.read_bool_setting("service_area_transit_arrive_by", False)
+        )
+        self.update_service_area_transit_time_labels()
         self.service_area_transit_max_time_edit.setText(
             self.read_setting(
                 "service_area_transit_max_time",

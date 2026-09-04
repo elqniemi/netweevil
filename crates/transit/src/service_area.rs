@@ -3,6 +3,11 @@ use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use anyhow::{Result, bail};
 use rayon::prelude::*;
 
+use crate::backward::{
+    BackwardIndex, BackwardQueueEntry, BackwardStance, BackwardStateKey, BackwardStep,
+    arrivals_at_or_before, latest_trip_connection_into, relax_backward_state,
+    reverse_transfer_walks,
+};
 use crate::legs::{ShapePointIndexCache, seconds_for_distance, transit_connection_geometry_cached};
 use crate::model::{
     AccessMode, TransitBundle, TransitConnection, TransitOutcome, TransitPoint,
@@ -13,6 +18,34 @@ use crate::runtime::{
     PrevStep, QueueEntry, StateKey, StopSpatialIndex, TransitRuntime, best_street_candidates,
     build_departures_by_stop, build_transfer_candidates, can_start_transfer_walk, relax_state,
 };
+
+/// Time anchor a service area is measured against: the query departure for a
+/// depart-after sweep, or the arrival deadline for an arrive-by sweep. Both
+/// report the clock time at each stop plus the travel time between that stop
+/// and the anchor, so the result shape is identical.
+#[derive(Debug, Clone, Copy)]
+enum ServiceAreaAnchor {
+    DepartAfter { departure_s: u32 },
+    ArriveBy { deadline_s: u32 },
+}
+
+impl ServiceAreaAnchor {
+    fn travel_time_s(self, stop_time_s: u32) -> u32 {
+        match self {
+            Self::DepartAfter { departure_s } => stop_time_s.saturating_sub(departure_s),
+            Self::ArriveBy { deadline_s } => deadline_s.saturating_sub(stop_time_s),
+        }
+    }
+
+    /// Travel time attributed to a ridden connection: from the query anchor to
+    /// the connection's far end.
+    fn connection_travel_time_s(self, connection: TransitConnection) -> u32 {
+        match self {
+            Self::DepartAfter { .. } => self.travel_time_s(connection.arrival_s),
+            Self::ArriveBy { .. } => self.travel_time_s(connection.departure_s),
+        }
+    }
+}
 
 const STOPS_LIMIT_ADVICE: &str = "disable returns.include_stops, reduce max_travel_time_s/search_window_s, or raise returns.max_stops explicitly";
 const SEGMENTS_LIMIT_ADVICE: &str = "disable returns.include_stop_segments, reduce max_travel_time_s/search_window_s, or raise returns.max_stop_segments explicitly";
@@ -71,20 +104,7 @@ pub(crate) fn execute_transit_service_area_with_runtime(
     request: &TransitServiceAreaRequest,
 ) -> Result<TransitServiceAreaResult> {
     if request.time.arrive_by {
-        return Ok(TransitServiceAreaResult {
-            analysis_id: request.analysis_id.clone(),
-            outcome: TransitOutcome::NotImplemented,
-            origin_count: request.origins.len(),
-            processed_origin_count: 0,
-            skipped_origin_count: request.origins.len(),
-            max_travel_time_s: request.max_travel_time_s,
-            stops: Vec::new(),
-            stop_segments: Vec::new(),
-            diagnostics: vec![
-                "arrive_by transit service-area searches are not implemented yet; use depart-after timing"
-                    .to_string(),
-            ],
-        });
+        return execute_transit_service_area_arrive_by(runtime, request);
     }
     let access_modes = request.modes.validated_access_modes()?;
     let max_access_distance_m = access_modes
@@ -92,7 +112,7 @@ pub(crate) fn execute_transit_service_area_with_runtime(
         .map(|mode| mode.max_access_distance_m(&request.modes))
         .fold(0.0_f64, f64::max);
 
-    let departure_s = runtime.request_departure_seconds(&request.time.datetime)?;
+    let departure_s = runtime.request_time_seconds(&request.time.datetime)?;
     let search_end_s = departure_s.saturating_add(request.time.search_window_s);
     let time_limit_s = departure_s.saturating_add(request.max_travel_time_s);
     let origin_outputs = request
@@ -118,6 +138,76 @@ pub(crate) fn execute_transit_service_area_with_runtime(
         )
         .collect::<Result<Vec<_>>>()?;
 
+    assemble_transit_service_area_result(
+        runtime.bundle,
+        request,
+        ServiceAreaAnchor::DepartAfter { departure_s },
+        origin_outputs,
+    )
+}
+
+/// Latest-departure sweep: for every stop, the latest clock time at which a
+/// traveller can leave it and still reach one of the request's points by the
+/// deadline. Travel times are measured back from the deadline.
+fn execute_transit_service_area_arrive_by(
+    runtime: &TransitRuntime<'_>,
+    request: &TransitServiceAreaRequest,
+) -> Result<TransitServiceAreaResult> {
+    let egress_modes = request.modes.validated_egress_modes()?;
+    let max_egress_distance_m = egress_modes
+        .iter()
+        .map(|mode| mode.max_egress_distance_m(&request.modes))
+        .fold(0.0_f64, f64::max);
+
+    let deadline_s = runtime.request_time_seconds(&request.time.datetime)?;
+    let search_start_s = deadline_s.saturating_sub(request.time.search_window_s);
+    let time_floor_s = deadline_s.saturating_sub(request.max_travel_time_s);
+    let owned_index;
+    let index = match runtime.backward_index {
+        Some(index) => index,
+        None => {
+            owned_index = BackwardIndex::build(runtime.bundle, runtime.all_transfer_candidates());
+            &owned_index
+        }
+    };
+    let origin_outputs = request
+        .origins
+        .par_iter()
+        .enumerate()
+        .map_init(
+            BackwardOriginSearchScratch::default,
+            |scratch, (origin_index, origin)| {
+                search_service_area_target(
+                    runtime,
+                    index,
+                    request,
+                    &egress_modes,
+                    max_egress_distance_m,
+                    deadline_s,
+                    search_start_s,
+                    time_floor_s,
+                    origin_index,
+                    origin,
+                    scratch,
+                )
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
+
+    assemble_transit_service_area_result(
+        runtime.bundle,
+        request,
+        ServiceAreaAnchor::ArriveBy { deadline_s },
+        origin_outputs,
+    )
+}
+
+fn assemble_transit_service_area_result(
+    bundle: &TransitBundle,
+    request: &TransitServiceAreaRequest,
+    anchor: ServiceAreaAnchor,
+    origin_outputs: Vec<OriginSearchOutput>,
+) -> Result<TransitServiceAreaResult> {
     let mut all_stops = Vec::new();
     let mut all_segment_refs = Vec::new();
     let mut diagnostics = Vec::new();
@@ -150,12 +240,8 @@ pub(crate) fn execute_transit_service_area_with_runtime(
         }
     }
 
-    let all_segments = materialize_transit_service_area_segments(
-        runtime.bundle,
-        request,
-        departure_s,
-        all_segment_refs,
-    )?;
+    let all_segments =
+        materialize_transit_service_area_segments(bundle, request, anchor, all_segment_refs)?;
 
     let outcome = if processed_origin_count == 0 {
         TransitOutcome::Unreachable
@@ -448,6 +534,339 @@ fn search_service_area_origin(
     })
 }
 
+/// Backward search state reused across targets on the same rayon worker.
+#[derive(Default)]
+struct BackwardOriginSearchScratch {
+    heap: BinaryHeap<BackwardQueueEntry>,
+    best: HashMap<BackwardStateKey, u32>,
+    next: HashMap<BackwardStateKey, BackwardStep>,
+    seen_segment_refs: HashSet<TransitServiceAreaSegmentRef>,
+}
+
+impl BackwardOriginSearchScratch {
+    fn reset(&mut self) {
+        self.heap.clear();
+        self.best.clear();
+        self.next.clear();
+        self.seen_segment_refs.clear();
+    }
+}
+
+/// Latest-departure sweep towards one target point. Every settled state is the
+/// latest clock time at which the traveller can be at that stop and still
+/// reach the target by the deadline.
+#[allow(clippy::too_many_arguments)]
+fn search_service_area_target(
+    runtime: &TransitRuntime<'_>,
+    index: &BackwardIndex,
+    request: &TransitServiceAreaRequest,
+    egress_modes: &[AccessMode],
+    max_egress_distance_m: f64,
+    deadline_s: u32,
+    search_start_s: u32,
+    time_floor_s: u32,
+    origin_index: usize,
+    origin: &TransitPoint,
+    scratch: &mut BackwardOriginSearchScratch,
+) -> Result<OriginSearchOutput> {
+    let egress = best_street_candidates(
+        runtime,
+        origin.lon,
+        origin.lat,
+        egress_modes,
+        &request.modes,
+        true,
+    );
+    if egress.is_empty() {
+        return Ok(OriginSearchOutput {
+            skipped_diagnostic: Some(format!(
+                "origin '{}' had no transit stop within {:.0} m for egress modes {:?}",
+                origin.id,
+                max_egress_distance_m,
+                egress_modes
+                    .iter()
+                    .map(|mode| mode.label())
+                    .collect::<Vec<_>>()
+            )),
+            stops: Vec::new(),
+            segment_refs: Vec::new(),
+        });
+    }
+
+    scratch.reset();
+    let BackwardOriginSearchScratch {
+        heap,
+        best,
+        next,
+        seen_segment_refs,
+    } = scratch;
+    let mut segment_refs = Vec::new();
+
+    for candidate in egress {
+        let Some(time_s) = deadline_s.checked_sub(candidate.time_s) else {
+            continue;
+        };
+        if time_s < time_floor_s {
+            continue;
+        }
+        relax_backward_state(
+            heap,
+            best,
+            next,
+            BackwardStateKey {
+                stop_index: candidate.stop_index,
+                boardings: 0,
+                stance: BackwardStance::Alighted,
+            },
+            time_s,
+            BackwardStep::Egress {
+                time_s: candidate.time_s,
+                mode: candidate.mode,
+                // Service-area output does not materialize street paths; avoid
+                // retaining a potentially large path per reached state.
+                network_path: None,
+            },
+        );
+    }
+
+    while let Some(entry) = heap.pop() {
+        if best
+            .get(&entry.state)
+            .is_some_and(|known| *known > entry.time_s)
+        {
+            continue;
+        }
+        if entry.time_s < time_floor_s {
+            continue;
+        }
+
+        match entry.state.stance {
+            BackwardStance::OnFoot => {
+                for walk in reverse_transfer_walks(
+                    index,
+                    runtime.all_transfer_candidates(),
+                    entry.state.stop_index,
+                    request.modes.max_transfer_distance_m,
+                    request.modes.walk_speed_kph,
+                ) {
+                    if walk.from_stop_index == entry.state.stop_index {
+                        continue;
+                    }
+                    let Some(arrival_limit_s) = entry
+                        .time_s
+                        .checked_sub(walk.travel_time_s)
+                        .and_then(|time_s| time_s.checked_sub(request.modes.transfer_slack_s))
+                    else {
+                        continue;
+                    };
+                    if arrival_limit_s < time_floor_s {
+                        continue;
+                    }
+                    relax_backward_state(
+                        heap,
+                        best,
+                        next,
+                        BackwardStateKey {
+                            stop_index: walk.from_stop_index,
+                            boardings: entry.state.boardings,
+                            stance: BackwardStance::Alighted,
+                        },
+                        arrival_limit_s,
+                        BackwardStep::Transfer {
+                            next: entry.state,
+                            travel_time_s: walk.travel_time_s,
+                            network_path: None,
+                        },
+                    );
+                }
+            }
+            BackwardStance::Alighted => {
+                let boardings = entry.state.boardings.saturating_add(1);
+                if boardings > request.modes.max_transfers.saturating_add(1) {
+                    continue;
+                }
+                for connection in arrivals_at_or_before(
+                    index,
+                    runtime.bundle,
+                    entry.state.stop_index,
+                    entry.time_s,
+                ) {
+                    if connection.arrival_s < search_start_s || connection.arrival_s < time_floor_s
+                    {
+                        break;
+                    }
+                    if connection.departure_s < time_floor_s {
+                        continue;
+                    }
+                    if !runtime.allowed_routes[connection.route_index as usize] {
+                        continue;
+                    }
+                    ride_backward_in_service_area(
+                        request,
+                        heap,
+                        best,
+                        next,
+                        seen_segment_refs,
+                        &mut segment_refs,
+                        origin_index,
+                        *connection,
+                        boardings,
+                        entry.state,
+                    )?;
+                }
+            }
+            BackwardStance::Aboard(trip_index) => {
+                if let Some(board_time_s) = entry.time_s.checked_sub(request.modes.board_slack_s)
+                    && board_time_s >= time_floor_s
+                {
+                    for stance in [BackwardStance::OnFoot, BackwardStance::Alighted] {
+                        relax_backward_state(
+                            heap,
+                            best,
+                            next,
+                            BackwardStateKey {
+                                stop_index: entry.state.stop_index,
+                                boardings: entry.state.boardings,
+                                stance,
+                            },
+                            board_time_s,
+                            BackwardStep::Board { next: entry.state },
+                        );
+                    }
+                }
+                if let Some(connection) = latest_trip_connection_into(
+                    index,
+                    runtime.bundle,
+                    trip_index,
+                    entry.state.stop_index,
+                    entry.time_s,
+                ) && connection.arrival_s >= search_start_s
+                    && connection.departure_s >= time_floor_s
+                {
+                    ride_backward_in_service_area(
+                        request,
+                        heap,
+                        best,
+                        next,
+                        seen_segment_refs,
+                        &mut segment_refs,
+                        origin_index,
+                        *connection,
+                        entry.state.boardings,
+                        entry.state,
+                    )?;
+                }
+            }
+        }
+    }
+
+    let mut stops = Vec::new();
+    if request.returns.include_stops {
+        let mut stop_best = BTreeMap::<u32, (u32, u8, BackwardStateKey)>::new();
+        for (state, departure_s) in best.iter() {
+            let (state, departure_s) = (*state, *departure_s);
+            // On-board states sit a boarding slack ahead of the moment the
+            // traveller has to be at the stop; the foot and alighted states
+            // carry that reachable clock time.
+            if matches!(state.stance, BackwardStance::Aboard(_)) || departure_s < time_floor_s {
+                continue;
+            }
+            let entry =
+                stop_best
+                    .entry(state.stop_index)
+                    .or_insert((departure_s, state.boardings, state));
+            if departure_s > entry.0 || (departure_s == entry.0 && state.boardings < entry.1) {
+                *entry = (departure_s, state.boardings, state);
+            }
+        }
+        for (stop_index, (departure_s, boardings, state)) in stop_best {
+            let stop = &runtime.bundle.stops[stop_index as usize];
+            ensure_transit_service_area_output_room(
+                stops.len(),
+                request.returns.max_stops,
+                "stops",
+                STOPS_LIMIT_ADVICE,
+            )?;
+            stops.push(TransitServiceAreaStop {
+                origin_id: origin.id.clone(),
+                stop_id: stop.stop_id.clone(),
+                stop_name: stop.name.clone(),
+                lon: stop.lon,
+                lat: stop.lat,
+                arrival_s: departure_s,
+                travel_time_s: deadline_s.saturating_sub(departure_s),
+                boarding_count: boardings,
+                access_mode: egress_mode_for_state(next, state),
+            });
+        }
+    }
+
+    Ok(OriginSearchOutput {
+        skipped_diagnostic: None,
+        stops,
+        segment_refs,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ride_backward_in_service_area(
+    request: &TransitServiceAreaRequest,
+    heap: &mut BinaryHeap<BackwardQueueEntry>,
+    best: &mut HashMap<BackwardStateKey, u32>,
+    next: &mut HashMap<BackwardStateKey, BackwardStep>,
+    seen_segment_refs: &mut HashSet<TransitServiceAreaSegmentRef>,
+    segment_refs: &mut Vec<TransitServiceAreaSegmentRef>,
+    origin_index: usize,
+    connection: TransitConnection,
+    boardings: u8,
+    from_state: BackwardStateKey,
+) -> Result<()> {
+    let next_state = BackwardStateKey {
+        stop_index: connection.from_stop_index,
+        boardings,
+        stance: BackwardStance::Aboard(connection.trip_index),
+    };
+    if best
+        .get(&next_state)
+        .is_some_and(|known| connection.departure_s <= *known)
+    {
+        return Ok(());
+    }
+    relax_backward_state(
+        heap,
+        best,
+        next,
+        next_state,
+        connection.departure_s,
+        BackwardStep::Ride {
+            connection,
+            next: from_state,
+        },
+    );
+    if request.returns.include_stop_segments {
+        let segment_ref = TransitServiceAreaSegmentRef {
+            origin_index,
+            trip_index: connection.trip_index,
+            route_index: connection.route_index,
+            from_stop_index: connection.from_stop_index,
+            to_stop_index: connection.to_stop_index,
+            connection_departure_s: connection.departure_s,
+            connection_arrival_s: connection.arrival_s,
+            boarding_count: boardings,
+        };
+        if seen_segment_refs.insert(segment_ref) {
+            ensure_transit_service_area_output_room(
+                segment_refs.len(),
+                request.returns.max_stop_segments,
+                "stop segments",
+                SEGMENTS_LIMIT_ADVICE,
+            )?;
+            segment_refs.push(segment_ref);
+        }
+    }
+    Ok(())
+}
+
 fn ensure_transit_service_area_output_room(
     current_len: usize,
     max_len: usize,
@@ -468,7 +887,7 @@ fn ensure_transit_service_area_output_room(
 fn materialize_transit_service_area_segments(
     bundle: &TransitBundle,
     request: &TransitServiceAreaRequest,
-    query_departure_s: u32,
+    anchor: ServiceAreaAnchor,
     segment_refs: Vec<TransitServiceAreaSegmentRef>,
 ) -> Result<Vec<TransitServiceAreaSegment>> {
     if !request.returns.include_stop_segments {
@@ -483,7 +902,7 @@ fn materialize_transit_service_area_segments(
         let segment = transit_service_area_segment(
             bundle,
             origin,
-            query_departure_s,
+            anchor,
             segment_ref.boarding_count,
             segment_ref.connection(),
             request.returns.include_geometry,
@@ -516,10 +935,25 @@ fn access_mode_for_state(
     }
 }
 
+/// Street mode of the egress leg that finishes the journey at the target.
+fn egress_mode_for_state(
+    next: &HashMap<BackwardStateKey, BackwardStep>,
+    mut state: BackwardStateKey,
+) -> Option<AccessMode> {
+    loop {
+        match next.get(&state)? {
+            BackwardStep::Egress { mode, .. } => return Some(*mode),
+            BackwardStep::Board { next } => state = *next,
+            BackwardStep::Ride { next, .. } => state = *next,
+            BackwardStep::Transfer { next, .. } => state = *next,
+        }
+    }
+}
+
 fn transit_service_area_segment(
     bundle: &TransitBundle,
     origin: &TransitPoint,
-    departure_s: u32,
+    anchor: ServiceAreaAnchor,
     boarding_count: u8,
     connection: TransitConnection,
     include_geometry: bool,
@@ -538,7 +972,7 @@ fn transit_service_area_segment(
         departure_s: connection.departure_s,
         arrival_s: connection.arrival_s,
         duration_s: connection.arrival_s.saturating_sub(connection.departure_s),
-        travel_time_s: connection.arrival_s.saturating_sub(departure_s),
+        travel_time_s: anchor.connection_travel_time_s(connection),
         boarding_count,
         mode: Some(route.mode),
         route_id: Some(route.route_id.clone()),
