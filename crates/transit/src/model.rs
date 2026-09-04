@@ -506,7 +506,7 @@ pub struct TransitModeOptions {
     #[serde(default = "default_transfer_distance_m")]
     pub max_transfer_distance_m: f64,
     /// Selects a precomputed, profile-specific network transfer table. When
-    /// absent, the legacy straight-line transfer expansion remains active.
+    /// absent, transfers use straight-line walking distances.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transfer_profile_id: Option<String>,
     #[serde(default = "default_board_slack_s")]
