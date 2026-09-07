@@ -502,6 +502,12 @@ Route request shape:
 }
 ```
 
+Street-route requests can also supply `profile_overrides` alongside `profile_id`,
+or an inline `profile` document. The API compiles and caches these profiles in
+memory on first use. Requests selecting a prepared profile keep the existing
+fast path. See [request-defined profiles](docs/request-profiles.md) for request
+examples, cache limits, cold preparation costs and benchmarking.
+
 Performance notes:
 
 - JSON is the warmest response path.

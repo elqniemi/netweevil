@@ -1308,6 +1308,7 @@ dependencies = [
  "netweevil-query",
  "netweevil-simulate",
  "netweevil-transit",
+ "rayon",
  "serde",
  "serde_json",
  "tokio",

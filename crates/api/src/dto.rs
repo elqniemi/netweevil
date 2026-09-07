@@ -90,7 +90,19 @@ pub(crate) struct ProfiledRequest<T> {
     pub(crate) request: T,
 }
 
-pub(crate) type RouteExecutionRequest = EngineModeRequest<RouteRequest>;
+/// Request-defined profiles are currently supported only by street routes.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RouteExecutionRequest {
+    #[serde(default)]
+    pub(crate) profile_id: Option<String>,
+    #[serde(default)]
+    pub(crate) profile: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) profile_overrides: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) engine_mode: EngineMode,
+    pub(crate) request: RouteRequest,
+}
 pub(crate) type OdExecutionRequest = EngineModeRequest<OdPairsDocument>;
 pub(crate) type MatrixExecutionRequest = EngineModeRequest<MatrixRequest>;
 pub(crate) type AccessibilityExecutionRequest = EngineModeRequest<AccessibilityRequest>;

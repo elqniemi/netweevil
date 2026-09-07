@@ -14,6 +14,7 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 
 mod dto;
+mod dynamic_profiles;
 mod error;
 mod geojson;
 mod handlers;

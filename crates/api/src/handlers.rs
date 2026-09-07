@@ -25,6 +25,7 @@ use crate::dto::{
     ServiceAreaExecutionRequest, ServiceAreaSequenceExecutionRequest, ServiceInfoResponse,
     TransitFeedInfo,
 };
+use crate::dynamic_profiles::resolve_dynamic_profile;
 use crate::error::ApiError;
 use crate::geojson::{
     betweenness_result_geojson, geojson_response, matrix_result_geojson, od_result_geojson,
@@ -107,10 +108,27 @@ pub(crate) async fn route_handler(
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<RouteExecutionRequest>,
 ) -> Result<Response, ApiError> {
-    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let dynamic = if payload.profile.is_some() || payload.profile_overrides.is_some() {
+        Some(
+            resolve_dynamic_profile(
+                Arc::clone(&state.service),
+                payload.profile_id.as_deref(),
+                payload.profile,
+                payload.profile_overrides,
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let engine = if let Some(dynamic) = &dynamic {
+        Arc::clone(&dynamic.engine)
+    } else {
+        Arc::clone(&resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?.engine)
+    };
     info!(
         endpoint = "route",
-        profile_id = %profile.document.profile.id,
+        profile_id = %engine.metrics().profile_id,
         route_id = %payload.request.route_id,
         engine_mode = ?payload.engine_mode,
         format = query.format.as_deref().unwrap_or("json"),
@@ -121,11 +139,15 @@ pub(crate) async fn route_handler(
     if wants_geojson(&query) {
         request.returns.geometry = ReturnGeometry::Full;
     }
-    let effective_engine = profile
-        .engine
-        .effective_route_engine_description(&request, engine_mode);
-    let service = execution_context(state.service.as_ref(), profile, effective_engine);
-    let engine = Arc::clone(&profile.engine);
+    let effective_engine = engine.effective_route_engine_description(&request, engine_mode);
+    let service = ExecutionContext {
+        dataset_id: state.service.dataset_manifest.dataset_id.0.clone(),
+        profile_id: engine.metrics().profile_id.clone(),
+        profile_hash: engine.metrics().profile_hash.clone(),
+        route_engine: effective_engine.route_engine.to_string(),
+        batch_engine: effective_engine.batch_engine.to_string(),
+        acceleration: effective_engine.acceleration.to_string(),
+    };
     let route_id = request.route_id.clone();
     let edge_names = if request.returns.segment_rows {
         load_edge_names(state.service.as_ref())?
@@ -148,9 +170,20 @@ pub(crate) async fn route_handler(
         segments = result.summary.segment_count,
         "response"
     );
-    analysis_response(&query, service, result, |context, result| {
+    let mut response = analysis_response(&query, service, result, |context, result| {
         route_result_geojson(state.service.as_ref(), context, result)
-    })
+    })?;
+    if let Some(dynamic) = dynamic {
+        response.headers_mut().insert(
+            "x-netweevil-profile-cache",
+            dynamic.cache_status.parse().unwrap(),
+        );
+        response.headers_mut().insert(
+            "x-netweevil-profile-prepare-ms",
+            format!("{:.3}", dynamic.prepare_ms).parse().unwrap(),
+        );
+    }
+    Ok(response)
 }
 
 pub(crate) async fn od_handler(

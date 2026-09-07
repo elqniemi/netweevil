@@ -20,6 +20,7 @@ netweevil-profile = { path = "../profile" }
 netweevil-query = { path = "../query" }
 netweevil-simulate = { path = "../simulate" }
 netweevil-transit = { path = "../transit" }
+rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

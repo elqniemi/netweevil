@@ -20,6 +20,7 @@ use serde::Serialize;
 use tokio::sync::Semaphore;
 use tracing::info;
 
+use crate::dynamic_profiles::DynamicProfileCache;
 use crate::error::ApiError;
 use crate::simulation::SimulationRegistry;
 
@@ -46,6 +47,7 @@ pub(crate) struct ServiceRuntime {
     pub(crate) routing_workers: Arc<Semaphore>,
     pub(crate) default_profile_id: String,
     pub(crate) profiles: BTreeMap<String, LoadedProfile>,
+    pub(crate) dynamic_profiles: DynamicProfileCache,
     pub(crate) transit_feeds: BTreeMap<String, LoadedTransitFeed>,
     pub(crate) capabilities: ServiceCapabilities,
     pub(crate) engine: EngineDescription,
@@ -56,6 +58,7 @@ pub(crate) struct LoadedProfile {
     pub(crate) document: ProfileDocument,
     pub(crate) manifest: CompiledProfileManifest,
     pub(crate) engine: Arc<PreparedRoutingEngine>,
+    pub(crate) dataset_acceleration: Option<Arc<DatasetAccelerationBundle>>,
 }
 
 pub(crate) struct LoadedTransitFeed {
@@ -277,6 +280,7 @@ pub(crate) fn load_service_runtime(
         routing_workers,
         default_profile_id,
         profiles: loaded_profiles,
+        dynamic_profiles: DynamicProfileCache::from_env()?,
         transit_feeds: loaded_transit_feeds,
         capabilities: service_capabilities(),
         engine,
@@ -371,13 +375,17 @@ fn load_or_compile_profile(
     };
 
     let engine = Arc::new(
-        PreparedRoutingEngine::new(topology, Arc::new(compiled_bundle), dataset_acceleration)
-            .with_context(|| {
-                format!(
-                    "preparing in-memory routing engine for profile '{}'",
-                    document.profile.id
-                )
-            })?,
+        PreparedRoutingEngine::new(
+            topology,
+            Arc::new(compiled_bundle),
+            dataset_acceleration.clone(),
+        )
+        .with_context(|| {
+            format!(
+                "preparing in-memory routing engine for profile '{}'",
+                document.profile.id
+            )
+        })?,
     );
 
     Ok(LoadedProfile {
@@ -385,6 +393,7 @@ fn load_or_compile_profile(
         document,
         manifest,
         engine,
+        dataset_acceleration,
     })
 }
 
@@ -465,6 +474,58 @@ pub(crate) fn engine_description(topology: &TopologyBundle) -> EngineDescription
             acceleration: "spatial_index+edge_phantoms",
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn test_service(
+    topology: TopologyBundle,
+    document: ProfileDocument,
+) -> Arc<ServiceRuntime> {
+    let topology = Arc::new(topology);
+    let metrics = netweevil_profile::compile_profile_bundle(
+        &document,
+        &topology,
+        CacheBundleId::new("test-topology"),
+    )
+    .unwrap();
+    let profile_id = document.profile.id.clone();
+    let profile_hash = document.fingerprint().unwrap();
+    let engine = Arc::new(
+        PreparedRoutingEngine::new(Arc::clone(&topology), Arc::new(metrics), None).unwrap(),
+    );
+    Arc::new(ServiceRuntime {
+        workspace_root: PathBuf::new(),
+        dataset_manifest: serde_json::from_value(serde_json::json!({
+            "dataset_id": "test", "label": "test", "source_path": "test",
+            "source_sha256": "test", "source_size_bytes": 0,
+            "imported_at": "test", "build_stage": "topology_ready",
+            "topology_bundle": {"bundle_id": "test-topology", "path": "unused"}
+        }))
+        .unwrap(),
+        engine: engine_description(&topology),
+        topology,
+        edge_names: OnceLock::new(),
+        routing_workers: Arc::new(Semaphore::new(1)),
+        default_profile_id: profile_id.clone(),
+        profiles: BTreeMap::from([(
+            profile_id.clone(),
+            LoadedProfile {
+                source_path: PathBuf::new(),
+                document,
+                manifest: serde_json::from_value(serde_json::json!({
+                    "compile_id": "test", "dataset_id": "test", "profile_id": profile_id,
+                    "profile_hash": profile_hash, "defaults_pack": "test", "mode": "car",
+                    "created_at": "test", "bundle": {"bundle_id": "test", "path": "unused"}
+                }))
+                .unwrap(),
+                engine,
+                dataset_acceleration: None,
+            },
+        )]),
+        dynamic_profiles: DynamicProfileCache::from_env().unwrap(),
+        transit_feeds: BTreeMap::new(),
+        capabilities: service_capabilities(),
+    })
 }
 
 #[cfg(test)]

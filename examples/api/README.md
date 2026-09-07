@@ -1,5 +1,11 @@
 # Netweevil API Examples
 
+`route_profile_overrides.json` demonstrates request-defined street routing on
+the North Netherlands dataset. Send it to `/v1/route`; the first request compiles
+the effective profile and subsequent identical profiles reuse the cached engine.
+See [request-defined profiles](../../docs/request-profiles.md) for merge semantics
+and inline profiles.
+
 ## Groningen Batch Examples
 
 These Groningen examples target:
