@@ -175,8 +175,8 @@ pub(crate) fn route_between_candidates(
                             // The customized weights already carry the
                             // pairwise failure penalties (customization is
                             // only attached for pairwise-only datasets), so
-                            // the hierarchy query is exact here without an
-                            // automaton pass.
+                            // hierarchy query minimizes the quantized metric
+                            // without an automaton pass.
                             accelerated_route_query_seeded(
                                 topology,
                                 routing_graph,
@@ -196,11 +196,10 @@ pub(crate) fn route_between_candidates(
                             )?
                         }
                     } else {
-                        // The CCH (when present) and the bidirectional search
-                        // both ignore multi-edge restriction sequences, so the
-                        // candidate is a lower bound: if it happens to respect
-                        // the sequences it is also feasible and therefore
-                        // optimal; otherwise the automaton search decides.
+                        // Both searches ignore multi-edge restrictions. A
+                        // legal candidate is optimal under the search metric,
+                        // which is quantized when CCH is active. An illegal
+                        // candidate requires the automaton search.
                         let pairwise_candidate = if routing_graph.acceleration.is_some() {
                             accelerated_route_query_seeded(
                                 topology,
@@ -240,8 +239,8 @@ pub(crate) fn route_between_candidates(
                         }
                     }
                 } else if routing_graph.acceleration.is_some() {
-                    // The complete CCH query is exact on its own; no
-                    // follow-up search on the base graph is needed.
+                    // The CCH query minimizes the quantized metric without
+                    // a follow-up search on the base graph.
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);
                     let destination_seeds = destination_edge_seeds(routing_graph, destination);
                     accelerated_route_query_seeded(

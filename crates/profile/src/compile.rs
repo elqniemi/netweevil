@@ -1,3 +1,6 @@
+use netweevil_core::{
+    CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, add_cch_weights, encode_cch_weight,
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use anyhow::Result;
@@ -5,8 +8,7 @@ use netweevil_core::{
     COMPILED_ACCELERATION_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId,
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
     CompiledTemporalProfile, CompiledTurnCostConfig, DatasetAccelerationBundle,
-    EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, NO_FEATURE_ROW, NO_MIDDLE, RoadClass,
-    TopologyBundle,
+    EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, NO_FEATURE_ROW, RoadClass, TopologyBundle,
 };
 
 use crate::components::{ParsedCostComponent, parse_component_expression};
@@ -390,8 +392,7 @@ fn build_attribute_match_cache(
 /// turn-adjusted transition cost, then replays the elimination order: for
 /// every state `v` (in contraction order) and every arc pair `x -> v`,
 /// `v -> y` with higher-ranked endpoints, relaxes `w(x -> y)` through the
-/// lower triangle. Improvements record `v` as the arc's middle for
-/// query-time path unpacking. Processing middles in increasing rank
+/// lower triangle. Processing states in increasing rank
 /// guarantees child arc weights are final before any triangle uses them.
 fn compile_acceleration_with_progress(
     bundle: &DatasetAccelerationBundle,
@@ -408,29 +409,21 @@ fn compile_acceleration_with_progress(
         .last()
         .copied()
         .unwrap_or_default() as usize;
-    let mut upward_weight = vec![f64::INFINITY; upward_len];
-    let mut upward_middle = vec![NO_MIDDLE; upward_len];
-    let mut downward_weight = vec![f64::INFINITY; downward_len];
-    let mut downward_middle = vec![NO_MIDDLE; downward_len];
+    let mut upward_weight = vec![CCH_WEIGHT_INFINITY; upward_len];
+    let mut downward_weight = vec![CCH_WEIGHT_INFINITY; downward_len];
 
-    let result_template = |upward_weight: Vec<f64>,
-                           upward_middle: Vec<u32>,
-                           downward_weight: Vec<f64>,
-                           downward_middle: Vec<u32>| {
-        CompiledAcceleration {
+    let result_template =
+        |upward_weight: Vec<u32>, downward_weight: Vec<u32>| CompiledAcceleration {
             schema_version: COMPILED_ACCELERATION_SCHEMA_VERSION,
             source_acceleration_bundle_id: source_acceleration_bundle_id.clone(),
             algorithm: bundle.algorithm.clone(),
             upward_weight,
-            upward_middle,
             downward_weight,
-            downward_middle,
             time_upward_weight: Vec::new(),
             time_downward_weight: Vec::new(),
             distance_upward_weight: Vec::new(),
             distance_downward_weight: Vec::new(),
-        }
-    };
+        };
 
     let transition_topology = &topology.edge_based_topology;
     if bundle.upward_first_out.len() != edge_count + 1
@@ -441,12 +434,7 @@ fn compile_acceleration_with_progress(
     {
         // Shape mismatch: emit empty weights; engine preparation rejects the
         // bundle with a re-import error instead of silently degrading.
-        return result_template(
-            upward_weight,
-            upward_middle,
-            downward_weight,
-            downward_middle,
-        );
+        return result_template(upward_weight, downward_weight);
     }
 
     emit_compile_progress(
@@ -519,7 +507,7 @@ fn compile_acceleration_with_progress(
                     edge_index,
                     next_edge,
                 ) {
-                    upward_weight[slot] = upward_weight[slot].min(weight);
+                    upward_weight[slot] = upward_weight[slot].min(encode_cch_weight(weight));
                 }
             } else if let Some(slot) = find_arc(
                 &bundle.downward_first_out,
@@ -527,7 +515,7 @@ fn compile_acceleration_with_progress(
                 edge_index,
                 next_edge,
             ) {
-                downward_weight[slot] = downward_weight[slot].min(weight);
+                downward_weight[slot] = downward_weight[slot].min(encode_cch_weight(weight));
             }
         }
     }
@@ -566,7 +554,7 @@ fn compile_acceleration_with_progress(
         for reverse_slot in incoming_range {
             let incoming_arc = reverse_downward_arc[reverse_slot] as usize;
             let incoming_weight = downward_weight[incoming_arc];
-            if !incoming_weight.is_finite() {
+            if incoming_weight == CCH_WEIGHT_INFINITY {
                 continue;
             }
             let tail = downward_tail[incoming_arc] as usize;
@@ -576,17 +564,16 @@ fn compile_acceleration_with_progress(
                     continue;
                 }
                 let outgoing_weight = upward_weight[outgoing_arc];
-                if !outgoing_weight.is_finite() {
+                if outgoing_weight == CCH_WEIGHT_INFINITY {
                     continue;
                 }
-                let candidate = incoming_weight + outgoing_weight;
+                let candidate = add_cch_weights(incoming_weight, outgoing_weight);
                 if edge_rank[tail] < edge_rank[head as usize] {
                     if let Some(slot) =
                         find_arc(&bundle.upward_first_out, &bundle.upward_head, tail, head)
                         && candidate < upward_weight[slot]
                     {
                         upward_weight[slot] = candidate;
-                        upward_middle[slot] = middle;
                     }
                 } else if let Some(slot) = find_arc(
                     &bundle.downward_first_out,
@@ -596,7 +583,6 @@ fn compile_acceleration_with_progress(
                 ) && candidate < downward_weight[slot]
                 {
                     downward_weight[slot] = candidate;
-                    downward_middle[slot] = middle;
                 }
             }
         }
@@ -621,15 +607,14 @@ fn compile_acceleration_with_progress(
         format!("Customizing CCH 100% (upward {upward_len} arcs, downward {downward_len} arcs)"),
     );
 
-    // Per-metric weight sets over the same arcs, for exact one-to-all
-    // sweeps on time- and distance-limited isochrones. Middles are not
-    // recorded: isochrones need distances, not unpacked paths. Both runs
+    // Per-metric weight sets over the same arcs, for fixed-point one-to-all
+    // sweeps on time- and distance-limited isochrones. Both runs
     // are independent of the generalized-cost weights, so they customize in
     // parallel.
     let customize_metric =
-        |base_weight: &(dyn Fn(usize, usize) -> f64 + Sync)| -> (Vec<f64>, Vec<f64>) {
-            let mut metric_upward = vec![f64::INFINITY; upward_len];
-            let mut metric_downward = vec![f64::INFINITY; downward_len];
+        |base_weight: &(dyn Fn(usize, usize) -> f64 + Sync)| -> (Vec<u32>, Vec<u32>) {
+            let mut metric_upward = vec![CCH_WEIGHT_INFINITY; upward_len];
+            let mut metric_downward = vec![CCH_WEIGHT_INFINITY; downward_len];
             for edge_index in 0..edge_count {
                 if edge_metrics[edge_index].generalized_cost.is_none()
                     || topology.routing_edge(edge_index).flags
@@ -669,7 +654,8 @@ fn compile_acceleration_with_progress(
                             edge_index,
                             next_edge,
                         ) {
-                            metric_upward[slot] = metric_upward[slot].min(weight);
+                            metric_upward[slot] =
+                                metric_upward[slot].min(encode_cch_weight(weight));
                         }
                     } else if let Some(slot) = find_arc(
                         &bundle.downward_first_out,
@@ -677,7 +663,8 @@ fn compile_acceleration_with_progress(
                         edge_index,
                         next_edge,
                     ) {
-                        metric_downward[slot] = metric_downward[slot].min(weight);
+                        metric_downward[slot] =
+                            metric_downward[slot].min(encode_cch_weight(weight));
                     }
                 }
             }
@@ -690,7 +677,7 @@ fn compile_acceleration_with_progress(
                 for reverse_slot in incoming_range {
                     let incoming_arc = reverse_downward_arc[reverse_slot] as usize;
                     let incoming_weight = metric_downward[incoming_arc];
-                    if !incoming_weight.is_finite() {
+                    if incoming_weight == CCH_WEIGHT_INFINITY {
                         continue;
                     }
                     let tail = downward_tail[incoming_arc] as usize;
@@ -700,10 +687,10 @@ fn compile_acceleration_with_progress(
                             continue;
                         }
                         let outgoing_weight = metric_upward[outgoing_arc];
-                        if !outgoing_weight.is_finite() {
+                        if outgoing_weight == CCH_WEIGHT_INFINITY {
                             continue;
                         }
-                        let candidate = incoming_weight + outgoing_weight;
+                        let candidate = add_cch_weights(incoming_weight, outgoing_weight);
                         if edge_rank[tail] < edge_rank[head as usize] {
                             if let Some(slot) =
                                 find_arc(&bundle.upward_first_out, &bundle.upward_head, tail, head)
@@ -723,7 +710,13 @@ fn compile_acceleration_with_progress(
                     }
                 }
             }
-            (metric_upward, metric_downward)
+            if metric_upward.contains(&CCH_WEIGHT_OVERFLOW)
+                || metric_downward.contains(&CCH_WEIGHT_OVERFLOW)
+            {
+                (Vec::new(), Vec::new())
+            } else {
+                (metric_upward, metric_downward)
+            }
         };
 
     let time_weight = |edge_index: usize, next_index: usize| -> f64 {
@@ -759,9 +752,7 @@ fn compile_acceleration_with_progress(
         source_acceleration_bundle_id,
         algorithm: bundle.algorithm.clone(),
         upward_weight,
-        upward_middle,
         downward_weight,
-        downward_middle,
         time_upward_weight,
         time_downward_weight,
         distance_upward_weight,
@@ -1326,17 +1317,15 @@ temporal:
             "accel-test"
         );
         assert_eq!(compiled_acceleration.upward_weight.len(), 1);
-        assert!(compiled_acceleration.upward_weight[0].is_finite());
-        assert_eq!(
-            compiled_acceleration.upward_middle,
-            vec![netweevil_core::NO_MIDDLE]
-        );
+        assert!(compiled_acceleration.upward_weight[0] < netweevil_core::CCH_WEIGHT_OVERFLOW);
         assert!(compiled_acceleration.downward_weight.is_empty());
         // Per-metric weight sets align with the same arcs.
         assert_eq!(compiled_acceleration.time_upward_weight.len(), 1);
-        assert!(compiled_acceleration.time_upward_weight[0].is_finite());
+        assert!(compiled_acceleration.time_upward_weight[0] < netweevil_core::CCH_WEIGHT_OVERFLOW);
         assert_eq!(compiled_acceleration.distance_upward_weight.len(), 1);
-        assert!(compiled_acceleration.distance_upward_weight[0].is_finite());
+        assert!(
+            compiled_acceleration.distance_upward_weight[0] < netweevil_core::CCH_WEIGHT_OVERFLOW
+        );
         assert!(compiled_acceleration.time_downward_weight.is_empty());
         assert!(compiled_acceleration.distance_downward_weight.is_empty());
 
@@ -1351,9 +1340,11 @@ temporal:
         .expect("temporal-only edge still compiles for exact temporal routing");
         assert!(compiled.edge_metrics[1].generalized_cost.is_some());
         let static_acceleration = compiled.acceleration.expect("acceleration compiled");
-        assert!(static_acceleration.upward_weight[0].is_infinite());
-        assert!(static_acceleration.time_upward_weight[0].is_infinite());
-        assert!(static_acceleration.distance_upward_weight[0].is_infinite());
+        assert!(static_acceleration.upward_weight[0] == netweevil_core::CCH_WEIGHT_INFINITY);
+        assert!(static_acceleration.time_upward_weight[0] == netweevil_core::CCH_WEIGHT_INFINITY);
+        assert!(
+            static_acceleration.distance_upward_weight[0] == netweevil_core::CCH_WEIGHT_INFINITY
+        );
     }
 
     fn tag_match<const N: usize>(pairs: [(&str, &str); N]) -> TagMatch {

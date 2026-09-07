@@ -1,75 +1,70 @@
-# CCH Routing Accelerator — Design
+# CCH routing accelerator
 
-Netweevil's primary route accelerator is an edge-based Customizable Contraction
-Hierarchy (CCH). The dataset-level preprocessing is metric independent; each
-compiled profile customizes arc weights without rebuilding topology.
+NetWeevil uses an edge-based Customizable Contraction Hierarchy. Dataset
+preprocessing depends on legal transitions; profile compilation customizes
+weights without rebuilding the hierarchy.
 
-## Why the previous accelerator was replaced
+## Dataset build
 
-The previous "shortcut CH" build (`edge_based_shortcut_ch_v1`) capped shortcut
-insertion with budgets (`max_shortcut_budget_per_edge`,
-`max_shortcuts_per_contracted_edge`, `max_shortcut_path_len`). A capped
-elimination is not a valid hierarchy: queries over it return upper bounds only,
-so every route still had to run a full exact search seeded with that bound.
-Customization also walked each arc's frozen full base-edge path, which is slow
-and does not yield the minimum over decompositions under the active profile.
+Hierarchy vertices are directed road-edge states. Its base arcs are legal
+edge-to-edge transitions, including permitted u-turns.
 
-## Structure
+Nested dissection partitions the undirected edge-transition graph. Recursive
+partitions place separator states last; minimum-degree elimination orders
+small leaves. The directed elimination game then contracts states in rank
+order. Contracting `v` inserts `x -> y` for every `x -> v -> y` whose endpoints
+outrank `v`, excluding `x == y`. It deduplicates arcs without an insertion
+budget. Keeping every required shortcut preserves shortest paths under any
+supported nonnegative profile metric.
 
-Vertices of the hierarchy are directed edge states (edge-based routing), arcs
-are legal edge-to-edge transitions plus shortcuts.
+The dataset bundle stores edge order and rank, and upward and downward CSR
+adjacency sorted by head id. It stores no expanded shortcut paths.
 
-### Dataset build (metric independent, once per dataset)
+## Profile customization
 
-1. Order edge states by recursive geometric bisection (nested-dissection
-   style): recurse on halves, emit separator states last. Rank = position in
-   this order.
-2. Elimination game, processing states in rank order, with NO budgets:
-   contracting state `v` adds shortcut `x -> y` for every incoming arc
-   `x -> v` and outgoing arc `v -> y` with `rank(x), rank(y) > rank(v)`,
-   `x != y`, deduplicated by `(tail, head)`. Completeness of this step is what
-   makes the hierarchy query exact on its own.
-3. Persist (schema v3, algorithm `edge_based_cch_v2`): `edge_order`,
-   `edge_rank`, upward CSR (`tail rank < head rank`) and downward CSR
-   (`tail rank > head rank`), adjacency sorted by head id for binary-search
-   lookup. No path expansions are stored.
+Base arcs receive the cost of the head edge plus the transition penalty.
+Forbidden transitions and shortcuts without a reachable decomposition start
+at infinity. Basic customization processes states in increasing rank and
+relaxes each lower triangle, `w(x -> y) = min(w(x -> y), w(x -> v) + w(v -> y))`.
+Both child weights are final before their triangle is visited.
 
-### Profile customization (per compiled profile)
+Each arc has three `u32` weights for generalized cost, travel time, and
+distance, totaling 12 bytes. This figure excludes dataset adjacency and
+per-edge profile data. A weight unit is 1/1024 of the metric unit. Base
+transition costs round to the nearest unit. Infinity and finite overflow have
+distinct sentinel values; overflow cannot turn a reachable route into an
+unreachable one. Metrics that cannot be represented use exact routing.
 
-1. Initialize: arcs that correspond to real base transitions get the
-   turn-adjusted transition cost (head-edge generalized cost + turn penalty,
-   `inf` when forbidden); pure shortcuts start at `inf`.
-2. Basic customization, replaying the elimination order: for each state `v` in
-   rank order, for each arc pair (`x -> v`, `v -> y`) with higher-ranked
-   `x, y`: relax `w(x -> y) <= w(x -> v) + w(v -> y)`. When a relaxation
-   improves an arc, record `middle = v` for unpacking.
-3. Persist per-profile `upward_weight`, `downward_weight`, `upward_middle`,
-   `downward_middle` (sentinel `u32::MAX` = base transition).
+For a path with `n` transitions, the rounding error is at most `n/2048`
+metric units. Quantization can change the selected route when alternatives
+are close. If the selected and exact-optimal paths contain `n` and `m`
+transitions, the selected path's excess original cost is bounded by
+`(n + m)/2048`, with endpoint costs held fixed. Public route summaries compute
+costs from the reconstructed road edges and original profile metrics.
+Service-area labels inherit the same error bound, so threshold membership can
+differ for edges within that bound of the cutoff.
 
-Processing middles in increasing rank guarantees both child arcs have final
-weights before any triangle that uses them is relaxed.
+## Queries and reconstruction
 
-### Query
+Forward search follows upward arcs from origin seeds. Backward search follows
+reversed downward arcs from destination seeds. Each direction stops when its
+own queue minimum reaches the best complete cost. A sum of the two queue
+minima is not a valid stopping criterion because the searches use different
+arc sets. Snapped edge-interior endpoints enter as partial-edge seeds.
 
-Bidirectional search: forward relaxes upward arcs from the origin seeds,
-backward relaxes downward arcs toward the destination seeds (via the reverse
-downward CSR). Termination is per direction: a direction stops only when its
-queue minimum is `>= best`. The sum rule (`topF + topB >= best`) is NOT valid
-for hierarchy searches because the two directions explore different arc sets,
-so a meeting arc is never relaxed from both sides.
+Reconstruction finds a lower triangle whose integer child weights sum to the
+parent weight, then expands its children. Decreasing middle rank guarantees
+termination, including for zero-cost transitions. An arc without a matching
+lower triangle unpacks to a base transition. No middle-state arrays or full
+shortcut expansions are persisted.
 
-Snapped endpoints in edge interiors enter as seeds with partial-edge costs.
-Path unpacking is recursive through `middle` pointers down to base
-transitions; child arcs are located by binary search in the sorted CSR rows.
+The exact engine is the differential-test reference and handles unsupported
+acceleration cases, including multi-edge restriction automata and metric
+overflow. A hierarchy query optimizes the quantized metric; it does not run an
+exact search afterward.
 
-The CCH result is authoritative: no exact re-search runs after it. The exact
-engine remains the differential-test oracle and the fallback when a profile
-activates multi-edge restriction automata (which the CCH does not model) or
-when a dataset has no acceleration bundle.
+## Bundle validation
 
-## Compatibility
-
-Datasets imported with the previous algorithm fail to load with a clear
-"re-import this dataset" error, consistent with previous bundle format
-migrations. Compiled profiles are validated against the dataset acceleration
-bundle id and recompile automatically when stale.
+Readers require the current bundle format and schema. Unsupported dataset
+bundles fail with a re-import instruction. Compiled profiles are validated
+against the dataset acceleration bundle id and recompile when stale.

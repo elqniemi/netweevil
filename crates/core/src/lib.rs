@@ -35,9 +35,11 @@ pub use graph::{
     TurnRestriction, TurnRestrictionKind,
 };
 pub use metrics::{
+    CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, CCH_WEIGHT_SCALE,
     COMPILED_ACCELERATION_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
-    CompiledTemporalProfile, CompiledTurnCostConfig, NO_MIDDLE,
+    CompiledTemporalProfile, CompiledTurnCostConfig, add_cch_weights, decode_cch_weight,
+    encode_cch_weight,
 };
 pub use temporal::{
     EVERY_DAY, FRIDAY, MONDAY, MinuteInterval, PUBLIC_HOLIDAY, SATURDAY, SUNDAY, THURSDAY, TUESDAY,

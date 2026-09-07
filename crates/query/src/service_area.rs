@@ -860,8 +860,8 @@ pub(crate) fn build_temporal_service_area_expansion(
 
 /// Bounded Dijkstra beats a full hierarchy sweep while the reachable ball is
 /// small; once the ball grows past a fraction of the graph, the linear PHAST
-/// sweep wins. The limit is where the expansion aborts and switches (both
-/// algorithms are exact, so this is purely a cost crossover).
+/// sweep wins. This limit switches from original floating-point distances
+/// to quantized hierarchy distances, whose rounding can affect boundaries.
 fn default_phast_settle_limit(edge_count: usize) -> usize {
     (edge_count / 8).max(10_000)
 }
@@ -1222,14 +1222,12 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
     })
 }
 
-/// Exact bounded one-to-all over the customized hierarchy for a
-/// service-area metric: an upward Dijkstra from the seeds followed by a
-/// rank-descending sweep of the downward arcs. Every edge state receives its
-/// exact metric distance through its own up-down path, so no unpacking is
-/// needed. States whose distance exceeds `max_cost` are kept (they may
-/// still contribute a partially reachable edge) but never propagated —
-/// earlier edges on any within-bound path are themselves within bound, so
-/// the cutoff loses nothing.
+/// Bounded one-to-all search over the quantized service-area metric.
+/// Upward Dijkstra and a rank-descending downward sweep produce distances
+/// without unpacking paths. Rounding can move labels across the budget.
+/// States beyond `max_cost` are kept for partially reachable edges but do
+/// not propagate. Nonnegative weights make this cutoff sound within the
+/// quantized metric.
 fn phast_service_area_expansion(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
@@ -1303,7 +1301,7 @@ fn phast_service_area_expansion(
             ..acceleration.source.upward_first_out[edge_index + 1] as usize
         {
             let next_edge = acceleration.source.upward_head[slot] as usize;
-            let next_cost = cost + upward_weight[slot];
+            let next_cost = cost + netweevil_core::decode_cch_weight(upward_weight[slot]);
             if next_cost < dist[next_edge] {
                 dist[next_edge] = next_cost;
                 heap.push(State {
@@ -1329,7 +1327,7 @@ fn phast_service_area_expansion(
             ..acceleration.source.downward_first_out[state + 1] as usize
         {
             let head = acceleration.source.downward_head[slot] as usize;
-            let next_cost = cost + downward_weight[slot];
+            let next_cost = cost + netweevil_core::decode_cch_weight(downward_weight[slot]);
             if next_cost < dist[head] {
                 dist[head] = next_cost;
             }

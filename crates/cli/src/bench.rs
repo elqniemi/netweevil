@@ -203,6 +203,9 @@ pub(crate) struct BenchHttpArgs {
     /// OSRM profile path segment.
     #[arg(long, default_value = "driving")]
     osrm_profile: String,
+    /// Minimum interval between HTTP request starts; requires --concurrency 1.
+    #[arg(long, default_value_t = 0)]
+    request_interval_ms: u64,
     /// Per-request timeout in seconds.
     #[arg(long, default_value_t = 300)]
     timeout_s: u64,
@@ -673,6 +676,8 @@ struct BenchSettings {
     backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     osrm_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    request_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -743,6 +748,8 @@ struct RequestRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     distance_m: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    generalized_cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
 
@@ -777,6 +784,7 @@ struct Outcome {
     ok: bool,
     duration_s: Option<f64>,
     distance_m: Option<f64>,
+    generalized_cost: Option<f64>,
     error: Option<String>,
     /// Transport or non-2xx status failure, as opposed to a server that
     /// answered but could not route.
@@ -789,9 +797,15 @@ impl Outcome {
             ok: true,
             duration_s: Some(duration_s),
             distance_m: Some(distance_m),
+            generalized_cost: None,
             error: None,
             status_failure: false,
         }
+    }
+
+    fn with_generalized_cost(mut self, cost: Option<f64>) -> Self {
+        self.generalized_cost = cost;
+        self
     }
 
     fn ok_without_quality() -> Self {
@@ -799,6 +813,7 @@ impl Outcome {
             ok: true,
             duration_s: None,
             distance_m: None,
+            generalized_cost: None,
             error: None,
             status_failure: false,
         }
@@ -809,6 +824,7 @@ impl Outcome {
             ok: false,
             duration_s: None,
             distance_m: None,
+            generalized_cost: None,
             error: Some(error.into()),
             status_failure: false,
         }
@@ -819,6 +835,7 @@ impl Outcome {
             ok: false,
             duration_s: None,
             distance_m: None,
+            generalized_cost: None,
             error: Some(error.into()),
             status_failure: true,
         }
@@ -840,6 +857,7 @@ fn drive<T, F>(
     tasks: &[T],
     iterations: usize,
     concurrency: usize,
+    request_interval: Duration,
     execute: F,
 ) -> (Vec<Sample>, Duration)
 where
@@ -857,13 +875,16 @@ where
                 let execute = &execute;
                 scope.spawn(move || {
                     let mut local = Vec::new();
+                    let mut next_start = Instant::now();
                     loop {
                         let index = cursor.fetch_add(1, Ordering::Relaxed);
                         if index >= total {
                             break;
                         }
                         let task = &tasks[index % tasks.len()];
+                        std::thread::sleep(next_start.saturating_duration_since(Instant::now()));
                         let start = Instant::now();
+                        next_start = start + request_interval;
                         let (id, bucket, outcome) = execute(task);
                         local.push(Sample {
                             index,
@@ -950,6 +971,7 @@ fn summarize(
             latency_ms: sample.latency_ms,
             duration_s: sample.outcome.duration_s,
             distance_m: sample.outcome.distance_m,
+            generalized_cost: sample.outcome.generalized_cost,
             error: sample.outcome.error.clone(),
         })
         .collect();
@@ -1173,7 +1195,8 @@ fn execute_task(engine: &PreparedRoutingEngine, task: &Task) -> (String, Option<
                 Ok(result) => Outcome::ok(
                     result.summary.total_travel_time_s,
                     result.summary.total_distance_m as f64,
-                ),
+                )
+                .with_generalized_cost(Some(result.summary.total_generalized_cost)),
                 Err(error) => Outcome::routing_failure(error.to_string()),
             };
             (id.clone(), Some(*bucket), outcome)
@@ -1304,7 +1327,12 @@ fn parse_netweevil_route(body: &serde_json::Value) -> Outcome {
         .get("total_distance_m")
         .and_then(serde_json::Value::as_f64);
     match (duration_s, distance_m) {
-        (Some(duration_s), Some(distance_m)) => Outcome::ok(duration_s, distance_m),
+        (Some(duration_s), Some(distance_m)) => Outcome::ok(duration_s, distance_m)
+            .with_generalized_cost(
+                summary
+                    .get("total_generalized_cost")
+                    .and_then(serde_json::Value::as_f64),
+            ),
         _ => Outcome::routing_failure("route summary has no travel time or distance"),
     }
 }
@@ -1334,6 +1362,11 @@ fn parse_osrm_route(body: &serde_json::Value) -> Outcome {
 fn http_agent(timeout: Duration) -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
+        .user_agent(concat!(
+            "NetWeevil/",
+            env!("CARGO_PKG_VERSION"),
+            " routing-research"
+        ))
         .http_status_as_error(false)
         .build()
         .into()
@@ -1520,6 +1553,9 @@ pub(crate) fn bench_run(paths: &WorkspacePaths, args: BenchRunArgs) -> Result<()
         rows.truncate(limit);
     }
 
+    if rows.is_empty() {
+        bail!("benchmark corpus is empty after applying --limit");
+    }
     let loaded = load_engine(paths, &args.dataset, &args.profile, args.engine)?;
     let effective = loaded
         .engine
@@ -1531,9 +1567,13 @@ pub(crate) fn bench_run(paths: &WorkspacePaths, args: BenchRunArgs) -> Result<()
         let _ = execute_task(&loaded.engine, task);
     }
 
-    let (mut samples, wall) = drive(&tasks, args.iterations, args.concurrency, |task| {
-        execute_task(&loaded.engine, task)
-    });
+    let (mut samples, wall) = drive(
+        &tasks,
+        args.iterations,
+        args.concurrency,
+        Duration::ZERO,
+        |task| execute_task(&loaded.engine, task),
+    );
     let (mut summary, buckets, requests) = summarize(&mut samples, wall);
     summary.engine_load_s = Some(loaded.load.as_secs_f64());
     if args.workload == Workload::Matrix {
@@ -1587,6 +1627,9 @@ pub(crate) fn bench_run(paths: &WorkspacePaths, args: BenchRunArgs) -> Result<()
 }
 
 pub(crate) fn bench_http(args: BenchHttpArgs) -> Result<()> {
+    if args.request_interval_ms > 0 && args.concurrency != 1 {
+        bail!("--request-interval-ms requires --concurrency 1");
+    }
     if args.iterations == 0 {
         bail!("--iterations must be at least 1");
     }
@@ -1599,10 +1642,16 @@ pub(crate) fn bench_http(args: BenchHttpArgs) -> Result<()> {
         rows.truncate(limit);
     }
 
+    if rows.is_empty() {
+        bail!("benchmark corpus is empty after applying --limit");
+    }
+    let request_interval = Duration::from_millis(args.request_interval_ms);
     let timeout = Duration::from_secs(args.timeout_s);
     let warmup_agent = http_agent(timeout);
     for index in 0..args.warmup {
+        let started = Instant::now();
         let _ = execute_http(&warmup_agent, &args, &rows[index % rows.len()]);
+        std::thread::sleep(request_interval.saturating_sub(started.elapsed()));
     }
     drop(warmup_agent);
 
@@ -1617,13 +1666,19 @@ pub(crate) fn bench_http(args: BenchHttpArgs) -> Result<()> {
         agents[index % agents.len()].clone()
     };
 
-    let (mut samples, wall) = drive(&rows, args.iterations, args.concurrency, {
-        let args = &args;
-        move |row| {
-            let agent = worker_agent();
-            execute_http(&agent, args, row)
-        }
-    });
+    let (mut samples, wall) = drive(
+        &rows,
+        args.iterations,
+        args.concurrency,
+        request_interval,
+        {
+            let args = &args;
+            move |row| {
+                let agent = worker_agent();
+                execute_http(&agent, args, row)
+            }
+        },
+    );
     let (summary, buckets, requests) = summarize(&mut samples, wall);
 
     let report = BenchReport {
@@ -1647,6 +1702,7 @@ pub(crate) fn bench_http(args: BenchHttpArgs) -> Result<()> {
             url: Some(args.url.clone()),
             backend: Some(args.backend.as_str().to_string()),
             osrm_profile: (args.backend == HttpBackend::Osrm).then(|| args.osrm_profile.clone()),
+            request_interval_ms: Some(args.request_interval_ms),
             ..BenchSettings::default()
         },
         summary,
@@ -1675,6 +1731,7 @@ struct MergedRequest {
     latency_ms: f64,
     duration_s: Option<f64>,
     distance_m: Option<f64>,
+    generalized_cost: Option<f64>,
 }
 
 /// Fold per-request records by id: median latency across iterations, and the
@@ -1693,11 +1750,13 @@ fn merge_by_id(records: &[RequestRecord]) -> BTreeMap<String, MergedRequest> {
             latency_ms: 0.0,
             duration_s: None,
             distance_m: None,
+            generalized_cost: None,
         });
         if record.ok && !entry.ok {
             entry.ok = true;
             entry.duration_s = record.duration_s;
             entry.distance_m = record.distance_m;
+            entry.generalized_cost = record.generalized_cost;
         }
     }
     for (id, mut values) in latencies {
@@ -1802,6 +1861,7 @@ pub(crate) fn bench_compare(args: BenchCompareArgs) -> Result<()> {
     let mut candidate_only = 0_usize;
     let mut duration_diffs = Vec::new();
     let mut distance_diffs = Vec::new();
+    let mut cost_diffs = Vec::new();
     for (id, base) in &baseline_requests {
         let Some(cand) = candidate_requests.get(id) else {
             continue;
@@ -1826,6 +1886,11 @@ pub(crate) fn bench_compare(args: BenchCompareArgs) -> Result<()> {
         {
             distance_diffs.push(diff);
         }
+        if let (Some(a), Some(b)) = (base.generalized_cost, cand.generalized_cost)
+            && let Some(diff) = relative_difference(a, b)
+        {
+            cost_diffs.push(diff);
+        }
     }
 
     println!();
@@ -1839,7 +1904,11 @@ pub(crate) fn bench_compare(args: BenchCompareArgs) -> Result<()> {
     }
     println!("  baseline only     {baseline_only}");
     println!("  candidate only    {candidate_only}");
-    for (label, mut diffs) in [("duration", duration_diffs), ("distance", distance_diffs)] {
+    for (label, mut diffs) in [
+        ("duration", duration_diffs),
+        ("distance", distance_diffs),
+        ("cost", cost_diffs),
+    ] {
         if diffs.is_empty() {
             println!("  {label:<9} rel diff  no comparable values");
             continue;
@@ -1865,6 +1934,16 @@ fn read_report(path: &Path) -> Result<BenchReport> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paced_requests_wait_between_measurements() {
+        let interval = Duration::from_millis(10);
+        let (samples, wall) = drive(&[0, 1, 2], 1, 1, interval, |id| {
+            (id.to_string(), None, Outcome::ok_without_quality())
+        });
+        assert_eq!(samples.len(), 3);
+        assert!(wall >= interval * 2);
+    }
 
     fn row(id: &str) -> CorpusRow {
         CorpusRow {
@@ -2003,12 +2082,14 @@ mod tests {
             "service": {},
             "result": {
                 "outcome": "legal",
-                "summary": { "total_travel_time_s": 900.5, "total_distance_m": 15000 },
+                "summary": { "total_travel_time_s": 900.5,
+                    "total_generalized_cost": 912.25, "total_distance_m": 15000 },
             },
         });
         let outcome = parse_netweevil_route(&body);
         assert!(outcome.ok);
         assert_eq!(outcome.duration_s, Some(900.5));
+        assert_eq!(outcome.generalized_cost, Some(912.25));
         assert_eq!(outcome.distance_m, Some(15000.0));
 
         let unreachable = parse_netweevil_route(&serde_json::json!({
@@ -2029,6 +2110,7 @@ mod tests {
                 latency_ms: 30.0,
                 duration_s: None,
                 distance_m: None,
+                generalized_cost: None,
                 error: Some("unreachable".to_string()),
             },
             RequestRecord {
@@ -2039,6 +2121,7 @@ mod tests {
                 latency_ms: 10.0,
                 duration_s: Some(60.0),
                 distance_m: Some(1000.0),
+                generalized_cost: Some(60.0),
                 error: None,
             },
         ];

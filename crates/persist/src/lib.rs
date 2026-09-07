@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn round_trips_compiled_profile_bundle_with_turn_costs() {
-        let bundle = CompiledProfileBundle {
+        let mut bundle = CompiledProfileBundle {
             schema_version: COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
             profile_id: "test".to_string(),
             profile_hash: "abc".to_string(),
@@ -522,6 +522,36 @@ mod tests {
         assert_eq!(round_tripped.turn_costs.cost_time_weight, 1.5);
         assert_eq!(round_tripped.edge_metrics.len(), 1);
 
+        let weights = vec![
+            0,
+            12345,
+            netweevil_core::CCH_WEIGHT_OVERFLOW,
+            netweevil_core::CCH_WEIGHT_INFINITY,
+        ];
+        bundle.acceleration = Some(netweevil_core::CompiledAcceleration {
+            schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
+            source_acceleration_bundle_id: CacheBundleId::new("acceleration-test"),
+            algorithm: netweevil_core::CCH_ALGORITHM.into(),
+            upward_weight: weights.clone(),
+            downward_weight: weights.clone(),
+            time_upward_weight: weights.clone(),
+            time_downward_weight: weights.clone(),
+            distance_upward_weight: weights.clone(),
+            distance_downward_weight: weights.clone(),
+        });
+        write_compiled_profile_bundle(&path, &bundle).expect("fixed-point bundle serializes");
+        let round_tripped = read_compiled_profile_bundle(&path).expect("fixed-point bundle reads");
+        let acceleration = round_tripped.acceleration.expect("acceleration retained");
+        for actual in [
+            &acceleration.upward_weight,
+            &acceleration.downward_weight,
+            &acceleration.time_upward_weight,
+            &acceleration.time_downward_weight,
+            &acceleration.distance_upward_weight,
+            &acceleration.distance_downward_weight,
+        ] {
+            assert_eq!(actual, &weights);
+        }
         fs::remove_file(path).expect("temporary bundle should be removed");
     }
 }

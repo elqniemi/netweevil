@@ -1,3 +1,6 @@
+use netweevil_core::{
+    CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, add_cch_weights, encode_cch_weight,
+};
 use std::collections::{BinaryHeap, HashMap};
 
 use anyhow::{Result, bail};
@@ -90,8 +93,8 @@ pub(crate) fn transition_failure_mode_penalty(
 /// with failure modes route accelerated instead of via graph-wide A*.
 ///
 /// Only sound when every restriction is pairwise: the failure penalties are
-/// then a function of (previous edge, next edge) alone and bake into arc
-/// weights exactly. Datasets with multi-edge restriction sequences return
+/// then a function of (previous edge, next edge) alone and are included
+/// before quantizing base weights. Multi-edge restriction sequences return
 /// `None` (their penalties are state-dependent) and keep the A* path.
 /// Reverse-oneway variants change the edge set and never reach here.
 pub(crate) fn customize_failure_mode_acceleration(
@@ -101,8 +104,6 @@ pub(crate) fn customize_failure_mode_acceleration(
     base_acceleration: &AccelerationGraph,
     fallback: &FallbackPolicy,
 ) -> Option<netweevil_core::CompiledAcceleration> {
-    use netweevil_core::NO_MIDDLE;
-
     let mode_bit = metrics.mode.access_bit();
     if topology.turn_restrictions.iter().any(|restriction| {
         restriction.mode_mask.contains(mode_bit) && restriction.edge_path.len() > 2
@@ -120,10 +121,8 @@ pub(crate) fn customize_failure_mode_acceleration(
 
     let upward_len = source.upward_head.len();
     let downward_len = source.downward_head.len();
-    let mut upward_weight = vec![f64::INFINITY; upward_len];
-    let mut upward_middle = vec![NO_MIDDLE; upward_len];
-    let mut downward_weight = vec![f64::INFINITY; downward_len];
-    let mut downward_middle = vec![NO_MIDDLE; downward_len];
+    let mut upward_weight = vec![CCH_WEIGHT_INFINITY; upward_len];
+    let mut downward_weight = vec![CCH_WEIGHT_INFINITY; downward_len];
 
     // Phase 1: degraded transition costs plus the pairwise failure
     // penalties, exactly as the A* search would pay them.
@@ -152,12 +151,12 @@ pub(crate) fn customize_failure_mode_acceleration(
             if source.edge_rank[edge_index] < source.edge_rank[next_edge] {
                 if let Some(slot) = base_acceleration.upward_arc_slot(edge_index, next_edge as u32)
                 {
-                    upward_weight[slot] = upward_weight[slot].min(weight);
+                    upward_weight[slot] = upward_weight[slot].min(encode_cch_weight(weight));
                 }
             } else if let Some(slot) =
                 base_acceleration.downward_arc_slot(edge_index, next_edge as u32)
             {
-                downward_weight[slot] = downward_weight[slot].min(weight);
+                downward_weight[slot] = downward_weight[slot].min(encode_cch_weight(weight));
             }
         }
     }
@@ -173,7 +172,7 @@ pub(crate) fn customize_failure_mode_acceleration(
         for reverse_slot in incoming_range {
             let incoming_arc = base_acceleration.reverse_downward_arc[reverse_slot] as usize;
             let incoming_weight = downward_weight[incoming_arc];
-            if !incoming_weight.is_finite() {
+            if incoming_weight == CCH_WEIGHT_INFINITY {
                 continue;
             }
             let tail = base_acceleration.downward_tail[incoming_arc] as usize;
@@ -183,35 +182,36 @@ pub(crate) fn customize_failure_mode_acceleration(
                     continue;
                 }
                 let outgoing_weight = upward_weight[outgoing_arc];
-                if !outgoing_weight.is_finite() {
+                if outgoing_weight == CCH_WEIGHT_INFINITY {
                     continue;
                 }
-                let candidate = incoming_weight + outgoing_weight;
+                let candidate = add_cch_weights(incoming_weight, outgoing_weight);
                 if source.edge_rank[tail] < source.edge_rank[head as usize] {
                     if let Some(slot) = base_acceleration.upward_arc_slot(tail, head)
                         && candidate < upward_weight[slot]
                     {
                         upward_weight[slot] = candidate;
-                        upward_middle[slot] = middle;
                     }
                 } else if let Some(slot) = base_acceleration.downward_arc_slot(tail, head)
                     && candidate < downward_weight[slot]
                 {
                     downward_weight[slot] = candidate;
-                    downward_middle[slot] = middle;
                 }
             }
         }
     }
 
+    if upward_weight.contains(&CCH_WEIGHT_OVERFLOW)
+        || downward_weight.contains(&CCH_WEIGHT_OVERFLOW)
+    {
+        return None;
+    }
     Some(netweevil_core::CompiledAcceleration {
-        schema_version: 3,
+        schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
         source_acceleration_bundle_id: base_compiled.source_acceleration_bundle_id.clone(),
         algorithm: source.algorithm.clone(),
         upward_weight,
-        upward_middle,
         downward_weight,
-        downward_middle,
         time_upward_weight: Vec::new(),
         time_downward_weight: Vec::new(),
         distance_upward_weight: Vec::new(),

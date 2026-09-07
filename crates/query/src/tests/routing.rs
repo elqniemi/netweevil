@@ -2767,3 +2767,135 @@ fn component_service_area_labels_bypass_scalar_phast() {
     }));
     assert!(!expansion.reached_edges.is_empty());
 }
+
+#[test]
+fn fixed_point_near_tie_keeps_reconstruction_legal_and_error_bounded() {
+    let topology = test_topology();
+    let mut metrics = test_metrics();
+    metrics.edge_metrics[0].generalized_cost = Some(10.0);
+    metrics.edge_metrics[1].generalized_cost = Some(20.0001);
+    metrics.edge_metrics[2].generalized_cost = Some(30.00005);
+    let (bundle, compiled) = build_test_cch(&topology, &metrics);
+    let graph = crate::build_routing_graph_from_shared(&topology, Arc::new(compiled), Some(bundle))
+        .expect("graph builds");
+    let path = crate::accelerated_route_query(&topology, &graph, 0, 2)
+        .expect("query succeeds")
+        .expect("path exists");
+    for pair in path.edge_indexes.windows(2) {
+        assert_eq!(
+            topology.routing_edge(pair[0]).to,
+            topology.routing_edge(pair[1]).from
+        );
+    }
+    let actual: f64 = path
+        .edge_indexes
+        .iter()
+        .map(|&edge| metrics.edge_metrics[edge].generalized_cost.unwrap())
+        .sum();
+    let exact = 30.00005;
+    assert!(actual >= exact);
+    assert!(actual - exact <= path.edge_indexes.len() as f64 / 2048.0);
+    assert!(
+        (actual - path.total_generalized_cost).abs() <= path.edge_indexes.len() as f64 / 2048.0
+    );
+}
+
+#[test]
+fn finite_weight_overflow_disables_acceleration_without_losing_route() {
+    let topology = test_topology();
+    let mut metrics = test_metrics();
+    metrics.edge_metrics[1].generalized_cost = Some(1e12);
+    let (bundle, compiled) = build_test_cch(&topology, &metrics);
+    let graph = crate::build_routing_graph_from_shared(&topology, Arc::new(compiled), Some(bundle))
+        .expect("overflow graph builds");
+    assert!(graph.acceleration.is_none());
+    assert_eq!(graph.edge_costs[1], 1e12);
+}
+
+#[test]
+fn phast_fractional_time_labels_obey_fixed_point_error_bound() {
+    use crate::service_area::{
+        ServiceAreaMetricKind, build_service_area_expansion_with_settle_limit,
+    };
+    let topology = test_topology();
+    let mut base_metrics = test_metrics();
+    base_metrics.edge_metrics[1].travel_time_s = Some(20.0001);
+    let (bundle, compiled) = build_test_cch(&topology, &base_metrics);
+    let metrics = Arc::new(compiled);
+    let graph = crate::build_routing_graph_from_shared(&topology, metrics.clone(), Some(bundle))
+        .expect("graph builds");
+    let origin = crate::LabeledPoint {
+        id: "origin".into(),
+        lon: 6.0,
+        lat: 53.0,
+        z: None,
+    };
+    let candidates = crate::snapping::snap_candidates(&topology, &graph, &origin, 1.0, true)
+        .expect("origin snaps");
+    // The budget lies between the rounded and original end time of edge 1.
+    let run = |settle_limit| {
+        build_service_area_expansion_with_settle_limit(
+            &topology,
+            &metrics,
+            &graph,
+            &origin,
+            &candidates,
+            1.0,
+            &Default::default(),
+            ServiceAreaMetricKind::TravelTimeS,
+            30.00005,
+            settle_limit,
+        )
+        .expect("expansion succeeds")
+    };
+    let exact = run(usize::MAX);
+    let rounded = run(0);
+    let error = (exact.edge_end_costs[1] - rounded.edge_end_costs[1]).abs();
+    assert!(error > 0.0 && error <= 1.0 / 2048.0);
+    assert!(exact.edge_end_costs[1] > 30.00005);
+    assert!(rounded.edge_end_costs[1] < 30.00005);
+}
+
+#[test]
+fn fixed_point_shortcut_unpacks_lower_triangle_including_zero_costs() {
+    let mut topology = test_topology();
+    topology.nodes.push(netweevil_core::TopologyNode {
+        node_id: netweevil_core::NodeId(3),
+        lon: 6.003,
+        lat: 53.0,
+        z: 0.0,
+    });
+    for (edge, (from, to)) in topology
+        .edge_layers
+        .routing
+        .iter_mut()
+        .zip([(1, 2), (0, 1), (2, 3)])
+    {
+        edge.from = netweevil_core::NodeId(from);
+        edge.to = netweevil_core::NodeId(to);
+    }
+    let topology = with_edge_based_topology(topology);
+    for middle_cost in [20.0001, 0.0] {
+        let mut metrics = test_metrics();
+        metrics.edge_metrics[0].generalized_cost = Some(middle_cost);
+        let (bundle, compiled) = build_test_cch(&topology, &metrics);
+        let shortcut_row = bundle.upward_first_out[1] as usize..bundle.upward_first_out[2] as usize;
+        assert!(
+            bundle.upward_head[shortcut_row].contains(&2),
+            "contracting state 0 must add 1 -> 2"
+        );
+        let graph =
+            crate::build_routing_graph_from_shared(&topology, Arc::new(compiled), Some(bundle))
+                .expect("graph builds");
+        let path = crate::accelerated_route_query(&topology, &graph, 0, 3)
+            .expect("query succeeds")
+            .expect("path exists");
+        assert_eq!(path.edge_indexes, vec![1, 0, 2]);
+        let original: f64 = path
+            .edge_indexes
+            .iter()
+            .map(|&edge| metrics.edge_metrics[edge].generalized_cost.unwrap())
+            .sum();
+        assert!((original - path.total_generalized_cost).abs() <= 2.0 / 2048.0);
+    }
+}

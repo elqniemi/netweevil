@@ -3,7 +3,7 @@ use std::collections::BinaryHeap;
 use anyhow::Result;
 #[cfg(test)]
 use anyhow::bail;
-use netweevil_core::{NO_MIDDLE, TopologyBundle};
+use netweevil_core::TopologyBundle;
 
 use crate::*;
 
@@ -74,11 +74,8 @@ impl BidirectionalAccelerationScratch {
     }
 }
 
-/// Expands one hierarchy arc to the base edge states it covers, excluding the
-/// arc's tail and including its head, recursing through customized middle
-/// pointers. Both child arcs of a middle `m` exist by contraction
-/// completeness: `tail -> m` is a downward arc of `tail`, `m -> head` an
-/// upward arc of `m`.
+/// Unpacks arcs by finding a lower triangle with the same integer weight.
+/// Child endpoints have lower rank, so expansion terminates even with zero costs.
 fn push_unpacked_arc(
     acceleration: &AccelerationGraph,
     stack: &mut Vec<(bool, u32)>,
@@ -95,29 +92,42 @@ fn push_unpacked_arc(
     stack.push((is_upward, arc_slot));
     while let Some((is_upward, slot)) = stack.pop() {
         let slot_index = slot as usize;
-        let (tail, head, middle) = if is_upward {
+        let (tail, head, weight) = if is_upward {
             (
                 acceleration.upward_tail[slot_index] as usize,
                 acceleration.source.upward_head[slot_index],
-                compiled.upward_middle[slot_index],
+                compiled.upward_weight[slot_index],
             )
         } else {
             (
                 acceleration.downward_tail[slot_index] as usize,
                 acceleration.source.downward_head[slot_index],
-                compiled.downward_middle[slot_index],
+                compiled.downward_weight[slot_index],
             )
         };
-        if middle == NO_MIDDLE {
+        assert!(
+            weight < netweevil_core::CCH_WEIGHT_OVERFLOW,
+            "only finite CCH arcs can be unpacked"
+        );
+        let source = &acceleration.source;
+        let triangle = (source.downward_first_out[tail] as usize
+            ..source.downward_first_out[tail + 1] as usize)
+            .find_map(|left| {
+                let middle = source.downward_head[left] as usize;
+                if source.edge_rank[middle] >= source.edge_rank[head as usize] {
+                    return None;
+                }
+                let right = acceleration.upward_arc_slot(middle, head)?;
+                (netweevil_core::add_cch_weights(
+                    compiled.downward_weight[left],
+                    compiled.upward_weight[right],
+                ) == weight)
+                    .then_some((left, right))
+            });
+        let Some((left, right)) = triangle else {
             edge_indexes.push(head as usize);
             continue;
-        }
-        let left = acceleration
-            .downward_arc_slot(tail, middle)
-            .expect("customized middle implies a downward arc tail -> middle");
-        let right = acceleration
-            .upward_arc_slot(middle as usize, head)
-            .expect("customized middle implies an upward arc middle -> head");
+        };
         // Process left before right: LIFO stack, so push right first.
         stack.push((true, right as u32));
         stack.push((false, left as u32));
@@ -214,7 +224,7 @@ pub(crate) fn accelerated_route_query(
     )
 }
 
-/// Exact point-to-point query over the customized CCH.
+/// Point-to-point query that minimizes the quantized CCH metric.
 ///
 /// Forward search relaxes upward arcs from the origin seeds; backward search
 /// relaxes downward arcs toward the destination seeds. Each direction runs
@@ -223,8 +233,8 @@ pub(crate) fn accelerated_route_query(
 /// two directions explore disjoint arc sets, so a meeting state is only ever
 /// labeled by the side that reaches it.
 ///
-/// With the complete contraction this result is authoritative: no follow-up
-/// search on the base graph is required.
+/// Complete contraction preserves the optimum of the quantized metric.
+/// No follow-up search optimizes the original floating-point metric.
 pub(crate) fn accelerated_route_query_seeded(
     topology: &TopologyBundle,
     routing_graph: &RoutingGraph,
@@ -315,7 +325,8 @@ pub(crate) fn accelerated_route_query_seeded(
                     ..acceleration.source.upward_first_out[edge_index + 1] as usize
                 {
                     let next_edge = acceleration.source.upward_head[slot] as usize;
-                    let next_cost = cost + compiled.upward_weight[slot];
+                    let next_cost =
+                        cost + netweevil_core::decode_cch_weight(compiled.upward_weight[slot]);
                     if !scratch.update_forward(next_edge, next_cost, slot as u32) {
                         continue;
                     }
@@ -349,8 +360,10 @@ pub(crate) fn accelerated_route_query_seeded(
                 {
                     let previous_edge = acceleration.reverse_downward_edge[slot] as usize;
                     let next_cost = cost
-                        + compiled.downward_weight
-                            [acceleration.reverse_downward_arc[slot] as usize];
+                        + netweevil_core::decode_cch_weight(
+                            compiled.downward_weight
+                                [acceleration.reverse_downward_arc[slot] as usize],
+                        );
                     if !scratch.update_backward(
                         previous_edge,
                         next_cost,
@@ -395,9 +408,8 @@ struct CchSpaceEntry {
 /// edge index. Forward spaces store the predecessor upward arc per state;
 /// backward spaces store the successor downward arc. Because both spaces are
 /// complete, `min over shared states of (forward + backward)` equals the
-/// exact shortest-path cost — the same guarantee the pairwise CCH query
-/// relies on, shared across every origin/destination combination instead of
-/// being recomputed per pair.
+/// shortest-path cost under the quantized metric, as in the pairwise CCH
+/// query. The spaces are shared across origin/destination combinations.
 #[derive(Debug)]
 pub(crate) struct CchSearchSpace {
     entries: Vec<CchSpaceEntry>,
@@ -453,7 +465,8 @@ pub(crate) fn build_forward_cch_space(
                 ..acceleration.source.upward_first_out[edge_index + 1] as usize
             {
                 let next_edge = acceleration.source.upward_head[slot] as usize;
-                let next_cost = cost + compiled.upward_weight[slot];
+                let next_cost =
+                    cost + netweevil_core::decode_cch_weight(compiled.upward_weight[slot]);
                 if !scratch.update_forward(next_edge, next_cost, slot as u32) {
                     continue;
                 }
@@ -522,7 +535,9 @@ pub(crate) fn build_backward_cch_space(
             {
                 let previous_edge = acceleration.reverse_downward_edge[slot] as usize;
                 let next_cost = cost
-                    + compiled.downward_weight[acceleration.reverse_downward_arc[slot] as usize];
+                    + netweevil_core::decode_cch_weight(
+                        compiled.downward_weight[acceleration.reverse_downward_arc[slot] as usize],
+                    );
                 if !scratch.update_backward(
                     previous_edge,
                     next_cost,

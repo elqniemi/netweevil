@@ -31,24 +31,7 @@ pub(crate) fn build_dataset_acceleration_bundle_with_progress(
     source_topology_bundle_id: CacheBundleId,
     progress: &mut impl FnMut(DatasetImportProgress),
 ) -> DatasetAccelerationBundle {
-    let transition_topology = &topology.edge_based_topology;
     let edge_count = topology.edge_count();
-    let mut in_degree = vec![0_u32; edge_count];
-    let mut out_degree = vec![0_u32; edge_count];
-
-    let has_transitions = transition_topology.edge_transition_first_out.len() == edge_count + 1;
-    if has_transitions {
-        for (edge_index, degree) in out_degree.iter_mut().enumerate() {
-            let start = transition_topology.edge_transition_first_out[edge_index] as usize;
-            let end = transition_topology.edge_transition_first_out[edge_index + 1] as usize;
-            *degree = end.saturating_sub(start) as u32;
-            for &next_edge in &transition_topology.edge_transition_edges[start..end] {
-                if let Some(entry) = in_degree.get_mut(next_edge as usize) {
-                    *entry += 1;
-                }
-            }
-        }
-    }
 
     emit_progress(
         progress,
@@ -57,8 +40,20 @@ pub(crate) fn build_dataset_acceleration_bundle_with_progress(
         format!("Ordering {edge_count} edge states by nested dissection"),
     );
 
-    let edge_order = build_nested_dissection_edge_order(topology, &in_degree, &out_degree);
+    let edge_order = dissect(build_edge_cell(topology), LEAF_NODES);
 
+    build_with_order(topology, source_topology_bundle_id, edge_order, progress)
+}
+
+fn build_with_order(
+    topology: &TopologyBundle,
+    source_topology_bundle_id: CacheBundleId,
+    edge_order: Vec<u32>,
+    progress: &mut impl FnMut(DatasetImportProgress),
+) -> DatasetAccelerationBundle {
+    let edge_count = topology.edge_count();
+    let transition_topology = &topology.edge_based_topology;
+    let has_transitions = transition_topology.edge_transition_first_out.len() == edge_count + 1;
     let mut edge_rank = vec![0_u32; edge_count];
     for (rank, &edge_index) in edge_order.iter().enumerate() {
         edge_rank[edge_index as usize] = rank as u32;
@@ -233,7 +228,7 @@ fn arcs_to_csr(sorted_arcs: &[(u32, u32)], edge_count: usize) -> (Vec<u32>, Vec<
 }
 
 /// Node count below which a cell is ordered directly by minimum degree.
-const LEAF_NODES: usize = 256;
+const LEAF_NODES: usize = 32;
 /// Fraction of a cell placed in the flow source set and in the sink set.
 const FLOW_SIDE_FRACTION: f64 = 0.25;
 /// Capacity marking arcs that must never appear in a minimum cut.
@@ -254,6 +249,7 @@ const FLOW_DIRECTIONS: [(f32, f32); 4] = [(1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1
 /// `ids` maps a local index back to a topology node id, adjacency rows hold
 /// sorted local ids, and `x`/`y` are equirectangular projections of the node
 /// coordinates so that projecting onto a direction is metric.
+#[derive(Clone)]
 struct Cell {
     ids: Vec<u32>,
     first_out: Vec<u32>,
@@ -314,52 +310,45 @@ struct Split {
     separator: Vec<u32>,
 }
 
-/// Builds the simple undirected node graph spanned by the routing edges.
-fn build_node_cell(topology: &TopologyBundle) -> Cell {
-    let node_count = topology.nodes.len();
+/// The undirected transition graph is used only to choose elimination ranks.
+/// Contraction retains every directed transition, including legal u-turns.
+fn build_edge_cell(topology: &TopologyBundle) -> Cell {
     let edge_count = topology.edge_count();
-    let mut pairs = Vec::with_capacity(edge_count * 2);
-    for edge_index in 0..edge_count {
-        let edge = topology.routing_edge(edge_index);
-        let (from, to) = (edge.from.0 as usize, edge.to.0 as usize);
-        if from == to || from >= node_count || to >= node_count {
-            continue;
+    let transitions = &topology.edge_based_topology;
+    let mut pairs = Vec::with_capacity(transitions.edge_transition_edges.len() * 2);
+    if transitions.edge_transition_first_out.len() == edge_count + 1 {
+        for edge in 0..edge_count {
+            let start = transitions.edge_transition_first_out[edge] as usize;
+            let end = transitions.edge_transition_first_out[edge + 1] as usize;
+            for &next in &transitions.edge_transition_edges[start..end] {
+                if next as usize != edge && (next as usize) < edge_count {
+                    pairs.push((edge as u32, next));
+                    pairs.push((next, edge as u32));
+                }
+            }
         }
-        pairs.push((from as u32, to as u32));
-        pairs.push((to as u32, from as u32));
     }
     pairs.par_sort_unstable();
     pairs.dedup();
-
-    let mut first_out = vec![0_u32; node_count + 1];
-    for &(tail, _) in &pairs {
-        first_out[tail as usize + 1] += 1;
-    }
-    for node in 0..node_count {
-        first_out[node + 1] += first_out[node];
-    }
-    let heads = pairs.iter().map(|&(_, head)| head).collect::<Vec<_>>();
+    let (first_out, heads) = arcs_to_csr(&pairs, edge_count);
     drop(pairs);
-
-    let mean_lat = if node_count == 0 {
+    let mean_lat = if topology.nodes.is_empty() {
         0.0
     } else {
-        topology.nodes.iter().map(|node| node.lat).sum::<f64>() / node_count as f64
+        topology.nodes.iter().map(|node| node.lat).sum::<f64>() / topology.nodes.len() as f64
     };
     let longitude_scale = mean_lat.to_radians().cos().abs().max(0.05);
-    let x = topology
-        .nodes
-        .iter()
-        .map(|node| (node.lon * longitude_scale) as f32)
-        .collect::<Vec<_>>();
-    let y = topology
-        .nodes
-        .iter()
-        .map(|node| node.lat as f32)
-        .collect::<Vec<_>>();
-
+    let mut x = Vec::with_capacity(edge_count);
+    let mut y = Vec::with_capacity(edge_count);
+    for index in 0..edge_count {
+        let edge = topology.routing_edge(index);
+        let from = &topology.nodes[edge.from.0 as usize];
+        let to = &topology.nodes[edge.to.0 as usize];
+        x.push(((from.lon + to.lon) * 0.5 * longitude_scale) as f32);
+        y.push(((from.lat + to.lat) * 0.5) as f32);
+    }
     Cell {
-        ids: (0..node_count as u32).collect(),
+        ids: (0..edge_count as u32).collect(),
         first_out,
         heads,
         x,
@@ -789,12 +778,12 @@ fn minimum_degree_order(cell: &Cell) -> Vec<u32> {
 
 /// Produces a nested-dissection elimination order for one cell: both sides
 /// first, then the separator that keeps them apart.
-fn dissect(cell: Cell) -> Vec<u32> {
+fn dissect(cell: Cell, leaf_nodes: usize) -> Vec<u32> {
     let node_count = cell.len();
     if node_count == 0 {
         return Vec::new();
     }
-    if node_count <= LEAF_NODES {
+    if node_count <= leaf_nodes {
         return minimum_degree_order(&cell);
     }
 
@@ -802,8 +791,10 @@ fn dissect(cell: Cell) -> Vec<u32> {
         let left_cell = cell.induced(&left);
         let right_cell = cell.induced(&right);
         drop(cell);
-        let (mut left_order, mut right_order) =
-            rayon::join(|| dissect(left_cell), || dissect(right_cell));
+        let (mut left_order, mut right_order) = rayon::join(
+            || dissect(left_cell, leaf_nodes),
+            || dissect(right_cell, leaf_nodes),
+        );
         left_order.append(&mut right_order);
         return left_order;
     }
@@ -814,72 +805,17 @@ fn dissect(cell: Cell) -> Vec<u32> {
     let separator = cell.induced(&split.separator);
     drop(cell);
     let ((mut a_order, mut b_order), mut separator_order) = rayon::join(
-        || rayon::join(|| dissect(side_a), || dissect(side_b)),
-        || dissect(separator),
+        || {
+            rayon::join(
+                || dissect(side_a, leaf_nodes),
+                || dissect(side_b, leaf_nodes),
+            )
+        },
+        || dissect(separator, leaf_nodes),
     );
     a_order.append(&mut b_order);
     a_order.append(&mut separator_order);
     a_order
-}
-
-/// Nested-dissection elimination order over the topology nodes.
-fn build_nested_dissection_node_order(topology: &TopologyBundle) -> Vec<u32> {
-    let cell = build_node_cell(topology);
-    let mut order = Vec::with_capacity(cell.len());
-    let mut connected = Vec::with_capacity(cell.len());
-    for node in 0..cell.len() {
-        if cell.neighbours(node).is_empty() {
-            order.push(cell.ids[node]);
-        } else {
-            connected.push(node as u32);
-        }
-    }
-    let root = cell.induced(&connected);
-    drop(cell);
-    order.append(&mut dissect(root));
-    order
-}
-
-/// Orders edge states by the nested-dissection rank of their head node.
-///
-/// Every transition out of an edge state is decided at that state's head
-/// node, so the states sharing a head node are contracted consecutively and
-/// the states heading into a node separator form a separator of the
-/// transition graph: any transition path leaving one side reaches the other
-/// only after entering a state whose head is a separator node. Ties inside
-/// one node are broken by transition degree so sparse states go first.
-fn build_nested_dissection_edge_order(
-    topology: &TopologyBundle,
-    in_degree: &[u32],
-    out_degree: &[u32],
-) -> Vec<u32> {
-    let node_order = build_nested_dissection_node_order(topology);
-    let mut node_rank = vec![u32::MAX; topology.nodes.len()];
-    for (rank, &node) in node_order.iter().enumerate() {
-        node_rank[node as usize] = rank as u32;
-    }
-    drop(node_order);
-
-    let mut keyed = (0..topology.edge_count())
-        .into_par_iter()
-        .map(|edge_index| {
-            let edge = topology.routing_edge(edge_index);
-            let rank = node_rank
-                .get(edge.to.0 as usize)
-                .copied()
-                .unwrap_or(u32::MAX);
-            (
-                rank,
-                in_degree[edge_index] + out_degree[edge_index],
-                edge_index as u32,
-            )
-        })
-        .collect::<Vec<_>>();
-    keyed.par_sort_unstable();
-    keyed
-        .into_iter()
-        .map(|(_, _, edge_index)| edge_index)
-        .collect()
 }
 
 #[cfg(test)]
@@ -891,6 +827,148 @@ mod tests {
         ACCELERATION_BUNDLE_SCHEMA_VERSION, CCH_ALGORITHM, CacheBundleId, NodeId, TopologyBundle,
         TopologyNode,
     };
+
+    #[test]
+    #[ignore = "requires NETWEEVIL_ORDERING_TOPOLOGY pointing to a local topology bundle"]
+    fn measure_edge_ordering() {
+        let path = std::env::var("NETWEEVIL_ORDERING_TOPOLOGY").expect("topology path");
+        let mut topology = netweevil_persist::read_topology_bundle(path).expect("read topology");
+        let leaves =
+            std::env::var("NETWEEVIL_ORDERING_LEAVES").unwrap_or("16,32,64,128,256".into());
+        let transitions = &topology.edge_based_topology;
+        let mut uturns = 0usize;
+        for edge in 0..topology.edge_count() {
+            let from = topology.routing_edge(edge);
+            for &next in &transitions.edge_transition_edges[transitions.edge_transition_first_out
+                [edge] as usize
+                ..transitions.edge_transition_first_out[edge + 1] as usize]
+            {
+                let to = topology.routing_edge(next as usize);
+                if from.from == to.to && from.to == to.from {
+                    uturns += 1;
+                }
+            }
+        }
+        eprintln!(
+            "edge_states={} transitions={} uturns={uturns}",
+            topology.edge_count(),
+            transitions.edge_transition_edges.len()
+        );
+        // Diagnostic only: this altered graph must never be used for routing.
+        if std::env::var("NETWEEVIL_ORDERING_OMIT_UTURNS").as_deref() == Ok("1") {
+            let mut first_out = vec![0u32];
+            let mut heads = Vec::new();
+            for edge in 0..topology.edge_count() {
+                let from = topology.routing_edge(edge);
+                for &next in &transitions.edge_transition_edges[transitions
+                    .edge_transition_first_out[edge]
+                    as usize
+                    ..transitions.edge_transition_first_out[edge + 1] as usize]
+                {
+                    let to = topology.routing_edge(next as usize);
+                    if from.from != to.to || from.to != to.from {
+                        heads.push(next);
+                    }
+                }
+                first_out.push(heads.len() as u32);
+            }
+            topology.edge_based_topology.edge_transition_first_out = first_out;
+            topology.edge_based_topology.edge_transition_edges = heads;
+            eprintln!("diagnostic graph omits u-turns; routing semantics are not preserved");
+        }
+        if let Ok(path) = std::env::var("NETWEEVIL_ORDERING_FIXED_ACCELERATION") {
+            let acceleration =
+                netweevil_persist::read_acceleration_bundle(path).expect("read acceleration");
+            let baseline_shortcuts = acceleration.stats.shortcut_arc_count;
+            let order = acceleration.edge_order.clone();
+            drop(acceleration);
+            let start = std::time::Instant::now();
+            let bundle = super::build_with_order(
+                &topology,
+                CacheBundleId::new("uturn-diagnostic"),
+                order,
+                &mut |_| {},
+            );
+            eprintln!(
+                "fixed_order baseline_shortcuts={baseline_shortcuts} base={} shortcuts={} total={} contraction_s={:.3}",
+                bundle.stats.base_arc_count,
+                bundle.stats.shortcut_arc_count,
+                bundle.stats.total_arc_count,
+                start.elapsed().as_secs_f64()
+            );
+            return;
+        }
+        let leaves = leaves
+            .split(',')
+            .map(|leaf| leaf.parse::<usize>().expect("leaf size").max(1))
+            .collect::<Vec<_>>();
+        let start = std::time::Instant::now();
+        let cells = experiment_cells(
+            super::build_edge_cell(&topology),
+            *leaves.iter().max().expect("leaf sizes"),
+        );
+        let partition_s = start.elapsed().as_secs_f64();
+        eprintln!("partition_s={partition_s:.3} cells={}", cells.len());
+        for leaf in leaves {
+            let start = std::time::Instant::now();
+            use rayon::prelude::*;
+            let order = cells
+                .par_iter()
+                .flat_map_iter(|cell| super::dissect(cell.clone(), leaf))
+                .collect();
+            let ordering_s = partition_s + start.elapsed().as_secs_f64();
+            eprintln!("leaf={leaf} ordering_s={ordering_s:.3}; contracting");
+            let bundle = super::build_with_order(
+                &topology,
+                CacheBundleId::new("ordering-experiment"),
+                order,
+                &mut |_| {},
+            );
+            eprintln!(
+                "leaf={leaf} ordering_s={ordering_s:.3} total_s={:.3} base={} shortcuts={} total={}",
+                start.elapsed().as_secs_f64(),
+                bundle.stats.base_arc_count,
+                bundle.stats.shortcut_arc_count,
+                bundle.stats.total_arc_count
+            );
+        }
+    }
+
+    // Share the expensive large-cell flow cuts across the leaf-size sweep.
+    fn experiment_cells(cell: Cell, cutoff: usize) -> Vec<Cell> {
+        if cell.len() <= cutoff {
+            return vec![cell];
+        }
+        if let Some((left, right)) = super::split_components(&cell) {
+            let left = cell.induced(&left);
+            let right = cell.induced(&right);
+            drop(cell);
+            let (mut a, mut b) = rayon::join(
+                || experiment_cells(left, cutoff),
+                || experiment_cells(right, cutoff),
+            );
+            a.append(&mut b);
+            return a;
+        }
+        let split =
+            super::inertial_flow_split(&cell).unwrap_or_else(|| super::coordinate_split(&cell));
+        let left = cell.induced(&split.side_a);
+        let right = cell.induced(&split.side_b);
+        let separator = cell.induced(&split.separator);
+        drop(cell);
+        let ((mut a, mut b), mut separator) = rayon::join(
+            || {
+                rayon::join(
+                    || experiment_cells(left, cutoff),
+                    || experiment_cells(right, cutoff),
+                )
+            },
+            || experiment_cells(separator, cutoff),
+        );
+        a.append(&mut b);
+        a.append(&mut separator);
+        a
+    }
 
     fn line_topology() -> TopologyBundle {
         let edges = vec![edge(0, 0, 1, 10), edge(1, 1, 2, 11), edge(2, 2, 3, 12)];
@@ -1141,6 +1219,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn edge_ordering_preserves_every_transition_including_uturns() {
+        let topology = grid_topology(6);
+        let bundle = build_dataset_acceleration_bundle(&topology, CacheBundleId::new("grid"));
+        let transitions = &topology.edge_based_topology;
+        let mut uturns = 0;
+        for edge in 0..topology.edge_count() {
+            let from = topology.routing_edge(edge);
+            for &next in &transitions.edge_transition_edges[transitions.edge_transition_first_out
+                [edge] as usize
+                ..transitions.edge_transition_first_out[edge + 1] as usize]
+            {
+                let to = topology.routing_edge(next as usize);
+                if from.from == to.to && from.to == to.from {
+                    uturns += 1;
+                }
+                let (offsets, heads) = if bundle.edge_rank[edge] < bundle.edge_rank[next as usize] {
+                    (&bundle.upward_first_out, &bundle.upward_head)
+                } else {
+                    (&bundle.downward_first_out, &bundle.downward_head)
+                };
+                assert!(
+                    heads[offsets[edge] as usize..offsets[edge + 1] as usize]
+                        .binary_search(&next)
+                        .is_ok()
+                );
+            }
+        }
+        assert!(uturns > 0);
     }
 
     #[test]

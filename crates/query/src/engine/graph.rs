@@ -88,7 +88,7 @@ impl AccelerationGraph {
     pub(crate) fn metric_weights(
         &self,
         metric_kind: crate::service_area::ServiceAreaMetricKind,
-    ) -> Option<(&[f64], &[f64])> {
+    ) -> Option<(&[u32], &[u32])> {
         let compiled = self.metrics.acceleration.as_ref()?;
         let (upward, downward) = match metric_kind {
             crate::service_area::ServiceAreaMetricKind::TravelTimeS => {
@@ -536,6 +536,15 @@ pub(crate) fn build_acceleration_graph(
         }
         return Ok(None);
     };
+    if acceleration
+        .upward_weight
+        .contains(&netweevil_core::CCH_WEIGHT_OVERFLOW)
+        || acceleration
+            .downward_weight
+            .contains(&netweevil_core::CCH_WEIGHT_OVERFLOW)
+    {
+        return Ok(None);
+    }
     let Some(topology_source) = dataset_acceleration else {
         // Profiles compiled without a dataset CCH bundle in reach run on the
         // exact engine only.
@@ -558,7 +567,9 @@ pub(crate) fn build_acceleration_graph(
             topology_source.schema_version
         );
     }
-    if acceleration.algorithm != netweevil_core::CCH_ALGORITHM || acceleration.schema_version != 3 {
+    if acceleration.algorithm != netweevil_core::CCH_ALGORITHM
+        || acceleration.schema_version != netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION
+    {
         bail!(
             "compiled profile acceleration uses an outdated format; recompile the profile against the current dataset"
         );
@@ -584,7 +595,6 @@ pub(crate) fn build_acceleration_graph(
         .unwrap_or_default() as usize;
     if topology_source.upward_head.len() != upward_len
         || acceleration.upward_weight.len() != upward_len
-        || acceleration.upward_middle.len() != upward_len
     {
         bail!(
             "acceleration upward arrays are inconsistent; re-import the dataset and recompile the profile"
@@ -592,7 +602,6 @@ pub(crate) fn build_acceleration_graph(
     }
     if topology_source.downward_head.len() != downward_len
         || acceleration.downward_weight.len() != downward_len
-        || acceleration.downward_middle.len() != downward_len
     {
         bail!(
             "acceleration downward arrays are inconsistent; re-import the dataset and recompile the profile"

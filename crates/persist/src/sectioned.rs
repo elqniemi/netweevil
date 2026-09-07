@@ -272,28 +272,20 @@ pub(crate) fn write_compiled_profile_sectioned(
     writer.write_raw(&travel_times)?;
     writer.write_raw(&costs)?;
 
-    static EMPTY_F64: &[f64] = &[];
     static EMPTY_U32: &[u32] = &[];
     match bundle.acceleration.as_ref() {
         Some(acceleration) => {
             writer.write_raw(&acceleration.upward_weight)?;
-            writer.write_raw(&acceleration.upward_middle)?;
             writer.write_raw(&acceleration.downward_weight)?;
-            writer.write_raw(&acceleration.downward_middle)?;
             writer.write_raw(&acceleration.time_upward_weight)?;
             writer.write_raw(&acceleration.time_downward_weight)?;
             writer.write_raw(&acceleration.distance_upward_weight)?;
             writer.write_raw(&acceleration.distance_downward_weight)?;
         }
         None => {
-            writer.write_raw(EMPTY_F64)?;
-            writer.write_raw(EMPTY_U32)?;
-            writer.write_raw(EMPTY_F64)?;
-            writer.write_raw(EMPTY_U32)?;
-            writer.write_raw(EMPTY_F64)?;
-            writer.write_raw(EMPTY_F64)?;
-            writer.write_raw(EMPTY_F64)?;
-            writer.write_raw(EMPTY_F64)?;
+            for _ in 0..6 {
+                writer.write_raw(EMPTY_U32)?;
+            }
         }
     }
     writer.write_bincode(&bundle.temporal)?;
@@ -349,14 +341,12 @@ pub(crate) fn read_compiled_profile_sectioned(
         )
         .collect();
 
-    let upward_weight: Vec<f64> = reader.read_raw()?;
-    let upward_middle: Vec<u32> = reader.read_raw()?;
-    let downward_weight: Vec<f64> = reader.read_raw()?;
-    let downward_middle: Vec<u32> = reader.read_raw()?;
-    let time_upward_weight: Vec<f64> = reader.read_raw()?;
-    let time_downward_weight: Vec<f64> = reader.read_raw()?;
-    let distance_upward_weight: Vec<f64> = reader.read_raw()?;
-    let distance_downward_weight: Vec<f64> = reader.read_raw()?;
+    let upward_weight: Vec<u32> = reader.read_raw()?;
+    let downward_weight: Vec<u32> = reader.read_raw()?;
+    let time_upward_weight: Vec<u32> = reader.read_raw()?;
+    let time_downward_weight: Vec<u32> = reader.read_raw()?;
+    let distance_upward_weight: Vec<u32> = reader.read_raw()?;
+    let distance_downward_weight: Vec<u32> = reader.read_raw()?;
     let acceleration = header
         .acceleration
         .map(|acceleration| CompiledAcceleration {
@@ -364,9 +354,7 @@ pub(crate) fn read_compiled_profile_sectioned(
             source_acceleration_bundle_id: acceleration.source_acceleration_bundle_id,
             algorithm: acceleration.algorithm,
             upward_weight,
-            upward_middle,
             downward_weight,
-            downward_middle,
             time_upward_weight,
             time_downward_weight,
             distance_upward_weight,

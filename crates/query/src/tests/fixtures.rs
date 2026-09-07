@@ -273,7 +273,8 @@ pub(super) fn build_test_cch(
     CompiledProfileBundle,
 ) {
     use netweevil_core::{
-        ACCELERATION_BUNDLE_SCHEMA_VERSION, CCH_ALGORITHM, DatasetAccelerationBundle, NO_MIDDLE,
+        ACCELERATION_BUNDLE_SCHEMA_VERSION, CCH_ALGORITHM, CCH_WEIGHT_INFINITY,
+        DatasetAccelerationBundle, add_cch_weights, encode_cch_weight,
     };
     use std::collections::BTreeMap;
 
@@ -316,12 +317,15 @@ pub(super) fn build_test_cch(
 
     // Customize the fixed arc set for any base transition weight, mirroring
     // the real compiler.
-    let customize = |base: &dyn Fn(usize, usize) -> f64| -> BTreeMap<(u32, u32), (f64, u32)> {
-        let mut arcs = BTreeMap::<(u32, u32), (f64, u32)>::new();
+    let customize = |base: &dyn Fn(usize, usize) -> f64| -> BTreeMap<(u32, u32), (u32, u32)> {
+        let mut arcs = BTreeMap::<(u32, u32), (u32, u32)>::new();
         for &(tail, head) in &arc_set {
             arcs.insert(
                 (tail, head),
-                (base(tail as usize, head as usize), NO_MIDDLE),
+                (
+                    encode_cch_weight(base(tail as usize, head as usize)),
+                    u32::MAX,
+                ),
             );
         }
         for middle in 0..edge_count as u32 {
@@ -340,13 +344,15 @@ pub(super) fn build_test_cch(
                     if tail == head {
                         continue;
                     }
-                    if !incoming_weight.is_finite() || !outgoing_weight.is_finite() {
+                    if incoming_weight == CCH_WEIGHT_INFINITY
+                        || outgoing_weight == CCH_WEIGHT_INFINITY
+                    {
                         continue;
                     }
-                    let candidate = incoming_weight + outgoing_weight;
+                    let candidate = add_cch_weights(incoming_weight, outgoing_weight);
                     let entry = arcs
                         .entry((tail, head))
-                        .or_insert((f64::INFINITY, NO_MIDDLE));
+                        .or_insert((CCH_WEIGHT_INFINITY, u32::MAX));
                     if candidate < entry.0 {
                         *entry = (candidate, middle);
                     }
@@ -384,33 +390,29 @@ pub(super) fn build_test_cch(
     let mut upward_first_out = vec![0_u32; edge_count + 1];
     let mut upward_head = Vec::new();
     let mut upward_weight = Vec::new();
-    let mut upward_middle = Vec::new();
     let mut downward_first_out = vec![0_u32; edge_count + 1];
     let mut downward_head = Vec::new();
     let mut downward_weight = Vec::new();
-    let mut downward_middle = Vec::new();
     let mut time_upward_weight = Vec::new();
     let mut time_downward_weight = Vec::new();
     let mut distance_upward_weight = Vec::new();
     let mut distance_downward_weight = Vec::new();
-    let metric_weight = |arcs: &BTreeMap<(u32, u32), (f64, u32)>, tail: u32, head: u32| {
+    let metric_weight = |arcs: &BTreeMap<(u32, u32), (u32, u32)>, tail: u32, head: u32| {
         arcs.get(&(tail, head))
             .map(|&(weight, _)| weight)
-            .unwrap_or(f64::INFINITY)
+            .unwrap_or(CCH_WEIGHT_INFINITY)
     };
-    for (&(tail, head), &(weight, middle)) in &arcs {
+    for (&(tail, head), &(weight, _)) in &arcs {
         if tail < head {
             upward_first_out[tail as usize + 1] += 1;
             upward_head.push(head);
             upward_weight.push(weight);
-            upward_middle.push(middle);
             time_upward_weight.push(metric_weight(&time_arcs, tail, head));
             distance_upward_weight.push(metric_weight(&distance_arcs, tail, head));
         } else {
             downward_first_out[tail as usize + 1] += 1;
             downward_head.push(head);
             downward_weight.push(weight);
-            downward_middle.push(middle);
             time_downward_weight.push(metric_weight(&time_arcs, tail, head));
             distance_downward_weight.push(metric_weight(&distance_arcs, tail, head));
         }
@@ -434,13 +436,11 @@ pub(super) fn build_test_cch(
     });
     let mut metrics = metrics.clone();
     metrics.acceleration = Some(CompiledAcceleration {
-        schema_version: 3,
+        schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
         source_acceleration_bundle_id: CacheBundleId::new("test-cch"),
         algorithm: CCH_ALGORITHM.to_string(),
         upward_weight,
-        upward_middle,
         downward_weight,
-        downward_middle,
         time_upward_weight,
         time_downward_weight,
         distance_upward_weight,
