@@ -573,6 +573,12 @@ netweevil bench http --url http://127.0.0.1:5000 \
   --backend osrm --osrm-profile driving --concurrency 16 --json /tmp/osrm-c16.json
 ```
 
+For a remote endpoint, follow its usage policy. `--request-interval-ms 1100`
+with `--concurrency 1` spaces request starts by at least 1.1 seconds. The
+reported request latency excludes this delay; throughput includes it and
+therefore measures the imposed request rate. HTTP requests identify the client
+as NetWeevil.
+
 The `osrm` backend calls
 `GET /route/v1/{profile}/{lon},{lat};{lon},{lat}?overview=false` and reads
 `routes[0].duration` and `routes[0].distance`. HTTP status failures are counted
@@ -588,8 +594,14 @@ netweevil bench compare --baseline /tmp/http-c16.json --candidate /tmp/osrm-c16.
 ```
 
 JSON reports carry the git commit, dataset, profile, engine, every setting, and
-one record per request (`id`, `ok`, `latency_ms`, `duration_s`, `distance_m`).
-Keep them outside the repository.
+one record per request (`id`, `ok`, `latency_ms`, `duration_s`, `distance_m`,
+and NetWeevil's `generalized_cost`). Matrix records also include succeeded,
+failed and ignored cell counts; a successful matrix request can contain
+unreachable cells.
+Store reports under `.netweevil/reports/` or outside the checkout.
+
+See the [North Netherlands measurements](docs/performance-north-nl.md) for
+bundle sizes, routing checks, workload results and the remote OSRM comparison.
 
 ## QGIS Plugin
 

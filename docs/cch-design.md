@@ -58,10 +58,11 @@ termination, including for zero-cost transitions. An arc without a matching
 lower triangle unpacks to a base transition. No middle-state arrays or full
 shortcut expansions are persisted.
 
-The exact engine is the differential-test reference and handles unsupported
-acceleration cases, including multi-edge restriction automata and metric
-overflow. A hierarchy query optimizes the quantized metric; it does not run an
-exact search afterward.
+The exact engine is the differential-test reference and handles metric
+overflow. A hierarchy query optimizes the quantized metric. The engine checks
+its candidate against multi-edge restrictions and uses an exact automaton
+search when the candidate violates one. A legal candidate needs no exact
+follow-up search.
 
 ## Bundle validation
 

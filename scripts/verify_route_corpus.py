@@ -17,7 +17,7 @@ def verify(result, reference):
         return ["route is unreachable"]
     if summary["segment_count"] != len(segments):
         errors.append("segment count differs")
-    if result.get("edge_path") != [s["edge_id"] for s in segments]:
+    if (result.get("edge_path") or []) != [s["edge_id"] for s in segments]:
         errors.append("edge path differs from segments")
     if any(a["to_node_id"] != b["from_node_id"] for a, b in zip(segments, segments[1:])):
         errors.append("disconnected reconstructed segments")
@@ -28,7 +28,7 @@ def verify(result, reference):
     geometry = result.get("geometry") or []
     if not geometry or any(not math.isfinite(v) for point in geometry for v in point):
         errors.append("missing or nonfinite geometry")
-    elif segments:
+    else:
         for point, endpoint in [(geometry[0], "origin"), (geometry[-1], "destination")]:
             snapped = result[endpoint]
             if abs(point[0] - snapped["snapped_lon"]) > 1e-7 or abs(point[1] - snapped["snapped_lat"]) > 1e-7:

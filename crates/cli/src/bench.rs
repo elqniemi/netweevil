@@ -736,6 +736,13 @@ struct BucketStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct MatrixCellCounts {
+    succeeded: usize,
+    failed: usize,
+    ignored: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct RequestRecord {
     index: usize,
     id: String,
@@ -749,6 +756,8 @@ struct RequestRecord {
     distance_m: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     generalized_cost: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    matrix_cell_counts: Option<MatrixCellCounts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -785,6 +794,7 @@ struct Outcome {
     duration_s: Option<f64>,
     distance_m: Option<f64>,
     generalized_cost: Option<f64>,
+    matrix_cell_counts: Option<MatrixCellCounts>,
     error: Option<String>,
     /// Transport or non-2xx status failure, as opposed to a server that
     /// answered but could not route.
@@ -798,6 +808,7 @@ impl Outcome {
             duration_s: Some(duration_s),
             distance_m: Some(distance_m),
             generalized_cost: None,
+            matrix_cell_counts: None,
             error: None,
             status_failure: false,
         }
@@ -814,6 +825,7 @@ impl Outcome {
             duration_s: None,
             distance_m: None,
             generalized_cost: None,
+            matrix_cell_counts: None,
             error: None,
             status_failure: false,
         }
@@ -825,6 +837,7 @@ impl Outcome {
             duration_s: None,
             distance_m: None,
             generalized_cost: None,
+            matrix_cell_counts: None,
             error: Some(error.into()),
             status_failure: false,
         }
@@ -836,6 +849,7 @@ impl Outcome {
             duration_s: None,
             distance_m: None,
             generalized_cost: None,
+            matrix_cell_counts: None,
             error: Some(error.into()),
             status_failure: true,
         }
@@ -972,6 +986,7 @@ fn summarize(
             duration_s: sample.outcome.duration_s,
             distance_m: sample.outcome.distance_m,
             generalized_cost: sample.outcome.generalized_cost,
+            matrix_cell_counts: sample.outcome.matrix_cell_counts.clone(),
             error: sample.outcome.error.clone(),
         })
         .collect();
@@ -1206,10 +1221,19 @@ fn execute_task(engine: &PreparedRoutingEngine, task: &Task) -> (String, Option<
             destinations,
         } => {
             let outcome = match engine.execute_matrix(origins, destinations) {
-                Ok(result) if result.succeeded_count == 0 => {
-                    Outcome::routing_failure("no matrix cell succeeded")
+                Ok(result) => {
+                    let mut outcome = if result.succeeded_count == 0 {
+                        Outcome::routing_failure("no matrix cell succeeded")
+                    } else {
+                        Outcome::ok_without_quality()
+                    };
+                    outcome.matrix_cell_counts = Some(MatrixCellCounts {
+                        succeeded: result.succeeded_count,
+                        failed: result.failed_count,
+                        ignored: result.ignored_count,
+                    });
+                    outcome
                 }
-                Ok(_) => Outcome::ok_without_quality(),
                 Err(error) => Outcome::routing_failure(error.to_string()),
             };
             ("matrix".to_string(), None, outcome)
@@ -1453,7 +1477,7 @@ fn render_report(report: &BenchReport) {
     let summary = &report.summary;
     println!();
     if let Some(engine_load_s) = summary.engine_load_s {
-        println!("  engine load    {engine_load_s:.3} s (cold)");
+        println!("  engine load    {engine_load_s:.3} s");
     }
     if let Some(peak_rss) = summary.peak_rss_bytes {
         println!("  peak RSS       {}", format_bytes(peak_rss));
@@ -2111,6 +2135,7 @@ mod tests {
                 duration_s: None,
                 distance_m: None,
                 generalized_cost: None,
+                matrix_cell_counts: None,
                 error: Some("unreachable".to_string()),
             },
             RequestRecord {
@@ -2122,6 +2147,7 @@ mod tests {
                 duration_s: Some(60.0),
                 distance_m: Some(1000.0),
                 generalized_cost: Some(60.0),
+                matrix_cell_counts: None,
                 error: None,
             },
         ];

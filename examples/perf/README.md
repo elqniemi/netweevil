@@ -88,4 +88,5 @@ Route workloads request summaries only, so timings measure the search rather
 than geometry serialization. Use `--workload route-geometry` to measure the
 geometry path on purpose.
 
-Write JSON reports outside the repository; they are run artifacts, not inputs.
+Store JSON reports under `.netweevil/reports/` or outside the checkout.
+See the [North Netherlands measurements](../../docs/performance-north-nl.md).

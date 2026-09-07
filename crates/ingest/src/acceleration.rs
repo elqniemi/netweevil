@@ -926,7 +926,7 @@ mod tests {
             );
             eprintln!(
                 "leaf={leaf} ordering_s={ordering_s:.3} total_s={:.3} base={} shortcuts={} total={}",
-                start.elapsed().as_secs_f64(),
+                partition_s + start.elapsed().as_secs_f64(),
                 bundle.stats.base_arc_count,
                 bundle.stats.shortcut_arc_count,
                 bundle.stats.total_arc_count
