@@ -185,7 +185,7 @@ pub(crate) fn route_between_candidates(
                                 direct_path.clone(),
                             )?
                         } else {
-                            astar_between_edge_seeds_with_failure_modes(
+                            dijkstra_between_edge_seeds_with_failure_modes(
                                 topology,
                                 metrics,
                                 routing_graph,
@@ -226,7 +226,7 @@ pub(crate) fn route_between_candidates(
                             {
                                 Some(path)
                             }
-                            Some(_) => astar_between_edge_seeds_with_failure_modes(
+                            Some(_) => dijkstra_between_edge_seeds_with_failure_modes(
                                 topology,
                                 metrics,
                                 routing_graph,
@@ -254,7 +254,7 @@ pub(crate) fn route_between_candidates(
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);
                     let destination_seeds = destination_edge_seeds(routing_graph, destination);
                     if has_failure_modes(fallback) {
-                        astar_between_edge_seeds_with_failure_modes(
+                        dijkstra_between_edge_seeds_with_failure_modes(
                             topology,
                             metrics,
                             routing_graph,

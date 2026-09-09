@@ -19,9 +19,8 @@ use time::{Date, Duration, OffsetDateTime, Weekday};
 use crate::{
     AlternativeRouteOptions, AnalysisOutcome, ConnectivityPolicy, FallbackPolicy, HopSelectionInfo,
     RouteResult, RouteSegment, RouteSummary, RoutingGraph, SearchStateKey, SnapOptions,
-    SnappedPoint, build_breakdowns, build_route_geometry, execution_warnings, hop_info_for_pair,
-    no_route_failure, request_returns_detailed_path, snap_candidates_with_options,
-    turn_penalty_seconds,
+    SnappedPoint, build_breakdowns, build_route_geometry, hop_info_for_pair, no_route_failure,
+    request_returns_detailed_path, snap_candidates_with_options, turn_penalty_seconds,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -34,7 +33,6 @@ pub struct ScenarioOverlay {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenarioFeatureOverride {
-    #[serde(alias = "feature_id")]
     pub source_feature_id: i64,
     #[serde(default)]
     pub force_closed: bool,
@@ -2592,7 +2590,7 @@ fn build_temporal_route_result(
     } else {
         None
     };
-    let mut warnings = execution_warnings(metrics);
+    let mut warnings = Vec::new();
     warnings.push(
         "Time-dependent route used the exact multi-label edge search; static CCH acceleration was intentionally bypassed."
             .to_string(),

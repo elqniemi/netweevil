@@ -15,12 +15,12 @@ use netweevil_query::{
     LabeledPoint, PreparedRoutingEngine, RouteRequest, SnapOptions, SnappedPoint,
 };
 use netweevil_transit::{
-    OPENOV_GTFS_URL, PreparedTransitRouter, StreetTimeEstimator, TransitBundle,
-    TransitFeedManifest, TransitImportOptions, TransitStop, TransitStopBindingTarget,
-    TransitStreetPath, TransitTransferBuildOptions, TransitTransferTableManifest,
-    apply_transit_stop_bindings, build_transit_transfer_table, import_gtfs,
-    load_transit_stop_bindings, read_transit_bundle, read_transit_transfer_table,
-    transit_import_summary, write_transit_bundle, write_transit_transfer_table,
+    PreparedTransitRouter, StreetTimeEstimator, TransitBundle, TransitFeedManifest,
+    TransitImportOptions, TransitStop, TransitStopBindingTarget, TransitStreetPath,
+    TransitTransferBuildOptions, TransitTransferTableManifest, apply_transit_stop_bindings,
+    build_transit_transfer_table, import_gtfs, load_transit_stop_bindings, read_transit_bundle,
+    read_transit_transfer_table, transit_import_summary, write_transit_bundle,
+    write_transit_transfer_table,
 };
 
 #[derive(Subcommand, Debug)]
@@ -122,7 +122,7 @@ pub(crate) fn transit_import(paths: &WorkspacePaths, args: TransitImportArgs) ->
         label: format!("GTFS transit feed {}", args.name),
         source_path: args.source.display().to_string(),
         source_sha256: summary.source_sha256.clone(),
-        imported_at: netweevil_report::now_rfc3339()?,
+        imported_at: netweevil_manifest::now_rfc3339()?,
         service_start_date: args.service_start,
         service_days: args.service_days,
         stop_count: summary.stop_count as u64,
@@ -163,7 +163,6 @@ pub(crate) fn transit_import(paths: &WorkspacePaths, args: TransitImportArgs) ->
         "transit feed manifest written to {}",
         manifest_path.display()
     );
-    println!("openov source URL: {OPENOV_GTFS_URL}");
     Ok(())
 }
 
@@ -256,7 +255,7 @@ pub(crate) fn transit_build_transfers(
         profile_hash: table.profile_hash.clone(),
         dataset_id: table.dataset_id.clone(),
         path: output_path.display().to_string(),
-        created_at: netweevil_report::now_rfc3339()?,
+        created_at: netweevil_manifest::now_rfc3339()?,
         transfer_count: table.transfers.len() as u64,
         max_transfer_distance_m: table.max_transfer_distance_m,
     });

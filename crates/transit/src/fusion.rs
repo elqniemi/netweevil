@@ -23,22 +23,7 @@ pub fn load_transit_stop_bindings(path: impl AsRef<Path>) -> Result<TransitStopB
     let table = match path.extension().and_then(|extension| extension.to_str()) {
         Some(extension) if extension.eq_ignore_ascii_case("csv") => parse_stop_binding_csv(raw)?,
         Some(extension) if extension.eq_ignore_ascii_case("json") => {
-            #[derive(Deserialize)]
-            #[serde(untagged)]
-            enum BindingDocument {
-                Table(TransitStopBindingTable),
-                Bindings(Vec<TransitStopBinding>),
-            }
-            match serde_json::from_str::<BindingDocument>(raw)
-                .context("parsing JSON transit stop bindings")?
-            {
-                BindingDocument::Table(table) => table,
-                BindingDocument::Bindings(bindings) => TransitStopBindingTable {
-                    schema_version: TRANSIT_STOP_BINDING_SCHEMA_VERSION,
-                    feed_id: None,
-                    bindings,
-                },
-            }
+            serde_json::from_str(raw).context("parsing JSON transit stop bindings")?
         }
         other => bail!(
             "unsupported transit stop binding extension {:?}; use .json or .csv",

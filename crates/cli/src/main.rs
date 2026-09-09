@@ -18,8 +18,8 @@ use std::env;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use netweevil_manifest::{AlgorithmInfo, SoftwareInfo};
 use netweevil_persist::WorkspacePaths;
-use netweevil_report::{AlgorithmInfo, SoftwareInfo};
 use tracing_subscriber::EnvFilter;
 
 use crate::analyze::{

@@ -23,23 +23,3 @@ changelog=
     from departure/frame datetime fields for the QGIS Temporal Controller
   - 3D route and segment coordinates retain their Z ordinate when split and
     loaded; vertical segments are kept distinct
-  1.1.0
-  - Transit first/last-mile modes: routes and transit service areas can reach
-    transit by walking, cycling, or car (walking+transit, cycling+transit,
-    car+transit)
-  - Advanced first/last-mile option to plan access and egress with different
-    street modes (off by default)
-  - Transit service areas gained dedicated access mode, distance, and speed
-    controls; reachable stops report the access mode used
-  1.0.0
-  - QGIS 4 / Qt 6 support (supportsQt6, scoped-enum-safe compatibility layer)
-  - Plugin split into focused modules instead of one 6000-line file
-  - Always-visible connection bar with status indicator, auto-connect on open,
-    and lazy reconnect before every run
-  - Task-first tab order; points-first layouts in Route and Transit
-  - Service Area tab only shows the controls the selected mode actually uses
-  - Unsafe degraded-routing modes no longer persist between sessions and are
-    highlighted in red while enabled
-  - Workspace root no longer defaults to the plugin install directory
-  - Friendly validation messages and non-modal message-bar alerts
-  - Request JSON defaults moved out of examples/ into .netweevil/requests/

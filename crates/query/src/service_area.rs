@@ -227,7 +227,7 @@ pub(crate) fn execute_service_area_with_graph(
         })
         .collect();
     let mut diagnostics = Vec::new();
-    let mut warnings = execution_warnings(metrics);
+    let mut warnings = Vec::new();
     let mut threshold_summaries = Vec::new();
     let mut origin_bands = Vec::new();
     let mut processed_origin_count = 0_usize;

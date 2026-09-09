@@ -12,26 +12,69 @@ use crate::model::{
     TransitStreetPath,
 };
 
-pub(crate) fn build_departures_by_stop(bundle: &TransitBundle) -> Vec<Vec<TransitConnection>> {
-    let mut departures_by_stop: Vec<Vec<TransitConnection>> = vec![Vec::new(); bundle.stops.len()];
+pub(crate) struct DepartureIndex {
+    pub(crate) by_stop: Vec<Vec<u32>>,
+    pub(crate) next_connection: Vec<u32>,
+}
+
+/// Links adjacent connections on each run in timetable order. Position matters
+/// when a vehicle visits the same stop more than once.
+pub(crate) fn build_run_links(bundle: &TransitBundle) -> (Vec<u32>, Vec<u32>) {
+    let mut previous = vec![u32::MAX; bundle.connections.len()];
+    let mut next = vec![u32::MAX; bundle.connections.len()];
+    let run_count = bundle
+        .connections
+        .iter()
+        .map(|connection| connection.run_index as usize + 1)
+        .max()
+        .unwrap_or_default();
+    let mut last_by_run = vec![u32::MAX; run_count];
+    let mut indexes = (0..bundle.connections.len() as u32).collect::<Vec<_>>();
+    if !bundle
+        .connections
+        .windows(2)
+        .all(|pair| pair[0].departure_s <= pair[1].departure_s)
+    {
+        indexes.sort_by_key(|index| bundle.connections[*index as usize].departure_s);
+    }
+    for index in indexes {
+        let connection = &bundle.connections[index as usize];
+        let last_index = &mut last_by_run[connection.run_index as usize];
+        if let Some(last) = bundle.connections.get(*last_index as usize)
+            && last.to_stop_index == connection.from_stop_index
+            && last.arrival_s <= connection.departure_s
+        {
+            previous[index as usize] = *last_index;
+            next[*last_index as usize] = index;
+        }
+        *last_index = index;
+    }
+    (previous, next)
+}
+
+pub(crate) fn build_departures_by_stop(bundle: &TransitBundle) -> DepartureIndex {
+    let mut departures_by_stop: Vec<Vec<u32>> = vec![Vec::new(); bundle.stops.len()];
     let mut unsorted_stops = Vec::<usize>::new();
-    for connection in &bundle.connections {
+    for (connection_index, connection) in bundle.connections.iter().enumerate() {
         let stop_index = connection.from_stop_index as usize;
         let departures = &mut departures_by_stop[stop_index];
-        if departures
-            .last()
-            .is_some_and(|previous| previous.departure_s > connection.departure_s)
-        {
+        if departures.last().is_some_and(|previous| {
+            bundle.connections[*previous as usize].departure_s > connection.departure_s
+        }) {
             unsorted_stops.push(stop_index);
         }
-        departures.push(*connection);
+        departures.push(connection_index as u32);
     }
     unsorted_stops.sort_unstable();
     unsorted_stops.dedup();
     for stop_index in unsorted_stops {
-        departures_by_stop[stop_index].sort_by_key(|connection| connection.departure_s);
+        departures_by_stop[stop_index]
+            .sort_by_key(|index| bundle.connections[*index as usize].departure_s);
     }
-    departures_by_stop
+    DepartureIndex {
+        by_stop: departures_by_stop,
+        next_connection: build_run_links(bundle).1,
+    }
 }
 
 #[derive(Debug)]
@@ -63,31 +106,62 @@ impl StopSpatialIndex {
         lat: f64,
         max_distance_m: f64,
     ) -> Vec<StopCandidate> {
-        if max_distance_m <= 0.0 {
+        if !max_distance_m.is_finite()
+            || max_distance_m <= 0.0
+            || !lon.is_finite()
+            || !lat.is_finite()
+        {
             return Vec::new();
         }
-        let lat_radius = max_distance_m / 110_540.0;
-        let lon_radius = max_distance_m / (111_320.0 * lat.to_radians().cos().abs().max(0.01));
+        // Bound the same sphere used by the exact haversine filter. The
+        // longitude arc widens near a pole; a wrapped box scans occupied
+        // latitude cells and lets the exact distance decide membership.
+        let angular_radius = (max_distance_m / 6_371_000.0).min(std::f64::consts::PI);
+        let lat_radius = angular_radius.to_degrees();
+        let lon_radius = if lat.abs() + lat_radius >= 90.0 {
+            180.0
+        } else {
+            (angular_radius.sin() / lat.to_radians().cos())
+                .clamp(-1.0, 1.0)
+                .asin()
+                .to_degrees()
+        };
+        let wraps_longitude = lon - lon_radius <= -180.0 || lon + lon_radius >= 180.0;
         let min_col = ((lon - lon_radius) / self.cell_degrees).floor() as i32;
         let max_col = ((lon + lon_radius) / self.cell_degrees).floor() as i32;
-        let min_row = ((lat - lat_radius) / self.cell_degrees).floor() as i32;
-        let max_row = ((lat + lat_radius) / self.cell_degrees).floor() as i32;
+        let min_row = (((lat - lat_radius).max(-90.0)) / self.cell_degrees).floor() as i32;
+        let max_row = (((lat + lat_radius).min(90.0)) / self.cell_degrees).floor() as i32;
         let mut candidates = Vec::new();
-        for col in min_col..=max_col {
-            for row in min_row..=max_row {
-                let Some(stop_indexes) = self.cells.get(&(col, row)) else {
-                    continue;
-                };
-                for &stop_index in stop_indexes {
-                    let stop = &bundle.stops[stop_index as usize];
-                    let distance_m = haversine_m(lon, lat, stop.lon, stop.lat);
-                    if distance_m <= max_distance_m {
-                        candidates.push(StopCandidate {
-                            stop_index,
-                            distance_m,
-                            transfer_time_s: None,
-                            network_path: None,
-                        });
+        let cell_count = (i64::from(max_col) - i64::from(min_col) + 1)
+            .saturating_mul(i64::from(max_row) - i64::from(min_row) + 1);
+        let mut visit = |stop_indexes: &[u32]| {
+            for &stop_index in stop_indexes {
+                let stop = &bundle.stops[stop_index as usize];
+                let distance_m = haversine_m(lon, lat, stop.lon, stop.lat);
+                if distance_m <= max_distance_m {
+                    candidates.push(StopCandidate {
+                        stop_index,
+                        distance_m,
+                        transfer_time_s: None,
+                        network_path: None,
+                    });
+                }
+            }
+        };
+        if wraps_longitude || cell_count > self.cells.len() as i64 {
+            for (&(col, row), stops) in &self.cells {
+                if (wraps_longitude || (col >= min_col && col <= max_col))
+                    && row >= min_row
+                    && row <= max_row
+                {
+                    visit(stops);
+                }
+            }
+        } else {
+            for col in min_col..=max_col {
+                for row in min_row..=max_row {
+                    if let Some(stops) = self.cells.get(&(col, row)) {
+                        visit(stops);
                     }
                 }
             }
@@ -103,20 +177,12 @@ impl StopSpatialIndex {
     }
 }
 
-/// Transfer expansion considers at most this many nearby stops per stop.
-pub(crate) const MAX_TRANSFER_CANDIDATES: usize = 32;
-
-/// Expanding-radius search beyond which a stop is considered to have no more
-/// transfer neighbours worth indexing.
-const MAX_TRANSFER_INDEX_RADIUS_M: f64 = 100_000.0;
-
-/// Precomputes, for every stop, its `MAX_TRANSFER_CANDIDATES` nearest stops
-/// (including itself) sorted by distance. Search-time transfer expansion
-/// filters this static list by the requested max transfer distance instead of
-/// re-querying and re-sorting the spatial index on every settled state.
+/// Every stop within the requested walking radius, sorted by distance. A
+/// nearest-neighbour cap can hide the only usable platform in a busy station.
 pub(crate) fn build_transfer_candidates(
     bundle: &TransitBundle,
     stop_index: &StopSpatialIndex,
+    max_distance_m: f64,
 ) -> Vec<Vec<StopCandidate>> {
     use rayon::prelude::*;
 
@@ -124,18 +190,14 @@ pub(crate) fn build_transfer_candidates(
         .stops
         .par_iter()
         .map(|stop| {
-            let mut radius_m = 500.0_f64;
-            loop {
-                let mut candidates = stop_index.nearby_stops(bundle, stop.lon, stop.lat, radius_m);
-                if candidates.len() >= MAX_TRANSFER_CANDIDATES
-                    || radius_m >= MAX_TRANSFER_INDEX_RADIUS_M
-                {
-                    candidates.sort_by(|left, right| left.distance_m.total_cmp(&right.distance_m));
-                    candidates.truncate(MAX_TRANSFER_CANDIDATES);
-                    return candidates;
-                }
-                radius_m *= 2.0;
-            }
+            let mut candidates =
+                stop_index.nearby_stops(bundle, stop.lon, stop.lat, max_distance_m);
+            candidates.sort_by(|left, right| {
+                left.distance_m
+                    .total_cmp(&right.distance_m)
+                    .then_with(|| left.stop_index.cmp(&right.stop_index))
+            });
+            candidates
         })
         .collect()
 }
@@ -162,7 +224,7 @@ pub trait StreetTimeEstimator: Send + Sync {
     /// Rich path from an arbitrary origin point to a transit stop. Binding-
     /// aware hosts override this method. The caller separately consults
     /// `street_time_s` when this richer method returns `None` for an unbound
-    /// stop, preserving compatibility with coordinate-only estimators. A
+    /// stop. This supports coordinate-only estimators for unbound stops. A
     /// bound stop never falls back to coordinates because that would bypass
     /// its platform/node feasibility constraint.
     fn point_to_stop_path(
@@ -207,7 +269,7 @@ pub trait StreetTimeEstimator: Send + Sync {
 
 pub(crate) struct TransitRuntime<'a> {
     pub(crate) bundle: &'a TransitBundle,
-    pub(crate) departures_by_stop: &'a [Vec<TransitConnection>],
+    pub(crate) departures_by_stop: &'a DepartureIndex,
     stop_index: &'a StopSpatialIndex,
     transfer_candidates: &'a [Vec<StopCandidate>],
     pub(crate) allowed_routes: Vec<bool>,
@@ -221,7 +283,7 @@ pub(crate) struct TransitRuntime<'a> {
 impl<'a> TransitRuntime<'a> {
     pub(crate) fn new(
         bundle: &'a TransitBundle,
-        departures_by_stop: &'a [Vec<TransitConnection>],
+        departures_by_stop: &'a DepartureIndex,
         stop_index: &'a StopSpatialIndex,
         transfer_candidates: &'a [Vec<StopCandidate>],
         modes: &TransitModeOptions,
@@ -423,15 +485,32 @@ pub(crate) fn best_street_candidates(
 pub(crate) struct StateKey {
     pub(crate) stop_index: u32,
     pub(crate) boardings: u8,
-    pub(crate) trip_index: u32,
+    pub(crate) connection_index: u32,
+    pub(crate) can_alight: bool,
+}
+
+/// Staying aboard has no slack. Changing vehicles at the same stop needs
+/// both transfer and boarding slack; a transfer walk already paid its slack.
+pub(crate) fn boarding_slack_s(
+    state: StateKey,
+    continuing_run: bool,
+    modes: &TransitModeOptions,
+) -> u32 {
+    if continuing_run {
+        0
+    } else if state.boardings > 0 && state.can_alight {
+        modes.board_slack_s.saturating_add(modes.transfer_slack_s)
+    } else {
+        modes.board_slack_s
+    }
 }
 
 pub(crate) fn can_start_transfer_walk(state: StateKey) -> bool {
-    state.boardings > 0 && state.trip_index != u32::MAX
+    state.boardings > 0 && state.can_alight
 }
 
 pub(crate) fn can_finish_with_egress(state: StateKey) -> bool {
-    state.boardings > 0 && state.trip_index != u32::MAX
+    state.boardings > 0 && state.can_alight
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -447,7 +526,12 @@ impl Ord for QueueEntry {
             .cmp(&self.time_s)
             .then_with(|| self.state.stop_index.cmp(&other.state.stop_index))
             .then_with(|| self.state.boardings.cmp(&other.state.boardings))
-            .then_with(|| self.state.trip_index.cmp(&other.state.trip_index))
+            .then_with(|| {
+                self.state
+                    .connection_index
+                    .cmp(&other.state.connection_index)
+            })
+            .then_with(|| self.state.can_alight.cmp(&other.state.can_alight))
     }
 }
 

@@ -22,6 +22,7 @@ csv.workspace = true
 netweevil-api = { path = "../api" }
 netweevil-core = { path = "../core" }
 netweevil-ingest = { path = "../ingest" }
+netweevil-manifest = { path = "../manifest" }
 netweevil-persist = { path = "../persist" }
 netweevil-profile = { path = "../profile" }
 netweevil-query = { path = "../query" }
@@ -30,6 +31,7 @@ netweevil-simulate = { path = "../simulate" }
 netweevil-transit = { path = "../transit" }
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tracing-subscriber.workspace = true
 ureq.workspace = true

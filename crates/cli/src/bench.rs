@@ -8,7 +8,7 @@
 //! - `run` executes a workload in-process against one shared
 //!   [`PreparedRoutingEngine`], optionally across several threads.
 //! - `http` executes the same corpus against a running HTTP server, either the
-//!   NetWeevil API or an OSRM `route` service.
+//!   NetWeevil, OSRM, or Valhalla route service.
 //! - `compare` diffs two JSON reports produced from the same corpus, reporting
 //!   both latency and route-quality agreement.
 //!
@@ -16,7 +16,7 @@
 //! comparable: NetWeevil against OSRM, accelerated against exact, or one commit
 //! against another.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,6 +27,7 @@ use clap::{Args, Subcommand, ValueEnum};
 use netweevil_core::{
     CompiledProfileBundle, DatasetAccelerationBundle, TopologyBounds, TopologyBundle,
 };
+use netweevil_manifest::now_rfc3339;
 use netweevil_persist::{
     WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
     read_compiled_profile_manifests, read_dataset_manifest, read_topology_bundle,
@@ -39,8 +40,8 @@ use netweevil_query::{
     ServiceAreaPolygonOptions, ServiceAreaRequest, ServiceAreaReturnOptions, ServiceAreaThreshold,
     ServiceAreaThresholdMetric, SnapOptions, TemporalRequestOptions,
 };
-use netweevil_report::now_rfc3339;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Snap radius used by every generated request, matching the request schema
 /// default so a corpus stays valid across all three subcommands.
@@ -54,7 +55,7 @@ const MEDIUM_MAX_M: f64 = 30_000.0;
 
 const EARTH_RADIUS_M: f64 = 6_371_008.8;
 
-const REPORT_SCHEMA_VERSION: u32 = 1;
+const REPORT_SCHEMA_VERSION: u32 = 2;
 
 // ---------------------------------------------------------------------------
 // CLI surface
@@ -170,6 +171,8 @@ pub(crate) enum HttpBackend {
     Netweevil,
     /// An OSRM `route` service (`GET /route/v1/{profile}/...`).
     Osrm,
+    /// A Valhalla route service (`POST /route`).
+    Valhalla,
 }
 
 impl HttpBackend {
@@ -177,6 +180,7 @@ impl HttpBackend {
         match self {
             Self::Netweevil => "netweevil",
             Self::Osrm => "osrm",
+            Self::Valhalla => "valhalla",
         }
     }
 }
@@ -203,6 +207,9 @@ pub(crate) struct BenchHttpArgs {
     /// OSRM profile path segment.
     #[arg(long, default_value = "driving")]
     osrm_profile: String,
+    /// Valhalla costing model, such as auto, bicycle, or pedestrian.
+    #[arg(long, default_value = "auto")]
+    valhalla_costing: String,
     /// Minimum interval between HTTP request starts; requires --concurrency 1.
     #[arg(long, default_value_t = 0)]
     request_interval_ms: u64,
@@ -570,9 +577,8 @@ fn write_corpus(path: &Path, rows: &[CorpusRow]) -> Result<()> {
     Ok(())
 }
 
-/// Read a corpus CSV. Accepts both the `source_lon`/`source_lat` header of
-/// generated corpora and the older `source_x`/`source_y` header. A missing
-/// `bucket` column is derived from the straight-line distance.
+/// Read longitude/latitude corpus coordinates. A missing `bucket` column is
+/// derived from the straight-line distance.
 fn read_corpus(path: &Path) -> Result<Vec<CorpusRow>> {
     let mut reader = csv::Reader::from_path(path)
         .with_context(|| format!("reading corpus {}", path.display()))?;
@@ -580,20 +586,21 @@ fn read_corpus(path: &Path) -> Result<Vec<CorpusRow>> {
         .headers()
         .context("reading corpus header row")?
         .clone();
-    let column = |names: [&str; 2]| -> Result<usize> {
+    let column = |name: &str| -> Result<usize> {
         headers
             .iter()
-            .position(|header| names.contains(&header.trim()))
-            .with_context(|| format!("corpus is missing a '{}' column", names[0]))
+            .position(|header| header.trim() == name)
+            .with_context(|| format!("corpus is missing a '{name}' column"))
     };
-    let id_index = column(["id", "id"])?;
-    let source_lon_index = column(["source_lon", "source_x"])?;
-    let source_lat_index = column(["source_lat", "source_y"])?;
-    let target_lon_index = column(["target_lon", "target_x"])?;
-    let target_lat_index = column(["target_lat", "target_y"])?;
+    let id_index = column("id")?;
+    let source_lon_index = column("source_lon")?;
+    let source_lat_index = column("source_lat")?;
+    let target_lon_index = column("target_lon")?;
+    let target_lat_index = column("target_lat")?;
     let bucket_index = headers.iter().position(|header| header.trim() == "bucket");
 
     let mut rows = Vec::new();
+    let mut ids = BTreeSet::new();
     for (line, record) in reader.records().enumerate() {
         let record = record.with_context(|| format!("reading corpus row {}", line + 2))?;
         let field = |index: usize| -> Result<f64> {
@@ -608,17 +615,30 @@ fn read_corpus(path: &Path) -> Result<Vec<CorpusRow>> {
         let source_lat = field(source_lat_index)?;
         let target_lon = field(target_lon_index)?;
         let target_lat = field(target_lat_index)?;
-        let bucket = bucket_index
-            .and_then(|index| record.get(index))
-            .and_then(|value| Bucket::parse(value.trim()))
-            .unwrap_or_else(|| {
-                Bucket::classify(haversine_m(
-                    (source_lon, source_lat),
-                    (target_lon, target_lat),
-                ))
-            });
+        let id = record.get(id_index).unwrap_or_default().trim().to_string();
+        if id.is_empty() || !ids.insert(id.clone()) {
+            bail!(
+                "corpus row {} has an empty or duplicate id '{id}'",
+                line + 2
+            );
+        }
+        if !(-180.0..=180.0).contains(&source_lon)
+            || !(-180.0..=180.0).contains(&target_lon)
+            || !(-90.0..=90.0).contains(&source_lat)
+            || !(-90.0..=90.0).contains(&target_lat)
+        {
+            bail!("corpus row {} has invalid WGS84 coordinates", line + 2);
+        }
+        let bucket = match bucket_index.and_then(|index| record.get(index)) {
+            Some(value) => Bucket::parse(value.trim())
+                .with_context(|| format!("invalid bucket in corpus row {}", line + 2))?,
+            None => Bucket::classify(haversine_m(
+                (source_lon, source_lat),
+                (target_lon, target_lat),
+            )),
+        };
         rows.push(CorpusRow {
-            id: record.get(id_index).unwrap_or_default().to_string(),
+            id,
             source_lon,
             source_lat,
             target_lon,
@@ -630,6 +650,25 @@ fn read_corpus(path: &Path) -> Result<Vec<CorpusRow>> {
         bail!("corpus {} has no rows", path.display());
     }
     Ok(rows)
+}
+
+/// Hash the actual selected coordinates and ids, independent of file location.
+fn corpus_fingerprint(rows: &[CorpusRow]) -> String {
+    let mut hash = Sha256::new();
+    for row in rows {
+        hash.update((row.id.len() as u64).to_le_bytes());
+        hash.update(row.id.as_bytes());
+        for value in [
+            row.source_lon,
+            row.source_lat,
+            row.target_lon,
+            row.target_lat,
+        ] {
+            hash.update(value.to_le_bytes());
+        }
+        hash.update([row.bucket.index() as u8]);
+    }
+    format!("{:x}", hash.finalize())
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +697,7 @@ pub(crate) struct BenchReport {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct BenchSettings {
     corpus_path: String,
+    corpus_sha256: String,
     corpus_rows: usize,
     workload: String,
     concurrency: usize,
@@ -676,6 +716,8 @@ struct BenchSettings {
     backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     osrm_profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    valhalla_costing: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     request_interval_ms: Option<u64>,
 }
@@ -1313,7 +1355,7 @@ fn netweevil_route_url(base_url: &str) -> String {
 
 fn osrm_route_url(base_url: &str, profile: &str, row: &CorpusRow) -> String {
     format!(
-        "{}/route/v1/{}/{:.6},{:.6};{:.6},{:.6}?overview=false",
+        "{}/route/v1/{}/{},{};{},{}?overview=false&radiuses=500;500",
         base_url.trim_end_matches('/'),
         profile,
         row.source_lon,
@@ -1331,6 +1373,20 @@ fn netweevil_route_body(row: &CorpusRow, profile_id: Option<&str>) -> serde_json
         body["profile_id"] = serde_json::Value::String(profile_id.to_string());
     }
     body
+}
+
+fn valhalla_route_body(row: &CorpusRow, costing: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": row.id,
+        "locations": [
+            {"lon": row.source_lon, "lat": row.source_lat, "search_cutoff": DEFAULT_SNAP_DISTANCE_M},
+            {"lon": row.target_lon, "lat": row.target_lat, "search_cutoff": DEFAULT_SNAP_DISTANCE_M},
+        ],
+        "costing": costing,
+        "format": "osrm",
+        "directions_type": "none",
+        "shape_format": "no_shape",
+    })
 }
 
 /// Read `{service, result}` from the NetWeevil API into a benchmark outcome.
@@ -1408,6 +1464,9 @@ fn execute_http(
         HttpBackend::Osrm => agent
             .get(osrm_route_url(&args.url, &args.osrm_profile, row))
             .call(),
+        HttpBackend::Valhalla => agent
+            .post(format!("{}/route", args.url.trim_end_matches('/')))
+            .send_json(valhalla_route_body(row, &args.valhalla_costing)),
     };
     let outcome = match response {
         Err(error) => Outcome::status_failure(error.to_string()),
@@ -1421,6 +1480,7 @@ fn execute_http(
                     Ok(body) => match args.backend {
                         HttpBackend::Netweevil => parse_netweevil_route(&body),
                         HttpBackend::Osrm => parse_osrm_route(&body),
+                        HttpBackend::Valhalla => parse_osrm_route(&body),
                     },
                 }
             }
@@ -1625,6 +1685,7 @@ pub(crate) fn bench_run(paths: &WorkspacePaths, args: BenchRunArgs) -> Result<()
         ),
         settings: BenchSettings {
             corpus_path: args.corpus.display().to_string(),
+            corpus_sha256: corpus_fingerprint(&rows),
             corpus_rows,
             workload: args.workload.as_str().to_string(),
             concurrency: args.concurrency.max(1),
@@ -1632,7 +1693,8 @@ pub(crate) fn bench_run(paths: &WorkspacePaths, args: BenchRunArgs) -> Result<()
             iterations: args.iterations,
             snap_distance_m: DEFAULT_SNAP_DISTANCE_M,
             limit: args.limit,
-            matrix_size: (args.workload == Workload::Matrix).then_some(args.matrix_size),
+            matrix_size: (args.workload == Workload::Matrix)
+                .then_some(args.matrix_size.min(rows.len())),
             threshold_s: (args.workload == Workload::ServiceArea).then_some(args.threshold_s),
             ..BenchSettings::default()
         },
@@ -1716,6 +1778,7 @@ pub(crate) fn bench_http(args: BenchHttpArgs) -> Result<()> {
         engine: format!("http:{}", args.backend.as_str()),
         settings: BenchSettings {
             corpus_path: args.corpus.display().to_string(),
+            corpus_sha256: corpus_fingerprint(&rows),
             corpus_rows,
             workload: "route".to_string(),
             concurrency: args.concurrency.max(1),
@@ -1726,6 +1789,8 @@ pub(crate) fn bench_http(args: BenchHttpArgs) -> Result<()> {
             url: Some(args.url.clone()),
             backend: Some(args.backend.as_str().to_string()),
             osrm_profile: (args.backend == HttpBackend::Osrm).then(|| args.osrm_profile.clone()),
+            valhalla_costing: (args.backend == HttpBackend::Valhalla)
+                .then(|| args.valhalla_costing.clone()),
             request_interval_ms: Some(args.request_interval_ms),
             ..BenchSettings::default()
         },
@@ -1812,6 +1877,7 @@ fn describe_report(path: &Path, report: &BenchReport) -> String {
 pub(crate) fn bench_compare(args: BenchCompareArgs) -> Result<()> {
     let baseline: BenchReport = read_report(&args.baseline)?;
     let candidate: BenchReport = read_report(&args.candidate)?;
+    validate_comparison(&baseline.settings, &candidate.settings)?;
 
     println!("netweevil bench compare");
     println!(
@@ -1822,12 +1888,6 @@ pub(crate) fn bench_compare(args: BenchCompareArgs) -> Result<()> {
         "  candidate  {}",
         describe_report(&args.candidate, &candidate)
     );
-    if baseline.settings.corpus_path != candidate.settings.corpus_path {
-        println!(
-            "  warning: reports used different corpora ('{}' vs '{}')",
-            baseline.settings.corpus_path, candidate.settings.corpus_path
-        );
-    }
 
     let baseline_requests = merge_by_id(&baseline.requests);
     let candidate_requests = merge_by_id(&candidate.requests);
@@ -1951,8 +2011,27 @@ pub(crate) fn bench_compare(args: BenchCompareArgs) -> Result<()> {
 fn read_report(path: &Path) -> Result<BenchReport> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading benchmark report {}", path.display()))?;
-    serde_json::from_str(&text)
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .with_context(|| format!("parsing benchmark report {}", path.display()))?;
+    if value["schema_version"].as_u64() != Some(u64::from(REPORT_SCHEMA_VERSION)) {
+        bail!("unsupported benchmark report schema; rerun the benchmark with the current binary");
+    }
+    serde_json::from_value(value)
         .with_context(|| format!("parsing benchmark report {}", path.display()))
+}
+
+fn validate_comparison(baseline: &BenchSettings, candidate: &BenchSettings) -> Result<()> {
+    if baseline.corpus_sha256.is_empty() || baseline.corpus_sha256 != candidate.corpus_sha256 {
+        bail!("reports must use the same selected corpus coordinates, ids, and buckets");
+    }
+    if baseline.workload != candidate.workload
+        || baseline.matrix_size != candidate.matrix_size
+        || baseline.threshold_s != candidate.threshold_s
+        || baseline.snap_distance_m != candidate.snap_distance_m
+    {
+        bail!("reports must use the same workload, matrix size, threshold, and snap distance");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2020,22 +2099,10 @@ mod tests {
     }
 
     #[test]
-    fn reads_both_corpus_header_layouts() {
+    fn reads_canonical_corpus_and_rejects_invalid_rows() {
         let dir =
             std::env::temp_dir().join(format!("netweevil-bench-corpus-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-
-        let xy_header = dir.join("xy_header.csv");
-        std::fs::write(
-            &xy_header,
-            "id,source_x,source_y,target_x,target_y\na,6.5665,53.2194,6.5641,53.2108\n",
-        )
-        .unwrap();
-        let rows = read_corpus(&xy_header).unwrap();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, "a");
-        assert!((rows[0].source_lon - 6.5665).abs() < 1e-9);
-        assert_eq!(rows[0].bucket, Bucket::Short);
 
         let current = dir.join("current.csv");
         std::fs::write(
@@ -2046,6 +2113,17 @@ mod tests {
         let rows = read_corpus(&current).unwrap();
         assert_eq!(rows[0].bucket, Bucket::Long);
 
+        let invalid = dir.join("invalid.csv");
+        for content in [
+            "id,source_lon,source_lat,target_lon,target_lat\na,NaN,53.2,6.9,53.6\n",
+            "id,source_lon,source_lat,target_lon,target_lat\na,6.5,91,6.9,53.6\n",
+            "id,source_lon,source_lat,target_lon,target_lat\na,6.5,53.2,6.9,53.6\na,6.5,53.2,6.9,53.6\n",
+            "id,source_lon,source_lat,target_lon,target_lat,bucket\na,6.5,53.2,6.9,53.6,invalid\n",
+        ] {
+            std::fs::write(&invalid, content).unwrap();
+            assert!(read_corpus(&invalid).is_err(), "{content}");
+        }
+
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2054,7 +2132,7 @@ mod tests {
         let url = osrm_route_url("http://127.0.0.1:5000/", "driving", &row("r1"));
         assert_eq!(
             url,
-            "http://127.0.0.1:5000/route/v1/driving/4.900000,52.300000;5.100000,52.400000?overview=false"
+            "http://127.0.0.1:5000/route/v1/driving/4.9,52.3;5.1,52.4?overview=false&radiuses=500;500"
         );
     }
 
@@ -2072,6 +2150,41 @@ mod tests {
 
         let anonymous = netweevil_route_body(&row("r1"), None);
         assert!(anonymous.get("profile_id").is_none());
+    }
+
+    #[test]
+    fn valhalla_requests_summary_in_osrm_units() {
+        let body = valhalla_route_body(&row("v"), "bicycle");
+        assert_eq!(body["costing"], "bicycle");
+        assert_eq!(body["locations"][0]["lon"], 4.9);
+        assert_eq!(body["locations"][1]["search_cutoff"], 500.0);
+        assert_eq!(body["format"], "osrm");
+        assert_eq!(body["shape_format"], "no_shape");
+        assert_eq!(body["directions_type"], "none");
+        let outcome = parse_osrm_route(&serde_json::json!({
+            "code": "Ok", "routes": [{"duration": 60.0, "distance": 1200.0}]
+        }));
+        assert_eq!(outcome.distance_m, Some(1200.0));
+    }
+
+    #[test]
+    fn comparison_rejects_changed_coordinates_or_workloads() {
+        let original = row("same-id");
+        let mut changed = original.clone();
+        changed.target_lon += 0.00000001;
+        let baseline = BenchSettings {
+            corpus_sha256: corpus_fingerprint(&[original]),
+            workload: "route".to_string(),
+            ..BenchSettings::default()
+        };
+        let mut candidate = baseline.clone();
+        candidate.corpus_path = "a-copy-at-another-path.csv".to_string();
+        assert!(validate_comparison(&baseline, &candidate).is_ok());
+        candidate.corpus_sha256 = corpus_fingerprint(&[changed]);
+        assert!(validate_comparison(&baseline, &candidate).is_err());
+        candidate = baseline.clone();
+        candidate.workload = "route-geometry".to_string();
+        assert!(validate_comparison(&baseline, &candidate).is_err());
     }
 
     #[test]

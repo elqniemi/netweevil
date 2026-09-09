@@ -48,7 +48,9 @@ differ for edges within that bound of the cutoff.
 
 Forward search follows upward arcs from origin seeds. Backward search follows
 reversed downward arcs from destination seeds. Each direction stops when its
-own queue minimum reaches the best complete cost. A sum of the two queue
+queue minimum plus a lower bound on the opposite seed cost reaches the best
+complete cost. Destination seeds can be negative because they subtract the
+unused part of a snapped edge. A sum of the two queue
 minima is not a valid stopping criterion because the searches use different
 arc sets. Snapped edge-interior endpoints enter as partial-edge seeds.
 
@@ -62,7 +64,9 @@ The exact engine is the differential-test reference and handles metric
 overflow. A hierarchy query optimizes the quantized metric. The engine checks
 its candidate against multi-edge restrictions and uses an exact automaton
 search when the candidate violates one. A legal candidate needs no exact
-follow-up search.
+follow-up search. Matrix searches share complete CCH search spaces, validate
+each reconstructed path, and resume the current origin's restriction-aware
+Dijkstra frontier when a candidate is illegal.
 
 ## Bundle validation
 

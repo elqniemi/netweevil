@@ -24,12 +24,7 @@ id,source_lon,source_lat,target_lon,target_lat,bucket
 (5–30 km), or `long` (> 30 km). Reports group latency by bucket, so mixing the
 three keeps a single number from being dominated by one route length.
 
-The older layout is still accepted as input, and its bucket is derived from the
-straight-line distance:
-
-```text
-id,source_x,source_y,target_x,target_y
-```
+The optional `bucket` is derived from straight-line distance when omitted. IDs must be unique and coordinates must be finite WGS84 longitude/latitude.
 
 ## Regenerating
 

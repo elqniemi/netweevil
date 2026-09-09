@@ -23,7 +23,7 @@ use crate::model::{
     TransitStreetPath,
 };
 use crate::router::{transit_leg_signature, unreachable_transit_route_diagnostic};
-use crate::runtime::{StopCandidate, TransitRuntime, best_street_candidates};
+use crate::runtime::{StopCandidate, TransitRuntime, best_street_candidates, build_run_links};
 
 /// Egress, transfer, and access legs may sit outside the connection search
 /// window; the scan keeps expanding states this far below the window floor,
@@ -36,8 +36,8 @@ const BACKWARD_WINDOW_TAIL_S: u32 = 6 * 60 * 60;
 pub(crate) struct BackwardIndex {
     /// Per stop, connections ending there, ordered by arrival time.
     arrivals_by_stop: Vec<Vec<u32>>,
-    /// Per trip, its connections ordered by departure time.
-    connections_by_trip: Vec<Vec<u32>>,
+    /// Previous connection on the same vehicle, or u32::MAX at its first stop.
+    previous_connection: Vec<u32>,
     /// Per stop, the transfers that end there. Transfer tables are directed,
     /// so the reverse scan cannot read the forward adjacency.
     reverse_transfers: Vec<Vec<ReverseTransfer>>,
@@ -58,25 +58,19 @@ impl BackwardIndex {
         transfer_candidates: &[Vec<StopCandidate>],
     ) -> Self {
         let mut arrivals_by_stop = vec![Vec::<u32>::new(); bundle.stops.len()];
-        let mut connections_by_trip = vec![Vec::<u32>::new(); bundle.trips.len()];
         for (connection_index, connection) in bundle.connections.iter().enumerate() {
             let connection_index = connection_index as u32;
             if let Some(arrivals) = arrivals_by_stop.get_mut(connection.to_stop_index as usize) {
                 arrivals.push(connection_index);
             }
-            if let Some(trip) = connections_by_trip.get_mut(connection.trip_index as usize) {
-                trip.push(connection_index);
-            }
         }
         for arrivals in &mut arrivals_by_stop {
             arrivals.sort_unstable_by_key(|index| bundle.connections[*index as usize].arrival_s);
         }
-        for trip in &mut connections_by_trip {
-            trip.sort_unstable_by_key(|index| bundle.connections[*index as usize].departure_s);
-        }
+        let previous_connection = build_run_links(bundle).0;
         Self {
             arrivals_by_stop,
-            connections_by_trip,
+            previous_connection,
             reverse_transfers: build_reverse_transfers(transfer_candidates),
         }
     }
@@ -110,7 +104,7 @@ fn build_reverse_transfers(
 /// How the traveller occupies a stop at the state's clock time. The three
 /// stances mirror the forward scan's state kinds: a foot arrival may only
 /// board, a vehicle arrival may transfer or finish, and an on-board state
-/// carries its trip so same-trip riding stays free of boarding slack.
+/// carries its run so staying aboard stays free of boarding slack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum BackwardStance {
     /// Arrived on foot (access or transfer walk); the only continuation is
@@ -118,7 +112,7 @@ pub(crate) enum BackwardStance {
     OnFoot,
     /// Alighted from a vehicle; may transfer on foot or finish with egress.
     Alighted,
-    /// Aboard the given trip, departing this stop on it.
+    /// Aboard the indexed connection. Distinguishes repeated visits to a stop.
     Aboard(u32),
 }
 
@@ -195,7 +189,7 @@ pub(crate) fn arrivals_at_or_before<'a>(
     bundle: &'a TransitBundle,
     stop_index: u32,
     limit_s: u32,
-) -> impl Iterator<Item = &'a TransitConnection> {
+) -> impl Iterator<Item = (u32, &'a TransitConnection)> {
     let arrivals = index
         .arrivals_by_stop
         .get(stop_index as usize)
@@ -206,27 +200,20 @@ pub(crate) fn arrivals_at_or_before<'a>(
     arrivals[..end]
         .iter()
         .rev()
-        .map(move |index| &bundle.connections[*index as usize])
+        .map(move |index| (*index, &bundle.connections[*index as usize]))
 }
 
-/// The trip's own connection into `stop_index` at or before `limit_s`, used to
-/// ride one more stop backwards without paying boarding slack.
-pub(crate) fn latest_trip_connection_into<'a>(
-    index: &'a BackwardIndex,
+/// The adjacent connection on the vehicle, independent of repeated stop IDs.
+pub(crate) fn previous_run_connection<'a>(
+    index: &BackwardIndex,
     bundle: &'a TransitBundle,
-    trip_index: u32,
-    stop_index: u32,
-    limit_s: u32,
-) -> Option<&'a TransitConnection> {
-    index
-        .connections_by_trip
-        .get(trip_index as usize)?
-        .iter()
-        .rev()
-        .map(|connection_index| &bundle.connections[*connection_index as usize])
-        .find(|connection| {
-            connection.to_stop_index == stop_index && connection.arrival_s <= limit_s
-        })
+    connection_index: u32,
+) -> Option<(u32, &'a TransitConnection)> {
+    let previous = *index.previous_connection.get(connection_index as usize)?;
+    bundle
+        .connections
+        .get(previous as usize)
+        .map(|connection| (previous, connection))
 }
 
 pub(crate) struct ReverseTransferWalk<'a> {
@@ -368,13 +355,15 @@ pub(crate) fn execute_transit_route_arrive_by(
         {
             continue;
         }
-        if !collect_alternatives {
+        if !transit_leg_minimums_enabled(&request.modes) && !collect_alternatives {
             if let Some(found) = best_final.as_ref()
                 && entry.time_s <= found.departure_s
             {
                 continue;
             }
-        } else if let Some(found) = best_final.as_ref() {
+        } else if !transit_leg_minimums_enabled(&request.modes)
+            && let Some(found) = best_final.as_ref()
+        {
             let min_departure_s =
                 transit_alternative_departure_limit(deadline_s, found.departure_s, request);
             if entry.time_s < min_departure_s {
@@ -387,27 +376,6 @@ pub(crate) fn execute_transit_route_arrive_by(
 
         match entry.state.stance {
             BackwardStance::OnFoot => {
-                if let Some(access) = access_by_stop.get(&entry.state.stop_index)
-                    && let Some(departure_s) = entry.time_s.checked_sub(access.time_s)
-                {
-                    let candidate = BackwardFinalCandidate {
-                        departure_s,
-                        state: entry.state,
-                        access_time_s: access.time_s,
-                        access_mode: access.mode,
-                        access_network_path: access.network_path.clone(),
-                    };
-                    if collect_final_candidates {
-                        final_candidates.push(candidate.clone());
-                    }
-                    if best_final
-                        .as_ref()
-                        .is_none_or(|found| departure_s > found.departure_s)
-                    {
-                        best_final = Some(candidate);
-                    }
-                }
-
                 for walk in reverse_transfer_walks(
                     index,
                     runtime.all_transfer_candidates(),
@@ -448,13 +416,15 @@ pub(crate) fn execute_transit_route_arrive_by(
                 if boardings > request.modes.max_transfers.saturating_add(1) {
                     continue;
                 }
-                for connection in
+                for (connection_index, connection) in
                     arrivals_at_or_before(index, bundle, entry.state.stop_index, entry.time_s)
                 {
                     if connection.arrival_s < search_start_s {
                         break;
                     }
-                    if !runtime.allowed_routes[connection.route_index as usize] {
+                    if !connection.drop_off_allowed
+                        || !runtime.allowed_routes[connection.route_index as usize]
+                    {
                         continue;
                     }
                     relax_backward_state(
@@ -464,7 +434,7 @@ pub(crate) fn execute_transit_route_arrive_by(
                         BackwardStateKey {
                             stop_index: connection.from_stop_index,
                             boardings,
-                            stance: BackwardStance::Aboard(connection.trip_index),
+                            stance: BackwardStance::Aboard(connection_index),
                         },
                         connection.departure_s,
                         BackwardStep::Ride {
@@ -474,9 +444,44 @@ pub(crate) fn execute_transit_route_arrive_by(
                     );
                 }
             }
-            BackwardStance::Aboard(trip_index) => {
-                if let Some(board_time_s) = entry.time_s.checked_sub(request.modes.board_slack_s) {
+            BackwardStance::Aboard(connection_index) => {
+                let pickup_allowed = matches!(next.get(&entry.state), Some(BackwardStep::Ride { connection, .. }) if connection.pickup_allowed);
+                if pickup_allowed
+                    && let Some(board_time_s) =
+                        entry.time_s.checked_sub(request.modes.board_slack_s)
+                {
+                    // Preserve each trip's access candidate before the on-foot
+                    // label merges later departures at the same stop.
+                    if let Some(access) = access_by_stop.get(&entry.state.stop_index)
+                        && let Some(departure_s) = board_time_s.checked_sub(access.time_s)
+                    {
+                        let candidate = BackwardFinalCandidate {
+                            departure_s,
+                            state: entry.state,
+                            access_time_s: access.time_s,
+                            access_mode: access.mode,
+                            access_network_path: access.network_path.clone(),
+                        };
+                        if collect_final_candidates {
+                            final_candidates.push(candidate.clone());
+                        }
+                        if best_final
+                            .as_ref()
+                            .is_none_or(|found| departure_s > found.departure_s)
+                        {
+                            best_final = Some(candidate);
+                        }
+                    }
+
                     for stance in [BackwardStance::OnFoot, BackwardStance::Alighted] {
+                        let slack_s = if stance == BackwardStance::Alighted {
+                            request.modes.transfer_slack_s
+                        } else {
+                            0
+                        };
+                        let Some(ready_time_s) = board_time_s.checked_sub(slack_s) else {
+                            continue;
+                        };
                         relax_backward_state(
                             &mut heap,
                             &mut best,
@@ -486,18 +491,14 @@ pub(crate) fn execute_transit_route_arrive_by(
                                 boardings: entry.state.boardings,
                                 stance,
                             },
-                            board_time_s,
+                            ready_time_s,
                             BackwardStep::Board { next: entry.state },
                         );
                     }
                 }
-                if let Some(connection) = latest_trip_connection_into(
-                    index,
-                    bundle,
-                    trip_index,
-                    entry.state.stop_index,
-                    entry.time_s,
-                ) && connection.arrival_s >= search_start_s
+                if let Some((previous_index, connection)) =
+                    previous_run_connection(index, bundle, connection_index)
+                    && connection.arrival_s >= search_start_s
                 {
                     relax_backward_state(
                         &mut heap,
@@ -506,7 +507,7 @@ pub(crate) fn execute_transit_route_arrive_by(
                         BackwardStateKey {
                             stop_index: connection.from_stop_index,
                             boardings: entry.state.boardings,
-                            stance: BackwardStance::Aboard(trip_index),
+                            stance: BackwardStance::Aboard(previous_index),
                         },
                         connection.departure_s,
                         BackwardStep::Ride {

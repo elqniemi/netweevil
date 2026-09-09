@@ -2454,7 +2454,7 @@ fn can_ignore_multi_edge_restriction_sequences_via_engine_mode() {
 fn loads_od_pairs_from_csv() {
     let path = write_temp_file(
         "od_pairs.csv",
-        "id,source_x,source_y,target_x,target_y\npair_1,6.1,53.1,6.2,53.2\n",
+        "id,source_lon,source_lat,target_lon,target_lat,source_z,target_z\npair_1,6.1,53.1,6.2,53.2,12,24\n",
     );
 
     let document = load_od_pairs(&path).expect("CSV loads");
@@ -2465,12 +2465,14 @@ fn loads_od_pairs_from_csv() {
     assert_eq!(document.pairs[0].destination.id, "pair_1:target");
     assert_eq!(document.pairs[0].origin.lon, 6.1);
     assert_eq!(document.pairs[0].destination.lat, 53.2);
+    assert_eq!(document.pairs[0].origin.z, Some(12.0));
+    assert_eq!(document.pairs[0].destination.z, Some(24.0));
     fs::remove_file(path).ok();
 }
 
 #[test]
 fn loads_point_set_from_csv() {
-    let path = write_temp_file("points.csv", "id,x,y\na,6.1,53.1\nb,6.2,53.2\n");
+    let path = write_temp_file("points.csv", "id,lon,lat,z\na,6.1,53.1,12\nb,6.2,53.2,\n");
 
     let document = load_point_set(&path).expect("CSV loads");
 
@@ -2478,6 +2480,8 @@ fn loads_point_set_from_csv() {
     assert_eq!(document.points[0].id, "a");
     assert_eq!(document.points[1].lon, 6.2);
     assert_eq!(document.points[1].lat, 53.2);
+    assert_eq!(document.points[0].z, Some(12.0));
+    assert_eq!(document.points[1].z, None);
     fs::remove_file(path).ok();
 }
 
@@ -2897,5 +2901,316 @@ fn fixed_point_shortcut_unpacks_lower_triangle_including_zero_costs() {
             .map(|&edge| metrics.edge_metrics[edge].generalized_cost.unwrap())
             .sum();
         assert!((original - path.total_generalized_cost).abs() <= 2.0 / 2048.0);
+    }
+}
+
+#[test]
+fn cch_termination_accounts_for_negative_destination_phantom_cost() {
+    let topology = test_topology();
+    let (bundle, compiled) = build_test_cch(&topology, &test_metrics());
+    let graph = crate::build_routing_graph_from_shared(&topology, Arc::new(compiled), Some(bundle))
+        .expect("graph builds");
+    // The first meeting costs 18, but the upward route 0 -> 1 costs 30 - 15.
+    // Stopping the forward queue at 18 discards the optimum.
+    let origins = [(0, 10.0), (2, 18.0)];
+    let destinations = [(1, -15.0), (2, 0.0)];
+    let path =
+        crate::accelerated_route_query_seeded(&topology, &graph, &origins, &destinations, None)
+            .unwrap()
+            .unwrap();
+    assert_eq!(path.total_generalized_cost, 15.0);
+    assert_eq!(path.edge_indexes, vec![0, 1]);
+}
+
+#[test]
+fn cch_pruning_matches_complete_spaces_on_directed_graphs() {
+    // Vary edge ordering, one-way connectivity, zero costs,
+    // multiple endpoint seeds, and destination offsets. Complete unpruned
+    // spaces provide an independent oracle for the pruned point query.
+    let mut random = 19_u64;
+    let mut next = || {
+        random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+        random >> 32
+    };
+    for _ in 0..12 {
+        let mut topology = test_topology();
+        topology.nodes = (0..8)
+            .map(|index| netweevil_core::TopologyNode {
+                node_id: netweevil_core::NodeId(index),
+                lon: 6.0 + f64::from(index) * 0.001,
+                lat: 53.0,
+                z: 0.0,
+            })
+            .collect();
+        let mut edges = Vec::new();
+        let mut metrics = test_metrics();
+        metrics.edge_metrics.clear();
+        for edge_index in 0..24 {
+            let mut edge = topology.edge(0);
+            edge.edge_id = EdgeId(edge_index);
+            edge.from = netweevil_core::NodeId((next() % 8) as u32);
+            edge.to = netweevil_core::NodeId((edge.from.0 + 1 + (next() % 7) as u32) % 8);
+            edges.push(edge);
+            let cost = (next() % 30) as f64;
+            metrics.edge_metrics.push(CompiledEdgeMetric {
+                edge_id: EdgeId(edge_index),
+                travel_time_s: Some(cost),
+                generalized_cost: Some(cost),
+            });
+        }
+        topology.edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges);
+        topology = with_edge_based_topology(topology);
+        let (bundle, compiled) = build_test_cch(&topology, &metrics);
+        let graph =
+            crate::build_routing_graph_from_shared(&topology, Arc::new(compiled), Some(bundle))
+                .unwrap();
+        for _ in 0..100 {
+            let origins = [
+                (next() as usize % 24, (next() % 30) as f64),
+                (next() as usize % 24, (next() % 30) as f64),
+            ];
+            let destinations = [
+                (next() as usize % 24, -(next() as f64 % 30.0)),
+                (next() as usize % 24, -(next() as f64 % 30.0)),
+            ];
+            let forward = crate::build_forward_cch_space(&graph, &origins);
+            let backward = crate::build_backward_cch_space(&graph, &destinations);
+            let expected = crate::join_cch_spaces(&forward, &backward).map(|(cost, _)| cost);
+            let actual = crate::accelerated_route_query_seeded(
+                &topology,
+                &graph,
+                &origins,
+                &destinations,
+                None,
+            )
+            .unwrap();
+            assert_eq!(actual.map(|path| path.total_generalized_cost), expected);
+            let exact = crate::seeded_bidirectional_dijkstra_on_edge_transitions(
+                &topology,
+                &graph,
+                &origins,
+                &destinations,
+                None,
+            )
+            .unwrap();
+            assert_eq!(exact.map(|path| path.total_generalized_cost), expected);
+        }
+    }
+}
+
+#[test]
+fn snap_cache_preserves_each_point_id_and_separates_radius_and_elevation_window() {
+    let topology = test_topology();
+    let graph = build_routing_graph(&topology, &test_metrics()).unwrap();
+    let mut cache = std::collections::HashMap::new();
+    let mut point = crate::LabeledPoint {
+        id: "first".into(),
+        lon: 6.0,
+        lat: 53.0,
+        z: Some(5.0),
+    };
+    let wide = SnapOptions {
+        max_distance_m: 1.0,
+        z_window_m: Some(10.0),
+        ..Default::default()
+    };
+    let narrow = SnapOptions {
+        max_distance_m: 10.0,
+        z_window_m: Some(1.0),
+        ..Default::default()
+    };
+    let first =
+        crate::snapping::cached_snap_candidates(&mut cache, &topology, &graph, &point, &wide, true)
+            .unwrap();
+    assert!(first.iter().all(|candidate| candidate.point_id == "first"));
+    point.id = "second".into();
+    let second =
+        crate::snapping::cached_snap_candidates(&mut cache, &topology, &graph, &point, &wide, true)
+            .unwrap();
+    assert!(
+        second
+            .iter()
+            .all(|candidate| candidate.point_id == "second")
+    );
+    assert!(
+        crate::snapping::cached_snap_candidates(
+            &mut cache, &topology, &graph, &point, &narrow, true
+        )
+        .is_err()
+    );
+    point.id = "third".into();
+    let error = crate::snapping::cached_snap_candidates(
+        &mut cache, &topology, &graph, &point, &narrow, true,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("third"));
+    assert_eq!(error.diagnostics[0].point_ids, vec!["third"]);
+}
+
+#[test]
+fn snaps_long_edge_midpoints_even_when_a_nearer_node_search_finds_other_edges() {
+    let mut topology = test_topology();
+    topology.nodes[0].lon = 6.0;
+    topology.nodes[1].lon = 6.1;
+    topology.nodes[2].lon = 6.05;
+    topology.nodes[2].lat = 53.00005;
+    topology = with_edge_based_topology(topology);
+    let graph = build_routing_graph(&topology, &test_metrics()).unwrap();
+    let point = crate::LabeledPoint {
+        id: "middle".into(),
+        lon: 6.05,
+        lat: 53.0,
+        z: None,
+    };
+    let candidates =
+        crate::snapping::snap_candidates(&topology, &graph, &point, 10.0, true).unwrap();
+    assert_eq!(candidates[0].snapped_edge_id, Some(0));
+    assert!((candidates[0].snapped_edge_fraction.unwrap() - 0.5).abs() < 1e-10);
+    assert!(candidates[0].snap_distance_m < 1e-8);
+}
+
+#[test]
+fn edge_spatial_index_keeps_all_projectable_edges_and_prunes_distant_leaves() {
+    let mut topology = test_topology();
+    topology.nodes.clear();
+    let template = test_topology().edge(0);
+    let mut edges = Vec::new();
+    for index in 0..512_u32 {
+        let lon = 4.0 + f64::from(index) * 0.01;
+        for offset in [0.0, 0.009] {
+            topology.nodes.push(netweevil_core::TopologyNode {
+                node_id: netweevil_core::NodeId(topology.nodes.len() as u32),
+                lon: lon + offset,
+                lat: 53.0,
+                z: 0.0,
+            });
+        }
+        let mut edge = template;
+        edge.edge_id = EdgeId(index);
+        edge.from = netweevil_core::NodeId(index * 2);
+        edge.to = netweevil_core::NodeId(index * 2 + 1);
+        edges.push(edge);
+    }
+    topology.edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges);
+    let mut costs = vec![1.0; edges.len()];
+    costs[100] = f64::INFINITY;
+    let index = crate::edge_spatial_index::EdgeSpatialIndex::build(&topology, &costs);
+    for edge in 0..512 {
+        let candidates = index.candidates(4.0 + edge as f64 * 0.01 + 0.0045, 53.0, 1.0);
+        assert_eq!(candidates.contains(&(edge as u32)), edge != 100);
+        assert!(
+            candidates.len() <= 32,
+            "localized query must avoid scanning the whole network"
+        );
+    }
+}
+
+#[test]
+fn restricted_frontier_resumes_without_losing_destination_offsets_or_turn_history() {
+    let topology = multi_edge_restricted_topology();
+    let metrics = restricted_metrics();
+    let graph = build_routing_graph(&topology, &metrics).unwrap();
+    let fallback = crate::FallbackPolicy::default();
+    let origins = [(0, graph.edge_costs[0]), (3, graph.edge_costs[3])];
+    let mut search = crate::RestrictedSearchScratch::default();
+    search.prepare(&metrics, &graph, &origins, &fallback);
+    // Query a nearby target, resume through the forbidden sequence for a far
+    // target, then revisit an already settled target and a fractional edge.
+    for (edge, adjustment, expected) in [
+        (1, 0.0, vec![0, 1]),
+        (2, 0.0, vec![3, 2]),
+        (0, -5.0, vec![0]),
+        (2, -5.0, vec![3, 2]),
+        (1, -5.0, vec![0, 1]),
+    ] {
+        let path = search
+            .route_to(
+                &topology,
+                &metrics,
+                &graph,
+                &[(edge, adjustment)],
+                None,
+                &fallback,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(crate::path_respects_restriction_sequences(
+            &graph,
+            &path.edge_indexes
+        ));
+        assert_eq!(path.edge_indexes, expected);
+        let expected_cost = expected
+            .iter()
+            .map(|&edge| graph.edge_costs[edge])
+            .sum::<f64>()
+            + adjustment;
+        assert_eq!(path.total_generalized_cost, expected_cost);
+    }
+}
+
+#[test]
+fn restricted_many_to_many_matrix_matches_independent_routes() {
+    let topology = multi_edge_restricted_topology();
+    let (bundle, metrics) = build_test_cch(&topology, &restricted_metrics());
+    let engine =
+        PreparedRoutingEngine::new(Arc::new(topology), Arc::new(metrics), Some(bundle)).unwrap();
+    let point = |lon: f64| crate::LabeledPoint {
+        id: lon.to_string(),
+        lon,
+        lat: 53.0,
+        z: None,
+    };
+    let point_set = |points| PointSetDocument {
+        points,
+        snap: SnapOptions {
+            max_distance_m: 10.0,
+            ..Default::default()
+        },
+        connectivity: Default::default(),
+        fallback: Default::default(),
+        returns: ReturnConfig {
+            geometry: ReturnGeometry::Full,
+            ..Default::default()
+        },
+        alternatives: Default::default(),
+        temporal: Default::default(),
+    };
+    let origins = point_set(vec![point(6.0), point(6.0005)]);
+    // Five distinct destinations activate shared CCH spaces even with turn
+    // sequences. The cheapest unrestricted route violates [0, 1, 2].
+    let destinations = point_set(vec![
+        point(6.0022),
+        point(6.0024),
+        point(6.0026),
+        point(6.0028),
+        point(6.003),
+    ]);
+    let matrix = engine.execute_matrix(&origins, &destinations).unwrap();
+    for (origin_index, origin) in origins.points.iter().enumerate() {
+        for (destination_index, destination) in destinations.points.iter().enumerate() {
+            let route = engine
+                .execute_route(&RouteRequest {
+                    route_id: "independent".into(),
+                    origin: origin.clone(),
+                    destination: destination.clone(),
+                    snap: origins.snap.clone(),
+                    connectivity: Default::default(),
+                    fallback: Default::default(),
+                    returns: origins.returns.clone(),
+                    alternatives: Default::default(),
+                    temporal: Default::default(),
+                })
+                .unwrap();
+            let cell = &matrix.cells[origin_index * destinations.points.len() + destination_index];
+            assert_eq!(
+                cell.total_generalized_cost,
+                Some(route.summary.total_generalized_cost)
+            );
+            assert_eq!(
+                cell.total_travel_time_s,
+                Some(route.summary.total_travel_time_s)
+            );
+            assert_eq!(cell.geometry, route.geometry);
+        }
     }
 }

@@ -1421,7 +1421,7 @@ fn network_street_access_prices_legs_with_the_estimator() {
 
     // A missing access path omits the stop candidate even when egress is
     // routable. The fixture stops are intentionally unbound, exercising the
-    // coordinate-only estimator compatibility path.
+    // coordinate-only estimator path.
     let missing_access = router
         .execute_route_with_street_estimator(
             &request(TransitStreetAccessModel::Network),
@@ -1700,4 +1700,496 @@ fn arrive_by_service_area_reports_latest_departures_towards_the_target() {
             .iter()
             .any(|segment| segment.from_stop_id == "A" && segment.to_stop_id == "B")
     );
+}
+
+#[test]
+fn same_stop_changes_pay_transfer_slack_in_both_directions_and_service_areas() {
+    let mut files = two_line_transfer_fixture_files();
+    files.insert("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,08:05:00,08:05:00,A,1\nT1,08:10:00,08:10:00,B1,2\nT2,08:15:00,08:15:00,B1,1\nT2,08:25:00,08:25:00,C,2\n".to_string());
+    let router = PreparedTransitRouter::new(Arc::new(import_fixture(files, "same-stop-transfer")));
+    for arrive_by in [false, true] {
+        for (transfer_slack_s, expected) in [
+            (270, TransitOutcome::Scheduled),
+            (271, TransitOutcome::Unreachable),
+        ] {
+            let mut modes = short_access_modes();
+            modes.max_transfer_distance_m = 0.0;
+            modes.transfer_slack_s = transfer_slack_s;
+            let mut request = arrive_by_request(
+                &fixture_datetime(if arrive_by {
+                    8 * 3600 + 40 * 60
+                } else {
+                    8 * 3600
+                }),
+                modes,
+            );
+            request.time.arrive_by = arrive_by;
+            let result = router.execute_route(&request).expect("route executes");
+            assert_eq!(
+                result.outcome, expected,
+                "arrive_by={arrive_by}, slack={transfer_slack_s}"
+            );
+            let area = router
+                .execute_service_area(&TransitServiceAreaRequest {
+                    analysis_id: "same-stop-transfer".to_string(),
+                    origins: vec![if arrive_by {
+                        request.destination.clone()
+                    } else {
+                        request.origin.clone()
+                    }],
+                    time: request.time.clone(),
+                    modes: request.modes.clone(),
+                    max_travel_time_s: 3600,
+                    returns: TransitServiceAreaReturnOptions::default(),
+                })
+                .expect("service area executes");
+            let reached = area
+                .stops
+                .iter()
+                .any(|stop| stop.stop_id == if arrive_by { "A" } else { "C" });
+            assert_eq!(
+                reached,
+                expected == TransitOutcome::Scheduled,
+                "service area arrive_by={arrive_by}, slack={transfer_slack_s}"
+            );
+        }
+    }
+}
+
+#[test]
+fn departure_search_keeps_same_trip_among_unboardable_departures() {
+    let mut bundle = import_fixture(fixture_files(), "interleaved-departures");
+    // T1 stays at B for zero seconds. Later departures from B need boarding
+    // slack and must not make the binary search skip T1's continuation.
+    bundle
+        .connections
+        .retain(|connection| connection.departure_s < 86_400);
+    bundle.connections[1].departure_s = 8 * 3600 + 15 * 60;
+    for offset_s in [10, 20] {
+        let mut trip = bundle.trips[0].clone();
+        trip.trip_id = format!("distractor-{offset_s}");
+        let trip_index = bundle.trips.len() as u32;
+        bundle.trips.push(trip);
+        bundle.connections.push(TransitConnection {
+            trip_index,
+            run_index: 100 + trip_index,
+            pickup_allowed: true,
+            drop_off_allowed: true,
+            route_index: 0,
+            from_stop_index: 1,
+            to_stop_index: 2,
+            departure_s: 8 * 3600 + 15 * 60 + offset_s,
+            arrival_s: 8 * 3600 + 16 * 60,
+        });
+    }
+    bundle
+        .connections
+        .sort_by_key(|connection| connection.departure_s);
+    let mut request = arrive_by_request(&fixture_datetime(8 * 3600), short_access_modes());
+    request.time.arrive_by = false;
+    request.modes.max_transfer_distance_m = 0.0;
+    request.modes.max_transfers = 0;
+    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    let route = router.execute_route(&request).expect("route executes");
+    assert_eq!(route.outcome, TransitOutcome::Scheduled);
+    assert_eq!(route.summary.arrival_s, Some(8 * 3600 + 20 * 60 + 1));
+    let area = router
+        .execute_service_area(&TransitServiceAreaRequest {
+            analysis_id: "interleaved".to_string(),
+            origins: vec![request.origin.clone()],
+            time: request.time,
+            modes: request.modes,
+            max_travel_time_s: 3600,
+            returns: TransitServiceAreaReturnOptions::default(),
+        })
+        .expect("service area executes");
+    let target = area
+        .stops
+        .iter()
+        .find(|stop| stop.stop_id == "C")
+        .expect("C is reachable");
+    assert_eq!(target.arrival_s, 8 * 3600 + 20 * 60);
+}
+
+#[test]
+fn busy_station_transfer_search_keeps_platforms_beyond_the_nearest_32() {
+    let mut bundle = import_fixture(two_line_transfer_fixture_files(), "busy-station");
+    bundle.stops[2].lon = 6.013;
+    for index in 0..40 {
+        bundle.stops.push(TransitStop {
+            stop_id: format!("unused-platform-{index}"),
+            name: format!("Unused platform {index}"),
+            lon: 6.01 + f64::from(index) * 0.00001,
+            lat: 53.0,
+            binding: None,
+        });
+    }
+    // Give enough time for the 201 m walk and both slacks.
+    for connection in &mut bundle.connections {
+        if connection.trip_index == 1 {
+            connection.departure_s += 60;
+            connection.arrival_s += 60;
+        }
+    }
+    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    for arrive_by in [false, true] {
+        for (radius, expected) in [
+            (250.0, TransitOutcome::Scheduled),
+            (100.0, TransitOutcome::Unreachable),
+            (250.0, TransitOutcome::Scheduled),
+        ] {
+            let mut request = arrive_by_request(
+                &fixture_datetime(if arrive_by {
+                    8 * 3600 + 40 * 60
+                } else {
+                    8 * 3600
+                }),
+                short_access_modes(),
+            );
+            request.time.arrive_by = arrive_by;
+            request.modes.max_transfer_distance_m = radius;
+            let route = router.execute_route(&request).expect("route executes");
+            assert_eq!(
+                route.outcome, expected,
+                "radius={radius}, arrive_by={arrive_by}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rejected_short_leg_does_not_prune_a_valid_later_journey() {
+    let mut files = fixture_files();
+    files.insert(
+        "trips.txt",
+        "route_id,service_id,trip_id,trip_headsign\nR,WEEK,SHORT,C\nR,WEEK,LONG,C\n".to_string(),
+    );
+    files.insert("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nSHORT,08:05:00,08:05:00,A,1\nSHORT,08:06:00,08:06:00,C,2\nLONG,08:10:00,08:10:00,A,1\nLONG,08:25:00,08:25:00,C,2\n".to_string());
+    let router = PreparedTransitRouter::new(Arc::new(import_fixture(files, "minimum-pruning")));
+    let mut request = arrive_by_request(&fixture_datetime(8 * 3600), short_access_modes());
+    request.time.arrive_by = false;
+    request.modes.min_transit_leg_duration_s = 600;
+    let route = router.execute_route(&request).expect("route executes");
+    assert_eq!(route.outcome, TransitOutcome::Scheduled);
+    assert_eq!(route.summary.arrival_s, Some(8 * 3600 + 25 * 60 + 1));
+}
+
+#[test]
+fn rejected_short_leg_does_not_prune_a_valid_earlier_arrive_by_journey() {
+    let mut files = fixture_files();
+    files.insert(
+        "trips.txt",
+        "route_id,service_id,trip_id,trip_headsign\nR,WEEK,SHORT,C\nR,WEEK,LONG,C\n".to_string(),
+    );
+    files.insert("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nLONG,08:05:00,08:05:00,A,1\nLONG,08:20:00,08:20:00,C,2\nSHORT,08:25:00,08:25:00,A,1\nSHORT,08:26:00,08:26:00,C,2\n".to_string());
+    let router =
+        PreparedTransitRouter::new(Arc::new(import_fixture(files, "minimum-pruning-reverse")));
+    let mut request =
+        arrive_by_request(&fixture_datetime(8 * 3600 + 30 * 60), short_access_modes());
+    request.modes.min_transit_leg_duration_s = 600;
+    let route = router.execute_route(&request).expect("route executes");
+    assert_eq!(route.outcome, TransitOutcome::Scheduled);
+    assert_eq!(route.summary.departure_s, 8 * 3600 + 5 * 60 - 31);
+}
+
+#[test]
+fn gtfs_pickup_and_drop_off_restrictions_allow_riding_through_a_stop() {
+    let mut files = fixture_files();
+    files.insert("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type\nT1,08:05:00,08:05:00,A,1,0,0\nT1,08:10:00,08:10:00,B,2,1,1\nT1,08:20:00,08:20:00,C,3,0,0\n".to_string());
+    let bundle = import_fixture(files, "restricted-stop");
+    assert!(!bundle.connections[0].drop_off_allowed);
+    assert!(!bundle.connections[1].pickup_allowed);
+    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    for arrive_by in [false, true] {
+        let mut request = arrive_by_request(
+            &fixture_datetime(if arrive_by {
+                8 * 3600 + 30 * 60
+            } else {
+                8 * 3600
+            }),
+            short_access_modes(),
+        );
+        request.time.arrive_by = arrive_by;
+        request.modes.max_transfer_distance_m = 0.0;
+        assert_eq!(
+            router.execute_route(&request).unwrap().outcome,
+            TransitOutcome::Scheduled
+        );
+        let mut alight = request.clone();
+        alight.destination.lon = 6.01;
+        assert_eq!(
+            router.execute_route(&alight).unwrap().outcome,
+            TransitOutcome::Unreachable
+        );
+        let mut board = request.clone();
+        board.origin.lon = 6.01;
+        assert_eq!(
+            router.execute_route(&board).unwrap().outcome,
+            TransitOutcome::Unreachable
+        );
+        let area = router
+            .execute_service_area(&TransitServiceAreaRequest {
+                analysis_id: "restricted-stop".to_string(),
+                origins: vec![if arrive_by {
+                    request.destination.clone()
+                } else {
+                    request.origin.clone()
+                }],
+                time: request.time,
+                modes: request.modes,
+                max_travel_time_s: 3600,
+                returns: TransitServiceAreaReturnOptions::default(),
+            })
+            .unwrap();
+        assert!(!area.stops.iter().any(|stop| stop.stop_id == "B"));
+        assert!(
+            area.stops
+                .iter()
+                .any(|stop| stop.stop_id == if arrive_by { "A" } else { "C" })
+        );
+    }
+}
+
+#[test]
+fn frequency_departures_and_service_days_have_distinct_vehicle_runs() {
+    let bundle = import_fixture(frequency_fixture_files(), "run-identities");
+    let mut runs = BTreeMap::<u32, Vec<&TransitConnection>>::new();
+    for connection in &bundle.connections {
+        runs.entry(connection.run_index)
+            .or_default()
+            .push(connection);
+    }
+    assert_eq!(runs.len(), 4 * 7);
+    for connections in runs.values() {
+        assert_eq!(connections.len(), 2);
+        assert_eq!(connections[0].trip_index, connections[1].trip_index);
+        assert_eq!(connections[0].arrival_s, connections[1].departure_s);
+    }
+    let imported_again = import_fixture(frequency_fixture_files(), "run-identities");
+    assert_eq!(
+        bincode::serialize(&bundle).unwrap(),
+        bincode::serialize(&imported_again).unwrap()
+    );
+}
+
+#[test]
+fn changing_frequency_runs_counts_as_a_transfer_and_keeps_separate_legs() {
+    let mut bundle = import_fixture(frequency_fixture_files(), "run-change");
+    // Model partial service: the 08:00 vehicle terminates at B and only the
+    // 08:10 vehicle serves B to C. Their shared GTFS trip_id is not a vehicle.
+    bundle.connections.retain(|connection| {
+        (connection.from_stop_index == 0 && connection.departure_s == 8 * 3600)
+            || (connection.from_stop_index == 1 && connection.departure_s == 8 * 3600 + 15 * 60)
+    });
+    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    for arrive_by in [false, true] {
+        let mut request = arrive_by_request(
+            &fixture_datetime(if arrive_by {
+                8 * 3600 + 30 * 60
+            } else {
+                7 * 3600 + 55 * 60
+            }),
+            short_access_modes(),
+        );
+        request.time.arrive_by = arrive_by;
+        request.modes.max_transfer_distance_m = 0.0;
+        request.modes.max_transfers = 0;
+        assert_eq!(
+            router.execute_route(&request).unwrap().outcome,
+            TransitOutcome::Unreachable
+        );
+        request.modes.max_transfers = 1;
+        let result = router.execute_route(&request).unwrap();
+        assert_eq!(result.outcome, TransitOutcome::Scheduled);
+        assert_eq!(result.summary.boarding_count, 2);
+        let legs = result
+            .legs
+            .iter()
+            .filter(|leg| leg.leg_type == TransitLegType::Transit)
+            .collect::<Vec<_>>();
+        assert_eq!(legs.len(), 2);
+        assert_eq!(legs[0].trip_id, legs[1].trip_id);
+        assert_ne!(legs[0].run_index, legs[1].run_index);
+    }
+}
+
+#[test]
+fn stop_spatial_index_matches_exact_distance_at_boundaries_poles_and_dateline() {
+    use crate::legs::haversine_m;
+    use crate::runtime::StopSpatialIndex;
+    let mut bundle = import_fixture(fixture_files(), "spatial-extremes");
+    let points = [
+        (0.01, 0.0),
+        (-179.999, 0.0),
+        (179.999, 0.0),
+        (90.0, 89.999),
+        (-90.0, 89.999),
+    ];
+    bundle.stops = points
+        .iter()
+        .enumerate()
+        .map(|(index, &(lon, lat))| TransitStop {
+            stop_id: index.to_string(),
+            name: index.to_string(),
+            lon,
+            lat,
+            binding: None,
+        })
+        .collect();
+    let index = StopSpatialIndex::new(&bundle.stops);
+    for (lon, lat, radius) in [
+        (0.0, 0.0, 1111.95),
+        (179.999, 0.0, 300.0),
+        (-179.999, 0.0, 300.0),
+        (0.0, 89.999, 300.0),
+    ] {
+        let mut found = index
+            .nearby_stops(&bundle, lon, lat, radius)
+            .iter()
+            .map(|stop| stop.stop_index)
+            .collect::<Vec<_>>();
+        found.sort_unstable();
+        let expected = bundle
+            .stops
+            .iter()
+            .enumerate()
+            .filter(|(_, stop)| haversine_m(lon, lat, stop.lon, stop.lat) <= radius)
+            .map(|(index, _)| index as u32)
+            .collect::<Vec<_>>();
+        assert_eq!(found, expected, "search at {lon}, {lat}, radius {radius}");
+    }
+}
+
+#[test]
+fn arranged_pickup_and_drop_off_are_excluded_without_booking_support() {
+    for restriction in [2, 3] {
+        for (pickup, drop_off) in [(restriction, 0), (0, restriction)] {
+            let mut files = fixture_files();
+            files.insert("stop_times.txt", format!("trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type\nT1,08:05:00,08:05:00,A,1,{pickup},0\nT1,08:20:00,08:20:00,C,2,0,{drop_off}\n"));
+            let router =
+                PreparedTransitRouter::new(Arc::new(import_fixture(files, "arranged-service")));
+            for arrive_by in [false, true] {
+                let mut request = arrive_by_request(
+                    &fixture_datetime(if arrive_by {
+                        8 * 3600 + 30 * 60
+                    } else {
+                        8 * 3600
+                    }),
+                    short_access_modes(),
+                );
+                request.time.arrive_by = arrive_by;
+                assert_eq!(
+                    router.execute_route(&request).unwrap().outcome,
+                    TransitOutcome::Unreachable
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "timing probe; run with --release --ignored --nocapture"]
+fn benchmark_sparse_feed_preparation_and_repeated_routes() {
+    use std::time::Instant;
+    let mut bundle = import_fixture(fixture_files(), "sparse-preparation");
+    // Distant stops expose preparation work that should depend on the
+    // requested transfer radius, not a search for 32 remote neighbours.
+    for index in 0..1_000 {
+        bundle.stops.push(TransitStop {
+            stop_id: format!("distant-{index}"),
+            name: format!("Distant {index}"),
+            lon: -150.0 + f64::from(index % 100) * 3.0,
+            lat: -60.0 + f64::from(index / 100) * 10.0,
+            binding: None,
+        });
+    }
+    let start = Instant::now();
+    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    let preparation = start.elapsed();
+    let mut request = arrive_by_request(&fixture_datetime(8 * 3600), short_access_modes());
+    request.time.arrive_by = false;
+    let start = Instant::now();
+    for _ in 0..100 {
+        let result = router
+            .execute_route(std::hint::black_box(&request))
+            .unwrap();
+        assert_eq!(result.outcome, TransitOutcome::Scheduled);
+        std::hint::black_box(result);
+    }
+    eprintln!(
+        "sparse feed: 1003 stops; preparation={preparation:?}; 100 routes including cold transfer cache={:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
+fn repeated_stop_vehicle_positions_preserve_pickup_and_full_loop_geometry() {
+    let mut files = fixture_files();
+    files.insert("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type\nT1,08:00:00,08:00:00,A,1,0,0\nT1,08:10:00,08:10:00,B,2,1,1\nT1,08:20:00,08:20:00,A,3,1,1\nT1,08:30:00,08:30:00,C,4,0,0\n".to_string());
+    let router = PreparedTransitRouter::new(Arc::new(import_fixture(files, "repeated-stop")));
+    for arrive_by in [false, true] {
+        let mut request = arrive_by_request(
+            &fixture_datetime(if arrive_by {
+                8 * 3600 + 40 * 60
+            } else {
+                7 * 3600 + 55 * 60
+            }),
+            short_access_modes(),
+        );
+        request.time.arrive_by = arrive_by;
+        request.modes.max_transfers = 0;
+        request.modes.max_transfer_distance_m = 0.0;
+        request.returns.include_stops = true;
+        request.returns.include_stop_segments = true;
+        request.returns.include_geometry = true;
+        let result = router.execute_route(&request).unwrap();
+        assert_eq!(
+            result.outcome,
+            TransitOutcome::Scheduled,
+            "arrive_by={arrive_by}"
+        );
+        let transit = result
+            .legs
+            .iter()
+            .find(|leg| leg.leg_type == TransitLegType::Transit)
+            .unwrap();
+        assert_eq!(transit.departure_s, 8 * 3600);
+        assert_eq!(transit.arrival_s, 8 * 3600 + 30 * 60);
+        assert_eq!(
+            transit
+                .geometry
+                .iter()
+                .map(|point| point[0])
+                .collect::<Vec<_>>(),
+            vec![6.0, 6.01, 6.0, 6.02]
+        );
+        assert_eq!(result.stop_segments.len(), 3);
+        let area = router
+            .execute_service_area(&TransitServiceAreaRequest {
+                analysis_id: "repeated-stop".to_string(),
+                origins: vec![if arrive_by {
+                    request.destination.clone()
+                } else {
+                    request.origin.clone()
+                }],
+                time: request.time,
+                modes: request.modes,
+                max_travel_time_s: 3600,
+                returns: TransitServiceAreaReturnOptions::default(),
+            })
+            .unwrap();
+        let endpoint = area
+            .stops
+            .iter()
+            .find(|stop| stop.stop_id == if arrive_by { "A" } else { "C" })
+            .expect("endpoint is reachable");
+        assert_eq!(
+            endpoint.arrival_s,
+            if arrive_by {
+                8 * 3600 - 30
+            } else {
+                8 * 3600 + 30 * 60
+            }
+        );
+    }
 }

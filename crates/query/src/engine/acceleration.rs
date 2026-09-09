@@ -228,7 +228,8 @@ pub(crate) fn accelerated_route_query(
 ///
 /// Forward search relaxes upward arcs from the origin seeds; backward search
 /// relaxes downward arcs toward the destination seeds. Each direction runs
-/// until its queue minimum reaches the best known up-down cost — the sum rule
+/// until its queue minimum plus the opposite seed lower bound reaches the
+/// best known up-down cost. The sum rule
 /// used by same-graph bidirectional Dijkstra is NOT sound here because the
 /// two directions explore disjoint arc sets, so a meeting state is only ever
 /// labeled by the side that reaches it.
@@ -245,6 +246,11 @@ pub(crate) fn accelerated_route_query_seeded(
     let Some(acceleration) = routing_graph.acceleration.as_ref() else {
         return Ok(None);
     };
+
+    // Destination phantoms subtract the unused part of the final edge. A
+    // queue minimum alone is therefore not a lower bound on a complete path.
+    let minimum_origin_cost = minimum_seed_cost(origin_seeds);
+    let minimum_destination_cost = minimum_seed_cost(destination_seeds);
 
     ACCELERATION_SEARCH_SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
@@ -297,8 +303,8 @@ pub(crate) fn accelerated_route_query_seeded(
                 .peek()
                 .map(|state| state.cost)
                 .unwrap_or(f64::INFINITY);
-            let forward_active = next_forward_cost < best_cost;
-            let backward_active = next_backward_cost < best_cost;
+            let forward_active = next_forward_cost + minimum_destination_cost < best_cost;
+            let backward_active = next_backward_cost + minimum_origin_cost < best_cost;
             if !forward_active && !backward_active {
                 break;
             }
@@ -394,6 +400,14 @@ pub(crate) fn accelerated_route_query_seeded(
 
         Ok(best_path)
     })
+}
+
+fn minimum_seed_cost(seeds: &[(usize, f64)]) -> f64 {
+    seeds
+        .iter()
+        .map(|&(_, cost)| cost)
+        .filter(|cost| cost.is_finite())
+        .fold(0.0, f64::min)
 }
 
 /// One settled hierarchy state of a full CCH search space.
@@ -666,6 +680,8 @@ pub(crate) fn seeded_bidirectional_dijkstra_on_edge_transitions(
     destination_seeds: &[(usize, f64)],
     initial_upper_bound: Option<RoutePath>,
 ) -> Result<Option<RoutePath>> {
+    let minimum_origin_cost = minimum_seed_cost(origin_seeds);
+    let minimum_destination_cost = minimum_seed_cost(destination_seeds);
     EDGE_SEARCH_SCRATCH.with(|scratch| {
         let mut scratch = scratch.borrow_mut();
         scratch.prepare(topology.edge_count());
@@ -711,7 +727,7 @@ pub(crate) fn seeded_bidirectional_dijkstra_on_edge_transitions(
                 .peek()
                 .map(|state| state.cost)
                 .unwrap_or(f64::INFINITY);
-            if best_path.is_some() && next_forward_cost + next_backward_cost >= best_cost {
+            if next_forward_cost + next_backward_cost >= best_cost {
                 break;
             }
 
@@ -735,7 +751,7 @@ pub(crate) fn seeded_bidirectional_dijkstra_on_edge_transitions(
                         best_edge = Some(edge_index);
                     }
                 }
-                if cost > best_cost {
+                if cost + minimum_destination_cost > best_cost {
                     continue;
                 }
 
@@ -772,7 +788,7 @@ pub(crate) fn seeded_bidirectional_dijkstra_on_edge_transitions(
                         best_edge = Some(edge_index);
                     }
                 }
-                if cost > best_cost {
+                if cost + minimum_origin_cost > best_cost {
                     continue;
                 }
 

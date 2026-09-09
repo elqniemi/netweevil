@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::Subcommand;
 use netweevil_core::{CacheBundleId, DatasetAccelerationBundle, TopologyBundle};
+use netweevil_manifest::{BundleRef, CompiledProfileManifest};
 use netweevil_persist::{
     WorkspacePaths, read_acceleration_bundle, read_dataset_manifest, read_topology_bundle,
     write_compiled_profile_bundle, write_compiled_profile_manifest,
@@ -11,7 +12,6 @@ use netweevil_profile::{
     ProfileCompileProgress, ProfileCompileStage,
     compile_profile_bundle_with_acceleration_with_progress, load_profile,
 };
-use netweevil_report::{BundleRef, CompiledProfileManifest};
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum ProfileCommand {
@@ -114,7 +114,7 @@ pub(crate) fn profile_compile(
         profile_hash,
         defaults_pack: profile.profile.defaults_pack.clone(),
         mode: profile.profile.mode,
-        created_at: netweevil_report::now_rfc3339()?,
+        created_at: netweevil_manifest::now_rfc3339()?,
         topology_bundle_id: Some(topology_ref.bundle_id),
         edge_count: Some(compiled_bundle.edge_metrics.len() as u64),
         bundle: BundleRef {

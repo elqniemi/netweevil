@@ -258,3 +258,18 @@ The older helper script is still available if you explicitly want one GeoPackage
 ```bash
 python3 examples/api/run_groningen_routes_every_10th_to_gpkg.py
 ```
+
+## Inspect routing locations
+
+`POST /v1/locate` returns profile-accessible snap candidates for each input point.
+Use `direction: "origin"` for outgoing routes or `"destination"` for incoming
+routes. The response includes snapped coordinates, directed edge IDs, position
+along the edge, component IDs, and snap distance. Candidates use the same
+spatial index, elevation window, and attribute filters as route requests.
+A point with no candidate fails the request with the route snapping diagnostic.
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/locate \
+  -H 'Content-Type: application/json' \
+  --data @examples/api/locate.json
+```

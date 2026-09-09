@@ -5,8 +5,7 @@ use rayon::prelude::*;
 
 use crate::backward::{
     BackwardIndex, BackwardQueueEntry, BackwardStance, BackwardStateKey, BackwardStep,
-    arrivals_at_or_before, latest_trip_connection_into, relax_backward_state,
-    reverse_transfer_walks,
+    arrivals_at_or_before, previous_run_connection, relax_backward_state, reverse_transfer_walks,
 };
 use crate::legs::{ShapePointIndexCache, seconds_for_distance, transit_connection_geometry_cached};
 use crate::model::{
@@ -16,7 +15,8 @@ use crate::model::{
 };
 use crate::runtime::{
     PrevStep, QueueEntry, StateKey, StopSpatialIndex, TransitRuntime, best_street_candidates,
-    build_departures_by_stop, build_transfer_candidates, can_start_transfer_walk, relax_state,
+    boarding_slack_s, build_departures_by_stop, build_transfer_candidates, can_start_transfer_walk,
+    relax_state,
 };
 
 /// Time anchor a service area is measured against: the query departure for a
@@ -54,6 +54,9 @@ const SEGMENTS_LIMIT_ADVICE: &str = "disable returns.include_stop_segments, redu
 struct TransitServiceAreaSegmentRef {
     origin_index: usize,
     trip_index: u32,
+    run_index: u32,
+    pickup_allowed: bool,
+    drop_off_allowed: bool,
     route_index: u32,
     from_stop_index: u32,
     to_stop_index: u32,
@@ -66,6 +69,9 @@ impl TransitServiceAreaSegmentRef {
     fn connection(self) -> TransitConnection {
         TransitConnection {
             trip_index: self.trip_index,
+            run_index: self.run_index,
+            pickup_allowed: self.pickup_allowed,
+            drop_off_allowed: self.drop_off_allowed,
             route_index: self.route_index,
             from_stop_index: self.from_stop_index,
             to_stop_index: self.to_stop_index,
@@ -87,7 +93,8 @@ pub fn execute_transit_service_area(
     }
     let departures_by_stop = build_departures_by_stop(bundle);
     let stop_index = StopSpatialIndex::new(&bundle.stops);
-    let transfer_candidates = build_transfer_candidates(bundle, &stop_index);
+    let transfer_candidates =
+        build_transfer_candidates(bundle, &stop_index, request.modes.max_transfer_distance_m);
     let runtime = TransitRuntime::new(
         bundle,
         &departures_by_stop,
@@ -339,7 +346,8 @@ fn search_service_area_origin(
         let state = StateKey {
             stop_index: candidate.stop_index,
             boardings: 0,
-            trip_index: u32::MAX,
+            connection_index: u32::MAX,
+            can_alight: false,
         };
         relax_state(
             heap,
@@ -393,7 +401,8 @@ fn search_service_area_origin(
                 let next_state = StateKey {
                     stop_index: transfer.stop_index,
                     boardings: entry.state.boardings,
-                    trip_index: u32::MAX,
+                    connection_index: u32::MAX,
+                    can_alight: false,
                 };
                 relax_state(
                     heap,
@@ -413,17 +422,16 @@ fn search_service_area_origin(
 
         if let Some(departures) = runtime
             .departures_by_stop
+            .by_stop
             .get(entry.state.stop_index as usize)
         {
-            let start = departures.partition_point(|connection| {
-                let slack = if entry.state.trip_index == connection.trip_index {
-                    0
-                } else {
-                    request.modes.board_slack_s
-                };
-                connection.departure_s < entry.time_s.saturating_add(slack)
+            // The binary-search predicate must be monotone in departure
+            // time. Trip-specific slack is checked after locating the range.
+            let start = departures.partition_point(|index| {
+                runtime.bundle.connections[*index as usize].departure_s < entry.time_s
             });
-            for connection in departures[start..].iter() {
+            for index in &departures[start..] {
+                let connection = &runtime.bundle.connections[*index as usize];
                 if connection.departure_s > search_end_s || connection.departure_s > time_limit_s {
                     break;
                 }
@@ -433,8 +441,27 @@ fn search_service_area_origin(
                 if !runtime.allowed_routes[connection.route_index as usize] {
                     continue;
                 }
-                let same_trip = entry.state.trip_index == connection.trip_index;
-                let next_boardings = if same_trip {
+                let same_run = runtime
+                    .departures_by_stop
+                    .next_connection
+                    .get(entry.state.connection_index as usize)
+                    .is_some_and(|next| *next == *index);
+                if connection.departure_s
+                    < entry.time_s.saturating_add(boarding_slack_s(
+                        entry.state,
+                        same_run,
+                        &request.modes,
+                    ))
+                {
+                    continue;
+                }
+                if !same_run
+                    && (!connection.pickup_allowed
+                        || (entry.state.connection_index != u32::MAX && !entry.state.can_alight))
+                {
+                    continue;
+                }
+                let next_boardings = if same_run {
                     entry.state.boardings
                 } else {
                     entry.state.boardings.saturating_add(1)
@@ -445,7 +472,8 @@ fn search_service_area_origin(
                 let next_state = StateKey {
                     stop_index: connection.to_stop_index,
                     boardings: next_boardings,
-                    trip_index: connection.trip_index,
+                    connection_index: *index,
+                    can_alight: connection.drop_off_allowed,
                 };
                 if best
                     .get(&next_state)
@@ -468,6 +496,9 @@ fn search_service_area_origin(
                     let segment_ref = TransitServiceAreaSegmentRef {
                         origin_index,
                         trip_index: connection.trip_index,
+                        run_index: connection.run_index,
+                        pickup_allowed: connection.pickup_allowed,
+                        drop_off_allowed: connection.drop_off_allowed,
                         route_index: connection.route_index,
                         from_stop_index: connection.from_stop_index,
                         to_stop_index: connection.to_stop_index,
@@ -494,6 +525,9 @@ fn search_service_area_origin(
         let mut stop_best = BTreeMap::<u32, (u32, u8, StateKey)>::new();
         for (state, arrival_s) in best.iter() {
             let (state, arrival_s) = (*state, *arrival_s);
+            if state.connection_index != u32::MAX && !state.can_alight {
+                continue;
+            }
             if arrival_s > time_limit_s {
                 continue;
             }
@@ -685,7 +719,7 @@ fn search_service_area_target(
                 if boardings > request.modes.max_transfers.saturating_add(1) {
                     continue;
                 }
-                for connection in arrivals_at_or_before(
+                for (connection_index, connection) in arrivals_at_or_before(
                     index,
                     runtime.bundle,
                     entry.state.stop_index,
@@ -698,7 +732,9 @@ fn search_service_area_target(
                     if connection.departure_s < time_floor_s {
                         continue;
                     }
-                    if !runtime.allowed_routes[connection.route_index as usize] {
+                    if !connection.drop_off_allowed
+                        || !runtime.allowed_routes[connection.route_index as usize]
+                    {
                         continue;
                     }
                     ride_backward_in_service_area(
@@ -710,16 +746,28 @@ fn search_service_area_target(
                         &mut segment_refs,
                         origin_index,
                         *connection,
+                        connection_index,
                         boardings,
                         entry.state,
                     )?;
                 }
             }
-            BackwardStance::Aboard(trip_index) => {
-                if let Some(board_time_s) = entry.time_s.checked_sub(request.modes.board_slack_s)
+            BackwardStance::Aboard(connection_index) => {
+                let pickup_allowed = matches!(next.get(&entry.state), Some(BackwardStep::Ride { connection, .. }) if connection.pickup_allowed);
+                if pickup_allowed
+                    && let Some(board_time_s) =
+                        entry.time_s.checked_sub(request.modes.board_slack_s)
                     && board_time_s >= time_floor_s
                 {
                     for stance in [BackwardStance::OnFoot, BackwardStance::Alighted] {
+                        let slack_s = if stance == BackwardStance::Alighted {
+                            request.modes.transfer_slack_s
+                        } else {
+                            0
+                        };
+                        let Some(ready_time_s) = board_time_s.checked_sub(slack_s) else {
+                            continue;
+                        };
                         relax_backward_state(
                             heap,
                             best,
@@ -729,18 +777,14 @@ fn search_service_area_target(
                                 boardings: entry.state.boardings,
                                 stance,
                             },
-                            board_time_s,
+                            ready_time_s,
                             BackwardStep::Board { next: entry.state },
                         );
                     }
                 }
-                if let Some(connection) = latest_trip_connection_into(
-                    index,
-                    runtime.bundle,
-                    trip_index,
-                    entry.state.stop_index,
-                    entry.time_s,
-                ) && connection.arrival_s >= search_start_s
+                if let Some((previous_index, connection)) =
+                    previous_run_connection(index, runtime.bundle, connection_index)
+                    && connection.arrival_s >= search_start_s
                     && connection.departure_s >= time_floor_s
                 {
                     ride_backward_in_service_area(
@@ -752,6 +796,7 @@ fn search_service_area_target(
                         &mut segment_refs,
                         origin_index,
                         *connection,
+                        previous_index,
                         entry.state.boardings,
                         entry.state,
                     )?;
@@ -818,13 +863,14 @@ fn ride_backward_in_service_area(
     segment_refs: &mut Vec<TransitServiceAreaSegmentRef>,
     origin_index: usize,
     connection: TransitConnection,
+    connection_index: u32,
     boardings: u8,
     from_state: BackwardStateKey,
 ) -> Result<()> {
     let next_state = BackwardStateKey {
         stop_index: connection.from_stop_index,
         boardings,
-        stance: BackwardStance::Aboard(connection.trip_index),
+        stance: BackwardStance::Aboard(connection_index),
     };
     if best
         .get(&next_state)
@@ -847,6 +893,9 @@ fn ride_backward_in_service_area(
         let segment_ref = TransitServiceAreaSegmentRef {
             origin_index,
             trip_index: connection.trip_index,
+            run_index: connection.run_index,
+            pickup_allowed: connection.pickup_allowed,
+            drop_off_allowed: connection.drop_off_allowed,
             route_index: connection.route_index,
             from_stop_index: connection.from_stop_index,
             to_stop_index: connection.to_stop_index,

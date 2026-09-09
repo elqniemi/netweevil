@@ -43,7 +43,7 @@ pub(crate) struct ServiceRuntime {
     pub(crate) workspace_root: PathBuf,
     pub(crate) dataset_manifest: DatasetManifest,
     pub(crate) topology: Arc<TopologyBundle>,
-    pub(crate) edge_names: OnceLock<Option<Arc<[String]>>>,
+    pub(crate) edge_names: OnceLock<Arc<[String]>>,
     pub(crate) routing_workers: Arc<Semaphore>,
     pub(crate) default_profile_id: String,
     pub(crate) profiles: BTreeMap<String, LoadedProfile>,
@@ -86,6 +86,7 @@ fn service_capabilities() -> ServiceCapabilities {
     ServiceCapabilities {
         analyses: vec![
             "route",
+            "locate",
             "od",
             "matrix",
             "accessibility",
@@ -192,19 +193,14 @@ pub(crate) fn load_service_runtime(
 
     let default_profile_id =
         default_profile_id.context("default profile could not be loaded into the API runtime")?;
-    let engine = loaded_profiles
-        .get(&default_profile_id)
-        .map(|profile| {
-            let effective = profile
-                .engine
-                .effective_engine_description(netweevil_query::EngineMode::Auto);
-            EngineDescription {
-                route_engine: effective.route_engine,
-                batch_engine: effective.batch_engine,
-                acceleration: effective.acceleration,
-            }
-        })
-        .unwrap_or_else(|| engine_description(topology.as_ref()));
+    let effective = loaded_profiles[&default_profile_id]
+        .engine
+        .effective_engine_description(netweevil_query::EngineMode::Auto);
+    let engine = EngineDescription {
+        route_engine: effective.route_engine,
+        batch_engine: effective.batch_engine,
+        acceleration: effective.acceleration,
+    };
 
     let mut loaded_transit_feeds = BTreeMap::new();
     for feed_id in &options.transit_feeds {
@@ -430,7 +426,7 @@ where
     .map_err(|error| anyhow::anyhow!("routing worker panicked: {error}"))?
 }
 
-pub(crate) fn load_edge_names(service: &ServiceRuntime) -> Result<Option<Arc<[String]>>, ApiError> {
+pub(crate) fn load_edge_names(service: &ServiceRuntime) -> Result<Arc<[String]>, ApiError> {
     if let Some(edge_names) = service.edge_names.get() {
         return Ok(edge_names.clone());
     }
@@ -449,31 +445,11 @@ pub(crate) fn load_edge_names(service: &ServiceRuntime) -> Result<Option<Arc<[St
                 bundle_ref.path
             ))
         })?;
-        Some(Arc::<[String]>::from(bundle.names))
+        Arc::<[String]>::from(bundle.names)
     };
 
     let _ = service.edge_names.set(loaded.clone());
     Ok(loaded)
-}
-
-pub(crate) fn engine_description(topology: &TopologyBundle) -> EngineDescription {
-    let has_multi_edge_restrictions = topology
-        .turn_restrictions
-        .iter()
-        .any(|restriction| restriction.edge_path.len() > 2);
-    if has_multi_edge_restrictions {
-        EngineDescription {
-            route_engine: "astar_exact_multi_edge_turns",
-            batch_engine: "astar_exact_multi_edge_turns_batch_reuse",
-            acceleration: "spatial_index+a_star+turn_automaton",
-        }
-    } else {
-        EngineDescription {
-            route_engine: "bidirectional_exact_pairwise_turns",
-            batch_engine: "bidirectional_exact_pairwise_turns_batch_reuse",
-            acceleration: "spatial_index+edge_phantoms",
-        }
-    }
 }
 
 #[cfg(test)]
@@ -502,7 +478,14 @@ pub(crate) fn test_service(
             "topology_bundle": {"bundle_id": "test-topology", "path": "unused"}
         }))
         .unwrap(),
-        engine: engine_description(&topology),
+        engine: {
+            let effective = engine.effective_engine_description(netweevil_query::EngineMode::Auto);
+            EngineDescription {
+                route_engine: effective.route_engine,
+                batch_engine: effective.batch_engine,
+                acceleration: effective.acceleration,
+            }
+        },
         topology,
         edge_names: OnceLock::new(),
         routing_workers: Arc::new(Semaphore::new(1)),
@@ -530,38 +513,7 @@ pub(crate) fn test_service(
 
 #[cfg(test)]
 mod tests {
-    use super::{EngineDescription, engine_description, service_capabilities};
-    use netweevil_core::{EdgeBasedTopology, TopologyBundle};
-
-    #[test]
-    fn reports_pairwise_engine_when_only_simple_turns_exist() {
-        let topology = TopologyBundle {
-            schema_version: 1,
-            source_path: "test".to_string(),
-            source_sha256: "abc".to_string(),
-            feature_attributes: Default::default(),
-            temporal_rule_sets: Vec::new(),
-            nodes: vec![],
-            edge_layers: Default::default(),
-            turn_restrictions: vec![],
-            names: vec![],
-            edge_based_topology: EdgeBasedTopology::default(),
-            spatial_index: None,
-            node_component_ids: vec![0, 0],
-            edge_component_ids: vec![0],
-        };
-
-        let engine = engine_description(&topology);
-        assert_eq!(
-            engine.route_engine,
-            EngineDescription {
-                route_engine: "bidirectional_exact_pairwise_turns",
-                batch_engine: "bidirectional_exact_pairwise_turns_batch_reuse",
-                acceleration: "spatial_index+edge_phantoms",
-            }
-            .route_engine
-        );
-    }
+    use super::service_capabilities;
 
     #[test]
     fn advertises_accessibility_analysis() {

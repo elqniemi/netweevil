@@ -41,16 +41,18 @@ pub fn write_transit_bundle(path: impl AsRef<Path>, bundle: &TransitBundle) -> R
 pub fn read_transit_bundle(path: impl AsRef<Path>) -> Result<TransitBundle> {
     let path = path.as_ref();
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let bundle: TransitBundle = bincode::deserialize(&bytes)
-        .with_context(|| format!("parsing transit bundle {}", path.display()))?;
-    if bundle.schema_version != TRANSIT_BUNDLE_SCHEMA_VERSION {
+    let schema_version: u32 = bincode::deserialize_from(&mut bytes.as_slice())
+        .with_context(|| format!("reading transit bundle header {}", path.display()))?;
+    if schema_version != TRANSIT_BUNDLE_SCHEMA_VERSION {
         bail!(
             "transit bundle {} has schema version {}; expected {}; re-import the GTFS feed",
             path.display(),
-            bundle.schema_version,
+            schema_version,
             TRANSIT_BUNDLE_SCHEMA_VERSION
         );
     }
+    let bundle = bincode::deserialize(&bytes)
+        .with_context(|| format!("parsing transit bundle {}", path.display()))?;
     Ok(bundle)
 }
 
@@ -200,7 +202,6 @@ pub(crate) fn build_bundle_from_files(
         &stop_by_id,
         &trip_by_id,
         &trips,
-        &active_services,
         &retained_gtfs_trips,
     )?;
 
@@ -394,10 +395,8 @@ fn parse_connections(
     stop_by_id: &HashMap<String, u32>,
     trip_by_id: &HashMap<String, u32>,
     trips: &[TransitTrip],
-    active_services: &HashMap<String, Vec<u32>>,
     retained_gtfs_trips: &HashMap<String, Vec<u32>>,
 ) -> Result<Vec<TransitConnection>> {
-    let _ = active_services;
     let mut reader = csv::Reader::from_reader(raw.as_bytes());
     let headers = reader.headers()?.clone();
     let trip_id = header_index(&headers, "trip_id")?;
@@ -405,7 +404,9 @@ fn parse_connections(
     let departure_time = header_index(&headers, "departure_time")?;
     let stop_id = header_index(&headers, "stop_id")?;
     let sequence = header_index(&headers, "stop_sequence")?;
-    let mut stop_times_by_trip = HashMap::<u32, Vec<StopTimeRow>>::new();
+    let pickup_type = headers.iter().position(|header| header == "pickup_type");
+    let drop_off_type = headers.iter().position(|header| header == "drop_off_type");
+    let mut stop_times_by_trip = BTreeMap::<u32, Vec<StopTimeRow>>::new();
     for record in reader.records() {
         let record = record?;
         let gtfs_trip_id = record.get(trip_id).unwrap_or_default();
@@ -424,6 +425,10 @@ fn parse_connections(
                 .unwrap_or_default(),
             arrival_s: parse_optional_gtfs_time(record.get(arrival_time).unwrap_or_default())?,
             departure_s: parse_optional_gtfs_time(record.get(departure_time).unwrap_or_default())?,
+            pickup_allowed: parse_pickup_drop_off(pickup_type.and_then(|index| record.get(index)))?,
+            drop_off_allowed: parse_pickup_drop_off(
+                drop_off_type.and_then(|index| record.get(index)),
+            )?,
         };
         stop_times_by_trip.entry(trip_index).or_default().push(row);
     }
@@ -432,6 +437,7 @@ fn parse_connections(
         None => HashMap::new(),
     };
     let mut connections = Vec::new();
+    let mut next_run_index = 0_u32;
     for (trip_index, mut rows) in stop_times_by_trip {
         rows.sort_by_key(|row| row.sequence);
         let trip = &trips[trip_index as usize];
@@ -444,46 +450,45 @@ fn parse_connections(
             .first()
             .and_then(|row| row.departure_s)
             .unwrap_or_default();
-        let windows = frequency_windows.get(&trip_index);
-        for pair in rows.windows(2) {
-            let from = pair[0];
-            let to = pair[1];
-            let from_departure_s = from.departure_s.unwrap_or_default();
-            let to_arrival_s = to.arrival_s.unwrap_or_default();
-            if to_arrival_s < from_departure_s {
-                continue;
-            }
-            for date_offset in &date_offsets {
-                let base = date_offset.saturating_mul(86_400);
-                if let Some(windows) = windows {
-                    let from_offset_s = from_departure_s.saturating_sub(anchor_departure_s);
-                    let to_offset_s = to_arrival_s.saturating_sub(anchor_departure_s);
-                    for window in windows {
-                        let mut trip_start_s = window.start_s;
-                        while trip_start_s < window.end_s {
-                            connections.push(TransitConnection {
-                                trip_index,
-                                route_index: trip.route_index,
-                                from_stop_index: from.stop_index,
-                                to_stop_index: to.stop_index,
-                                departure_s: base
-                                    .saturating_add(trip_start_s)
-                                    .saturating_add(from_offset_s),
-                                arrival_s: base
-                                    .saturating_add(trip_start_s)
-                                    .saturating_add(to_offset_s),
-                            });
-                            trip_start_s = trip_start_s.saturating_add(window.headway_s);
-                        }
+        let starts = if let Some(windows) = frequency_windows.get(&trip_index) {
+            windows
+                .iter()
+                .flat_map(|window| {
+                    (window.start_s..window.end_s).step_by(window.headway_s as usize)
+                })
+                .collect::<Vec<_>>()
+        } else {
+            vec![anchor_departure_s]
+        };
+        for date_offset in date_offsets {
+            let base = date_offset.saturating_mul(86_400);
+            for &start_s in &starts {
+                let run_index = next_run_index;
+                next_run_index = next_run_index
+                    .checked_add(1)
+                    .context("GTFS has too many vehicle runs")?;
+                for pair in rows.windows(2) {
+                    let from = pair[0];
+                    let to = pair[1];
+                    let from_departure_s = from.departure_s.unwrap_or_default();
+                    let to_arrival_s = to.arrival_s.unwrap_or_default();
+                    if to_arrival_s < from_departure_s {
+                        bail!("GTFS trip '{}' has decreasing stop times", trip.trip_id);
                     }
-                } else {
                     connections.push(TransitConnection {
                         trip_index,
+                        run_index,
+                        pickup_allowed: from.pickup_allowed,
+                        drop_off_allowed: to.drop_off_allowed,
                         route_index: trip.route_index,
                         from_stop_index: from.stop_index,
                         to_stop_index: to.stop_index,
-                        departure_s: base.saturating_add(from_departure_s),
-                        arrival_s: base.saturating_add(to_arrival_s),
+                        departure_s: base
+                            .saturating_add(start_s)
+                            .saturating_add(from_departure_s.saturating_sub(anchor_departure_s)),
+                        arrival_s: base
+                            .saturating_add(start_s)
+                            .saturating_add(to_arrival_s.saturating_sub(anchor_departure_s)),
                     });
                 }
             }
@@ -499,6 +504,17 @@ struct StopTimeRow {
     sequence: u32,
     arrival_s: Option<u32>,
     departure_s: Option<u32>,
+    pickup_allowed: bool,
+    drop_off_allowed: bool,
+}
+
+fn parse_pickup_drop_off(raw: Option<&str>) -> Result<bool> {
+    match raw.unwrap_or_default().trim() {
+        "" | "0" => Ok(true),
+        // Booking and driver coordination are not represented in requests.
+        "1" | "2" | "3" => Ok(false),
+        value => bail!("invalid GTFS pickup/drop-off type '{value}'; expected 0, 1, 2 or 3"),
+    }
 }
 
 /// Fills GTFS non-timepoint rows by linearly interpolating between successive

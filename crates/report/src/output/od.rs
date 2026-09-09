@@ -68,10 +68,10 @@ pub(super) fn write_od_csv(
         "pair_id",
         "origin_id",
         "destination_id",
-        "source_x",
-        "source_y",
-        "target_x",
-        "target_y",
+        "source_lon",
+        "source_lat",
+        "target_lon",
+        "target_lat",
         "status",
         "outcome",
         "fallback_used",
@@ -191,10 +191,10 @@ pub(super) fn write_od_gpkg(
         ("pair_id", "TEXT NOT NULL"),
         ("origin_id", "TEXT NOT NULL"),
         ("destination_id", "TEXT NOT NULL"),
-        ("source_x", "REAL NOT NULL"),
-        ("source_y", "REAL NOT NULL"),
-        ("target_x", "REAL NOT NULL"),
-        ("target_y", "REAL NOT NULL"),
+        ("source_lon", "REAL NOT NULL"),
+        ("source_lat", "REAL NOT NULL"),
+        ("target_lon", "REAL NOT NULL"),
+        ("target_lat", "REAL NOT NULL"),
         ("status", "TEXT NOT NULL"),
         ("outcome", "TEXT NOT NULL"),
         ("fallback_used", "INTEGER NOT NULL"),
@@ -238,10 +238,10 @@ pub(super) fn write_od_gpkg(
                 "destination_id",
                 SqlValue::Text(pair.destination_id.clone()),
             ),
-            ("source_x", SqlValue::Real(request_pair.origin.lon)),
-            ("source_y", SqlValue::Real(request_pair.origin.lat)),
-            ("target_x", SqlValue::Real(request_pair.destination.lon)),
-            ("target_y", SqlValue::Real(request_pair.destination.lat)),
+            ("source_lon", SqlValue::Real(request_pair.origin.lon)),
+            ("source_lat", SqlValue::Real(request_pair.origin.lat)),
+            ("target_lon", SqlValue::Real(request_pair.destination.lon)),
+            ("target_lat", SqlValue::Real(request_pair.destination.lat)),
             (
                 "status",
                 SqlValue::Text(batch_status_name(pair.status).to_string()),
@@ -354,10 +354,10 @@ pub(super) fn write_od_parquet(
         Field::new("pair_id", DataType::Utf8, false),
         Field::new("origin_id", DataType::Utf8, false),
         Field::new("destination_id", DataType::Utf8, false),
-        Field::new("source_x", DataType::Float64, false),
-        Field::new("source_y", DataType::Float64, false),
-        Field::new("target_x", DataType::Float64, false),
-        Field::new("target_y", DataType::Float64, false),
+        Field::new("source_lon", DataType::Float64, false),
+        Field::new("source_lat", DataType::Float64, false),
+        Field::new("target_lon", DataType::Float64, false),
+        Field::new("target_lat", DataType::Float64, false),
         Field::new("status", DataType::Utf8, false),
         Field::new("outcome", DataType::Utf8, false),
         Field::new("fallback_used", DataType::Utf8, false),
@@ -397,19 +397,19 @@ pub(super) fn write_od_parquet(
         .iter()
         .map(|(pair, _, _)| pair.destination_id.as_str())
         .collect::<Vec<_>>();
-    let source_x = rows
+    let source_lon = rows
         .iter()
         .map(|(_, request_pair, _)| request_pair.origin.lon)
         .collect::<Vec<_>>();
-    let source_y = rows
+    let source_lat = rows
         .iter()
         .map(|(_, request_pair, _)| request_pair.origin.lat)
         .collect::<Vec<_>>();
-    let target_x = rows
+    let target_lon = rows
         .iter()
         .map(|(_, request_pair, _)| request_pair.destination.lon)
         .collect::<Vec<_>>();
-    let target_y = rows
+    let target_lat = rows
         .iter()
         .map(|(_, request_pair, _)| request_pair.destination.lat)
         .collect::<Vec<_>>();
@@ -494,10 +494,10 @@ pub(super) fn write_od_parquet(
         Arc::new(StringArray::from(pair_ids)) as ArrayRef,
         Arc::new(StringArray::from(origin_ids)),
         Arc::new(StringArray::from(destination_ids)),
-        Arc::new(Float64Array::from(source_x)),
-        Arc::new(Float64Array::from(source_y)),
-        Arc::new(Float64Array::from(target_x)),
-        Arc::new(Float64Array::from(target_y)),
+        Arc::new(Float64Array::from(source_lon)),
+        Arc::new(Float64Array::from(source_lat)),
+        Arc::new(Float64Array::from(target_lon)),
+        Arc::new(Float64Array::from(target_lat)),
         Arc::new(StringArray::from(status)),
         Arc::new(StringArray::from(outcome)),
         Arc::new(StringArray::from(fallback_used)),
@@ -560,10 +560,10 @@ pub(super) fn write_od_geoparquet(
         Field::new("pair_id", DataType::Utf8, false),
         Field::new("origin_id", DataType::Utf8, false),
         Field::new("destination_id", DataType::Utf8, false),
-        Field::new("source_x", DataType::Float64, false),
-        Field::new("source_y", DataType::Float64, false),
-        Field::new("target_x", DataType::Float64, false),
-        Field::new("target_y", DataType::Float64, false),
+        Field::new("source_lon", DataType::Float64, false),
+        Field::new("source_lat", DataType::Float64, false),
+        Field::new("target_lon", DataType::Float64, false),
+        Field::new("target_lat", DataType::Float64, false),
         Field::new("status", DataType::Utf8, false),
         Field::new("outcome", DataType::Utf8, false),
         Field::new("fallback_used", DataType::Utf8, false),

@@ -18,6 +18,7 @@ mod dynamic_profiles;
 mod error;
 mod geojson;
 mod handlers;
+mod locate;
 mod simulation;
 mod state;
 mod transit;
@@ -53,11 +54,12 @@ pub async fn serve(paths: WorkspacePaths, options: ApiServeOptions) -> Result<()
 fn router(state: ApiState) -> Router {
     Router::new()
         .route("/healthz", get(handlers::healthz))
-        .route("/readyz", get(handlers::readyz))
+        .route("/readyz", get(handlers::service_info))
         .route("/v1/service", get(handlers::service_info))
         .route("/v1/profiles", get(handlers::list_profiles))
         .route("/v1/profiles/{profile_id}", get(handlers::get_profile))
         .route("/v1/route", post(handlers::route_handler))
+        .route("/v1/locate", post(locate::locate_handler))
         .route("/v1/transit-route", post(transit::transit_route_handler))
         .route(
             "/v1/transit-service-area",

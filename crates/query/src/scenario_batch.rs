@@ -23,8 +23,7 @@ pub struct ScenarioBatchCase {
     pub selector: ScenarioBatchSelector,
 }
 
-/// Exactly one scenario source. The untagged shape preserves existing
-/// `overlay: path.yml` cases while adding generated closure selectors.
+/// Exactly one scenario source: an overlay file or a generated closure selector.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum ScenarioBatchSelector {
@@ -65,7 +64,6 @@ impl<'de> Deserialize<'de> for ScenarioBatchSelector {
 pub struct ScenarioTopKSelector {
     /// CSV/JSON/YAML feature-score input, or a prior betweenness result JSON.
     pub ranking: PathBuf,
-    #[serde(alias = "k")]
     pub count: usize,
 }
 
@@ -80,7 +78,6 @@ pub struct ScenarioGroupSelector {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenarioFeatureScore {
-    #[serde(alias = "feature_id", alias = "source_way_id")]
     pub source_feature_id: i64,
     pub score: f64,
 }
@@ -89,6 +86,7 @@ pub struct ScenarioFeatureScore {
 /// runtime overlay. Requests retain their holiday calendars and continuous
 /// temporal overlays; only the scenario file is replaced per case.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScenarioBatchRequest {
     pub batch_id: String,
     /// Used when a scenario analysis request does not carry its own
@@ -97,17 +95,17 @@ pub struct ScenarioBatchRequest {
     pub departure_time: Option<String>,
     #[serde(default)]
     pub scenarios: Vec<ScenarioBatchCase>,
-    #[serde(default, alias = "route_requests")]
+    #[serde(default)]
     pub routes: Vec<RouteRequest>,
-    #[serde(default, alias = "service_area_requests")]
+    #[serde(default)]
     pub service_areas: Vec<ServiceAreaRequest>,
-    #[serde(default, alias = "accessibility_requests")]
+    #[serde(default)]
     pub accessibility: Vec<AccessibilityRequest>,
-    #[serde(default, alias = "od_requests")]
+    #[serde(default)]
     pub od: Vec<ScenarioOdRequest>,
-    #[serde(default, alias = "matrix", alias = "matrix_requests")]
+    #[serde(default)]
     pub matrices: Vec<ScenarioMatrixRequest>,
-    #[serde(default, alias = "betweenness_requests")]
+    #[serde(default)]
     pub betweenness: Vec<BetweennessRequest>,
 }
 
@@ -507,10 +505,7 @@ fn generated_closure_overlay(
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum ScenarioFeatureRankingFile {
-    Document {
-        #[serde(alias = "scores", alias = "ranking")]
-        features: Vec<ScenarioFeatureScore>,
-    },
+    Document { features: Vec<ScenarioFeatureScore> },
     Bare(Vec<ScenarioFeatureScore>),
 }
 

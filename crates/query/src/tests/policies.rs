@@ -1295,10 +1295,10 @@ fn skips_non_traversable_nodes_when_snapping_route_endpoints() {
 }
 
 #[test]
-fn accelerated_failure_mode_route_matches_astar_route() {
+fn accelerated_failure_mode_route_matches_dijkstra_route() {
     // Pairwise-only restriction: the failure penalties bake into customized
     // CCH weights, so the accelerated engine must return the same degraded
-    // route as the unaccelerated A* path.
+    // route as the unaccelerated Dijkstra path.
     let topology = illegal_turn_only_topology();
     let metrics = uniform_metrics(topology.edge_count(), 10.0);
     let (bundle, accelerated_metrics) = build_test_cch(&topology, &metrics);

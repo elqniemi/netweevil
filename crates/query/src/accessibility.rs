@@ -168,7 +168,7 @@ pub(crate) fn execute_accessibility_with_graph(
         .collect();
     let mut rows = Vec::new();
     let mut diagnostics = Vec::new();
-    let mut warnings = execution_warnings(metrics);
+    let mut warnings = Vec::new();
     let mut skipped_origin_count = 0_usize;
 
     for (origin, origin_ref) in request.origins.points.iter().zip(&origin_refs) {

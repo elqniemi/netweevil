@@ -126,7 +126,7 @@ Outputs load as grouped sublayers by threshold and geometry type.
 
 ### OD / Matrix
 
-- OD: point `Pairs file` at a CSV (`id,source_lon,source_lat,target_lon,target_lat`, several aliases accepted) or JSON pairs document, then press `Run OD`.
+- OD: point `Pairs file` at a CSV (`id,source_lon,source_lat,target_lon,target_lat` with optional `source_z,target_z`) or JSON pairs document, then press `Run OD`.
 - Matrix: build origins/destinations from loaded QGIS point layers (optionally selected features only, with an ID field) or from CSV/JSON files, then press `Run Matrix`.
 
 ### Simulation
@@ -155,3 +155,6 @@ Use the `Runs` tab to reload previous outputs without re-running: pick a file fr
 The QGIS plugin is licensed under MIT. The package directory includes a plain
 `LICENSE` file so installable ZIPs carry the license text required for QGIS
 plugin distribution.
+
+Point-set CSV files use `id,lon,lat` with optional `z` in metres. JSON inputs use
+objects containing `pairs` for OD queries or `points` for point sets.

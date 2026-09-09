@@ -5,8 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-pub const OPENOV_GTFS_URL: &str = "https://gtfs.openov.nl/gtfs-rt/gtfs-openov-nl.zip";
-pub const TRANSIT_BUNDLE_SCHEMA_VERSION: u32 = 3;
+pub const TRANSIT_BUNDLE_SCHEMA_VERSION: u32 = 4;
 pub const TRANSIT_STOP_BINDING_SCHEMA_VERSION: u32 = 1;
 pub const TRANSIT_TRANSFER_TABLE_SCHEMA_VERSION: u32 = 1;
 
@@ -264,6 +263,12 @@ pub struct TransitShape {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct TransitConnection {
     pub trip_index: u32,
+    /// One vehicle run, distinct for every service date and frequency departure.
+    pub run_index: u32,
+    /// Regular scheduled pickup only; prohibited and arranged pickups are excluded.
+    pub pickup_allowed: bool,
+    /// Regular scheduled drop-off only; prohibited and arranged drop-offs are excluded.
+    pub drop_off_allowed: bool,
     pub route_index: u32,
     pub from_stop_index: u32,
     pub to_stop_index: u32,
@@ -817,6 +822,9 @@ pub struct TransitLeg {
     pub route_short_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trip_id: Option<String>,
+    /// Identifies the vehicle run inside this imported timetable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_index: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headsign: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

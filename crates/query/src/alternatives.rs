@@ -273,10 +273,7 @@ fn materialize_route_alternative(
                 .flatten();
         }
     }
-    let warnings = merge_warnings(
-        merge_warnings(analysis.warnings, hop_info.warnings),
-        execution_warnings(metrics),
-    );
+    let warnings = merge_warnings(analysis.warnings, hop_info.warnings);
     let diagnostics = hop_info.diagnostics;
     Ok(RouteAlternative {
         alternative_index: rank,

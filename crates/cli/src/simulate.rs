@@ -6,6 +6,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use netweevil_core::CompiledProfileBundle;
+use netweevil_manifest::{RunKind, RunStatus, new_run_manifest};
 use netweevil_persist::{
     WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
     read_compiled_profile_manifests, read_dataset_manifest, read_topology_bundle,
@@ -13,7 +14,6 @@ use netweevil_persist::{
 };
 use netweevil_profile::{ProfileDocument, load_profile};
 use netweevil_query::PreparedRoutingEngine;
-use netweevil_report::{RunKind, RunStatus, new_run_manifest};
 use netweevil_simulate::{
     SimRunState, SimulationRunner, edge_bins_to_geojson, edge_usage_to_geojson,
     frames_to_temporal_geojson, load_scenario,

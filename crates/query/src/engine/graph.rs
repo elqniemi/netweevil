@@ -15,6 +15,7 @@ pub(crate) struct RoutePath {
 }
 
 pub(crate) struct RoutingGraph {
+    pub(crate) edge_spatial_index: crate::edge_spatial_index::EdgeSpatialIndex,
     first_out: Vec<u32>,
     edge_order: Vec<u32>,
     incoming_first_out: Vec<u32>,
@@ -489,7 +490,10 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
         .map(|sequence| sequence.iter().rev().copied().collect::<Vec<_>>())
         .collect::<Vec<_>>();
 
+    let edge_spatial_index =
+        crate::edge_spatial_index::EdgeSpatialIndex::build(topology, &edge_costs);
     Ok(RoutingGraph {
+        edge_spatial_index,
         first_out,
         edge_order,
         incoming_first_out,

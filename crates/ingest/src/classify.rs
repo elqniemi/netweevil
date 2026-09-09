@@ -250,7 +250,7 @@ pub(crate) fn classify_directional_access(
                 .or_else(|| access_forward_backward_direction(tags, "bicycle"));
         if let Some(direction) = explicit_direction {
             add_directional_bit(&mut directional, AccessMask::BICYCLE, direction);
-        } else if has_legacy_bicycle_opposite(tags) {
+        } else if has_bicycle_opposite(tags) {
             add_directional_bit(&mut directional, AccessMask::BICYCLE, EdgeDirection::Both);
         } else if highway == HighwayClass::Cycleway {
             add_directional_bit(&mut directional, AccessMask::BICYCLE, generic_direction);
@@ -335,7 +335,7 @@ fn is_access_no(value: &str) -> bool {
     matches!(value, "no" | "private")
 }
 
-fn has_legacy_bicycle_opposite(tags: &Tags) -> bool {
+fn has_bicycle_opposite(tags: &Tags) -> bool {
     matches!(
         tag(tags, "cycleway"),
         Some("opposite" | "opposite_lane" | "opposite_track" | "opposite_share_busway")

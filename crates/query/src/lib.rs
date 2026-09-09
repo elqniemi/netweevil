@@ -2,10 +2,10 @@
 //! OD batches, travel-time matrices, service areas (isochrones), and
 //! accessibility over an edge-based graph with turn costs and restrictions.
 //!
-//! Every surface is exact — accelerated paths (customizable contraction
-//! hierarchies) return the same costs as the exact engine, with no budgets
-//! or heuristics. `PreparedRoutingEngine` is the shared, thread-safe entry
-//! point used by the CLI, the HTTP API, and the simulation.
+//! Customizable contraction hierarchies minimize the compiled fixed-point
+//! metric; route summaries use original floating-point edge costs. Temporal
+//! and constrained requests use exact label searches. `PreparedRoutingEngine`
+//! is the shared, thread-safe entry point used by the CLI, API, and simulation.
 
 mod accessibility;
 mod alternatives;
@@ -13,6 +13,7 @@ mod batch;
 mod betweenness;
 mod diagnostics;
 mod documents;
+mod edge_spatial_index;
 mod engine;
 mod geometry;
 mod isochrone_polygon;

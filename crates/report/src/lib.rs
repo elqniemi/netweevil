@@ -18,10 +18,7 @@ pub use output::{
     write_route_result, write_service_area_result, write_service_area_sequence_result,
 };
 
-pub use netweevil_manifest::{
-    AlgorithmInfo, BundleRef, CompiledProfileManifest, DatasetManifest, MethodsSummary, RunKind,
-    RunManifest, RunStatus, SoftwareInfo, new_run_manifest, now_rfc3339,
-};
+use netweevil_manifest::{RunKind, RunManifest};
 
 #[derive(Debug, Clone)]
 pub enum RunResultSummary {
@@ -782,9 +779,13 @@ fn escape_html(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use netweevil_manifest::{
+        AlgorithmInfo, MethodsSummary, RunKind, RunManifest, RunStatus, SoftwareInfo,
+    };
+
     use super::{
-        AlgorithmInfo, MethodsSummary, RouteSummary, RunKind, RunManifest, RunResultSummary,
-        RunStatus, SoftwareInfo, load_run_result_summary, render_run_html, render_run_markdown,
+        RouteSummary, RunResultSummary, load_run_result_summary, render_run_html,
+        render_run_markdown,
     };
     use netweevil_query::{
         AnalysisOutcome, ConnectivityPolicy, DisconnectedNetworkMode, FallbackPolicy,

@@ -268,8 +268,7 @@ fn merge_overrides(base: &mut Value, overrides: Value) {
 fn parse_document(raw: Value) -> Result<ProfileDocument> {
     let document: ProfileDocument =
         serde_json::from_value(raw.clone()).context("invalid profile")?;
-    // The file schema permits unknown fields for compatibility. Request
-    // overrides must reject typos instead of silently routing with old values.
+    // Reject misspelled override fields before compiling the profile.
     reject_unknown_fields(&raw, &serde_json::to_value(&document)?, "profile")?;
     document.validate()?;
     for value in [
@@ -437,6 +436,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn locate_candidates_match_route_snapping_and_reject_invalid_requests() {
+        let service = fixture();
+        let state = ApiState {
+            service: service.clone(),
+            simulations: Arc::new(crate::simulation::SimulationRegistry::default()),
+        };
+        for direction in ["origin", "destination"] {
+            let payload = json!({"request": {
+                "points": [{"id":"first","lon":6.0005,"lat":53.0},
+                           {"id":"second","lon":6.0005,"lat":53.0}],
+                "snap":{"max_distance_m":100}, "direction":direction
+            }});
+            let Json(response) = crate::locate::locate_handler(
+                State(state.clone()),
+                Json(serde_json::from_value(payload).unwrap()),
+            )
+            .await
+            .unwrap();
+            let response = serde_json::to_value(response).unwrap();
+            assert_eq!(
+                response["service"]["profile_id"],
+                service.default_profile_id
+            );
+            for (index, id) in ["first", "second"].into_iter().enumerate() {
+                let expected = service.profiles[&service.default_profile_id]
+                    .engine
+                    .snap_route_candidates(
+                        &netweevil_query::LabeledPoint {
+                            id: id.into(),
+                            lon: 6.0005,
+                            lat: 53.0,
+                            z: None,
+                        },
+                        100.0,
+                        direction == "origin",
+                    )
+                    .unwrap();
+                assert_eq!(response["result"][index]["point_id"], id);
+                assert_eq!(
+                    response["result"][index]["candidates"],
+                    serde_json::to_value(expected).unwrap()
+                );
+                assert!(
+                    response["result"][index]["candidates"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|candidate| candidate["snapped_edge_fraction"]
+                            .as_f64()
+                            .is_some_and(|fraction| fraction > 0.0 && fraction < 1.0))
+                );
+            }
+        }
+        for request in [
+            json!({"points":[]}),
+            json!({"points":[{"id":"bad","lon":181,"lat":53}]}),
+            json!({"points":[{"id":"bad","lon":6,"lat":91}]}),
+            json!({"points":[{"id":"far","lon":0,"lat":0}]}),
+            json!({"points":[{"id":"bad","lon":6,"lat":53}], "snap":{"max_distance_m":-1}}),
+            json!({"points":[{"id":"bad","lon":6,"lat":53,"z":50}], "snap":{"z_window_m":1}}),
+        ] {
+            let error = crate::locate::locate_handler(
+                State(state.clone()),
+                Json(serde_json::from_value(json!({"request":request})).unwrap()),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.into_response().status(),
+                axum::http::StatusCode::BAD_REQUEST
+            );
+        }
+        let error = crate::locate::locate_handler(
+            State(state),
+            Json(
+                serde_json::from_value(json!({"profile_id":"missing","request": {
+                    "points":[{"id":"point","lon":6,"lat":53}]
+                }}))
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
     async fn concurrent_requests_compile_once_and_match_independent_exact_routing() {
         let service = fixture();
         let base = &service.profiles[&service.default_profile_id];
@@ -538,6 +627,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(
+        clippy::await_holding_lock,
+        reason = "Holding the cache lock proves named routes do not acquire it"
+    )]
     async fn named_routes_bypass_compilation_and_cache_locks_and_keep_response_shape() {
         let service = fixture();
         let _slot = service

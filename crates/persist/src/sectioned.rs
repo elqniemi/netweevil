@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn rejects_an_unrecognized_magic() {
-        let bytes = topology_bytes(b"NWSECB04", TOPOLOGY_BUNDLE_SCHEMA_VERSION);
+        let bytes = topology_bytes(b"INVALID!", TOPOLOGY_BUNDLE_SCHEMA_VERSION);
         let error = read_topology_sectioned(&bytes, Path::new("topology.bin"))
             .expect_err("an unrecognized magic is rejected");
         assert!(

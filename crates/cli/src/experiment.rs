@@ -139,7 +139,7 @@ pub(crate) fn experiment_run(paths: &WorkspacePaths, study: &Path) -> Result<()>
         experiment_id: experiment.experiment.id.clone(),
         label: experiment.experiment.label.clone(),
         dataset: experiment.experiment.dataset.clone(),
-        created_at: netweevil_report::now_rfc3339()?,
+        created_at: netweevil_manifest::now_rfc3339()?,
         status: if failed_count == 0 {
             "succeeded".to_string()
         } else if succeeded_count == 0 {

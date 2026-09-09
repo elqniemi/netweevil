@@ -1,4 +1,4 @@
-id,source_x,source_y,target_x,target_y
+id,source_lon,source_lat,target_lon,target_lat
 urban_center_station,6.5665,53.2194,6.5641,53.2108
 urban_center_zernike,6.5665,53.2194,6.5303,53.2410
 urban_paddepoel_helpman,6.5408,53.2351,6.5760,53.1990

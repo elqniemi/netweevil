@@ -420,9 +420,9 @@ fn effective_engine_description(routing_graph: &RoutingGraph) -> EffectiveEngine
             }
         } else {
             EffectiveEngineDescription {
-                route_engine: "astar_exact_multi_edge_turns",
-                batch_engine: "astar_exact_multi_edge_turns_batch_reuse",
-                acceleration: "spatial_index+a_star+turn_automaton",
+                route_engine: "dijkstra_exact_multi_edge_turns",
+                batch_engine: "dijkstra_exact_multi_edge_turns_batch_reuse",
+                acceleration: "spatial_index+turn_automaton",
             }
         }
     } else if routing_graph.acceleration.is_some() {
@@ -528,11 +528,6 @@ pub(crate) fn build_route_geometry(
         ]);
     }
     geometry
-}
-
-pub(crate) fn execution_warnings(metrics: &CompiledProfileBundle) -> Vec<String> {
-    let _ = metrics;
-    Vec::new()
 }
 
 pub(crate) fn turn_penalty_cost(

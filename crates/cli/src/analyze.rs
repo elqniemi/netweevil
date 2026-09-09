@@ -5,6 +5,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use netweevil_core::{CompiledProfileBundle, DatasetAccelerationBundle, TopologyBundle};
+use netweevil_manifest::{CompiledProfileManifest, RunKind, RunStatus, new_run_manifest};
 use netweevil_persist::{
     WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
     read_compiled_profile_manifests, read_dataset_manifest, read_edge_name_bundle,
@@ -20,9 +21,8 @@ use netweevil_query::{
     load_scenario_batch_request, load_service_area_request, load_service_area_sequence_request,
 };
 use netweevil_report::{
-    CompiledProfileManifest, RunKind, RunStatus, new_run_manifest, write_betweenness_result,
-    write_matrix_result, write_od_result, write_route_batch_result, write_route_result,
-    write_service_area_result, write_service_area_sequence_result,
+    write_betweenness_result, write_matrix_result, write_od_result, write_route_batch_result,
+    write_route_result, write_service_area_result, write_service_area_sequence_result,
 };
 use netweevil_transit::{
     AccessMode, TransitRouteRequest, TransitRouteResult, TransitStreetAccessModel,
@@ -738,7 +738,7 @@ fn validate_network_street_access_modes(request: &TransitRouteRequest) -> Result
 }
 
 fn record_effective_request<T: Serialize>(
-    manifest: &mut netweevil_report::RunManifest,
+    manifest: &mut netweevil_manifest::RunManifest,
     request: &T,
 ) -> Result<()> {
     manifest.effective_request =
@@ -1837,15 +1837,15 @@ fn engine_description_from(prepared: &PreparedRoutingEngine) -> EngineDescriptio
     let (route_summary, batch_summary) = match effective.route_engine {
         "cch_with_restriction_sequence_validation" => (
             "Customizable contraction hierarchy query over the compiled directed edge graph with edge-phantom snapping; candidate paths are validated against multi-edge turn-restriction sequences with an exact automaton fallback.",
-            "Customizable contraction hierarchy queries with per-batch snap reuse and duplicate snapped-pair solve reuse; candidate paths are validated against multi-edge turn-restriction sequences with an exact automaton fallback.",
+            "Customizable contraction hierarchy queries reuse endpoint search spaces and duplicate snapped solves; invalid multi-edge turn sequences resume an exact Dijkstra frontier for the current origin.",
         ),
         "accelerated_pairwise_turns" => (
             "Customizable contraction hierarchy query over the compiled directed edge graph with edge-phantom snapping for endpoints and pairwise turn prohibitions.",
             "Customizable contraction hierarchy queries with per-batch snap reuse and duplicate snapped-pair solve reuse for OD and matrix execution.",
         ),
-        "astar_exact_multi_edge_turns" => (
-            "Exact forward A* shortest-path search over the compiled directed edge graph with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences.",
-            "Exact forward A* shortest-path searches over the compiled directed edge graph with persisted topology spatial indexing for snapping and multi-edge turn-restriction sequences, with per-batch snap reuse and duplicate snapped-pair solve reuse for OD and matrix execution.",
+        "dijkstra_exact_multi_edge_turns" => (
+            "Exact forward Dijkstra shortest-path search over the compiled directed edge graph with prepared edge spatial indexing for snapping and multi-edge turn-restriction sequences.",
+            "Exact forward Dijkstra shortest-path searches over the compiled directed edge graph with prepared edge spatial indexing for snapping and multi-edge turn-restriction sequences, with per-batch snap reuse and duplicate snapped-pair solve reuse for OD and matrix execution.",
         ),
         _ => (
             "Exact bidirectional shortest-path search over the compiled directed edge graph with edge-phantom snapping for endpoints and pairwise turn prohibitions.",

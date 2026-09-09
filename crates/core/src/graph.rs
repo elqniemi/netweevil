@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{FeatureAttributeTable, FeatureAttributeValueRef, NO_FEATURE_ROW, TemporalRuleSet};
+use crate::{FeatureAttributeTable, NO_FEATURE_ROW, TemporalRuleSet};
 
 /// Schema version of [`TopologyBundle`]. Readers accept this value only.
 pub const TOPOLOGY_BUNDLE_SCHEMA_VERSION: u32 = 13;
@@ -235,13 +235,6 @@ impl Default for RoutingEdge {
     }
 }
 
-impl RoutingEdge {
-    /// Signed elevation change in this travel direction.
-    pub fn elevation_delta_m(self) -> f32 {
-        self.ascent_m - self.descent_m
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct EdgeProfileAttributes {
     pub duration_s: Option<f64>,
@@ -445,18 +438,6 @@ impl TopologyBundle {
         self.edge_layers.routing.len()
     }
 
-    /// Returns rise over horizontal run for an edge whose endpoint
-    /// elevations are both known. Vertical or zero-length segments have no
-    /// finite gradient and return `None`.
-    pub fn edge_gradient(&self, edge_index: usize) -> Option<f64> {
-        let edge = self.routing_edge(edge_index);
-        let from = self.nodes.get(edge.from.0 as usize)?;
-        let to = self.nodes.get(edge.to.0 as usize)?;
-        let delta_z = to.elevation_m()? - from.elevation_m()?;
-        let horizontal_m = crate::geo::haversine_meters(from.lon, from.lat, to.lon, to.lat);
-        (horizontal_m > f64::EPSILON).then_some(delta_z / horizontal_m)
-    }
-
     pub fn routing_edge(&self, edge_index: usize) -> RoutingEdge {
         self.edge_layers.routing[edge_index]
     }
@@ -509,17 +490,6 @@ impl TopologyBundle {
         if let Some(edge) = self.edge_layers.presentation.get_mut(edge_index) {
             edge.name_index = name_index;
         }
-    }
-
-    pub fn edge_attribute_value(
-        &self,
-        edge_index: usize,
-        name: &str,
-    ) -> Option<FeatureAttributeValueRef<'_>> {
-        let row = self.routing_edge(edge_index).feature_row;
-        (row != NO_FEATURE_ROW)
-            .then(|| self.feature_attributes.value(row, name))
-            .flatten()
     }
 
     pub fn edge_attribute_matches(&self, edge_index: usize, name: &str, expected: &str) -> bool {

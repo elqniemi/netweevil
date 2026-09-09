@@ -385,17 +385,7 @@ class AdvancedControlsMixin:
             ).isChecked(),
         }
         if include_failure_modes:
-            # Unsafe failure-mode checkboxes are intentionally NOT persisted:
-            # every QGIS session starts with safe routing semantics. Stale
-            # values from older plugin versions are removed.
-            for stale_key in [
-                "{}_auto_relax_unreachable".format(prefix),
-                "{}_allow_reverse_oneway".format(prefix),
-                "{}_allow_illegal_turn".format(prefix),
-                "{}_ignore_turn_restrictions".format(prefix),
-                "{}_allow_uturn".format(prefix),
-            ]:
-                settings.remove("{}/{}".format(SETTINGS_PREFIX, stale_key))
+            # Failure-mode checkboxes reset at the start of every QGIS session.
             values.update(
                 {
                     "{}_unsafe_visible".format(prefix): getattr(

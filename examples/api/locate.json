@@ -1,0 +1,10 @@
+{
+  "profile_id": "car_north_nl_2026_05",
+  "request": {
+    "points": [
+      {"id": "groningen", "lon": 6.5665, "lat": 53.2194}
+    ],
+    "direction": "origin",
+    "snap": {"max_distance_m": 500.0}
+  }
+}

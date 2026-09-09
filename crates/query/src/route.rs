@@ -501,7 +501,7 @@ pub(crate) fn execute_route_with_candidates(
                     origin_candidates,
                     destination_candidates,
                     failure.clone(),
-                    execution_warnings(metrics),
+                    Vec::new(),
                 ));
             }
             return Err(error);
@@ -533,7 +533,7 @@ pub(crate) fn execute_route_with_candidates(
                     origin_candidates,
                     destination_candidates,
                     failure.clone(),
-                    execution_warnings(metrics),
+                    Vec::new(),
                 ));
             }
             return Err(error);
@@ -631,7 +631,6 @@ pub(crate) fn execute_route_with_candidates(
         }
     }
     let breakdowns = build_breakdowns(topology, metrics, &path.edge_indexes, returns);
-    let warnings = execution_warnings(metrics);
 
     let mut result = RouteResult {
         route_id: route_id.to_string(),
@@ -661,10 +660,7 @@ pub(crate) fn execute_route_with_candidates(
         breakdowns,
         violations: analysis.violations,
         diagnostics: hop_info.diagnostics,
-        warnings: merge_warnings(
-            merge_warnings(warnings, analysis.warnings),
-            hop_info.warnings,
-        ),
+        warnings: merge_warnings(analysis.warnings, hop_info.warnings),
         alternatives: Vec::new(),
     };
     result.alternatives = build_route_alternatives(

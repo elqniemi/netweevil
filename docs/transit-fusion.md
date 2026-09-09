@@ -118,6 +118,21 @@ full path. Geometric fallback occurs only when the request explicitly selects
 
 ## Depart-after and arrive-by searches
 
+Each dated or frequency departure has a distinct `run_index`. Transit legs
+return it alongside the public trip ID, so separate vehicles using the same
+GTFS trip cannot be treated as staying aboard one vehicle. Pickup and drop-off
+are allowed only for regular scheduled stops. GTFS types `1`, `2` and `3` are
+excluded; arranging service by phone or with the driver is not modeled.
+
+Transit bundles must be re-imported for the current schema. The reader rejects
+unsupported schemas before decoding connections. Forward departure indexes
+store connection indices and continuation links instead of duplicating
+connection structs. Links distinguish repeated visits to the same stop.
+
+Geometric transfers include every stop within `max_transfer_distance_m`, and
+the prepared router caches that adjacency for the active radius. Precomputed
+network transfer tables still use their explicit build-time candidate limit.
+
 Transit routes and transit service areas plan in either direction. With
 `time.arrive_by: false` the scan settles the earliest arrival reachable after
 `time.datetime`, and `search_window_s` bounds how long after that time a trip

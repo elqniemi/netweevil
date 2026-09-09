@@ -42,6 +42,10 @@ The production surface is the `netweevil` CLI plus a preloadable HTTP API. The Q
 
 ## Local Quickstart
 
+OD CSV files use `id,source_lon,source_lat,target_lon,target_lat`, with optional
+`source_z,target_z`. Point-set CSV files use `id,lon,lat`, with optional `z`.
+JSON and YAML inputs use objects containing `pairs` or `points` respectively.
+
 Download the Groningen sample extract first — datasets are not checked in;
 [`datasets/README.md`](datasets/README.md) has the download and filter
 commands. Then run:
@@ -462,6 +466,7 @@ Discovery endpoints:
 Execution endpoints:
 
 - `POST /v1/route`
+- `POST /v1/locate`
 - `POST /v1/od`
 - `POST /v1/matrix`
 - `POST /v1/accessibility`
@@ -521,9 +526,8 @@ Benchmarking below.
 
 ## Benchmarking
 
-`netweevil bench` measures routing throughput and latency reproducibly, in
-process or over HTTP, and can diff two runs. It writes nothing into
-`.netweevil/`, so it is safe to point at a workspace you are also serving.
+`netweevil bench` measures routing throughput and latency in process or over
+HTTP and compares two runs. It reads compiled bundles without changing them.
 
 Generate a deterministic corpus. Coordinates are sampled inside the topology
 bounds (or `--bbox`), snapped with the engine's own snapping, and kept only when
@@ -577,6 +581,10 @@ netweevil bench http --url http://127.0.0.1:8080 \
 netweevil bench http --url http://127.0.0.1:5000 \
   --corpus examples/perf/north_nl_routes.csv \
   --backend osrm --osrm-profile driving --concurrency 16 --json /tmp/osrm-c16.json
+
+netweevil bench http --url http://127.0.0.1:8002 \
+  --corpus examples/perf/north_nl_routes.csv \
+  --backend valhalla --valhalla-costing auto --concurrency 16 --json /tmp/valhalla-c16.json
 ```
 
 For a remote endpoint, follow its usage policy. `--request-interval-ms 1100`
@@ -586,8 +594,11 @@ therefore measures the imposed request rate. HTTP requests identify the client
 as NetWeevil.
 
 The `osrm` backend calls
-`GET /route/v1/{profile}/{lon},{lat};{lon},{lat}?overview=false` and reads
-`routes[0].duration` and `routes[0].distance`. HTTP status failures are counted
+`GET /route/v1/{profile}/{lon},{lat};{lon},{lat}?overview=false&radiuses=500;500`
+and reads `routes[0].duration` and `routes[0].distance`. The `valhalla` backend
+posts to `/route`, requests OSRM output with no shape or directions, and reads
+the same seconds/metres fields. Its location search cutoff is 500 metres.
+HTTP status failures are counted
 separately from routing failures, so a broken server does not read as a fast
 one. The client is built without TLS; use plain `http://` endpoints.
 
@@ -599,7 +610,13 @@ the routes is visible:
 netweevil bench compare --baseline /tmp/http-c16.json --candidate /tmp/osrm-c16.json
 ```
 
-JSON reports carry the git commit, dataset, profile, engine, every setting, and
+JSON reports carry a SHA-256 fingerprint of the selected corpus coordinates,
+IDs and distance buckets. Comparison rejects different fingerprints or workload
+settings, including matrix size and service-area threshold. Corpus files use
+`id,source_lon,source_lat,target_lon,target_lat` with an optional `bucket`.
+Reports require the current schema and must be regenerated after schema changes.
+
+Reports also carry the git commit, dataset, profile, engine, every setting, and
 one record per request (`id`, `ok`, `latency_ms`, `duration_s`, `distance_m`,
 and NetWeevil's `generalized_cost`). Matrix records also include succeeded,
 failed and ignored cell counts; a successful matrix request can contain
@@ -608,6 +625,8 @@ Store reports under `.netweevil/reports/` or outside the checkout.
 
 See the [North Netherlands measurements](docs/performance-north-nl.md) for
 bundle sizes, routing checks, workload results and the remote OSRM comparison.
+The [routing parity assessment](docs/routing-parity.md) tracks remaining work,
+acceptance criteria, and the changes measured in this pass.
 
 ## QGIS Plugin
 

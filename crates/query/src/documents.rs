@@ -151,30 +151,14 @@ pub struct PointSetDocument {
     pub temporal: TemporalRequestOptions,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-enum OdPairsFile {
-    Document(OdPairsDocument),
-    Bare(Vec<OdPair>),
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
-enum PointSetFile {
-    Document(PointSetDocument),
-    Bare(Vec<LabeledPoint>),
-}
-
 pub fn load_od_pairs(path: impl AsRef<Path>) -> Result<OdPairsDocument> {
     let path = path.as_ref();
     let raw = fs::read_to_string(path)
         .with_context(|| format!("reading OD pairs file {}", path.display()))?;
     let document = match path.extension().and_then(|ext| ext.to_str()) {
-        Some("json") => {
-            parse_structured_od_pairs(serde_json::from_str(&raw).context("parsing JSON OD pairs")?)
-        }
+        Some("json") => serde_json::from_str(&raw).context("parsing JSON OD pairs")?,
         Some("yaml") | Some("yml") => {
-            parse_structured_od_pairs(serde_yaml::from_str(&raw).context("parsing YAML OD pairs")?)
+            serde_yaml::from_str(&raw).context("parsing YAML OD pairs")?
         }
         Some("csv") => load_od_pairs_csv(&raw)?,
         other => bail!(
@@ -193,12 +177,10 @@ pub fn load_point_set(path: impl AsRef<Path>) -> Result<PointSetDocument> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("reading point set {}", path.display()))?;
     let document = match path.extension().and_then(|ext| ext.to_str()) {
-        Some("json") => parse_structured_point_set(
-            serde_json::from_str(&raw).context("parsing JSON point set")?,
-        ),
-        Some("yaml") | Some("yml") => parse_structured_point_set(
-            serde_yaml::from_str(&raw).context("parsing YAML point set")?,
-        ),
+        Some("json") => serde_json::from_str(&raw).context("parsing JSON point set")?,
+        Some("yaml") | Some("yml") => {
+            serde_yaml::from_str(&raw).context("parsing YAML point set")?
+        }
         Some("csv") => load_point_set_csv(&raw)?,
         other => bail!(
             "unsupported point-set extension {:?}; use .json, .yml, .yaml, or .csv",
@@ -213,49 +195,37 @@ pub fn load_point_set(path: impl AsRef<Path>) -> Result<PointSetDocument> {
 
 fn load_od_pairs_csv(raw: &str) -> Result<OdPairsDocument> {
     let mut rows = csv_rows(raw);
-    let header = rows
-        .next()
-        .context("OD CSV must start with a header row: id,source_x,source_y,target_x,target_y")?;
-    let id_index = header_index(&header, &["id", "pair_id"])?;
-    let source_x_index = header_index(
-        &header,
-        &["source_x", "source_lon", "origin_x", "origin_lon"],
+    let header = rows.next().context(
+        "OD CSV must start with a header row: id,source_lon,source_lat,target_lon,target_lat",
     )?;
-    let source_y_index = header_index(
-        &header,
-        &["source_y", "source_lat", "origin_y", "origin_lat"],
-    )?;
-    let target_x_index = header_index(
-        &header,
-        &["target_x", "target_lon", "destination_x", "destination_lon"],
-    )?;
-    let target_y_index = header_index(
-        &header,
-        &["target_y", "target_lat", "destination_y", "destination_lat"],
-    )?;
-    let source_z_index = optional_header_index(&header, &["source_z", "origin_z"]);
-    let target_z_index = optional_header_index(&header, &["target_z", "destination_z"]);
+    let id_index = header_index(&header, "id")?;
+    let source_lon_index = header_index(&header, "source_lon")?;
+    let source_lat_index = header_index(&header, "source_lat")?;
+    let target_lon_index = header_index(&header, "target_lon")?;
+    let target_lat_index = header_index(&header, "target_lat")?;
+    let source_z_index = optional_header_index(&header, "source_z");
+    let target_z_index = optional_header_index(&header, "target_z");
 
     let mut pairs = Vec::new();
     for (row_number, row) in rows.enumerate() {
         let pair_id = csv_field(&row, id_index, row_number + 2, "id")?.to_string();
-        let source_x = parse_csv_f64(&row, source_x_index, row_number + 2, "source_x")?;
-        let source_y = parse_csv_f64(&row, source_y_index, row_number + 2, "source_y")?;
-        let target_x = parse_csv_f64(&row, target_x_index, row_number + 2, "target_x")?;
-        let target_y = parse_csv_f64(&row, target_y_index, row_number + 2, "target_y")?;
+        let source_lon = parse_csv_f64(&row, source_lon_index, row_number + 2, "source_lon")?;
+        let source_lat = parse_csv_f64(&row, source_lat_index, row_number + 2, "source_lat")?;
+        let target_lon = parse_csv_f64(&row, target_lon_index, row_number + 2, "target_lon")?;
+        let target_lat = parse_csv_f64(&row, target_lat_index, row_number + 2, "target_lat")?;
 
         pairs.push(OdPair {
             pair_id: pair_id.clone(),
             origin: LabeledPoint {
                 id: format!("{pair_id}:source"),
-                lon: source_x,
-                lat: source_y,
+                lon: source_lon,
+                lat: source_lat,
                 z: parse_optional_csv_f64(&row, source_z_index, row_number + 2, "source_z")?,
             },
             destination: LabeledPoint {
                 id: format!("{pair_id}:target"),
-                lon: target_x,
-                lat: target_y,
+                lon: target_lon,
+                lat: target_lat,
                 z: parse_optional_csv_f64(&row, target_z_index, row_number + 2, "target_z")?,
             },
         });
@@ -276,18 +246,18 @@ fn load_point_set_csv(raw: &str) -> Result<PointSetDocument> {
     let mut rows = csv_rows(raw);
     let header = rows
         .next()
-        .context("point-set CSV must start with a header row: id,x,y")?;
-    let id_index = header_index(&header, &["id"])?;
-    let x_index = header_index(&header, &["x", "lon", "longitude"])?;
-    let y_index = header_index(&header, &["y", "lat", "latitude"])?;
-    let z_index = optional_header_index(&header, &["z", "elevation", "elevation_m"]);
+        .context("point-set CSV must start with a header row: id,lon,lat")?;
+    let id_index = header_index(&header, "id")?;
+    let x_index = header_index(&header, "lon")?;
+    let y_index = header_index(&header, "lat")?;
+    let z_index = optional_header_index(&header, "z");
 
     let mut points = Vec::new();
     for (row_number, row) in rows.enumerate() {
         points.push(LabeledPoint {
             id: csv_field(&row, id_index, row_number + 2, "id")?.to_string(),
-            lon: parse_csv_f64(&row, x_index, row_number + 2, "x")?,
-            lat: parse_csv_f64(&row, y_index, row_number + 2, "y")?,
+            lon: parse_csv_f64(&row, x_index, row_number + 2, "lon")?,
+            lat: parse_csv_f64(&row, y_index, row_number + 2, "lat")?,
             z: parse_optional_csv_f64(&row, z_index, row_number + 2, "z")?,
         });
     }
@@ -303,28 +273,13 @@ fn load_point_set_csv(raw: &str) -> Result<PointSetDocument> {
     })
 }
 
-fn header_index(header: &[String], accepted: &[&str]) -> Result<usize> {
-    header
-        .iter()
-        .position(|value| {
-            accepted
-                .iter()
-                .any(|candidate| value.eq_ignore_ascii_case(candidate))
-        })
-        .with_context(|| {
-            format!(
-                "missing required CSV column; expected one of {}",
-                accepted.join(", ")
-            )
-        })
+fn header_index(header: &[String], column: &str) -> Result<usize> {
+    optional_header_index(header, column)
+        .with_context(|| format!("missing required CSV column '{column}'"))
 }
 
-fn optional_header_index(header: &[String], accepted: &[&str]) -> Option<usize> {
-    header.iter().position(|value| {
-        accepted
-            .iter()
-            .any(|candidate| value.eq_ignore_ascii_case(candidate))
-    })
+fn optional_header_index(header: &[String], column: &str) -> Option<usize> {
+    header.iter().position(|value| value == column)
 }
 
 fn csv_field<'a>(
@@ -405,36 +360,6 @@ fn parse_csv_line(line: &str) -> Vec<String> {
     }
     fields.push(current.trim().to_string());
     fields
-}
-
-fn parse_structured_point_set(parsed: PointSetFile) -> PointSetDocument {
-    match parsed {
-        PointSetFile::Document(document) => document,
-        PointSetFile::Bare(points) => PointSetDocument {
-            points,
-            snap: SnapOptions::default(),
-            connectivity: ConnectivityPolicy::default(),
-            fallback: FallbackPolicy::default(),
-            returns: ReturnConfig::default(),
-            alternatives: AlternativeRouteOptions::default(),
-            temporal: TemporalRequestOptions::default(),
-        },
-    }
-}
-
-fn parse_structured_od_pairs(parsed: OdPairsFile) -> OdPairsDocument {
-    match parsed {
-        OdPairsFile::Document(document) => document,
-        OdPairsFile::Bare(pairs) => OdPairsDocument {
-            pairs,
-            snap: SnapOptions::default(),
-            connectivity: ConnectivityPolicy::default(),
-            fallback: FallbackPolicy::default(),
-            returns: ReturnConfig::default(),
-            alternatives: AlternativeRouteOptions::default(),
-            temporal: TemporalRequestOptions::default(),
-        },
-    }
 }
 
 fn validate_service_area_request(request: ServiceAreaRequest) -> Result<ServiceAreaRequest> {

@@ -37,7 +37,7 @@ class BatchTabMixin:
         self.od_pairs_path_edit = QLineEdit("examples/requests/od_pairs.csv")
         self.od_pairs_path_edit.setToolTip(
             "CSV with columns id, source_lon, source_lat, target_lon, target_lat "
-            "(several aliases accepted), or a JSON pairs document."
+            "or a JSON pairs document."
         )
         self.od_output_path_edit = QLineEdit(".netweevil/runs/qgis-od.geojson")
         od_form.addRow(
@@ -350,13 +350,7 @@ class BatchTabMixin:
                 parsed.setdefault("snap", {"max_distance_m": 500.0})
                 parsed.setdefault("returns", {"geometry": "full"})
                 return parsed
-            if isinstance(parsed, list):
-                return {
-                    "pairs": parsed,
-                    "snap": {"max_distance_m": 500.0},
-                    "returns": {"geometry": "full"},
-                }
-        raise ValueError("OD input must be .csv or .json for API mode.")
+        raise ValueError("OD input must be a CSV or a JSON object containing pairs.")
 
     def load_point_set_document(self, path):
         suffix = path.suffix.lower()
@@ -368,50 +362,32 @@ class BatchTabMixin:
                 parsed.setdefault("snap", {"max_distance_m": 500.0})
                 parsed.setdefault("returns", {"geometry": "full"})
                 return parsed
-            if isinstance(parsed, list):
-                return {
-                    "points": parsed,
-                    "snap": {"max_distance_m": 500.0},
-                    "returns": {"geometry": "full"},
-                }
-        raise ValueError("Point-set input must be .csv or .json for API mode.")
+        raise ValueError("Point-set input must be a CSV or a JSON object containing points.")
 
     def load_od_csv(self, path):
         with path.open("r", encoding="utf-8", newline="") as handle:
             reader = csv.DictReader(handle)
             pairs = []
             for row in reader:
-                pair_id = self.first_value(row, ["id", "pair_id"])
-                source_x = float(
-                    self.first_value(row, ["source_x", "source_lon", "origin_x", "origin_lon"])
-                )
-                source_y = float(
-                    self.first_value(row, ["source_y", "source_lat", "origin_y", "origin_lat"])
-                )
-                target_x = float(
-                    self.first_value(
-                        row,
-                        ["target_x", "target_lon", "destination_x", "destination_lon"],
-                    )
-                )
-                target_y = float(
-                    self.first_value(
-                        row,
-                        ["target_y", "target_lat", "destination_y", "destination_lat"],
-                    )
-                )
+                pair_id = self.csv_value(row, "id")
+                source_lon = float(self.csv_value(row, "source_lon"))
+                source_lat = float(self.csv_value(row, "source_lat"))
+                target_lon = float(self.csv_value(row, "target_lon"))
+                target_lat = float(self.csv_value(row, "target_lat"))
                 pairs.append(
                     {
                         "pair_id": pair_id,
                         "origin": {
                             "id": "{}:source".format(pair_id),
-                            "lon": source_x,
-                            "lat": source_y,
+                            "lon": source_lon,
+                            "lat": source_lat,
+                            "z": float(row["source_z"]) if (row.get("source_z") or "").strip() else None,
                         },
                         "destination": {
                             "id": "{}:target".format(pair_id),
-                            "lon": target_x,
-                            "lat": target_y,
+                            "lon": target_lon,
+                            "lat": target_lat,
+                            "z": float(row["target_z"]) if (row.get("target_z") or "").strip() else None,
                         },
                     }
                 )
@@ -428,9 +404,10 @@ class BatchTabMixin:
             for row in reader:
                 points.append(
                     {
-                        "id": self.first_value(row, ["id"]),
-                        "lon": float(self.first_value(row, ["x", "lon", "longitude"])),
-                        "lat": float(self.first_value(row, ["y", "lat", "latitude"])),
+                        "id": self.csv_value(row, "id"),
+                        "lon": float(self.csv_value(row, "lon")),
+                        "lat": float(self.csv_value(row, "lat")),
+                        "z": float(row["z"]) if (row.get("z") or "").strip() else None,
                     }
                 )
         return {
@@ -439,13 +416,8 @@ class BatchTabMixin:
             "returns": {"geometry": "full"},
         }
 
-    def first_value(self, row, accepted_columns):
-        for column in accepted_columns:
-            value = row.get(column)
-            if value is not None and str(value).strip():
-                return str(value).strip()
-        raise ValueError(
-            "Missing required column. Expected one of: {}".format(
-                ", ".join(accepted_columns)
-            )
-        )
+    def csv_value(self, row, column):
+        value = row.get(column)
+        if value is not None and value.strip():
+            return value.strip()
+        raise ValueError("Missing required CSV value for column '{}'".format(column))

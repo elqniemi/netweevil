@@ -35,6 +35,7 @@ pub(crate) fn reconstruct_legs(
         route_id: None,
         route_short_name: None,
         trip_id: None,
+        run_index: None,
         headsign: None,
         geometry: street_geometry_if_requested(
             request,
@@ -72,6 +73,7 @@ pub(crate) fn reconstruct_legs(
                     route_id: None,
                     route_short_name: None,
                     trip_id: None,
+                    run_index: None,
                     headsign: None,
                     geometry: street_geometry_if_requested(
                         request,
@@ -105,6 +107,7 @@ pub(crate) fn reconstruct_legs(
                     route_id: None,
                     route_short_name: None,
                     trip_id: None,
+                    run_index: None,
                     headsign: None,
                     geometry: street_geometry_if_requested(
                         request,
@@ -138,6 +141,7 @@ pub(crate) fn reconstruct_legs(
                     route_id: Some(route.route_id.clone()),
                     route_short_name: Some(route.short_name.clone()),
                     trip_id: Some(trip.trip_id.clone()),
+                    run_index: Some(connection.run_index),
                     headsign: Some(trip.headsign.clone()),
                     geometry: transit_connection_geometry_if_requested(
                         request,
@@ -187,6 +191,7 @@ pub(crate) fn reconstruct_arrive_by_legs(
         route_id: None,
         route_short_name: None,
         trip_id: None,
+        run_index: None,
         headsign: None,
         geometry: street_geometry_if_requested(
             request,
@@ -222,6 +227,7 @@ pub(crate) fn reconstruct_arrive_by_legs(
                     route_id: Some(route.route_id.clone()),
                     route_short_name: Some(route.short_name.clone()),
                     trip_id: Some(trip.trip_id.clone()),
+                    run_index: Some(connection.run_index),
                     headsign: Some(trip.headsign.clone()),
                     geometry: transit_connection_geometry_if_requested(
                         request,
@@ -256,6 +262,7 @@ pub(crate) fn reconstruct_arrive_by_legs(
                     route_id: None,
                     route_short_name: None,
                     trip_id: None,
+                    run_index: None,
                     headsign: None,
                     geometry: street_geometry_if_requested(
                         request,
@@ -287,6 +294,7 @@ pub(crate) fn reconstruct_arrive_by_legs(
                     route_id: None,
                     route_short_name: None,
                     trip_id: None,
+                    run_index: None,
                     headsign: None,
                     geometry: street_geometry_if_requested(
                         request,
@@ -308,7 +316,7 @@ pub(crate) fn coalesce_transit_legs(legs: &mut Vec<TransitLeg>) {
         if let Some(last) = coalesced.last_mut()
             && last.leg_type == TransitLegType::Transit
             && leg.leg_type == TransitLegType::Transit
-            && last.trip_id == leg.trip_id
+            && last.run_index == leg.run_index
             && last.to_id == leg.from_id
         {
             last.to_id = leg.to_id;
@@ -657,5 +665,5 @@ pub(crate) fn haversine_m(lon_a: f64, lat_a: f64, lon_b: f64, lat_b: f64) -> f64
     let dlat = (lat_b - lat_a).to_radians();
     let dlon = (lon_b - lon_a).to_radians();
     let a = (dlat / 2.0).sin().powi(2) + lat1.cos() * lat2.cos() * (dlon / 2.0).sin().powi(2);
-    2.0 * earth_radius_m * a.sqrt().asin()
+    2.0 * earth_radius_m * a.clamp(0.0, 1.0).sqrt().asin()
 }

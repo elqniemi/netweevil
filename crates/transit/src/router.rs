@@ -11,14 +11,14 @@ use crate::legs::{
     transit_legs_satisfy_minimums,
 };
 use crate::model::{
-    AccessMode, TransitBundle, TransitConnection, TransitLeg, TransitModeOptions, TransitOutcome,
+    AccessMode, TransitBundle, TransitLeg, TransitModeOptions, TransitOutcome,
     TransitRouteAlternative, TransitRouteRequest, TransitRouteResult, TransitRouteSummary,
     TransitServiceAreaRequest, TransitServiceAreaResult, TransitStreetPath, TransitTransferTable,
 };
 use crate::runtime::{
-    PrevStep, StateKey, StopCandidate, StopSpatialIndex, StreetTimeEstimator, TransitRuntime,
-    best_street_candidates, build_departures_by_stop, build_transfer_candidates,
-    can_finish_with_egress, can_start_transfer_walk, relax_state,
+    DepartureIndex, PrevStep, StateKey, StopCandidate, StopSpatialIndex, StreetTimeEstimator,
+    TransitRuntime, best_street_candidates, boarding_slack_s, build_departures_by_stop,
+    build_transfer_candidates, can_finish_with_egress, can_start_transfer_walk, relax_state,
 };
 use crate::service_area::execute_transit_service_area_with_runtime;
 
@@ -35,25 +35,26 @@ struct FinalCandidate {
 
 pub struct PreparedTransitRouter {
     bundle: Arc<TransitBundle>,
-    departures_by_stop: Vec<Vec<TransitConnection>>,
+    departures_by_stop: DepartureIndex,
     stop_index: StopSpatialIndex,
-    transfer_candidates: Vec<Vec<StopCandidate>>,
-    network_transfer_candidates: HashMap<String, Vec<Vec<StopCandidate>>>,
+    /// Keep only the latest geometric radius so arbitrary request radii do
+    /// not grow an unbounded cache. Active requests retain their Arc.
+    transfer_candidates: Mutex<Option<(u64, Arc<Vec<Vec<StopCandidate>>>)>>,
+    network_transfer_candidates: HashMap<String, Arc<Vec<Vec<StopCandidate>>>>,
     /// Reverse indexes per transfer profile, built on the first arrive-by
     /// request that needs them and shared by every later request.
-    backward_indexes: Mutex<HashMap<Option<String>, Arc<BackwardIndex>>>,
+    backward_indexes: Mutex<HashMap<(Option<String>, u64), Arc<BackwardIndex>>>,
 }
 
 impl PreparedTransitRouter {
     pub fn new(bundle: Arc<TransitBundle>) -> Self {
         let departures_by_stop = build_departures_by_stop(&bundle);
         let stop_index = StopSpatialIndex::new(&bundle.stops);
-        let transfer_candidates = build_transfer_candidates(&bundle, &stop_index);
         Self {
             bundle,
             departures_by_stop,
             stop_index,
-            transfer_candidates,
+            transfer_candidates: Mutex::new(None),
             network_transfer_candidates: HashMap::new(),
             backward_indexes: Mutex::new(HashMap::new()),
         }
@@ -68,13 +69,12 @@ impl PreparedTransitRouter {
     ) -> Result<Self> {
         let departures_by_stop = build_departures_by_stop(&bundle);
         let stop_index = StopSpatialIndex::new(&bundle.stops);
-        let transfer_candidates = build_transfer_candidates(&bundle, &stop_index);
         let mut network_transfer_candidates = HashMap::new();
         for table in tables {
             let profile_id = table.profile_id.clone();
             let candidates = index_transit_transfer_table(&bundle, &table)?;
             if network_transfer_candidates
-                .insert(profile_id.clone(), candidates)
+                .insert(profile_id.clone(), Arc::new(candidates))
                 .is_some()
             {
                 anyhow::bail!("duplicate transit transfer table profile_id '{profile_id}'");
@@ -84,7 +84,7 @@ impl PreparedTransitRouter {
             bundle,
             departures_by_stop,
             stop_index,
-            transfer_candidates,
+            transfer_candidates: Mutex::new(None),
             network_transfer_candidates,
             backward_indexes: Mutex::new(HashMap::new()),
         })
@@ -102,8 +102,19 @@ impl PreparedTransitRouter {
 
     /// Cached reverse timetable/transfer index for the request's transfer
     /// profile. Only arrive-by requests need one.
-    fn backward_index_for(&self, modes: &TransitModeOptions) -> Result<Arc<BackwardIndex>> {
-        let key = modes.transfer_profile_id.clone();
+    fn backward_index_for(
+        &self,
+        modes: &TransitModeOptions,
+        transfers: &[Vec<StopCandidate>],
+    ) -> Result<Arc<BackwardIndex>> {
+        let key = (
+            modes.transfer_profile_id.clone(),
+            if modes.transfer_profile_id.is_some() {
+                0
+            } else {
+                modes.max_transfer_distance_m.to_bits()
+            },
+        );
         if let Some(index) = self
             .backward_indexes
             .lock()
@@ -112,24 +123,47 @@ impl PreparedTransitRouter {
         {
             return Ok(Arc::clone(index));
         }
-        let index = Arc::new(BackwardIndex::build(
-            self.bundle.as_ref(),
-            self.transfer_candidates_for(modes)?,
-        ));
-        self.backward_indexes
+        let index = Arc::new(BackwardIndex::build(self.bundle.as_ref(), transfers));
+        let mut indexes = self
+            .backward_indexes
             .lock()
-            .expect("transit backward index cache is poisoned")
-            .insert(key, Arc::clone(&index));
+            .expect("transit backward index cache is poisoned");
+        if key.0.is_none() {
+            indexes.retain(|(profile, _), _| profile.is_some());
+        }
+        indexes.insert(key, Arc::clone(&index));
         Ok(index)
     }
 
-    fn transfer_candidates_for(&self, modes: &TransitModeOptions) -> Result<&[Vec<StopCandidate>]> {
+    fn transfer_candidates_for(
+        &self,
+        modes: &TransitModeOptions,
+    ) -> Result<Arc<Vec<Vec<StopCandidate>>>> {
+        if !modes.max_transfer_distance_m.is_finite() || modes.max_transfer_distance_m < 0.0 {
+            anyhow::bail!("max_transfer_distance_m must be finite and nonnegative");
+        }
         let Some(profile_id) = modes.transfer_profile_id.as_deref() else {
-            return Ok(&self.transfer_candidates);
+            let key = modes.max_transfer_distance_m.to_bits();
+            let mut cache = self
+                .transfer_candidates
+                .lock()
+                .expect("transit transfer cache is poisoned");
+            if let Some((radius, candidates)) = cache.as_ref()
+                && *radius == key
+            {
+                return Ok(Arc::clone(candidates));
+            }
+            let candidates = Arc::new(build_transfer_candidates(
+                &self.bundle,
+                &self.stop_index,
+                modes.max_transfer_distance_m,
+            ));
+            *cache = Some((key, Arc::clone(&candidates)));
+            return Ok(candidates);
         };
         self.network_transfer_candidates
             .get(profile_id)
-            .map(Vec::as_slice)
+            .map(Arc::clone)
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "transit transfer profile '{}' is not loaded; available profiles: {:?}",
@@ -160,13 +194,13 @@ impl PreparedTransitRouter {
         let backward_index = request
             .time
             .arrive_by
-            .then(|| self.backward_index_for(&request.modes))
+            .then(|| self.backward_index_for(&request.modes, &transfer_candidates))
             .transpose()?;
         let runtime = TransitRuntime::new(
             self.bundle.as_ref(),
             &self.departures_by_stop,
             &self.stop_index,
-            transfer_candidates,
+            &transfer_candidates,
             &request.modes,
             street_estimator,
         );
@@ -197,13 +231,13 @@ impl PreparedTransitRouter {
         let backward_index = request
             .time
             .arrive_by
-            .then(|| self.backward_index_for(&request.modes))
+            .then(|| self.backward_index_for(&request.modes, &transfer_candidates))
             .transpose()?;
         let runtime = TransitRuntime::new(
             self.bundle.as_ref(),
             &self.departures_by_stop,
             &self.stop_index,
-            transfer_candidates,
+            &transfer_candidates,
             &request.modes,
             street_estimator,
         );
@@ -227,7 +261,8 @@ pub fn execute_transit_route(
     }
     let departures_by_stop = build_departures_by_stop(bundle);
     let stop_index = StopSpatialIndex::new(&bundle.stops);
-    let transfer_candidates = build_transfer_candidates(bundle, &stop_index);
+    let transfer_candidates =
+        build_transfer_candidates(bundle, &stop_index, request.modes.max_transfer_distance_m);
     let runtime = TransitRuntime::new(
         bundle,
         &departures_by_stop,
@@ -295,7 +330,8 @@ fn execute_transit_route_with_runtime(
         let state = StateKey {
             stop_index: candidate.stop_index,
             boardings: 0,
-            trip_index: u32::MAX,
+            connection_index: u32::MAX,
+            can_alight: false,
         };
         let arrival_s = departure_s.saturating_add(candidate.time_s);
         relax_state(
@@ -334,13 +370,15 @@ fn execute_transit_route_with_runtime(
         {
             continue;
         }
-        if !collect_alternatives {
+        if !transit_leg_minimums_enabled(&request.modes) && !collect_alternatives {
             if let Some(found) = best_final.as_ref()
                 && entry.time_s >= found.arrival_s
             {
                 continue;
             }
-        } else if let Some(found) = best_final.as_ref() {
+        } else if !transit_leg_minimums_enabled(&request.modes)
+            && let Some(found) = best_final.as_ref()
+        {
             let max_arrival_s =
                 transit_alternative_arrival_limit(departure_s, found.arrival_s, request);
             if entry.time_s > max_arrival_s {
@@ -389,7 +427,8 @@ fn execute_transit_route_with_runtime(
                 let next_state = StateKey {
                     stop_index: transfer.stop_index,
                     boardings: entry.state.boardings,
-                    trip_index: u32::MAX,
+                    connection_index: u32::MAX,
+                    can_alight: false,
                 };
                 relax_state(
                     &mut heap,
@@ -409,25 +448,43 @@ fn execute_transit_route_with_runtime(
 
         if let Some(departures) = runtime
             .departures_by_stop
+            .by_stop
             .get(entry.state.stop_index as usize)
         {
-            let start = departures.partition_point(|connection| {
-                let slack = if entry.state.trip_index == connection.trip_index {
-                    0
-                } else {
-                    request.modes.board_slack_s
-                };
-                connection.departure_s < entry.time_s.saturating_add(slack)
+            // The binary-search predicate must be monotone in departure
+            // time. Trip-specific slack is checked after locating the range.
+            let start = departures.partition_point(|index| {
+                runtime.bundle.connections[*index as usize].departure_s < entry.time_s
             });
-            for connection in departures[start..].iter() {
+            for index in &departures[start..] {
+                let connection = &runtime.bundle.connections[*index as usize];
                 if connection.departure_s > search_end_s {
                     break;
                 }
                 if !runtime.allowed_routes[connection.route_index as usize] {
                     continue;
                 }
-                let same_trip = entry.state.trip_index == connection.trip_index;
-                let next_boardings = if same_trip {
+                let same_run = runtime
+                    .departures_by_stop
+                    .next_connection
+                    .get(entry.state.connection_index as usize)
+                    .is_some_and(|next| *next == *index);
+                if connection.departure_s
+                    < entry.time_s.saturating_add(boarding_slack_s(
+                        entry.state,
+                        same_run,
+                        &request.modes,
+                    ))
+                {
+                    continue;
+                }
+                if !same_run
+                    && (!connection.pickup_allowed
+                        || (entry.state.connection_index != u32::MAX && !entry.state.can_alight))
+                {
+                    continue;
+                }
+                let next_boardings = if same_run {
                     entry.state.boardings
                 } else {
                     entry.state.boardings.saturating_add(1)
@@ -438,7 +495,8 @@ fn execute_transit_route_with_runtime(
                 let next_state = StateKey {
                     stop_index: connection.to_stop_index,
                     boardings: next_boardings,
-                    trip_index: connection.trip_index,
+                    connection_index: *index,
+                    can_alight: connection.drop_off_allowed,
                 };
                 relax_state(
                     &mut heap,

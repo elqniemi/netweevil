@@ -20,17 +20,16 @@ pub use fusion::{
 };
 pub use gtfs::{import_gtfs, read_transit_bundle, transit_import_summary, write_transit_bundle};
 pub use model::{
-    AccessMode, OPENOV_GTFS_URL, TRANSIT_BUNDLE_SCHEMA_VERSION,
-    TRANSIT_STOP_BINDING_SCHEMA_VERSION, TRANSIT_TRANSFER_TABLE_SCHEMA_VERSION,
-    TransitAlternativeOptions, TransitBundle, TransitConnection, TransitFeedManifest,
-    TransitImportOptions, TransitImportSummary, TransitLeg, TransitLegType, TransitMode,
-    TransitModeOptions, TransitNetworkTransfer, TransitOutcome, TransitPoint, TransitQueryTime,
-    TransitReturnOptions, TransitRoute, TransitRouteAlternative, TransitRouteRequest,
-    TransitRouteResult, TransitRouteStop, TransitRouteStopSegment, TransitRouteSummary,
-    TransitServiceAreaRequest, TransitServiceAreaResult, TransitServiceAreaReturnOptions,
-    TransitServiceAreaSegment, TransitServiceAreaStop, TransitShape, TransitStop,
-    TransitStopBinding, TransitStopBindingSummary, TransitStopBindingTable,
-    TransitStopBindingTarget, TransitStreetAccessModel, TransitStreetPath,
+    AccessMode, TRANSIT_BUNDLE_SCHEMA_VERSION, TRANSIT_STOP_BINDING_SCHEMA_VERSION,
+    TRANSIT_TRANSFER_TABLE_SCHEMA_VERSION, TransitAlternativeOptions, TransitBundle,
+    TransitConnection, TransitFeedManifest, TransitImportOptions, TransitImportSummary, TransitLeg,
+    TransitLegType, TransitMode, TransitModeOptions, TransitNetworkTransfer, TransitOutcome,
+    TransitPoint, TransitQueryTime, TransitReturnOptions, TransitRoute, TransitRouteAlternative,
+    TransitRouteRequest, TransitRouteResult, TransitRouteStop, TransitRouteStopSegment,
+    TransitRouteSummary, TransitServiceAreaRequest, TransitServiceAreaResult,
+    TransitServiceAreaReturnOptions, TransitServiceAreaSegment, TransitServiceAreaStop,
+    TransitShape, TransitStop, TransitStopBinding, TransitStopBindingSummary,
+    TransitStopBindingTable, TransitStopBindingTarget, TransitStreetAccessModel, TransitStreetPath,
     TransitTransferBuildOptions, TransitTransferTable, TransitTransferTableManifest, TransitTrip,
     TransitWalkingGeometry, load_transit_request,
 };

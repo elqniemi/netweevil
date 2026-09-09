@@ -1229,7 +1229,7 @@ fn build_component_route_result(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let mut warnings = execution_warnings(metrics);
+    let mut warnings = Vec::new();
     warnings.push(
         "Component budget/Pareto route used exact nondominated label-setting; static CCH acceleration was intentionally bypassed."
             .to_string(),
@@ -1333,7 +1333,7 @@ fn build_temporal_component_route_result(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let mut warnings = execution_warnings(metrics);
+    let mut warnings = Vec::new();
     warnings.push(
         "Temporal component budget/Pareto route used exact nondominated label-setting with edge-entry evaluation; static CCH acceleration was intentionally bypassed."
             .to_string(),

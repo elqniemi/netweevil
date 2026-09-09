@@ -1,12 +1,20 @@
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 use anyhow::{Result, bail};
 use netweevil_core::{TopologyBundle, TopologyNode};
 
 use crate::*;
 
-type SnapPointCacheKey = (bool, u64, u64, u64, u64, u64);
+#[derive(PartialEq, Eq, Hash)]
+pub(crate) struct SnapPointCacheKey {
+    is_origin: bool,
+    lon: u64,
+    lat: u64,
+    z: Option<u64>,
+    max_distance: u64,
+    z_window: Option<u64>,
+    attribute_filters: Vec<(String, String)>,
+}
 
 pub(crate) fn presnap_point_set(
     topology: &TopologyBundle,
@@ -49,7 +57,17 @@ pub(crate) fn cached_snap_candidates(
             },
         )
     });
-    value.clone()
+    match value {
+        Ok(candidates) => Ok(candidates
+            .iter()
+            .cloned()
+            .map(|mut candidate| {
+                candidate.point_id.clone_from(&point.id);
+                candidate
+            })
+            .collect()),
+        Err(_) => Err(route_snap_failure(point, options.max_distance_m)),
+    }
 }
 
 fn snap_point_cache_key(
@@ -57,19 +75,19 @@ fn snap_point_cache_key(
     options: &SnapOptions,
     is_origin: bool,
 ) -> SnapPointCacheKey {
-    let mut filter_hasher = std::collections::hash_map::DefaultHasher::new();
-    for (name, value) in &options.attribute_filters {
-        name.hash(&mut filter_hasher);
-        value.hash(&mut filter_hasher);
-    }
-    (
+    SnapPointCacheKey {
         is_origin,
-        point.lon.to_bits(),
-        point.lat.to_bits(),
-        point.z.map(f64::to_bits).unwrap_or(u64::MAX),
-        options.max_distance_m.to_bits() ^ options.z_window_m.map(f64::to_bits).unwrap_or_default(),
-        filter_hasher.finish(),
-    )
+        lon: point.lon.to_bits(),
+        lat: point.lat.to_bits(),
+        z: point.z.map(f64::to_bits),
+        max_distance: options.max_distance_m.to_bits(),
+        z_window: options.z_window_m.map(f64::to_bits),
+        attribute_filters: options
+            .attribute_filters
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect(),
+    }
 }
 
 pub(crate) fn snap_cache_key(point: &SnappedPoint) -> (u32, u64, u64) {
@@ -106,6 +124,13 @@ pub(crate) fn snap_candidates_with_options(
     options: &SnapOptions,
     is_origin: bool,
 ) -> Result<Vec<SnappedPoint>> {
+    if !point.lon.is_finite()
+        || !(-180.0..=180.0).contains(&point.lon)
+        || !point.lat.is_finite()
+        || !(-90.0..=90.0).contains(&point.lat)
+    {
+        bail!("snap point longitude and latitude must be finite and within geographic bounds");
+    }
     if options.max_distance_m < 0.0 || !options.max_distance_m.is_finite() {
         bail!("snap max_distance_m must be a finite non-negative value");
     }
@@ -119,9 +144,7 @@ pub(crate) fn snap_candidates_with_options(
         bail!("snap point elevation must be finite when provided");
     }
     const MAX_SNAP_CANDIDATES: usize = 8;
-    /// Linear-scan snapping fallbacks (no spatial index, or no nearby node)
-    /// are only acceptable on small graphs; on large datasets a full scan
-    /// per snapped point is a per-request O(network) cost.
+    // Node scans without an index are only acceptable on small graphs.
     const MAX_FULL_SCAN_ELEMENTS: usize = 250_000;
 
     let nearby_nodes = if let Some(spatial_index) = topology.spatial_index.as_ref() {
@@ -185,26 +208,10 @@ pub(crate) fn snap_candidates_with_options(
         );
     }
 
-    let mut candidate_edges = Vec::<u32>::new();
-    for &(node_id, _) in &nearby_nodes {
-        candidate_edges.extend_from_slice(routing_graph.outgoing_edges(node_id as usize));
-        candidate_edges.extend_from_slice(routing_graph.incoming_edges(node_id as usize));
-    }
-    if candidate_edges.is_empty() {
-        // No node landed within range: the point may still project onto the
-        // middle of a long edge whose endpoints are far away. A full edge
-        // scan finds it, but is only tolerable on small graphs.
-        if topology.edge_count() <= MAX_FULL_SCAN_ELEMENTS {
-            for edge_index in 0..topology.edge_count() {
-                if routing_graph.edge_costs[edge_index].is_finite() {
-                    candidate_edges.push(edge_index as u32);
-                }
-            }
-        }
-    } else {
-        candidate_edges.sort_unstable();
-        candidate_edges.dedup();
-    }
+    let candidate_edges =
+        routing_graph
+            .edge_spatial_index
+            .candidates(point.lon, point.lat, options.max_distance_m);
 
     for edge_index in candidate_edges {
         let edge = topology.routing_edge(edge_index as usize);
@@ -402,17 +409,21 @@ fn spatial_snap_nodes(
         point.lat,
     )
     .max(1.0);
-    let ring_limit = ((max_distance_m / cell_height_m.min(cell_width_m)).ceil() as i32).max(1) + 1;
+    // A finite radius can still overflow integer arithmetic or imply billions
+    // of empty cells. No query needs to visit cells outside this grid.
+    let ring_limit = (max_distance_m / cell_height_m.min(cell_width_m))
+        .ceil()
+        .max(1.0)
+        .min(f64::from(spatial_index.columns.max(spatial_index.rows))) as i64
+        + 1;
+    let row_start = (center_row - ring_limit).max(0);
+    let row_end = (center_row + ring_limit).min(i64::from(spatial_index.rows) - 1);
+    let col_start = (center_col - ring_limit).max(0);
+    let col_end = (center_col + ring_limit).min(i64::from(spatial_index.columns) - 1);
     let mut candidates = Vec::with_capacity(8);
 
-    for row in center_row - ring_limit..=center_row + ring_limit {
-        if !(0..spatial_index.rows as i32).contains(&row) {
-            continue;
-        }
-        for col in center_col - ring_limit..=center_col + ring_limit {
-            if !(0..spatial_index.columns as i32).contains(&col) {
-                continue;
-            }
+    for row in row_start..=row_end {
+        for col in col_start..=col_end {
             let cell =
                 &spatial_index.cells[row as usize * spatial_index.columns as usize + col as usize];
             let start = cell.node_start as usize;
@@ -455,15 +466,73 @@ fn spatial_index_cell_for_point(
     spatial_index: &netweevil_core::NodeSpatialIndex,
     lon: f64,
     lat: f64,
-) -> Option<(i32, i32)> {
+) -> Option<(i64, i64)> {
     if spatial_index.columns == 0 || spatial_index.rows == 0 {
         return None;
     }
     let col = (((lon - spatial_index.bounds.min_lon) / spatial_index.cell_width_deg).floor()
-        as i32)
-        .clamp(0, spatial_index.columns as i32 - 1);
+        as i64)
+        .clamp(0, i64::from(spatial_index.columns) - 1);
     let row = (((lat - spatial_index.bounds.min_lat) / spatial_index.cell_height_deg).floor()
-        as i32)
-        .clamp(0, spatial_index.rows as i32 - 1);
+        as i64)
+        .clamp(0, i64::from(spatial_index.rows) - 1);
     Some((col, row))
+}
+
+#[cfg(test)]
+mod spatial_tests {
+    use super::*;
+    use netweevil_core::{NodeId, NodeSpatialIndex, SpatialIndexCell, TopologyBounds};
+
+    #[test]
+    fn finite_global_snap_radius_is_bounded_by_the_node_grid() {
+        let topology = TopologyBundle {
+            schema_version: 1,
+            source_path: "test".into(),
+            source_sha256: "test".into(),
+            nodes: vec![TopologyNode {
+                node_id: NodeId(0),
+                lon: 6.0,
+                lat: 53.0,
+                z: 0.0,
+            }],
+            edge_layers: Default::default(),
+            feature_attributes: Default::default(),
+            temporal_rule_sets: vec![],
+            turn_restrictions: vec![],
+            names: vec![],
+            edge_based_topology: Default::default(),
+            spatial_index: None,
+            node_component_ids: vec![0],
+            edge_component_ids: vec![],
+        };
+        let index = NodeSpatialIndex {
+            bounds: TopologyBounds {
+                min_lon: 6.0,
+                min_lat: 53.0,
+                max_lon: 6.001,
+                max_lat: 53.001,
+            },
+            columns: 1,
+            rows: 1,
+            cell_width_deg: 0.001,
+            cell_height_deg: 0.001,
+            cells: vec![SpatialIndexCell {
+                node_start: 0,
+                node_len: 1,
+            }],
+            node_ids: vec![0],
+        };
+        for (lon, lat) in [(6.0, 53.0), (-180.0, -90.0), (180.0, 90.0)] {
+            let point = LabeledPoint {
+                id: "global".into(),
+                lon,
+                lat,
+                z: None,
+            };
+            let candidates = spatial_snap_nodes(&topology, &index, &point, f64::MAX);
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].0, 0);
+        }
+    }
 }

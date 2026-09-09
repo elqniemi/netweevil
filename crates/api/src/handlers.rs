@@ -41,10 +41,6 @@ pub(crate) async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
-pub(crate) async fn readyz(State(state): State<ApiState>) -> Json<ServiceInfoResponse> {
-    Json(build_service_info(state.service.as_ref()))
-}
-
 pub(crate) async fn service_info(State(state): State<ApiState>) -> Json<ServiceInfoResponse> {
     Json(build_service_info(state.service.as_ref()))
 }
@@ -150,7 +146,7 @@ pub(crate) async fn route_handler(
     };
     let route_id = request.route_id.clone();
     let edge_names = if request.returns.segment_rows {
-        load_edge_names(state.service.as_ref())?
+        Some(load_edge_names(state.service.as_ref())?)
     } else {
         None
     };

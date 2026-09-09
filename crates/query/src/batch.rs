@@ -188,13 +188,10 @@ pub(crate) fn execute_od_with_graph(
         pairs,
         diagnostics: Vec::new(),
         warnings: {
-            let mut warnings = vec![
-                "Batch OD execution reuses exact CCH search spaces (or single-source search trees without acceleration) and duplicate snapped solves within the batch; multi-edge restriction cases still fall back to per-pair automaton search.".to_string(),
-            ];
+            let mut warnings = Vec::new();
             if ignored_count > 0 {
                 warnings.push(batch_ignored_unreachable_warning("OD", ignored_count));
             }
-            warnings.extend(execution_warnings(metrics));
             warnings
         },
     })
@@ -393,13 +390,10 @@ pub(crate) fn execute_matrix_with_graph(
         cells,
         diagnostics: Vec::new(),
         warnings: {
-            let mut warnings = vec![
-                "Matrix execution reuses exact CCH search spaces (or single-source search trees without acceleration) and duplicate snapped solves within the batch; multi-edge restriction cases still fall back to per-cell automaton search.".to_string(),
-            ];
+            let mut warnings = Vec::new();
             if ignored_count > 0 {
                 warnings.push(batch_ignored_unreachable_warning("matrix", ignored_count));
             }
-            warnings.extend(execution_warnings(metrics));
             warnings
         },
     })
@@ -513,10 +507,11 @@ fn execute_od_per_pair_exact(
         ignored_count,
         pairs,
         diagnostics: Vec::new(),
-        warnings: vec![
-            "Temporal/component OD execution used independent exact label-setting searches per pair."
-                .to_string(),
-        ],
+        warnings: if ignored_count > 0 {
+            vec![batch_ignored_unreachable_warning("OD", ignored_count)]
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -669,10 +664,11 @@ fn execute_matrix_per_pair_exact(
         ignored_count,
         cells,
         diagnostics: Vec::new(),
-        warnings: vec![
-            "Temporal/component matrix execution used independent exact label-setting searches per cell."
-                .to_string(),
-        ],
+        warnings: if ignored_count > 0 {
+            vec![batch_ignored_unreachable_warning("matrix", ignored_count)]
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -875,6 +871,10 @@ fn cached_batch_route_result(
 struct CchSpaceCaches {
     forward: HashMap<(u32, u64, u64), CchSearchSpace>,
     backward: HashMap<(u32, u64, u64), CchSearchSpace>,
+    // Retain only the current origin's exact frontier. A row-major matrix
+    // reuses it across destinations without retaining one full graph per row.
+    restricted_origin: Option<(u32, u64, u64)>,
+    restricted_search: RestrictedSearchScratch,
 }
 
 fn execute_batched_route_with_candidates(
@@ -893,11 +893,12 @@ fn execute_batched_route_with_candidates(
     origin_candidates: &[SnappedPoint],
     destination_candidates: &[SnappedPoint],
 ) -> Result<RouteResult> {
-    let batchable = !routing_graph.has_restriction_sequences()
-        && !has_failure_modes(fallback)
+    let batchable = !has_failure_modes(fallback)
         && !auto_relaxation_requested(fallback)
         && alternatives.max_routes <= 1;
-    let use_single_source = batchable && matches!(strategy, BatchRouteStrategy::SingleSource);
+    let use_single_source = batchable
+        && !routing_graph.has_restriction_sequences()
+        && matches!(strategy, BatchRouteStrategy::SingleSource);
     let use_cch_spaces = batchable
         && matches!(strategy, BatchRouteStrategy::AcceleratedManyToMany)
         && routing_graph.acceleration.is_some();
@@ -922,6 +923,8 @@ fn execute_batched_route_with_candidates(
         let CchSpaceCaches {
             forward: forward_cache,
             backward: backward_cache,
+            restricted_origin,
+            restricted_search,
         } = cch_space_caches;
         for origin in origin_candidates {
             let forward = forward_cache
@@ -972,6 +975,30 @@ fn execute_batched_route_with_candidates(
                         cost,
                     )),
                     (None, None) => None,
+                };
+                let path = if path.as_ref().is_some_and(|path| {
+                    !path_respects_restriction_sequences(routing_graph, &path.edge_indexes)
+                }) {
+                    let key = snap_cache_key(origin);
+                    if *restricted_origin != Some(key) {
+                        restricted_search.prepare(
+                            metrics,
+                            routing_graph,
+                            &origin_edge_seeds(routing_graph, origin),
+                            fallback,
+                        );
+                        *restricted_origin = Some(key);
+                    }
+                    restricted_search.route_to(
+                        topology,
+                        metrics,
+                        routing_graph,
+                        &destination_edge_seeds(routing_graph, destination),
+                        direct_same_edge_path(routing_graph, origin, destination),
+                        fallback,
+                    )?
+                } else {
+                    path
                 };
                 if let Some(path) = path {
                     return batch_route_result_for_path(
@@ -1032,7 +1059,7 @@ fn execute_batched_route_with_candidates(
             origin_candidates,
             destination_candidates,
             failure,
-            execution_warnings(metrics),
+            Vec::new(),
         ));
     }
 
@@ -1133,10 +1160,7 @@ fn batch_route_result_for_path(
         breakdowns: build_breakdowns(topology, metrics, &path.edge_indexes, returns),
         violations: analysis.violations,
         diagnostics: hop_info.diagnostics,
-        warnings: merge_warnings(
-            merge_warnings(execution_warnings(metrics), analysis.warnings),
-            hop_info.warnings,
-        ),
+        warnings: merge_warnings(analysis.warnings, hop_info.warnings),
         alternatives: Vec::new(),
     })
 }
@@ -1153,7 +1177,7 @@ fn choose_batch_route_strategy(
     unique_origin_count: usize,
     unique_pair_count: usize,
 ) -> BatchRouteStrategy {
-    if routing_graph.has_restriction_sequences() || unique_origin_count == 0 {
+    if unique_origin_count == 0 {
         return BatchRouteStrategy::Pairwise;
     }
 
@@ -1169,7 +1193,7 @@ fn choose_batch_route_strategy(
         } else {
             BatchRouteStrategy::Pairwise
         }
-    } else if average_destination_count >= 8 {
+    } else if !routing_graph.has_restriction_sequences() && average_destination_count >= 8 {
         // A single-source tree costs one exhaustive Dijkstra per origin while
         // a pairwise query costs one point-to-point search per pair; the tree
         // wins once each origin serves several destinations.
