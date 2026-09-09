@@ -624,11 +624,7 @@ pub(crate) fn execute_route_with_candidates(
     let mut segments = segments;
     if let Some(segment_rows) = segments.as_mut() {
         for (segment, edge_index) in segment_rows.iter_mut().zip(&path.edge_indexes) {
-            segment.violation_type = analysis
-                .segment_violation_types
-                .get(edge_index)
-                .copied()
-                .flatten();
+            segment.violation_type = analysis.segment_violation_types.get(edge_index).copied();
         }
     }
     let breakdowns = build_breakdowns(topology, metrics, &path.edge_indexes, returns);
@@ -789,7 +785,7 @@ pub(crate) struct HopSelectionInfo {
 pub(crate) struct RoutePathAnalysis {
     pub(crate) summary: RouteSummary,
     pub(crate) violations: Vec<RouteViolation>,
-    pub(crate) segment_violation_types: HashMap<usize, Option<RouteViolationType>>,
+    pub(crate) segment_violation_types: HashMap<usize, RouteViolationType>,
     pub(crate) warnings: Vec<String>,
 }
 
@@ -846,7 +842,7 @@ pub(crate) fn analyze_route_path(
     let mut automaton_state = 0_usize;
     let mut violations = Vec::new();
     let mut violation_types = std::collections::BTreeSet::<RouteViolationType>::new();
-    let mut segment_violation_types = HashMap::<usize, Option<RouteViolationType>>::new();
+    let mut segment_violation_types = HashMap::<usize, RouteViolationType>::new();
     for (position, &edge_index) in path.edge_indexes.iter().enumerate() {
         let edge = topology.routing_edge(edge_index);
         let metric = &metrics.edge_metrics[edge_index];
@@ -896,9 +892,7 @@ pub(crate) fn analyze_route_path(
                 penalty_generalized_cost: edge_penalty_cost,
             });
             violation_types.insert(route_violation_type);
-            segment_violation_types.insert(edge_index, Some(route_violation_type));
-        } else {
-            segment_violation_types.entry(edge_index).or_insert(None);
+            segment_violation_types.insert(edge_index, route_violation_type);
         }
 
         if let Some(previous_edge_index) = previous_edge_index {

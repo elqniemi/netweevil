@@ -148,7 +148,8 @@ pub(crate) fn route_between_candidates(
         return Err(no_route_failure(topology, origin_candidates, destination_candidates).into());
     }
 
-    let mut path_cache = HashMap::<((u32, u64, u64), (u32, u64, u64)), Option<RoutePath>>::new();
+    // Successful paths return immediately. Only failed pairs can be reused.
+    let mut failed_pairs = HashSet::<((u32, u64, u64), (u32, u64, u64))>::new();
 
     for origin in origin_candidates {
         for destination in destination_candidates {
@@ -161,9 +162,10 @@ pub(crate) fn route_between_candidates(
                 continue;
             };
             let key = (snap_cache_key(origin), snap_cache_key(destination));
-            let path = if let Some(cached) = path_cache.get(&key) {
-                cached.clone()
-            } else {
+            if failed_pairs.contains(&key) {
+                continue;
+            }
+            let path = {
                 let direct_path = direct_same_edge_path(routing_graph, origin, destination);
                 let path = if routing_graph.has_restriction_sequences() {
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);
@@ -273,7 +275,9 @@ pub(crate) fn route_between_candidates(
                         )?
                     }
                 };
-                path_cache.insert(key, path.clone());
+                if path.is_none() {
+                    failed_pairs.insert(key);
+                }
                 path
             };
             if let Some(path) = path {

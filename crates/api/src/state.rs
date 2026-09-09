@@ -88,6 +88,7 @@ fn service_capabilities() -> ServiceCapabilities {
             "route",
             "locate",
             "directions",
+            "match",
             "waypoints",
             "od",
             "matrix",

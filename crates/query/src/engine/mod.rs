@@ -80,6 +80,17 @@ impl PreparedRoutingEngine {
         self.metrics.clone()
     }
 
+    pub fn execute_trace_match(
+        &self,
+        request: &crate::TraceMatchRequest,
+    ) -> Result<crate::TraceMatchResult> {
+        crate::trace_matching::execute_trace_match_with_graph(
+            self.topology.as_ref(),
+            &self.default_routing_graph,
+            request,
+        )
+    }
+
     pub fn execute_waypoints(
         &self,
         request: &crate::WaypointRequest,

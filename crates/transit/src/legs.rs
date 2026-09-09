@@ -655,6 +655,9 @@ pub(crate) fn seconds_for_distance(distance_m: f64, speed_kph: f64) -> u32 {
     if speed_kph <= 0.0 {
         return u32::MAX / 4;
     }
+    if distance_m == 0.0 && speed_kph.is_finite() {
+        return 0;
+    }
     ((distance_m / (speed_kph * 1000.0 / 3600.0)).ceil() as u32).max(1)
 }
 

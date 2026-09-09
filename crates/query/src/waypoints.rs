@@ -184,13 +184,14 @@ fn snap_waypoint(
     };
     candidates.retain(|candidate| {
         same_position(candidate, &nearest)
-            && match (candidate.snapped_edge_id, nearest.snapped_edge_id) {
-                (Some(left), Some(right)) => {
-                    topology.routing_edge(left as usize).source_way_id
-                        == topology.routing_edge(right as usize).source_way_id
-                }
-                _ => true,
-            }
+            && (endpoint_node(candidate).is_some()
+                || match (candidate.snapped_edge_id, nearest.snapped_edge_id) {
+                    (Some(left), Some(right)) => {
+                        topology.routing_edge(left as usize).source_way_id
+                            == topology.routing_edge(right as usize).source_way_id
+                    }
+                    _ => true,
+                })
     });
     candidates.sort_by_key(snap_cache_key);
     candidates.dedup_by_key(|candidate| snap_cache_key(candidate));
@@ -242,16 +243,30 @@ impl Ord for QueueEntry {
     }
 }
 
+fn endpoint_node(point: &SnappedPoint) -> Option<u32> {
+    match point.snapped_edge_fraction {
+        None => Some(point.snapped_node_id),
+        Some(0.0) => point.snapped_from_node_id,
+        Some(1.0) => point.snapped_to_node_id,
+        _ => None,
+    }
+}
+
 fn same_position(left: &SnappedPoint, right: &SnappedPoint) -> bool {
-    let same_network_location = match (left.snapped_edge_id, right.snapped_edge_id) {
-        (None, None) => left.snapped_node_id == right.snapped_node_id,
-        (Some(a), Some(b)) => {
-            a == b
-                || (left.snapped_from_node_id == right.snapped_to_node_id
-                    && left.snapped_to_node_id == right.snapped_from_node_id)
-        }
-        _ => false,
-    };
+    let same_network_location =
+        if let (Some(left), Some(right)) = (endpoint_node(left), endpoint_node(right)) {
+            left == right
+        } else {
+            match (left.snapped_edge_id, right.snapped_edge_id) {
+                (None, None) => left.snapped_node_id == right.snapped_node_id,
+                (Some(a), Some(b)) => {
+                    a == b
+                        || (left.snapped_from_node_id == right.snapped_to_node_id
+                            && left.snapped_to_node_id == right.snapped_from_node_id)
+                }
+                _ => false,
+            }
+        };
     same_network_location
         && (left.snapped_lon - right.snapped_lon).abs() <= 1e-10
         && (left.snapped_lat - right.snapped_lat).abs() <= 1e-10
@@ -285,6 +300,10 @@ fn advance(
                     }
                     1.0
                 };
+                if next + 1 == locations.len() && point.snapped_edge_id.is_some() && position == 0.0
+                {
+                    return None;
+                }
                 (position + 1e-12 >= fraction).then_some((index, position))
             })
             .min_by(|left, right| left.1.total_cmp(&right.1));
@@ -294,7 +313,7 @@ fn advance(
         if next + 1 == locations.len() {
             return (next + 1, no_uturn, Some((candidate, position)));
         }
-        no_uturn |= locations[next][candidate].snapped_edge_id.is_none();
+        no_uturn |= position == 1.0;
         fraction = position;
         next += 1;
     }
@@ -318,20 +337,26 @@ fn solve_ordered(
         .map(|(_, cost)| cost)
         .fold(0.0, f64::min);
     for (origin_index, origin) in locations[0].iter().enumerate() {
-        let mut first = 1;
-        while first < locations.len()
-            && locations[first]
-                .iter()
-                .any(|point| same_position(origin, point))
-        {
-            first += 1;
+        if origin.snapped_edge_fraction == Some(1.0) {
+            continue;
         }
-        if first == locations.len() {
-            return Ok(Some(Solution {
-                path: Vec::new(),
-                origin: origin.clone(),
-                destination: locations.last().unwrap()[0].clone(),
-            }));
+        let mut first = 1;
+        while first < locations.len() {
+            let final_location = first + 1 == locations.len();
+            let Some(matched) = locations[first].iter().find(|point| {
+                snap_cache_key(origin) == snap_cache_key(point)
+                    && (!final_location || point.snapped_edge_fraction != Some(0.0))
+            }) else {
+                break;
+            };
+            if final_location {
+                return Ok(Some(Solution {
+                    path: Vec::new(),
+                    origin: origin.clone(),
+                    destination: matched.clone(),
+                }));
+            }
+            first += 1;
         }
         for (edge, cost) in origin_edge_seeds(graph, origin) {
             let fraction = if origin.snapped_edge_id == Some(edge as u32) {
@@ -381,7 +406,12 @@ fn solve_ordered(
             if !graph.automaton.is_transition_allowed(key.automaton, edge) {
                 continue;
             }
-            if key.no_uturn
+            let through_at_start = key.next + 1 < locations.len()
+                && locations[key.next].iter().any(|point| {
+                    point.snapped_edge_id == Some(edge as u32)
+                        && point.snapped_edge_fraction == Some(0.0)
+                });
+            if (key.no_uturn || through_at_start)
                 && topology.routing_edge(key.edge).from == topology.routing_edge(edge).to
             {
                 continue;
@@ -455,6 +485,7 @@ fn stop_cost_matrix(
     for (origin_index, origins) in snaps.iter().enumerate().take(snaps.len() - 1) {
         let seeds = origins
             .iter()
+            .filter(|point| point.snapped_edge_fraction != Some(1.0))
             .flat_map(|point| origin_edge_seeds(graph, point))
             .collect::<Vec<_>>();
         search.prepare(metrics, graph, &seeds, &fallback);
@@ -465,14 +496,19 @@ fn stop_cost_matrix(
             }
             let seeds = destinations
                 .iter()
+                .filter(|point| point.snapped_edge_fraction != Some(0.0))
                 .flat_map(|point| destination_edge_seeds(graph, point))
                 .collect::<Vec<_>>();
             let direct = origins
                 .iter()
+                .filter(|point| point.snapped_edge_fraction != Some(1.0))
                 .flat_map(|origin| {
-                    destinations.iter().filter_map(move |destination| {
-                        direct_same_edge_path(graph, origin, destination)
-                    })
+                    destinations
+                        .iter()
+                        .filter(|point| point.snapped_edge_fraction != Some(0.0))
+                        .filter_map(move |destination| {
+                            direct_same_edge_path(graph, origin, destination)
+                        })
                 })
                 .min_by(|left, right| {
                     left.total_generalized_cost

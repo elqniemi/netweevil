@@ -14,6 +14,15 @@ pub(crate) struct SnapPointCacheKey {
     max_distance: u64,
     z_window: Option<u64>,
     attribute_filters: Vec<(String, String)>,
+    constraint: Option<SnapConstraintCacheKey>,
+}
+
+#[derive(PartialEq, Eq, Hash)]
+struct SnapConstraintCacheKey {
+    bearing: Option<(u64, u64)>,
+    approach: SnapApproach,
+    driving_side: DrivingSide,
+    street_side_tolerance: u64,
 }
 
 pub(crate) fn presnap_point_set(
@@ -87,6 +96,19 @@ fn snap_point_cache_key(
             .iter()
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect(),
+        constraint: options.point_constraints.get(&point.id).map(|constraint| {
+            SnapConstraintCacheKey {
+                bearing: constraint.bearing.map(|bearing| {
+                    (
+                        bearing.degrees.to_bits(),
+                        bearing.tolerance_degrees.to_bits(),
+                    )
+                }),
+                approach: constraint.approach,
+                driving_side: constraint.driving_side,
+                street_side_tolerance: constraint.street_side_tolerance_m.to_bits(),
+            }
+        }),
     }
 }
 
@@ -143,11 +165,22 @@ pub(crate) fn snap_candidates_with_options(
     if point.z.is_some_and(|z| !z.is_finite()) {
         bail!("snap point elevation must be finite when provided");
     }
+    let constraint = options.point_constraints.get(&point.id);
+    if let Some(constraint) = constraint {
+        validate_point_constraint(constraint)?;
+    }
+    let directed = constraint.is_some_and(|constraint| {
+        constraint.bearing.is_some() || constraint.approach != SnapApproach::Unrestricted
+    });
     const MAX_SNAP_CANDIDATES: usize = 8;
     // Node scans without an index are only acceptable on small graphs.
     const MAX_FULL_SCAN_ELEMENTS: usize = 250_000;
 
-    let nearby_nodes = if let Some(spatial_index) = topology.spatial_index.as_ref() {
+    let nearby_nodes = if directed {
+        // Generic node seeds allow every incident direction and would bypass
+        // bearing/approach restrictions. Directed endpoints are added below.
+        Vec::new()
+    } else if let Some(spatial_index) = topology.spatial_index.as_ref() {
         spatial_snap_nodes(topology, spatial_index, point, options.max_distance_m)
     } else {
         if topology.nodes.len() > MAX_FULL_SCAN_ELEMENTS {
@@ -218,17 +251,32 @@ pub(crate) fn snap_candidates_with_options(
         let from = &topology.nodes[edge.from.0 as usize];
         let to = &topology.nodes[edge.to.0 as usize];
         let projection = project_point_onto_segment(point.lon, point.lat, from, to);
+        let candidate_z = if projection.fraction == 0.0 {
+            from.elevation_m()
+        } else if projection.fraction == 1.0 {
+            to.elevation_m()
+        } else {
+            (from.z.is_finite() && to.z.is_finite()).then_some(projection.z)
+        };
         if projection.distance_m > options.max_distance_m
             || !edge_matches_filters(topology, edge_index as usize, &options.attribute_filters)
-            || !elevation_is_eligible(
-                point,
-                (from.z.is_finite() && to.z.is_finite()).then_some(projection.z),
-                options.z_window_m,
-            )
+            || !elevation_is_eligible(point, candidate_z, options.z_window_m)
+            || constraint.is_some_and(|constraint| {
+                !edge_matches_point_constraint(point, from, to, constraint)
+            })
         {
             continue;
         }
-        if projection.fraction <= 1.0e-6 || projection.fraction >= 1.0 - 1.0e-6 {
+        if !directed && (projection.fraction <= 1.0e-6 || projection.fraction >= 1.0 - 1.0e-6) {
+            continue;
+        }
+        // An origin at an edge's end has not departed along that edge; likewise
+        // a destination at its start has not arrived along it. Zero-length
+        // seeds at those endpoints would satisfy a heading without traveling it.
+        if directed
+            && ((is_origin && projection.fraction == 1.0)
+                || (!is_origin && projection.fraction == 0.0))
+        {
             continue;
         }
         let snapped_node_id = if projection.fraction <= 0.5 {
@@ -265,6 +313,57 @@ pub(crate) fn snap_candidates_with_options(
     candidates.dedup_by(|left, right| snap_candidate_key(left) == snap_candidate_key(right));
     candidates.truncate(MAX_SNAP_CANDIDATES);
     Ok(candidates)
+}
+
+fn validate_point_constraint(constraint: &PointSnapConstraint) -> Result<()> {
+    if let Some(bearing) = constraint.bearing {
+        if !bearing.degrees.is_finite() || !(0.0..=360.0).contains(&bearing.degrees) {
+            bail!("snap bearing degrees must be finite and in [0, 360]");
+        }
+        if !bearing.tolerance_degrees.is_finite()
+            || !(0.0..=180.0).contains(&bearing.tolerance_degrees)
+        {
+            bail!("snap bearing tolerance_degrees must be finite and in [0, 180]");
+        }
+    }
+    if !constraint.street_side_tolerance_m.is_finite() || constraint.street_side_tolerance_m < 0.0 {
+        bail!("snap street_side_tolerance_m must be finite and non-negative");
+    }
+    Ok(())
+}
+
+fn edge_matches_point_constraint(
+    point: &LabeledPoint,
+    from: &TopologyNode,
+    to: &TopologyNode,
+    constraint: &PointSnapConstraint,
+) -> bool {
+    // Use the same local road tangent as projection, including its latitude
+    // scale. Cross-product sign is positive on the left of travel.
+    let dx = projected_delta_x(from.lon, from.lat, to.lon);
+    let dy = projected_delta_y(from.lat, to.lat);
+    let length = dx.hypot(dy);
+    if length <= f64::EPSILON {
+        return constraint.bearing.is_none() && constraint.approach == SnapApproach::Unrestricted;
+    }
+    if let Some(bearing) = constraint.bearing {
+        let heading = dx.atan2(dy).to_degrees().rem_euclid(360.0);
+        let difference = ((heading - bearing.degrees + 180.0).rem_euclid(360.0) - 180.0).abs();
+        if difference > bearing.tolerance_degrees + 1.0e-10 {
+            return false;
+        }
+    }
+    if constraint.approach == SnapApproach::Unrestricted {
+        return true;
+    }
+    let px = projected_delta_x(from.lon, from.lat, point.lon);
+    let py = projected_delta_y(from.lat, point.lat);
+    let side_distance = (dx * py - dy * px) / length;
+    if side_distance.abs() <= constraint.street_side_tolerance_m {
+        return true;
+    }
+    let on_driving_side = (side_distance < 0.0) == (constraint.driving_side == DrivingSide::Right);
+    on_driving_side == (constraint.approach == SnapApproach::Curb)
 }
 
 fn node_is_traversable_for_snap(
@@ -360,7 +459,11 @@ fn project_point_onto_segment(
         fraction,
         lon: from.lon + (to.lon - from.lon) * fraction,
         lat: from.lat + (to.lat - from.lat) * fraction,
-        z: if from.z.is_finite() && to.z.is_finite() {
+        z: if fraction == 0.0 {
+            finite_elevation(from.z)
+        } else if fraction == 1.0 {
+            finite_elevation(to.z)
+        } else if from.z.is_finite() && to.z.is_finite() {
             from.z + (to.z - from.z) * fraction
         } else {
             0.0

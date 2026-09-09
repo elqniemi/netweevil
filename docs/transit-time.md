@@ -35,6 +35,6 @@ Durations such as `travel_time_s` remain elapsed seconds. Do not divide returned
 
 The origin is the earlier of the first service day's local midnight and its GTFS noon-minus-twelve-hours anchor. This also represents midnight queries on an autumn transition day whose GTFS anchor falls after midnight. API service metadata and imported-feed manifests expose the same timezone and origin.
 
-Transit bundle schema is 5. Re-import GTFS feeds to regenerate bundles and feed manifests; earlier bundle layouts are rejected.
+Transit bundle schema is 6. Re-import GTFS feeds to regenerate bundles and feed manifests; earlier bundle layouts are rejected.
 
 The time rules follow the [GTFS schedule reference](https://gtfs.org/documentation/schedule/reference/#field-types) and [agency timezone requirement](https://gtfs.org/documentation/schedule/reference/#agencytxt). Timezone conversion uses the IANA data bundled with [chrono-tz](https://docs.rs/chrono-tz/latest/chrono_tz/).

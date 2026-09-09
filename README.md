@@ -370,8 +370,14 @@ identify exact instants; naive datetimes use the agency timezone and reject
 ambiguous or skipped clock times. Results include `time_context` with
 `agency_timezone` and `time_origin_unix_s`; add the origin to any returned
 `departure_s` or `arrival_s` to obtain its Unix timestamp. Exported QGIS and
-GeoJSON features retain both fields. Transit bundles use schema 5 and require
+GeoJSON features retain both fields. Transit bundles use schema 6 and require
 re-import after this change. See [transit time and service days](docs/transit-time.md).
+
+GTFS `transfers.txt` rules apply to depart-at, arrive-by, and service-area queries,
+including station children, forbidden transfers, minimum times, and route/trip
+specificity. Timed transfers use scheduled feasibility and report that vehicle
+holding is not simulated. Linked in-seat transfer types 4 and 5 are rejected.
+See [transfer rules and limitations](docs/transit-transfers.md).
 
 First and last miles are not limited to walking: `modes.access` and
 `modes.egress` accept `walk`, `bicycle`, or `car`, each with its own speed
@@ -477,6 +483,8 @@ Execution endpoints:
 
 - `POST /v1/route`
 - `POST /v1/directions`
+- `POST /v1/match`
+- `POST /v1/waypoints`
 - `POST /v1/locate`
 - `POST /v1/od`
 - `POST /v1/matrix`

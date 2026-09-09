@@ -69,6 +69,8 @@ pub fn transit_import_summary(bundle: &TransitBundle) -> TransitImportSummary {
         route_count: bundle.routes.len(),
         trip_count: bundle.trips.len(),
         connection_count: bundle.connections.len(),
+        transfer_rule_count: bundle.transfer_rules.len(),
+        diagnostics: bundle.import_diagnostics.clone(),
     }
 }
 
@@ -145,7 +147,7 @@ pub(crate) struct GtfsFiles {
 }
 
 impl GtfsFiles {
-    fn names() -> [&'static str; 9] {
+    fn names() -> [&'static str; 10] {
         [
             "agency.txt",
             "stops.txt",
@@ -153,6 +155,7 @@ impl GtfsFiles {
             "trips.txt",
             "stop_times.txt",
             "frequencies.txt",
+            "transfers.txt",
             "shapes.txt",
             "calendar.txt",
             "calendar_dates.txt",
@@ -213,6 +216,29 @@ pub(crate) fn build_bundle_from_files(
         &service_day_offsets_s,
     )?;
 
+    let transfer_rules = files
+        .get("transfers.txt")
+        .map(|raw| {
+            crate::transfer_rules::parse_transfer_rules(
+                raw,
+                files.get("stops.txt").unwrap(),
+                files.get("trips.txt").unwrap(),
+                &stop_by_id,
+                &route_by_id,
+                &trip_by_id,
+            )
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let import_diagnostics = if transfer_rules
+        .iter()
+        .any(|rule| rule.rule_type == crate::model::TransitTransferType::Timed)
+    {
+        vec![crate::transfer_rules::TIMED_TRANSFER_DIAGNOSTIC.to_string()]
+    } else {
+        Vec::new()
+    };
+
     Ok(TransitBundle {
         schema_version: TRANSIT_BUNDLE_SCHEMA_VERSION,
         feed_id: options.name,
@@ -230,6 +256,8 @@ pub(crate) fn build_bundle_from_files(
         trips,
         shapes,
         connections,
+        transfer_rules,
+        import_diagnostics,
     })
 }
 

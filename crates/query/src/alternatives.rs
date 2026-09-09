@@ -266,11 +266,7 @@ fn materialize_route_alternative(
     };
     if let Some(segment_rows) = segments.as_mut() {
         for (segment, edge_index) in segment_rows.iter_mut().zip(&path.edge_indexes) {
-            segment.violation_type = analysis
-                .segment_violation_types
-                .get(edge_index)
-                .copied()
-                .flatten();
+            segment.violation_type = analysis.segment_violation_types.get(edge_index).copied();
         }
     }
     let warnings = merge_warnings(analysis.warnings, hop_info.warnings);

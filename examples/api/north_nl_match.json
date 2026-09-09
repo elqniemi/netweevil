@@ -1,0 +1,53 @@
+{
+  "profile_id": "car_north_nl_2026_05",
+  "request": {
+    "trace_id": "groningen_trace",
+    "observations": [
+      {
+        "point": {
+          "id": "gps_0",
+          "lon": 6.5668038,
+          "lat": 53.2195332
+        },
+        "timestamp_s": 0
+      },
+      {
+        "point": {
+          "id": "gps_1",
+          "lon": 6.5732778,
+          "lat": 53.217439999999996
+        },
+        "timestamp_s": 30
+      },
+      {
+        "point": {
+          "id": "gps_2",
+          "lon": 6.580201499999999,
+          "lat": 53.215283199999995
+        },
+        "timestamp_s": 60
+      },
+      {
+        "point": {
+          "id": "gps_3",
+          "lon": 6.5701104,
+          "lat": 53.2126708
+        },
+        "timestamp_s": 90
+      },
+      {
+        "point": {
+          "id": "gps_4",
+          "lon": 6.571662454567956,
+          "lat": 53.214740302769
+        },
+        "timestamp_s": 120
+      }
+    ],
+    "snap": {
+      "max_distance_m": 50
+    },
+    "gps_accuracy_m": 10,
+    "max_transition_distance_m": 2000
+  }
+}

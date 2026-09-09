@@ -123,6 +123,8 @@ pub(crate) struct BackwardStateKey {
     pub(crate) stop_index: u32,
     pub(crate) boardings: u8,
     pub(crate) stance: BackwardStance,
+    /// Departing vehicle retained while searching backward across a walk.
+    pub(crate) transfer_to_connection: u32,
 }
 
 /// The step that carries a state onward to the target. Chains are stored in
@@ -329,6 +331,7 @@ pub(crate) fn execute_transit_route_arrive_by(
                 stop_index: candidate.stop_index,
                 boardings: 0,
                 stance: BackwardStance::Alighted,
+                transfer_to_connection: u32::MAX,
             },
             time_s,
             BackwardStep::Egress {
@@ -402,6 +405,7 @@ pub(crate) fn execute_transit_route_arrive_by(
                             stop_index: walk.from_stop_index,
                             boardings: entry.state.boardings,
                             stance: BackwardStance::Alighted,
+                            transfer_to_connection: entry.state.transfer_to_connection,
                         },
                         arrival_limit_s,
                         BackwardStep::Transfer {
@@ -423,6 +427,11 @@ pub(crate) fn execute_transit_route_arrive_by(
                     if connection.arrival_s < search_start_s {
                         break;
                     }
+                    if !runtime
+                        .backward_transfer_allowed(connection, entry.state.transfer_to_connection)?
+                    {
+                        continue;
+                    }
                     if !connection.drop_off_allowed
                         || !runtime.allowed_routes[connection.route_index as usize]
                     {
@@ -436,6 +445,7 @@ pub(crate) fn execute_transit_route_arrive_by(
                             stop_index: connection.from_stop_index,
                             boardings,
                             stance: BackwardStance::Aboard(connection_index),
+                            transfer_to_connection: u32::MAX,
                         },
                         connection.departure_s,
                         BackwardStep::Ride {
@@ -491,6 +501,8 @@ pub(crate) fn execute_transit_route_arrive_by(
                                 stop_index: entry.state.stop_index,
                                 boardings: entry.state.boardings,
                                 stance,
+                                transfer_to_connection: runtime
+                                    .backward_transfer_context(connection_index),
                             },
                             ready_time_s,
                             BackwardStep::Board { next: entry.state },
@@ -509,6 +521,7 @@ pub(crate) fn execute_transit_route_arrive_by(
                             stop_index: connection.from_stop_index,
                             boardings: entry.state.boardings,
                             stance: BackwardStance::Aboard(previous_index),
+                            transfer_to_connection: u32::MAX,
                         },
                         connection.departure_s,
                         BackwardStep::Ride {

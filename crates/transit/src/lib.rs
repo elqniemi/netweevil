@@ -14,6 +14,7 @@ mod router;
 mod runtime;
 mod service_area;
 mod timetable_time;
+mod transfer_rules;
 
 pub use fusion::{
     apply_transit_stop_bindings, build_transit_transfer_table, load_transit_stop_bindings,
@@ -31,8 +32,9 @@ pub use model::{
     TransitServiceAreaReturnOptions, TransitServiceAreaSegment, TransitServiceAreaStop,
     TransitShape, TransitStop, TransitStopBinding, TransitStopBindingSummary,
     TransitStopBindingTable, TransitStopBindingTarget, TransitStreetAccessModel, TransitStreetPath,
-    TransitTimeContext, TransitTransferBuildOptions, TransitTransferTable,
-    TransitTransferTableManifest, TransitTrip, TransitWalkingGeometry, load_transit_request,
+    TransitTimeContext, TransitTransferBuildOptions, TransitTransferRule, TransitTransferTable,
+    TransitTransferTableManifest, TransitTransferType, TransitTrip, TransitWalkingGeometry,
+    load_transit_request,
 };
 pub use router::{PreparedTransitRouter, execute_transit_route};
 pub use runtime::StreetTimeEstimator;

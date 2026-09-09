@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-pub const TRANSIT_BUNDLE_SCHEMA_VERSION: u32 = 5;
+pub const TRANSIT_BUNDLE_SCHEMA_VERSION: u32 = 6;
 pub const TRANSIT_STOP_BINDING_SCHEMA_VERSION: u32 = 1;
 pub const TRANSIT_TRANSFER_TABLE_SCHEMA_VERSION: u32 = 1;
 
@@ -30,6 +30,8 @@ pub struct TransitImportSummary {
     pub route_count: usize,
     pub trip_count: usize,
     pub connection_count: usize,
+    pub transfer_rule_count: usize,
+    pub diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +88,31 @@ pub struct TransitBundle {
     pub trips: Vec<TransitTrip>,
     pub shapes: Vec<TransitShape>,
     pub connections: Vec<TransitConnection>,
+    pub transfer_rules: Vec<TransitTransferRule>,
+    pub import_diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitTransferType {
+    Recommended,
+    Timed,
+    MinimumTime,
+    Forbidden,
+}
+
+/// A transfers.txt rule expanded to platform stop indexes. Trip selectors
+/// take precedence over route selectors on their respective sides.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitTransferRule {
+    pub from_stop_index: u32,
+    pub to_stop_index: u32,
+    pub from_route_index: Option<u32>,
+    pub to_route_index: Option<u32>,
+    pub from_trip_index: Option<u32>,
+    pub to_trip_index: Option<u32>,
+    pub rule_type: TransitTransferType,
+    pub min_transfer_time_s: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

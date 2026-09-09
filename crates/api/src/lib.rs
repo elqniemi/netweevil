@@ -21,6 +21,7 @@ mod handlers;
 mod locate;
 mod simulation;
 mod state;
+mod trace_matching;
 mod transit;
 mod waypoints;
 
@@ -61,6 +62,7 @@ fn router(state: ApiState) -> Router {
         .route("/v1/profiles/{profile_id}", get(handlers::get_profile))
         .route("/v1/route", post(handlers::route_handler))
         .route("/v1/directions", post(handlers::directions_handler))
+        .route("/v1/match", post(trace_matching::trace_match_handler))
         .route("/v1/locate", post(locate::locate_handler))
         .route("/v1/waypoints", post(waypoints::waypoints_handler))
         .route("/v1/transit-route", post(transit::transit_route_handler))

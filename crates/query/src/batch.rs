@@ -197,6 +197,34 @@ pub(crate) fn execute_od_with_graph(
     })
 }
 
+fn validate_matrix_point_constraints(
+    origins: &PointSetDocument,
+    destinations: &PointSetDocument,
+) -> Result<()> {
+    let unrestricted = PointSnapConstraint::default();
+    for (points, other) in [(origins, destinations), (destinations, origins)] {
+        for point in &points.points {
+            let own = points
+                .snap
+                .point_constraints
+                .get(&point.id)
+                .unwrap_or(&unrestricted);
+            if other
+                .snap
+                .point_constraints
+                .get(&point.id)
+                .is_some_and(|constraint| constraint != own)
+            {
+                bail!(
+                    "origin and destination point sets specify conflicting snap constraints for point ID '{}'",
+                    point.id
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn execute_matrix_with_graph(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
@@ -204,6 +232,7 @@ pub(crate) fn execute_matrix_with_graph(
     origins: &PointSetDocument,
     destinations: &PointSetDocument,
 ) -> Result<MatrixResult> {
+    validate_matrix_point_constraints(origins, destinations)?;
     if origins.temporal.requires_exact_labels() || destinations.temporal.requires_exact_labels() {
         let is_temporal = origins.temporal.is_temporal() || destinations.temporal.is_temporal();
         let temporal_routing_graph;
@@ -552,6 +581,13 @@ fn execute_matrix_per_pair_exact(
         } else {
             origins.snap.attribute_filters.clone()
         },
+        point_constraints: origins
+            .snap
+            .point_constraints
+            .iter()
+            .chain(destinations.snap.point_constraints.iter())
+            .map(|(id, constraint)| (id.clone(), constraint.clone()))
+            .collect(),
     };
     let connectivity =
         merge_point_set_connectivity_policy(&origins.connectivity, &destinations.connectivity);
@@ -1149,8 +1185,7 @@ pub(crate) fn batch_route_result_for_path(
                             violation_type: analysis
                                 .segment_violation_types
                                 .get(&edge_index)
-                                .copied()
-                                .flatten(),
+                                .copied(),
                         }
                     })
                     .collect(),

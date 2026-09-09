@@ -13,6 +13,7 @@ use crate::model::{
 pub(crate) struct DepartureIndex {
     pub(crate) by_stop: Vec<Vec<u32>>,
     pub(crate) next_connection: Vec<u32>,
+    pub(crate) transfer_rules: crate::transfer_rules::TransferRuleIndex,
 }
 
 /// Links adjacent connections on each run in timetable order. Position matters
@@ -72,6 +73,7 @@ pub(crate) fn build_departures_by_stop(bundle: &TransitBundle) -> DepartureIndex
     DepartureIndex {
         by_stop: departures_by_stop,
         next_connection: build_run_links(bundle).1,
+        transfer_rules: crate::transfer_rules::TransferRuleIndex::new(bundle),
     }
 }
 
@@ -313,6 +315,63 @@ impl<'a> TransitRuntime<'a> {
         crate::timetable_time::request_time_seconds(self.bundle, raw)
     }
 
+    pub(crate) fn transfer_walk_context(&self, connection_index: u32) -> u32 {
+        let connection = &self.bundle.connections[connection_index as usize];
+        if self
+            .departures_by_stop
+            .transfer_rules
+            .has_origin(connection.to_stop_index)
+        {
+            connection_index
+        } else {
+            u32::MAX
+        }
+    }
+
+    pub(crate) fn forward_transfer_allowed(
+        &self,
+        state: StateKey,
+        to: &TransitConnection,
+    ) -> Result<bool> {
+        let from_index = if state.connection_index == u32::MAX {
+            state.transfer_from_connection
+        } else {
+            state.connection_index
+        };
+        let Some(from) = self.bundle.connections.get(from_index as usize) else {
+            return Ok(true);
+        };
+        self.departures_by_stop
+            .transfer_rules
+            .allows(self.bundle, from, to)
+    }
+
+    pub(crate) fn backward_transfer_context(&self, connection_index: u32) -> u32 {
+        let connection = &self.bundle.connections[connection_index as usize];
+        if self
+            .departures_by_stop
+            .transfer_rules
+            .has_destination(connection.from_stop_index)
+        {
+            connection_index
+        } else {
+            u32::MAX
+        }
+    }
+
+    pub(crate) fn backward_transfer_allowed(
+        &self,
+        from: &TransitConnection,
+        to_index: u32,
+    ) -> Result<bool> {
+        let Some(to) = self.bundle.connections.get(to_index as usize) else {
+            return Ok(true);
+        };
+        self.departures_by_stop
+            .transfer_rules
+            .allows(self.bundle, from, to)
+    }
+
     pub(crate) fn nearby_access_stops(
         &self,
         lon: f64,
@@ -446,6 +505,8 @@ pub(crate) struct StateKey {
     pub(crate) stop_index: u32,
     pub(crate) boardings: u8,
     pub(crate) connection_index: u32,
+    /// Arrival context retained after a transfer walk for trip-specific rules.
+    pub(crate) transfer_from_connection: u32,
     pub(crate) can_alight: bool,
 }
 
@@ -490,6 +551,11 @@ impl Ord for QueueEntry {
                 self.state
                     .connection_index
                     .cmp(&other.state.connection_index)
+            })
+            .then_with(|| {
+                self.state
+                    .transfer_from_connection
+                    .cmp(&other.state.transfer_from_connection)
             })
             .then_with(|| self.state.can_alight.cmp(&other.state.can_alight))
     }

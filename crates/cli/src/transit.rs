@@ -154,6 +154,10 @@ pub(crate) fn transit_import(paths: &WorkspacePaths, args: TransitImportArgs) ->
         manifest.trip_count,
         manifest.connection_count
     );
+    println!("imported {} transfer rules", summary.transfer_rule_count);
+    for diagnostic in &summary.diagnostics {
+        println!("transit import note: {diagnostic}");
+    }
     println!("transit bundle written to {}", bundle_path.display());
     if let Some(summary) = binding_summary {
         println!(
@@ -579,6 +583,7 @@ fn resolve_stop_candidates(
                 max_distance_m: 500.0,
                 z_window_m: *z_window_m,
                 attribute_filters: attribute_filter.clone(),
+                point_constraints: Default::default(),
             };
             let mut origins = engine.snap_route_candidates_with_options(&point, &options, true)?;
             let mut destinations =

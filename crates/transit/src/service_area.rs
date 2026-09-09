@@ -110,6 +110,17 @@ pub(crate) fn execute_transit_service_area_with_runtime(
     runtime: &TransitRuntime<'_>,
     request: &TransitServiceAreaRequest,
 ) -> Result<TransitServiceAreaResult> {
+    let mut result = search_transit_service_area_with_runtime(runtime, request)?;
+    result
+        .diagnostics
+        .extend(runtime.bundle.import_diagnostics.iter().cloned());
+    Ok(result)
+}
+
+fn search_transit_service_area_with_runtime(
+    runtime: &TransitRuntime<'_>,
+    request: &TransitServiceAreaRequest,
+) -> Result<TransitServiceAreaResult> {
     if request.time.arrive_by {
         return execute_transit_service_area_arrive_by(runtime, request);
     }
@@ -349,6 +360,7 @@ fn search_service_area_origin(
             boardings: 0,
             connection_index: u32::MAX,
             can_alight: false,
+            transfer_from_connection: u32::MAX,
         };
         relax_state(
             heap,
@@ -404,6 +416,8 @@ fn search_service_area_origin(
                     boardings: entry.state.boardings,
                     connection_index: u32::MAX,
                     can_alight: false,
+                    transfer_from_connection: runtime
+                        .transfer_walk_context(entry.state.connection_index),
                 };
                 relax_state(
                     heap,
@@ -462,6 +476,9 @@ fn search_service_area_origin(
                 {
                     continue;
                 }
+                if !same_run && !runtime.forward_transfer_allowed(entry.state, connection)? {
+                    continue;
+                }
                 let next_boardings = if same_run {
                     entry.state.boardings
                 } else {
@@ -475,6 +492,7 @@ fn search_service_area_origin(
                     boardings: next_boardings,
                     connection_index: *index,
                     can_alight: connection.drop_off_allowed,
+                    transfer_from_connection: u32::MAX,
                 };
                 if best
                     .get(&next_state)
@@ -652,6 +670,7 @@ fn search_service_area_target(
                 stop_index: candidate.stop_index,
                 boardings: 0,
                 stance: BackwardStance::Alighted,
+                transfer_to_connection: u32::MAX,
             },
             time_s,
             BackwardStep::Egress {
@@ -705,6 +724,7 @@ fn search_service_area_target(
                             stop_index: walk.from_stop_index,
                             boardings: entry.state.boardings,
                             stance: BackwardStance::Alighted,
+                            transfer_to_connection: entry.state.transfer_to_connection,
                         },
                         arrival_limit_s,
                         BackwardStep::Transfer {
@@ -731,6 +751,11 @@ fn search_service_area_target(
                         break;
                     }
                     if connection.departure_s < time_floor_s {
+                        continue;
+                    }
+                    if !runtime
+                        .backward_transfer_allowed(connection, entry.state.transfer_to_connection)?
+                    {
                         continue;
                     }
                     if !connection.drop_off_allowed
@@ -777,6 +802,8 @@ fn search_service_area_target(
                                 stop_index: entry.state.stop_index,
                                 boardings: entry.state.boardings,
                                 stance,
+                                transfer_to_connection: runtime
+                                    .backward_transfer_context(connection_index),
                             },
                             ready_time_s,
                             BackwardStep::Board { next: entry.state },
@@ -872,6 +899,7 @@ fn ride_backward_in_service_area(
         stop_index: connection.from_stop_index,
         boardings,
         stance: BackwardStance::Aboard(connection_index),
+        transfer_to_connection: u32::MAX,
     };
     if best
         .get(&next_state)

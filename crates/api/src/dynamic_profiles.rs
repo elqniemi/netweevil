@@ -436,6 +436,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn trace_matching_endpoint_exports_sequence_and_rejects_partial_timestamps() {
+        let state = ApiState {
+            service: fixture(),
+            simulations: Arc::new(crate::simulation::SimulationRegistry::default()),
+        };
+        let base = json!({"request": {
+            "trace_id":"test-trace", "snap":{"max_distance_m":10},
+            "observations": [
+                {"point":{"id":"p0","lon":6.0002,"lat":53.0},"timestamp_s":0},
+                {"point":{"id":"p1","lon":6.0009,"lat":53.0},"timestamp_s":10},
+                {"point":{"id":"p2","lon":6.0018,"lat":53.0},"timestamp_s":20}
+            ]
+        }});
+        for format in [None, Some("geojson")] {
+            let response = crate::trace_matching::trace_match_handler(
+                State(state.clone()),
+                Query(ResponseFormatQuery {
+                    format: format.map(str::to_owned),
+                }),
+                Json(serde_json::from_value(base.clone()).unwrap()),
+            )
+            .await
+            .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            let result = if format.is_some() {
+                &body
+            } else {
+                &body["result"]
+            };
+            assert_eq!(result["trace_id"], "test-trace");
+            assert!(
+                result["tracepoints"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .all(|point| !point.is_null())
+            );
+            assert_eq!(result["gaps"].as_array().unwrap().len(), 0);
+            assert_eq!(
+                result["confidence_method"],
+                "exp_negative_mean_model_penalty_not_probability"
+            );
+            if format.is_some() {
+                assert_eq!(body["type"], "FeatureCollection");
+                assert_eq!(body["features"][0]["geometry"]["type"], "LineString");
+                assert_eq!(
+                    body["features"][0]["properties"]["observation_indices"],
+                    json!([0, 1, 2])
+                );
+            } else {
+                assert_eq!(result["matchings"].as_array().unwrap().len(), 1);
+                assert_eq!(result["matchings"][0]["edge_path"], json!([0, 1]));
+            }
+        }
+        let mut invalid = base;
+        invalid["request"]["observations"][1]
+            .as_object_mut()
+            .unwrap()
+            .remove("timestamp_s");
+        let error = crate::trace_matching::trace_match_handler(
+            State(state),
+            Query(ResponseFormatQuery { format: None }),
+            Json(serde_json::from_value(invalid).unwrap()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
     async fn directions_endpoint_preserves_profile_context_in_json_and_geojson() {
         let service = fixture();
         service
@@ -645,6 +721,8 @@ mod tests {
             json!({"points":[{"id":"far","lon":0,"lat":0}]}),
             json!({"points":[{"id":"bad","lon":6,"lat":53}], "snap":{"max_distance_m":-1}}),
             json!({"points":[{"id":"bad","lon":6,"lat":53,"z":50}], "snap":{"z_window_m":1}}),
+            json!({"points":[{"id":"bad","lon":6.0005,"lat":53}], "snap":{"point_constraints":{"bad":{"bearing":{"degrees":361,"tolerance_degrees":10}}}}}),
+            json!({"points":[{"id":"bad","lon":6.0005,"lat":53}], "snap":{"point_constraints":{"bad":{"bearing":{"degrees":270,"tolerance_degrees":10}}}}}),
         ] {
             let error = crate::locate::locate_handler(
                 State(state.clone()),
@@ -672,6 +750,38 @@ mod tests {
             error.into_response().status(),
             axum::http::StatusCode::NOT_FOUND
         );
+    }
+
+    #[tokio::test]
+    async fn locate_applies_bearing_and_curb_constraints_to_directed_candidates() {
+        let state = ApiState {
+            service: fixture(),
+            simulations: Arc::new(crate::simulation::SimulationRegistry::default()),
+        };
+        for direction in ["origin", "destination"] {
+            let payload = json!({"request": {
+                "points": [{"id":"curb","lon":6.0005,"lat":52.9999}],
+                "direction": direction,
+                "snap": {"max_distance_m":20, "point_constraints": {
+                    "curb": {"bearing":{"degrees":90,"tolerance_degrees":5},
+                             "approach":"curb", "driving_side":"right"}
+                }}
+            }});
+            let Json(response) = crate::locate::locate_handler(
+                State(state.clone()),
+                Json(serde_json::from_value(payload).unwrap()),
+            )
+            .await
+            .unwrap();
+            let response = serde_json::to_value(response).unwrap();
+            let candidates = response["result"][0]["candidates"].as_array().unwrap();
+            assert!(!candidates.is_empty());
+            assert!(
+                candidates
+                    .iter()
+                    .all(|candidate| candidate["snapped_edge_id"].is_u64())
+            );
+        }
     }
 
     #[tokio::test]

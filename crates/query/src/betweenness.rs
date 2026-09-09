@@ -196,6 +196,7 @@ pub(crate) fn execute_betweenness_with_graph(
                         max_distance_m: 0.05,
                         z_window_m: Some(0.05),
                         attribute_filters: request.snap.attribute_filters.clone(),
+                        point_constraints: request.snap.point_constraints.clone(),
                     },
                     connectivity: ConnectivityPolicy::default(),
                     fallback: FallbackPolicy::default(),

@@ -1,5 +1,8 @@
 # Netweevil API Examples
 
+`north_nl_match.json` exercises `POST /v1/match` with a timestamped GPS trace.
+See [trace matching](../../docs/trace-matching.md) for scoring, gaps and limits.
+
 `route_profile_overrides.json` demonstrates request-defined street routing on
 the North Netherlands dataset. Send it to `/v1/route`; the first request compiles
 the effective profile and subsequent identical profiles reuse the cached engine.
@@ -293,3 +296,11 @@ first and last locations fixed. Optimization supports at most 16 intermediate
 indexes. Ordered routing supports up to 128 locations. Temporal, scenario and
 component-constrained requests are rejected. Requests use a loaded profile and
 the same elevation and attribute snapping options as street routes.
+
+## Directed snapping
+
+`locate_constraints.json` sends a bearing and curb-side requirement to
+`POST /v1/locate`. The same `snap.point_constraints` map works in routes,
+directions, point sets for matrices, waypoint requests and GPS trace matching.
+Keys refer to input point IDs. See [bearing and road-side constraints](../../docs/snap-constraints.md)
+for angle validation, driving-side choices and directed intersection behavior.

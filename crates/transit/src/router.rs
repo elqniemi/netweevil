@@ -278,6 +278,17 @@ fn execute_transit_route_with_runtime(
     runtime: &TransitRuntime<'_>,
     request: &TransitRouteRequest,
 ) -> Result<TransitRouteResult> {
+    let mut result = search_transit_route_with_runtime(runtime, request)?;
+    result
+        .diagnostics
+        .extend(runtime.bundle.import_diagnostics.iter().cloned());
+    Ok(result)
+}
+
+fn search_transit_route_with_runtime(
+    runtime: &TransitRuntime<'_>,
+    request: &TransitRouteRequest,
+) -> Result<TransitRouteResult> {
     let bundle = runtime.bundle;
     if request.time.arrive_by {
         return execute_transit_route_arrive_by(runtime, request);
@@ -333,6 +344,7 @@ fn execute_transit_route_with_runtime(
             boardings: 0,
             connection_index: u32::MAX,
             can_alight: false,
+            transfer_from_connection: u32::MAX,
         };
         let arrival_s = departure_s.saturating_add(candidate.time_s);
         relax_state(
@@ -430,6 +442,8 @@ fn execute_transit_route_with_runtime(
                     boardings: entry.state.boardings,
                     connection_index: u32::MAX,
                     can_alight: false,
+                    transfer_from_connection: runtime
+                        .transfer_walk_context(entry.state.connection_index),
                 };
                 relax_state(
                     &mut heap,
@@ -485,6 +499,9 @@ fn execute_transit_route_with_runtime(
                 {
                     continue;
                 }
+                if !same_run && !runtime.forward_transfer_allowed(entry.state, connection)? {
+                    continue;
+                }
                 let next_boardings = if same_run {
                     entry.state.boardings
                 } else {
@@ -498,6 +515,7 @@ fn execute_transit_route_with_runtime(
                     boardings: next_boardings,
                     connection_index: *index,
                     can_alight: connection.drop_off_allowed,
+                    transfer_from_connection: u32::MAX,
                 };
                 relax_state(
                     &mut heap,

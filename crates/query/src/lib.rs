@@ -28,6 +28,7 @@ mod service_area;
 mod service_area_sequence;
 mod snapping;
 mod temporal;
+mod trace_matching;
 mod waypoints;
 
 pub use accessibility::*;
@@ -57,6 +58,7 @@ pub use temporal::{
     TemporalOverlaySeries, everyday_mask, load_holiday_calendar, load_scenario_overlay,
     load_temporal_overlay, parse_datetime,
 };
+pub use trace_matching::*;
 pub use waypoints::*;
 
 #[cfg(test)]

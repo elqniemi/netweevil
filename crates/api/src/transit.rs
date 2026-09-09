@@ -538,6 +538,7 @@ fn resolve_api_stop_candidates(
                         max_distance_m: 500.0,
                         z_window_m: *z_window_m,
                         attribute_filters: attribute_filter.clone(),
+                        point_constraints: Default::default(),
                     },
                     is_origin,
                 )

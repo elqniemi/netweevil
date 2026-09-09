@@ -31,6 +31,7 @@
 *.ndjson
 run-manifest.json
 index.html
+!/frontend/index.html
 
 # Generated documentation and presentation artifacts
 /README.pdf
@@ -89,6 +90,7 @@ Thumbs.db
 # Build tooling and test artifacts
 build/
 dist/
+/frontend/node_modules/
 coverage/
 *.profraw
 *.profdata
@@ -107,6 +109,12 @@ coverage/
 *.tmp
 *.temp
 *.cache
+
+# Local environment settings and secrets
+.env
+.env.*
+!.env.example
+!.env.sample
 
 # Claude Code session artifacts
 .claude/

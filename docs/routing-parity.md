@@ -18,7 +18,7 @@ Valhalla covers dynamic mode costing, directions, optimized waypoint order,
 matrices, isochrones, map matching, elevation, and network location inspection.
 NetWeevil's existing dynamic profiles, temporal routing, alternatives, matrices,
 and service areas cover part of that workload. Basic English street directions
-and ordered/optimized waypoints are implemented; GPS trace matching is absent.
+and ordered/optimized waypoints are implemented, along with static GPS trace matching.
 See the [Valhalla service index](https://valhalla.github.io/valhalla/api/).
 
 MOTIS combines street and public transport routing with multiple timetable
@@ -33,20 +33,20 @@ See the [MOTIS project](https://github.com/motis-project/motis).
 | Area | NetWeevil implementation | Work needed for parity |
 | --- | --- | --- |
 | Road search | Edge-based CCH with metric customization, exact reference search, restriction validation; local OSRM HTTP comparison | Align car profiles and snap eligibility; close the measured latency gap and reduce hierarchy memory/restriction fallback |
-| Snapping | Directed edge-interior snapping with profile, elevation and attribute filters; prepared edge spatial index | Bearing and curb-side constraints, spherical date-line handling |
+| Snapping | Directed edge-interior and endpoint snapping with profile, elevation, attributes, per-point bearing and curb/opposite approach constraints | Spherical date-line handling; infer driving side from imported administrative data |
 | Dynamic costing | Cached request-defined profiles and overrides | Compare cold customization cost, cache churn and concurrent preparation against Valhalla |
 | Matrix | Shared CCH search spaces with legal-route validation and a reusable exact frontier per origin | Accelerate restriction-state searches; test large asymmetric matrices |
 | Service areas | Network and polygon output, multiple thresholds/origins, temporal sequences | Match Valhalla contour semantics and measure polygon generation independently |
 | Locate | `POST /v1/locate` returns the same profile-aware candidates as route snapping | Add richer edge metadata where consumers need it |
 | Navigation | Static legal street directions: English turns, road-name changes, legal roundabout exit counts, edge ranges | Lane/signpost guidance, localized text and voice, richer intersection classification, temporal directions |
 | Waypoints | Ordered static break/through routing with turn-history continuity; exact directed stop ordering with fixed endpoints and at most 16 intermediate stops | Via/break-through variants, time-dependent stop order, faster large stop sets |
-| Map matching | No trace-matching request or engine | Candidate emissions, transition-distance likelihoods, Viterbi search, timestamps, gaps and confidence |
+| Map matching | Gaussian emissions, shortest legal distance transitions and Viterbi search with turn-history continuity; timestamp/speed bounds, gaps and model-fit scores | Calibrated ambiguity, richer edge attributes, matched-path directions and large-trace throughput |
 | Elevation | Z-aware topology and multilayer pedestrian routing | DEM sampling and an elevation-along-path service |
 | Transit search | Depart-at, arrive-by, transfer limits, alternatives, frequency trips, access/egress and network transfer tables | Brute-force timetable oracle and a shared MOTIS journey corpus |
 | Transit storage | Connections expanded across a selected date window; agency timezone/DST-aware service anchors and explicit-offset query times | Pattern/run storage, service-day bitsets and year-scale memory measurements |
 | Transit feeds | Separate imported GTFS feeds | Feed-qualified identifiers, cross-feed transfers, NeTEx and flexible services |
 | Live transit | Static timetable | Immutable real-time snapshots, delays, cancellations, stop changes and alerts; GTFS-RT first |
-| Passenger constraints | Transfer/access/egress options | GTFS transfers/pathways, wheelchair and bicycle carriage rules, fares, platform-level passenger information |
+| Passenger constraints | GTFS recommended/forbidden/minimum-time transfers with route/trip specificity and station expansion; access/egress options | Timed vehicle holding, linked-trip in-seat continuity, pathways, wheelchair/bicycle carriage, fares and platform information |
 | Shared mobility | No GBFS routing integration | Availability, vehicle/station constraints, geofencing and rental legs |
 
 ## Changes in this pass
@@ -72,14 +72,37 @@ with fixed endpoints. Repeated occurrences of the first or last edge now receive
 partial-edge costs only at the actual first/last traversal, and final geometry
 ends at the destination snap without overshooting the edge.
 
+`snap.point_constraints` applies bearing tolerance and curb/opposite approach
+requirements by input point ID. The caller supplies the driving side. Directed
+endpoint snaps prevent a node or zero-length edge from bypassing a requested
+arrival or departure direction, including at coincident break waypoints.
+Routes, matrices, locate, waypoints and trace matching share these filters.
+See [bearing and road-side constraints](snap-constraints.md).
+
+`POST /v1/match` uses positional-error penalties and shortest legal network
+distances to select a sequence of directed candidates. Viterbi states preserve
+turn-restriction history across observations. Timestamps bound speed and gaps;
+unmatched observations remain aligned with the input. The reported confidence
+is an uncalibrated model-fit score, so it cannot establish the probability of
+choosing the correct road. Search budgets fail explicitly rather than returning
+a partially searched result. See [GPS trace matching](trace-matching.md).
+
 GTFS imports now require a shared IANA agency timezone. Connections use elapsed
 UTC seconds from an explicit origin; each service day's anchor follows the
 GTFS local-noon-minus-twelve-hours rule. Queries with explicit offsets identify
 an instant, and ambiguous or nonexistent local wall times are rejected.
 Depart-at, arrive-by and service areas share this interpretation. Bundle schema
-5 replaces the prior storage layout; feeds must be reimported. See
+6 is the current storage layout; feeds must be reimported. See
 [transit time semantics](transit-time.md) and the
 [GTFS schedule reference](https://gtfs.org/documentation/schedule/reference/).
+
+GTFS `transfers.txt` rules now apply to depart-at, arrive-by and service-area
+searches. Stop, station, route and trip selectors control recommendations,
+prohibitions and minimum interchange times. Search states retain the vehicle
+context across walking transfers, and conflicting rules of equal specificity
+produce an error. Timed connections use scheduled departures with an explicit
+diagnostic; vehicle holding and linked-trip in-seat transfers remain unsupported.
+See [GTFS transfer rules](transit-transfers.md).
 
 The CCH search now accounts for negative destination seed costs from
 partial-edge snapping when deciding whether to stop. Exact bidirectional search
@@ -93,9 +116,8 @@ bound proves the result. Later destinations reuse that origin's frontier.
 Only the current origin's exact frontier is retained to bound memory.
 
 Snapping caches use exact coordinate bits and preserve the requesting point's
-ID. A prepared edge index includes long-edge interiors whose endpoints lie
-outside the requested search radius. The same implementation serves routes,
-matrices and the new locate endpoint.
+ID and resolved bearing/approach constraints. A prepared edge index includes
+long-edge interiors whose endpoints lie outside the requested search radius.
 
 Transit transfer search now uses every stop within the requested radius,
 without a nearest-32 truncation or an expanding search out to 100 kilometres.
@@ -151,9 +173,9 @@ than a full multicriteria label set. These need separate correctness work.
 3. Extend the static waypoint and English guidance implementation with the
    remaining waypoint types, signposts, lane guidance and localization.
    Measure large directed stop sets before choosing an approximate optimizer.
-4. Build map matching as a query module. Reuse the edge spatial index for
-   candidates and the routing engine for transitions. Test parallel roads,
-   tunnels, sparse GPS points, gaps, stationary samples and disconnected traces.
+4. Benchmark trace matching with labeled GPS traces and compare ambiguity
+   estimates against correct-road labels. Extend the static matcher with
+   richer edge attribution, matched-path instructions and temporal traffic.
 5. Replace expanded transit storage before importing year-long, multi-feed
    schedules. Keep public trip IDs separate from dated/frequency run IDs.
    Group trips by stopping pattern and store operating days as bitsets while
@@ -176,14 +198,6 @@ local/UTC transit queries were exercised. Reports are in
 `.netweevil/reports/parity-next/`. QGIS packaging and Python export checks pass;
 a full QGIS runtime was not available.
 
-The next small road-performance experiment is to remove per-edge `None`
-entries in legal-route violation maps: readers already treat missing entries
-as no violation. Other inspected costs include cloning successful paths into
-a request-local cache immediately before returning, repeated cost walks and
-shortcut witness reconstruction. These are code observations, not profiler
-attribution; measure each change against exact routes and the same local HTTP
-corpus before claiming a gain.
-
 Run comparisons on locally hosted engines with the same OSM extract, hardware,
 thread count, service date, profile rules and output detail. Record executable
 revision, compiler, dataset hashes, preprocessing time, bundle size and server
@@ -203,10 +217,13 @@ minimum transfers, consecutive runs of one trip, overnight service, DST,
 wheelchair access, and delayed/cancelled trips. Record feed hashes and update
 generations. Run a small exhaustive timetable oracle before large MOTIS tests.
 
-The existing remote public OSRM results measure network latency and a paced
-request rate. They cannot establish equal-hardware engine capacity. This
-environment has no installed OSRM, Valhalla, MOTIS or Docker executable, so
-cross-engine performance parity remains unverified.
+The remote public OSRM results measure network latency and a paced request
+rate. The local comparison uses binaries extracted from the pinned official
+OSRM image and runs them directly on this host, without a container daemon.
+Its preprocessing commands, image digest and reports are recorded in the
+[local OSRM benchmark](local-osrm-benchmark.md). Profile and snap-policy
+differences still prevent a parity claim. Local Valhalla and MOTIS comparisons
+remain outstanding.
 
 ## Initial implementation measurements
 
@@ -246,8 +263,9 @@ These are sequential local workloads, with 20 route warmups and one matrix
 warmup. Three matrix samples are too few for a stable tail-latency estimate.
 Some development compilation occurred during this session, so small timing
 differences need controlled repetition. The large matrix reduction corresponds
-to eliminating exhaustive repeated searches, but it remains short of an OSRM
-comparison. Raw reports live under `.netweevil/reports/parity/` and are excluded
+to eliminating exhaustive repeated searches. An equivalent local OSRM matrix
+comparison remains outstanding; the local road-route comparison is documented
+above. Raw reports live under `.netweevil/reports/parity/` and are excluded
 from Git. The selected corpus fingerprint is
 `1d00d962d5dafcdd5ef2cf8d9e599fa3e234a5c6f77630f7b5910e978270b4c8`.
 

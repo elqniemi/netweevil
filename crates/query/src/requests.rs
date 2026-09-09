@@ -187,7 +187,7 @@ pub struct LabeledPoint {
     pub z: Option<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SnapOptions {
     #[serde(default = "default_snap_distance")]
     pub max_distance_m: f64,
@@ -199,6 +199,9 @@ pub struct SnapOptions {
     /// Semantic/source feature attributes that candidate edges must match.
     #[serde(default)]
     pub attribute_filters: BTreeMap<String, String>,
+    /// Directed road constraints keyed by the input point's `id`.
+    #[serde(default)]
+    pub point_constraints: BTreeMap<String, PointSnapConstraint>,
 }
 
 impl Default for SnapOptions {
@@ -207,6 +210,54 @@ impl Default for SnapOptions {
             max_distance_m: default_snap_distance(),
             z_window_m: None,
             attribute_filters: BTreeMap::new(),
+            point_constraints: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct BearingConstraint {
+    /// Travel direction clockwise from true north, in [0, 360].
+    pub degrees: f64,
+    /// Maximum angular difference in [0, 180].
+    pub tolerance_degrees: f64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapApproach {
+    #[default]
+    Unrestricted,
+    Curb,
+    Opposite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DrivingSide {
+    #[default]
+    Right,
+    Left,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PointSnapConstraint {
+    pub bearing: Option<BearingConstraint>,
+    pub approach: SnapApproach,
+    /// Supplied by the caller; the snapper does not infer the country's rule.
+    pub driving_side: DrivingSide,
+    /// Points within this lateral distance of the road center have no side.
+    pub street_side_tolerance_m: f64,
+}
+
+impl Default for PointSnapConstraint {
+    fn default() -> Self {
+        Self {
+            bearing: None,
+            approach: SnapApproach::Unrestricted,
+            driving_side: DrivingSide::Right,
+            street_side_tolerance_m: 5.0,
         }
     }
 }

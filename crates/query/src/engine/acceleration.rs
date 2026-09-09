@@ -1,11 +1,68 @@
+use std::cell::RefCell;
 use std::collections::BinaryHeap;
+use std::sync::{Arc, Weak};
 
 use anyhow::Result;
 #[cfg(test)]
 use anyhow::bail;
-use netweevil_core::TopologyBundle;
+use netweevil_core::{CompiledProfileBundle, DatasetAccelerationBundle, TopologyBundle};
 
 use crate::*;
+
+// 512 KiB per routing thread. Collisions replace entries and only cause a
+// repeated lookup; they never substitute a different arc's decomposition.
+const UNPACK_CACHE_SLOTS: usize = 32_768;
+
+#[derive(Clone, Copy)]
+struct UnpackWitness {
+    key: u64,
+    left: u32,
+    right: u32,
+}
+
+impl Default for UnpackWitness {
+    fn default() -> Self {
+        Self {
+            key: u64::MAX,
+            left: u32::MAX,
+            right: u32::MAX,
+        }
+    }
+}
+
+#[derive(Default)]
+struct UnpackCache {
+    source: Weak<DatasetAccelerationBundle>,
+    metrics: Weak<CompiledProfileBundle>,
+    entries: Vec<UnpackWitness>,
+}
+
+impl UnpackCache {
+    fn prepare(&mut self, graph: &AccelerationGraph) {
+        if self.source.as_ptr() != Arc::as_ptr(&graph.source)
+            || self.metrics.as_ptr() != Arc::as_ptr(&graph.metrics)
+        {
+            // Weak owners keep allocations distinct even after the last
+            // engine is dropped. A reused address cannot revive stale weights.
+            self.source = Arc::downgrade(&graph.source);
+            self.metrics = Arc::downgrade(&graph.metrics);
+            self.entries
+                .resize(UNPACK_CACHE_SLOTS, UnpackWitness::default());
+            self.entries.fill(UnpackWitness::default());
+        }
+    }
+
+    fn slot(&mut self, upward: bool, arc: u32) -> (&mut UnpackWitness, u64) {
+        let key = (u64::from(arc) << 1) | u64::from(upward);
+        let mixed = key ^ (key >> 17);
+        let index = mixed.wrapping_mul(0x9e37_79b9) as usize & (UNPACK_CACHE_SLOTS - 1);
+        (&mut self.entries[index], key)
+    }
+}
+
+thread_local! {
+    static UNPACK_CACHE: RefCell<UnpackCache> = RefCell::new(UnpackCache::default());
+}
 
 #[derive(Default)]
 pub(crate) struct BidirectionalAccelerationScratch {
@@ -83,6 +140,28 @@ fn push_unpacked_arc(
     arc_slot: u32,
     edge_indexes: &mut Vec<usize>,
 ) {
+    UNPACK_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache.prepare(acceleration);
+        push_unpacked_arc_cached(
+            acceleration,
+            stack,
+            is_upward,
+            arc_slot,
+            edge_indexes,
+            &mut cache,
+        );
+    });
+}
+
+fn push_unpacked_arc_cached(
+    acceleration: &AccelerationGraph,
+    stack: &mut Vec<(bool, u32)>,
+    is_upward: bool,
+    arc_slot: u32,
+    edge_indexes: &mut Vec<usize>,
+    cache: &mut UnpackCache,
+) {
     let compiled = acceleration
         .metrics
         .acceleration
@@ -110,20 +189,31 @@ fn push_unpacked_arc(
             "only finite CCH arcs can be unpacked"
         );
         let source = &acceleration.source;
-        let triangle = (source.downward_first_out[tail] as usize
-            ..source.downward_first_out[tail + 1] as usize)
-            .find_map(|left| {
-                let middle = source.downward_head[left] as usize;
-                if source.edge_rank[middle] >= source.edge_rank[head as usize] {
-                    return None;
-                }
-                let right = acceleration.upward_arc_slot(middle, head)?;
-                (netweevil_core::add_cch_weights(
-                    compiled.downward_weight[left],
-                    compiled.upward_weight[right],
-                ) == weight)
-                    .then_some((left, right))
-            });
+        let (entry, key) = cache.slot(is_upward, slot);
+        let triangle = if entry.key == key {
+            (entry.left != u32::MAX).then_some((entry.left as usize, entry.right as usize))
+        } else {
+            let triangle = (source.downward_first_out[tail] as usize
+                ..source.downward_first_out[tail + 1] as usize)
+                .find_map(|left| {
+                    let middle = source.downward_head[left] as usize;
+                    if source.edge_rank[middle] >= source.edge_rank[head as usize] {
+                        return None;
+                    }
+                    let right = acceleration.upward_arc_slot(middle, head)?;
+                    (netweevil_core::add_cch_weights(
+                        compiled.downward_weight[left],
+                        compiled.upward_weight[right],
+                    ) == weight)
+                        .then_some((left, right))
+                });
+            *entry = UnpackWitness {
+                key,
+                left: triangle.map_or(u32::MAX, |(left, _)| left as u32),
+                right: triangle.map_or(u32::MAX, |(_, right)| right as u32),
+            };
+            triangle
+        };
         let Some((left, right)) = triangle else {
             edge_indexes.push(head as usize);
             continue;
@@ -819,4 +909,81 @@ pub(crate) fn seeded_bidirectional_dijkstra_on_edge_transitions(
 
         Ok(best_path)
     })
+}
+
+#[cfg(test)]
+mod unpack_tests {
+    use super::*;
+    use netweevil_core::{CacheBundleId, CompiledAcceleration, TravelMode};
+
+    fn graph(direct_weight: u32) -> AccelerationGraph {
+        AccelerationGraph {
+            source: Arc::new(DatasetAccelerationBundle {
+                schema_version: netweevil_core::ACCELERATION_BUNDLE_SCHEMA_VERSION,
+                source_topology_bundle_id: CacheBundleId::new("witness-test"),
+                algorithm: netweevil_core::CCH_ALGORITHM.into(),
+                stats: Default::default(),
+                edge_order: vec![0, 1, 2],
+                edge_rank: vec![0, 1, 2],
+                upward_first_out: vec![0, 1, 2, 2],
+                upward_head: vec![2, 2],
+                downward_first_out: vec![0, 0, 1, 1],
+                downward_head: vec![0],
+            }),
+            metrics: Arc::new(CompiledProfileBundle {
+                schema_version: 3,
+                profile_id: "witness-test".into(),
+                profile_hash: direct_weight.to_string(),
+                mode: TravelMode::Car,
+                turn_costs: Default::default(),
+                components: vec![],
+                temporal: Default::default(),
+                source_topology_bundle_id: CacheBundleId::new("witness-test"),
+                edge_metrics: vec![],
+                acceleration: Some(CompiledAcceleration {
+                    schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
+                    source_acceleration_bundle_id: CacheBundleId::new("witness-test"),
+                    algorithm: netweevil_core::CCH_ALGORITHM.into(),
+                    upward_weight: vec![4, direct_weight],
+                    downward_weight: vec![2],
+                    time_upward_weight: vec![],
+                    time_downward_weight: vec![],
+                    distance_upward_weight: vec![],
+                    distance_downward_weight: vec![],
+                }),
+            }),
+            upward_tail: vec![0, 1],
+            downward_tail: vec![1],
+            reverse_downward_first_out: vec![0, 1, 1, 1],
+            reverse_downward_edge: vec![1],
+            reverse_downward_arc: vec![0],
+        }
+    }
+
+    fn unpack(graph: &AccelerationGraph) -> Vec<usize> {
+        let mut path = vec![1];
+        push_unpacked_arc(graph, &mut Vec::new(), true, 1, &mut path);
+        path
+    }
+
+    #[test]
+    fn cached_witnesses_follow_metric_and_topology_owners() {
+        let a = graph(6);
+        let mut b = graph(5);
+        b.source = a.source.clone();
+        for _ in 0..3 {
+            assert_eq!(unpack(&a), [1, 0, 2]);
+            assert_eq!(unpack(&a), [1, 0, 2]);
+            assert_eq!(unpack(&b), [1, 2]);
+        }
+        let mut c = graph(6);
+        c.metrics = a.metrics.clone();
+        Arc::make_mut(&mut c.source).upward_head[0] = 1;
+        assert_eq!(unpack(&a), [1, 0, 2]);
+        assert_eq!(unpack(&c), [1, 2]);
+        drop(a);
+        drop(b);
+        drop(c);
+        assert_eq!(unpack(&graph(5)), [1, 2]);
+    }
 }

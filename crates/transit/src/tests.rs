@@ -208,7 +208,7 @@ fn prepared_router_reuses_departures_and_spatial_index() {
 
     let result = router.execute_route(&request).expect("route executes");
     assert_eq!(result.outcome, TransitOutcome::Scheduled);
-    assert_eq!(result.summary.total_travel_time_s, Some(1201));
+    assert_eq!(result.summary.total_travel_time_s, Some(1200));
     assert_eq!(result.summary.boarding_count, 1);
 }
 
@@ -1395,7 +1395,7 @@ fn network_street_access_prices_legs_with_the_estimator() {
             Some(&FixedEstimator),
         )
         .expect("straight-line route executes");
-    assert_eq!(straight.summary.total_travel_time_s, Some(1201));
+    assert_eq!(straight.summary.total_travel_time_s, Some(1200));
 
     // Network pricing uses the estimator's times for access and egress.
     let network = router
@@ -1563,7 +1563,7 @@ fn arrive_by_route_takes_the_latest_departure_that_meets_the_deadline() {
     assert_eq!(boarding.arrival_s, 8 * 3600 + 30 * 60);
     // One second of access walking plus the boarding slack in front of the
     // 08:20 departure.
-    assert_eq!(result.summary.departure_s, 8 * 3600 + 20 * 60 - 30 - 1);
+    assert_eq!(result.summary.departure_s, 8 * 3600 + 20 * 60 - 30);
     let access = result.legs.first().expect("journey starts on foot");
     assert_eq!(access.leg_type, TransitLegType::Access);
     assert_eq!(access.departure_s, result.summary.departure_s);
@@ -1798,7 +1798,7 @@ fn departure_search_keeps_same_trip_among_unboardable_departures() {
     let router = PreparedTransitRouter::new(Arc::new(bundle));
     let route = router.execute_route(&request).expect("route executes");
     assert_eq!(route.outcome, TransitOutcome::Scheduled);
-    assert_eq!(route.summary.arrival_s, Some(8 * 3600 + 20 * 60 + 1));
+    assert_eq!(route.summary.arrival_s, Some(8 * 3600 + 20 * 60));
     let area = router
         .execute_service_area(&TransitServiceAreaRequest {
             analysis_id: "interleaved".to_string(),
@@ -1877,7 +1877,7 @@ fn rejected_short_leg_does_not_prune_a_valid_later_journey() {
     request.modes.min_transit_leg_duration_s = 600;
     let route = router.execute_route(&request).expect("route executes");
     assert_eq!(route.outcome, TransitOutcome::Scheduled);
-    assert_eq!(route.summary.arrival_s, Some(8 * 3600 + 25 * 60 + 1));
+    assert_eq!(route.summary.arrival_s, Some(8 * 3600 + 25 * 60));
 }
 
 #[test]
@@ -1895,7 +1895,7 @@ fn rejected_short_leg_does_not_prune_a_valid_earlier_arrive_by_journey() {
     request.modes.min_transit_leg_duration_s = 600;
     let route = router.execute_route(&request).expect("route executes");
     assert_eq!(route.outcome, TransitOutcome::Scheduled);
-    assert_eq!(route.summary.departure_s, 8 * 3600 + 5 * 60 - 31);
+    assert_eq!(route.summary.departure_s, 8 * 3600 + 5 * 60 - 30);
 }
 
 #[test]
@@ -2288,7 +2288,7 @@ fn query_offsets_and_naive_agency_times_resolve_to_the_same_instant() {
                     .time_context
                     .datetime(route.summary.arrival_s.unwrap())
                     .unwrap(),
-                "2026-03-29T08:30:01+02:00"
+                "2026-03-29T08:30:00+02:00"
             );
             let summary = (route.summary.departure_s, route.summary.arrival_s);
             if let Some(expected) = expected_summary {
@@ -2397,12 +2397,12 @@ fn explicit_offsets_distinguish_both_occurrences_of_the_autumn_hour() {
         (
             "2026-10-25T02:30:00+02:00",
             "EARLY",
-            "2026-10-25T02:15:01+01:00",
+            "2026-10-25T02:15:00+01:00",
         ),
         (
             "2026-10-25T02:30:00+01:00",
             "LATE",
-            "2026-10-25T03:15:01+01:00",
+            "2026-10-25T03:15:00+01:00",
         ),
     ] {
         let mut request = arrive_by_request(datetime, short_access_modes());
@@ -2430,7 +2430,7 @@ fn explicit_offsets_distinguish_both_occurrences_of_the_autumn_hour() {
             .time_context
             .datetime(result.summary.departure_s)
             .unwrap(),
-        "2026-10-25T02:44:29+02:00"
+        "2026-10-25T02:44:30+02:00"
     );
 }
 
@@ -2442,14 +2442,14 @@ fn overnight_service_routes_beyond_last_imported_date_across_both_dst_changes() 
             "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,25:30:00,25:30:00,A,1\nT1,26:30:00,26:30:00,C,2\n",
             "2026-03-29T01:20:00+01:00",
             "2026-03-29T01:30:00+01:00",
-            "2026-03-29T03:30:01+02:00",
+            "2026-03-29T03:30:00+02:00",
         ),
         (
             "2026-10-24",
             "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,26:15:00,26:15:00,A,1\nT1,27:15:00,27:15:00,C,2\n",
             "2026-10-25T02:00:00+02:00",
             "2026-10-25T02:15:00+02:00",
-            "2026-10-25T02:15:01+01:00",
+            "2026-10-25T02:15:00+01:00",
         ),
     ] {
         let bundle = timezone_fixture(service_date, 1, stop_times);
@@ -2507,4 +2507,358 @@ fn gtfs_import_requires_one_valid_shared_agency_timezone() {
         );
         assert!(result.is_err(), "invalid agency data should fail: {raw}");
     }
+}
+
+fn assert_transfer_reachability(bundle: TransitBundle, expected: bool) {
+    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    for arrive_by in [false, true] {
+        let mut modes = short_access_modes();
+        modes.max_transfer_distance_m = 100.0;
+        modes.board_slack_s = 0;
+        modes.transfer_slack_s = 0;
+        let mut request = arrive_by_request(
+            if arrive_by {
+                "2026-05-11T08:40:00+02:00"
+            } else {
+                "2026-05-11T08:00:00+02:00"
+            },
+            modes,
+        );
+        request.time.arrive_by = arrive_by;
+        let result = router.execute_route(&request).unwrap();
+        assert_eq!(
+            result.outcome == TransitOutcome::Scheduled,
+            expected,
+            "route arrive_by={arrive_by}"
+        );
+        let area = router
+            .execute_service_area(&TransitServiceAreaRequest {
+                analysis_id: "transfer-rules".to_string(),
+                origins: vec![if arrive_by {
+                    request.destination.clone()
+                } else {
+                    request.origin.clone()
+                }],
+                time: request.time.clone(),
+                modes: request.modes.clone(),
+                max_travel_time_s: 3600,
+                returns: TransitServiceAreaReturnOptions::default(),
+            })
+            .unwrap();
+        assert_eq!(
+            area.stops
+                .iter()
+                .any(|stop| stop.stop_id == if arrive_by { "A" } else { "C" }),
+            expected,
+            "service area arrive_by={arrive_by}"
+        );
+    }
+}
+
+#[test]
+fn forbidden_and_minimum_transfers_apply_to_same_stop_and_platform_walks() {
+    for same_stop in [false, true] {
+        for (rule_type, minimum, expected) in [
+            (0, "", true),
+            (3, "", false),
+            (2, "300", true),
+            (2, "301", false),
+        ] {
+            let mut files = two_line_transfer_fixture_files();
+            if same_stop {
+                files.insert("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,08:05:00,08:05:00,A,1\nT1,08:10:00,08:10:00,B1,2\nT2,08:15:00,08:15:00,B1,1\nT2,08:25:00,08:25:00,C,2\n".to_string());
+            }
+            let to_stop = if same_stop { "B1" } else { "B2" };
+            files.insert("transfers.txt", format!("from_stop_id,to_stop_id,transfer_type,min_transfer_time\nB1,{to_stop},{rule_type},{minimum}\n"));
+            assert_transfer_reachability(import_fixture(files, "restricted-transfer"), expected);
+        }
+    }
+}
+
+#[test]
+fn forbidden_transfer_does_not_require_alighting_from_continuing_vehicle() {
+    let mut files = fixture_files();
+    files.insert(
+        "transfers.txt",
+        "from_stop_id,to_stop_id,transfer_type\nB,B,3\n".to_string(),
+    );
+    assert_transfer_reachability(import_fixture(files, "stay-aboard"), true);
+}
+
+#[test]
+fn station_transfer_rules_expand_to_children_and_trip_pair_overrides_broad_ban() {
+    for override_rule in [false, true] {
+        let mut files = two_line_transfer_fixture_files();
+        files.insert("stops.txt", "stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station\nA,A,53,6,0,\nS,Station,53,6.01,1,\nB1,Platform1,53,6.01,0,S\nB2,Platform2,53,6.0101,0,S\nC,C,53,6.02,0,\n".to_string());
+        let mut raw =
+            "from_stop_id,to_stop_id,transfer_type,from_trip_id,to_trip_id\nS,S,3,,\n".to_string();
+        if override_rule {
+            raw.push_str("B1,B2,0,T1,T2\n");
+        }
+        files.insert("transfers.txt", raw);
+        let bundle = import_fixture(files, "station-transfer");
+        assert_eq!(
+            bundle.transfer_rules.len(),
+            if override_rule { 5 } else { 4 }
+        );
+        assert_transfer_reachability(bundle, override_rule);
+    }
+}
+
+#[test]
+fn trip_specific_transfer_walk_states_preserve_legal_incoming_and_outgoing_trips() {
+    // The earlier incoming trip and later outgoing trip are both forbidden.
+    // Merging all on-foot labels at each stop loses the valid middle pair.
+    let mut files = two_line_transfer_fixture_files();
+    files.insert(
+        "trips.txt",
+        "route_id,service_id,trip_id\nR1,WEEK,EARLY\nR1,WEEK,T1\nR2,WEEK,T2\nR2,WEEK,LATE\n"
+            .to_string(),
+    );
+    files.insert("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nEARLY,08:02:00,08:02:00,A,1\nEARLY,08:08:00,08:08:00,B1,2\nT1,08:05:00,08:05:00,A,1\nT1,08:10:00,08:10:00,B1,2\nT2,08:15:00,08:15:00,B2,1\nT2,08:25:00,08:25:00,C,2\nLATE,08:18:00,08:18:00,B2,1\nLATE,08:28:00,08:28:00,C,2\n".to_string());
+    files.insert(
+        "transfers.txt",
+        "from_stop_id,to_stop_id,transfer_type,from_trip_id,to_trip_id\nB1,B2,3,,\nB1,B2,0,T1,T2\n"
+            .to_string(),
+    );
+    assert_transfer_reachability(import_fixture(files, "transfer-label-context"), true);
+}
+
+#[test]
+fn transfer_specificity_follows_all_six_gtfs_ranks_in_both_directions() {
+    let selectors = [",,,", "R1,,,", "R1,R2,,", ",,T1,", ",R2,T1,", ",,T1,T2"];
+    for winning_rank in 1..selectors.len() {
+        for reverse_order in [false, true] {
+            let mut files = two_line_transfer_fixture_files();
+            let mut rows = [
+                format!("B1,B2,3,{}\n", selectors[winning_rank - 1]),
+                format!("B1,B2,0,{}\n", selectors[winning_rank]),
+            ];
+            if reverse_order {
+                rows.reverse();
+            }
+            files.insert("transfers.txt", format!("from_stop_id,to_stop_id,transfer_type,from_route_id,to_route_id,from_trip_id,to_trip_id\n{}", rows.concat()));
+            assert_transfer_reachability(import_fixture(files, "transfer-specificity"), true);
+        }
+    }
+}
+
+#[test]
+fn timed_transfers_report_static_semantics_and_do_not_hold_departed_vehicles() {
+    for minimum in ["0", "301"] {
+        let mut files = two_line_transfer_fixture_files();
+        files.insert(
+            "transfers.txt",
+            format!("from_stop_id,to_stop_id,transfer_type,min_transfer_time\nB1,B2,1,{minimum}\n"),
+        );
+        let bundle = import_fixture(files, "timed-transfer");
+        let expected = crate::transfer_rules::TIMED_TRANSFER_DIAGNOSTIC;
+        assert_eq!(transit_import_summary(&bundle).diagnostics, vec![expected]);
+        let router = PreparedTransitRouter::new(Arc::new(bundle.clone()));
+        let request = arrive_by_request("2026-05-11T08:40:00+02:00", short_access_modes());
+        assert!(
+            router
+                .execute_route(&request)
+                .unwrap()
+                .diagnostics
+                .iter()
+                .any(|message| message == expected)
+        );
+        let area = router
+            .execute_service_area(&TransitServiceAreaRequest {
+                analysis_id: "timed".to_string(),
+                origins: vec![request.destination.clone()],
+                time: request.time.clone(),
+                modes: request.modes.clone(),
+                max_travel_time_s: 3600,
+                returns: TransitServiceAreaReturnOptions::default(),
+            })
+            .unwrap();
+        assert!(area.diagnostics.iter().any(|message| message == expected));
+        assert_transfer_reachability(bundle, minimum == "0");
+    }
+}
+
+fn invalid_transfer_import(raw: &str) -> anyhow::Result<TransitBundle> {
+    let mut files = two_line_transfer_fixture_files();
+    files.insert("transfers.txt", raw.to_string());
+    build_bundle_from_files(
+        files,
+        "invalid-transfer".to_string(),
+        TransitImportOptions {
+            name: "invalid-transfer".to_string(),
+            source_label: "fixture".to_string(),
+            service_start_date: "2026-05-11".to_string(),
+            service_days: 1,
+        },
+    )
+}
+
+#[test]
+fn invalid_and_unsupported_transfer_rules_are_rejected() {
+    for raw in [
+        "from_trip_id,to_trip_id,transfer_type\nT1,T2,4\n",
+        "from_trip_id,to_trip_id,transfer_type\nT1,T2,5\n",
+        "from_stop_id,to_stop_id,transfer_type\nB1,B2,2\n",
+        "from_stop_id,to_stop_id,transfer_type\nB1,B2,6\n",
+        "from_stop_id,to_stop_id,transfer_type\nB1,B2,0\nB1,B2,3\n",
+        "from_stop_id,to_stop_id,transfer_type,from_trip_id\nB1,B2,0,MISSING\n",
+        "from_stop_id,to_stop_id,transfer_type,from_route_id,from_trip_id\nB1,B2,0,R2,T1\n",
+    ] {
+        assert!(invalid_transfer_import(raw).is_err(), "should reject {raw}");
+    }
+}
+
+#[test]
+fn equally_specific_overlapping_transfer_rules_fail_independent_of_row_order() {
+    for rows in ["B1,B2,0,T1,\nB1,B2,3,,T2\n", "B1,B2,3,,T2\nB1,B2,0,T1,\n"] {
+        let mut files = two_line_transfer_fixture_files();
+        files.insert(
+            "transfers.txt",
+            format!("from_stop_id,to_stop_id,transfer_type,from_trip_id,to_trip_id\n{rows}"),
+        );
+        let router =
+            PreparedTransitRouter::new(Arc::new(import_fixture(files, "ambiguous-transfer")));
+        for arrive_by in [false, true] {
+            let mut request = arrive_by_request(
+                if arrive_by {
+                    "2026-05-11T08:40:00+02:00"
+                } else {
+                    "2026-05-11T08:00:00+02:00"
+                },
+                short_access_modes(),
+            );
+            request.time.arrive_by = arrive_by;
+            let error = router.execute_route(&request).unwrap_err();
+            assert!(error.to_string().contains("equally specific"), "{error:#}");
+        }
+    }
+}
+
+#[test]
+fn transfer_walk_hops_cannot_bypass_forbidden_or_minimum_rules() {
+    for row in ["B1,B2,3,\n", "B1,B2,2,301\n"] {
+        let mut files = two_line_transfer_fixture_files();
+        files.insert("stops.txt", "stop_id,stop_name,stop_lat,stop_lon\nA,A,53,6\nB1,Platform1,53,6.01\nMID,Intermediate,53,6.01005\nB2,Platform2,53,6.0101\nC,C,53,6.02\n".to_string());
+        files.insert(
+            "transfers.txt",
+            format!("from_stop_id,to_stop_id,transfer_type,min_transfer_time\n{row}"),
+        );
+        assert_transfer_reachability(import_fixture(files, "no-walk-bypass"), false);
+    }
+}
+
+#[test]
+fn timed_transfer_cannot_board_a_vehicle_before_the_incoming_arrival() {
+    let mut files = two_line_transfer_fixture_files();
+    files.insert("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,08:05:00,08:05:00,A,1\nT1,08:10:00,08:10:00,B1,2\nT2,08:09:00,08:09:00,B2,1\nT2,08:25:00,08:25:00,C,2\n".to_string());
+    files.insert(
+        "transfers.txt",
+        "from_stop_id,to_stop_id,transfer_type\nB1,B2,1\n".to_string(),
+    );
+    assert_transfer_reachability(import_fixture(files, "no-vehicle-holding"), false);
+}
+
+#[test]
+fn inactive_trip_transfer_rules_do_not_become_general_restrictions() {
+    let mut files = two_line_transfer_fixture_files();
+    files.insert(
+        "trips.txt",
+        "route_id,service_id,trip_id\nR1,WEEK,T1\nR2,WEEK,T2\nR1,INACTIVE,OFF\n".to_string(),
+    );
+    files.insert(
+        "transfers.txt",
+        "from_stop_id,to_stop_id,transfer_type,from_trip_id\nB1,B2,3,OFF\n".to_string(),
+    );
+    let bundle = import_fixture(files, "inactive-transfer");
+    assert!(bundle.transfer_rules.is_empty());
+    assert_transfer_reachability(bundle, true);
+}
+
+#[test]
+fn transfer_trip_selectors_override_matching_route_selectors() {
+    let mut files = two_line_transfer_fixture_files();
+    files.insert("transfers.txt", "from_stop_id,to_stop_id,transfer_type,from_route_id,to_route_id,from_trip_id,to_trip_id\nB1,B2,3,R1,R2,,\nB1,B2,0,R1,R2,T1,T2\n".to_string());
+    assert_transfer_reachability(import_fixture(files, "trip-route-precedence"), true);
+}
+
+#[test]
+fn zero_distance_access_and_egress_preserve_exact_timetable_boundaries() {
+    let router = PreparedTransitRouter::new(Arc::new(import_fixture(
+        fixture_files(),
+        "exact-stop-times",
+    )));
+    let departure_s = 8 * 3600 + 10 * 60 + 30;
+    let arrival_s = 8 * 3600 + 20 * 60;
+    for arrive_by in [false, true] {
+        let mut modes = short_access_modes();
+        modes.board_slack_s = 0;
+        modes.transfer_slack_s = 0;
+        let mut request = arrive_by_request(
+            &fixture_datetime(if arrive_by { arrival_s } else { departure_s }),
+            modes,
+        );
+        request.time.arrive_by = arrive_by;
+        request.time.search_window_s = arrival_s - departure_s;
+        let result = router.execute_route(&request).unwrap();
+        assert_eq!(
+            result.outcome,
+            TransitOutcome::Scheduled,
+            "arrive_by={arrive_by}"
+        );
+        assert_eq!(result.summary.departure_s, departure_s);
+        assert_eq!(result.summary.arrival_s, Some(arrival_s));
+        for leg in result.legs.iter().filter(|leg| {
+            matches!(
+                leg.leg_type,
+                TransitLegType::Access | TransitLegType::Egress
+            )
+        }) {
+            assert_eq!(leg.departure_s, leg.arrival_s);
+        }
+        let area = router
+            .execute_service_area(&TransitServiceAreaRequest {
+                analysis_id: "exact-stop-times".to_string(),
+                origins: vec![if arrive_by {
+                    request.destination.clone()
+                } else {
+                    request.origin.clone()
+                }],
+                time: request.time.clone(),
+                modes: request.modes.clone(),
+                max_travel_time_s: arrival_s - departure_s,
+                returns: TransitServiceAreaReturnOptions::default(),
+            })
+            .unwrap();
+        let reached = area
+            .stops
+            .iter()
+            .find(|stop| stop.stop_id == if arrive_by { "A" } else { "C" })
+            .expect("boundary stop is reachable");
+        assert_eq!(reached.travel_time_s, arrival_s - departure_s);
+        assert_eq!(
+            reached.arrival_s,
+            if arrive_by { departure_s } else { arrival_s }
+        );
+    }
+}
+
+#[test]
+fn zero_distance_time_preserves_positive_rounding_and_invalid_speed_handling() {
+    use crate::legs::seconds_for_distance;
+    assert_eq!(seconds_for_distance(0.0, 4.8), 0);
+    assert_eq!(seconds_for_distance(0.001, 4.8), 1);
+    assert_eq!(seconds_for_distance(10.0, 3.6), 10);
+    assert_eq!(seconds_for_distance(0.0, 0.0), u32::MAX / 4);
+    assert_eq!(seconds_for_distance(0.0, -1.0), u32::MAX / 4);
+    assert_eq!(seconds_for_distance(0.0, f64::NAN), 1);
+    assert_eq!(seconds_for_distance(0.0, f64::INFINITY), 1);
+}
+
+#[test]
+fn coincident_platforms_allow_zero_time_transfers_without_walking_cycles() {
+    let mut files = two_line_transfer_fixture_files();
+    files.insert("stops.txt", "stop_id,stop_name,stop_lat,stop_lon\nA,A,53,6\nB1,Platform1,53,6.01\nMID,Intermediate,53,6.01\nB2,Platform2,53,6.01\nC,C,53,6.02\n".to_string());
+    files.insert("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,08:05:00,08:05:00,A,1\nT1,08:10:00,08:10:00,B1,2\nT2,08:10:00,08:10:00,B2,1\nT2,08:25:00,08:25:00,C,2\n".to_string());
+    assert_transfer_reachability(import_fixture(files, "zero-transfer"), true);
 }
