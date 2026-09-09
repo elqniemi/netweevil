@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-pub const TRANSIT_BUNDLE_SCHEMA_VERSION: u32 = 4;
+pub const TRANSIT_BUNDLE_SCHEMA_VERSION: u32 = 5;
 pub const TRANSIT_STOP_BINDING_SCHEMA_VERSION: u32 = 1;
 pub const TRANSIT_TRANSFER_TABLE_SCHEMA_VERSION: u32 = 1;
 
@@ -24,6 +24,8 @@ pub struct TransitImportSummary {
     pub source_sha256: String,
     pub service_start_date: String,
     pub service_days: u32,
+    pub agency_timezone: String,
+    pub time_origin_unix_s: i64,
     pub stop_count: usize,
     pub route_count: usize,
     pub trip_count: usize,
@@ -39,6 +41,8 @@ pub struct TransitFeedManifest {
     pub imported_at: String,
     pub service_start_date: String,
     pub service_days: u32,
+    pub agency_timezone: String,
+    pub time_origin_unix_s: i64,
     pub stop_count: u64,
     pub route_count: u64,
     pub trip_count: u64,
@@ -74,6 +78,9 @@ pub struct TransitBundle {
     #[serde(default)]
     pub stop_binding_sha256: Option<String>,
     pub service_dates: Vec<String>,
+    pub agency_timezone: String,
+    /// All departure_s/arrival_s values are elapsed UTC seconds from this instant.
+    pub time_origin_unix_s: i64,
     pub stops: Vec<TransitStop>,
     pub routes: Vec<TransitRoute>,
     pub trips: Vec<TransitTrip>,
@@ -702,9 +709,17 @@ pub enum TransitWalkingGeometry {
     Network,
 }
 
+/// Converts timetable-relative departure_s/arrival_s values to real instants.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransitTimeContext {
+    pub agency_timezone: String,
+    pub time_origin_unix_s: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitRouteResult {
     pub route_id: String,
+    pub time_context: TransitTimeContext,
     pub outcome: TransitOutcome,
     pub summary: TransitRouteSummary,
     pub legs: Vec<TransitLeg>,
@@ -720,6 +735,7 @@ pub struct TransitRouteResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitServiceAreaResult {
     pub analysis_id: String,
+    pub time_context: TransitTimeContext,
     pub outcome: TransitOutcome,
     pub origin_count: usize,
     pub processed_origin_count: usize,

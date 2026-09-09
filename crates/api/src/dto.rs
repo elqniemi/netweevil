@@ -64,6 +64,8 @@ pub(crate) struct TransitFeedInfo {
     pub(crate) source_path: String,
     pub(crate) service_start_date: String,
     pub(crate) service_days: u32,
+    pub(crate) agency_timezone: String,
+    pub(crate) time_origin_unix_s: i64,
     pub(crate) stop_count: u64,
     pub(crate) route_count: u64,
     pub(crate) trip_count: u64,
@@ -172,6 +174,8 @@ pub(crate) struct TransitExecutionContext {
     pub(crate) feed_id: String,
     pub(crate) service_start_date: String,
     pub(crate) service_days: u32,
+    pub(crate) agency_timezone: String,
+    pub(crate) time_origin_unix_s: i64,
     pub(crate) route_engine: String,
     pub(crate) walking_geometry: String,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -1066,7 +1066,7 @@ fn execute_batched_route_with_candidates(
     Err(failure.into())
 }
 
-fn batch_route_result_for_path(
+pub(crate) fn batch_route_result_for_path(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     routing_graph: &RoutingGraph,
@@ -1117,13 +1117,14 @@ fn batch_route_result_for_path(
             Some(
                 path.edge_indexes
                     .iter()
-                    .map(|&edge_index| {
+                    .enumerate()
+                    .map(|(position, &edge_index)| {
                         let edge = topology.edge(edge_index);
                         let metric = &metrics.edge_metrics[edge_index];
                         let factor = edge_traversal_factor(
                             edge_index,
-                            path.edge_indexes.first().copied(),
-                            path.edge_indexes.last().copied(),
+                            position == 0,
+                            position + 1 == path.edge_indexes.len(),
                             origin,
                             destination,
                         );

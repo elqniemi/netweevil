@@ -1148,12 +1148,13 @@ fn build_component_route_result(
         primary
             .edge_indexes
             .iter()
-            .map(|edge_index| {
+            .enumerate()
+            .map(|(position, edge_index)| {
                 let edge = topology.edge(*edge_index);
                 let factor = edge_traversal_factor(
                     *edge_index,
-                    primary.edge_indexes.first().copied(),
-                    primary.edge_indexes.last().copied(),
+                    position == 0,
+                    position + 1 == primary.edge_indexes.len(),
                     &primary.origin,
                     &primary.destination,
                 );

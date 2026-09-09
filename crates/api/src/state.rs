@@ -87,6 +87,8 @@ fn service_capabilities() -> ServiceCapabilities {
         analyses: vec![
             "route",
             "locate",
+            "directions",
+            "waypoints",
             "od",
             "matrix",
             "accessibility",

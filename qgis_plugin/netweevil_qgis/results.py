@@ -495,6 +495,7 @@ class ResultsMixin:
         return self.dedupe_coordinates(coordinates)
 
     def transit_summary_feature_collection(self, service, result):
+        time_context = result.get("time_context") or {}
         summary = result.get("summary") or {}
         coordinates = self.transit_route_coordinates(result)
         features = [
@@ -503,6 +504,8 @@ class ResultsMixin:
                 "geometry": self.item_geometry(coordinates),
                 "properties": {
                     "feed_id": service.get("feed_id"),
+                    "agency_timezone": time_context.get("agency_timezone"),
+                    "time_origin_unix_s": time_context.get("time_origin_unix_s"),
                     "service_start_date": service.get("service_start_date"),
                     "service_days": service.get("service_days"),
                     "route_engine": service.get("route_engine"),
@@ -530,6 +533,8 @@ class ResultsMixin:
                     "geometry": self.item_geometry(self.transit_route_coordinates(alternative)),
                     "properties": {
                         "feed_id": service.get("feed_id"),
+                        "agency_timezone": time_context.get("agency_timezone"),
+                        "time_origin_unix_s": time_context.get("time_origin_unix_s"),
                         "service_start_date": service.get("service_start_date"),
                         "service_days": service.get("service_days"),
                         "route_engine": service.get("route_engine"),
@@ -553,6 +558,7 @@ class ResultsMixin:
         }
 
     def transit_leg_feature_collection(self, service, result):
+        time_context = result.get("time_context") or {}
         features = []
         for index, leg in enumerate(result.get("legs") or [], start=1):
             features.append(
@@ -561,6 +567,8 @@ class ResultsMixin:
                     "geometry": self.item_geometry(leg.get("geometry")),
                     "properties": {
                         "feed_id": service.get("feed_id"),
+                        "agency_timezone": time_context.get("agency_timezone"),
+                        "time_origin_unix_s": time_context.get("time_origin_unix_s"),
                         "route_id": result.get("route_id"),
                         "leg_index": index,
                         "leg_type": leg.get("leg_type"),
@@ -593,6 +601,8 @@ class ResultsMixin:
                         "geometry": self.item_geometry(leg.get("geometry")),
                         "properties": {
                             "feed_id": service.get("feed_id"),
+                            "agency_timezone": time_context.get("agency_timezone"),
+                            "time_origin_unix_s": time_context.get("time_origin_unix_s"),
                             "route_id": result.get("route_id"),
                             "route_rank": alternative.get("rank"),
                             "alternative_index": alternative.get("alternative_index"),
@@ -622,6 +632,7 @@ class ResultsMixin:
         return {"type": "FeatureCollection", "features": features}
 
     def transit_stop_feature_collection(self, service, result):
+        time_context = result.get("time_context") or {}
         features = []
         for stop in result.get("stops") or []:
             features.append(
@@ -633,6 +644,8 @@ class ResultsMixin:
                     },
                     "properties": {
                         "feed_id": service.get("feed_id"),
+                        "agency_timezone": time_context.get("agency_timezone"),
+                        "time_origin_unix_s": time_context.get("time_origin_unix_s"),
                         "route_id": result.get("route_id"),
                         "sequence": stop.get("sequence"),
                         "stop_id": stop.get("stop_id"),
@@ -650,6 +663,7 @@ class ResultsMixin:
         return {"type": "FeatureCollection", "features": features}
 
     def transit_stop_segment_feature_collection(self, service, result):
+        time_context = result.get("time_context") or {}
         features = []
         for segment in result.get("stop_segments") or []:
             features.append(
@@ -658,6 +672,8 @@ class ResultsMixin:
                     "geometry": self.item_geometry(segment.get("geometry")),
                     "properties": {
                         "feed_id": service.get("feed_id"),
+                        "agency_timezone": time_context.get("agency_timezone"),
+                        "time_origin_unix_s": time_context.get("time_origin_unix_s"),
                         "route_id": result.get("route_id"),
                         "segment_index": segment.get("segment_index"),
                         "from_stop_id": segment.get("from_stop_id"),

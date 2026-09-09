@@ -1,11 +1,9 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
-use anyhow::{Context, Result, anyhow};
-use time::{OffsetDateTime, PrimitiveDateTime, Time, format_description::well_known::Rfc3339};
+use anyhow::Result;
 
 use crate::backward::BackwardIndex;
-use crate::gtfs::parse_iso_date;
 use crate::legs::{haversine_m, seconds_for_distance};
 use crate::model::{
     AccessMode, TransitBundle, TransitConnection, TransitModeOptions, TransitStop,
@@ -310,31 +308,9 @@ impl<'a> TransitRuntime<'a> {
         self
     }
 
-    /// Resolves a request datetime to bundle-relative seconds. Service days
-    /// are laid out end to end, so an after-midnight time on one service day
-    /// stays ahead of the next day's start.
+    /// Resolves explicit instants or unambiguous agency-local wall times.
     pub(crate) fn request_time_seconds(&self, raw: &str) -> Result<u32> {
-        let parsed = match OffsetDateTime::parse(raw, &Rfc3339) {
-            Ok(parsed) => parsed,
-            Err(_) => parse_naive_datetime(raw)
-                .with_context(|| format!("parsing transit datetime '{raw}'"))?,
-        };
-        let date = parsed.date().to_string();
-        let day_index = self
-            .bundle
-            .service_dates
-            .iter()
-            .position(|candidate| candidate == &date)
-            .ok_or_else(|| {
-                anyhow!(
-                    "request date {date} is outside transit bundle window {:?}",
-                    self.bundle.service_dates
-                )
-            })?;
-        Ok((day_index as u32) * 86_400
-            + parsed.hour() as u32 * 3600
-            + parsed.minute() as u32 * 60
-            + parsed.second() as u32)
+        crate::timetable_time::request_time_seconds(self.bundle, raw)
     }
 
     pub(crate) fn nearby_access_stops(
@@ -362,22 +338,6 @@ impl<'a> TransitRuntime<'a> {
     pub(crate) fn all_transfer_candidates(&self) -> &'a [Vec<StopCandidate>] {
         self.transfer_candidates
     }
-}
-
-fn parse_naive_datetime(raw: &str) -> Result<OffsetDateTime> {
-    let (date, time) = raw.split_once('T').unwrap_or((raw, "00:00:00"));
-    let date = parse_iso_date(date)?;
-    let parts = time
-        .split(':')
-        .map(str::parse::<u8>)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .with_context(|| format!("invalid time in datetime '{raw}'"))?;
-    let time = Time::from_hms(
-        parts.first().copied().unwrap_or_default(),
-        parts.get(1).copied().unwrap_or_default(),
-        parts.get(2).copied().unwrap_or_default(),
-    )?;
-    Ok(PrimitiveDateTime::new(date, time).assume_utc())
 }
 
 #[derive(Debug, Clone)]

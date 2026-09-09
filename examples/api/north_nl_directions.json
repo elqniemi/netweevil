@@ -1,0 +1,8 @@
+{
+  "request": {
+    "route_id": "groningen_directions",
+    "origin": { "id": "start", "lon": 6.5665, "lat": 53.2194 },
+    "destination": { "id": "finish", "lon": 6.5716, "lat": 53.2148 },
+    "snap": { "max_distance_m": 500.0 }
+  }
+}

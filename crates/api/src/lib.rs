@@ -22,6 +22,7 @@ mod locate;
 mod simulation;
 mod state;
 mod transit;
+mod waypoints;
 
 use simulation::SimulationRegistry;
 use state::{ApiState, load_service_runtime};
@@ -59,7 +60,9 @@ fn router(state: ApiState) -> Router {
         .route("/v1/profiles", get(handlers::list_profiles))
         .route("/v1/profiles/{profile_id}", get(handlers::get_profile))
         .route("/v1/route", post(handlers::route_handler))
+        .route("/v1/directions", post(handlers::directions_handler))
         .route("/v1/locate", post(locate::locate_handler))
+        .route("/v1/waypoints", post(waypoints::waypoints_handler))
         .route("/v1/transit-route", post(transit::transit_route_handler))
         .route(
             "/v1/transit-service-area",

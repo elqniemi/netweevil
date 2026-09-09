@@ -257,6 +257,7 @@ fn assemble_transit_service_area_result(
     };
     Ok(TransitServiceAreaResult {
         analysis_id: request.analysis_id.clone(),
+        time_context: bundle.time_context(),
         outcome,
         origin_count: request.origins.len(),
         processed_origin_count,

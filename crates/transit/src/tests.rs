@@ -1102,6 +1102,7 @@ fn csa_consumes_network_transfer_table_and_exposes_station_path() {
 
 fn hardened_gtfs_fixture_files() -> GtfsFiles {
     let mut files = GtfsFiles::default();
+    files.insert("agency.txt", "agency_id,agency_name,agency_url,agency_timezone\nA,Fixture,https://example.test,Europe/Amsterdam\n".to_string());
     files.insert(
         "stops.txt",
         "\u{feff}stop_id,stop_name,stop_lat,stop_lon\nA,A,53.0,6.0\nB,B,53.0,6.01\nC,C,53.0,6.02\nD,D,53.0,6.03\n"
@@ -1134,6 +1135,7 @@ fn hardened_gtfs_fixture_files() -> GtfsFiles {
 
 fn two_line_transfer_fixture_files() -> GtfsFiles {
     let mut files = GtfsFiles::default();
+    files.insert("agency.txt", "agency_id,agency_name,agency_url,agency_timezone\nA,Fixture,https://example.test,Europe/Amsterdam\n".to_string());
     files.insert(
         "stops.txt",
         "stop_id,stop_name,stop_lat,stop_lon\nA,A,53.0,6.0\nB1,Platform 1,53.0,6.01\nB2,Platform 2,53.0,6.0101\nC,C,53.0,6.02\n"
@@ -1167,6 +1169,7 @@ fn two_line_transfer_fixture_files() -> GtfsFiles {
 
 fn fixture_files() -> GtfsFiles {
     let mut files = GtfsFiles::default();
+    files.insert("agency.txt", "agency_id,agency_name,agency_url,agency_timezone\nA,Fixture,https://example.test,Europe/Amsterdam\n".to_string());
     files.insert(
         "stops.txt",
         "stop_id,stop_name,stop_lat,stop_lon\nA,A,53.0,6.0\nB,B,53.0,6.01\nC,C,53.0,6.02\n"
@@ -1197,6 +1200,7 @@ fn fixture_files() -> GtfsFiles {
 
 fn frequency_fixture_files() -> GtfsFiles {
     let mut files = GtfsFiles::default();
+    files.insert("agency.txt", "agency_id,agency_name,agency_url,agency_timezone\nA,Fixture,https://example.test,Europe/Amsterdam\n".to_string());
     files.insert(
         "stops.txt",
         "stop_id,stop_name,stop_lat,stop_lon\nA,A,53.0,6.0\nB,B,53.0,6.01\nC,C,53.0,6.02\n"
@@ -1231,6 +1235,7 @@ fn frequency_fixture_files() -> GtfsFiles {
 
 fn access_transfer_fixture_files() -> GtfsFiles {
     let mut files = GtfsFiles::default();
+    files.insert("agency.txt", "agency_id,agency_name,agency_url,agency_timezone\nA,Fixture,https://example.test,Europe/Amsterdam\n".to_string());
     files.insert(
         "stops.txt",
         "stop_id,stop_name,stop_lat,stop_lon\nA,A,53.0,6.0\nB,B,53.0,6.005\nC,C,53.0,6.01\n"
@@ -1261,6 +1266,7 @@ fn access_transfer_fixture_files() -> GtfsFiles {
 
 fn terminal_transfer_fixture_files() -> GtfsFiles {
     let mut files = GtfsFiles::default();
+    files.insert("agency.txt", "agency_id,agency_name,agency_url,agency_timezone\nA,Fixture,https://example.test,Europe/Amsterdam\n".to_string());
     files.insert(
         "stops.txt",
         "stop_id,stop_name,stop_lat,stop_lon\nA,A,53.0,6.0\nB,B,53.0,6.005\nC,C,53.0,6.01\n"
@@ -2191,5 +2197,314 @@ fn repeated_stop_vehicle_positions_preserve_pickup_and_full_loop_geometry() {
                 8 * 3600 + 30 * 60
             }
         );
+    }
+}
+
+fn timezone_fixture(start: &str, days: u32, stop_times: &str) -> TransitBundle {
+    let mut files = fixture_files();
+    files.insert("calendar.txt", "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nWEEK,1,1,1,1,1,1,1,20260101,20261231\n".to_string());
+    files.insert("stop_times.txt", stop_times.to_string());
+    build_bundle_from_files(
+        files,
+        "timezone-fixture".to_string(),
+        TransitImportOptions {
+            name: "timezone".to_string(),
+            source_label: "timezone".to_string(),
+            service_start_date: start.to_string(),
+            service_days: days,
+        },
+    )
+    .expect("timezone fixture imports")
+}
+
+const DAILY_MORNING_STOP_TIMES: &str = "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,08:00:00,08:00:00,A,1\nT1,08:30:00,08:30:00,C,2\n";
+
+#[test]
+fn gtfs_service_days_use_dst_aware_noon_minus_twelve_hours() {
+    for (start, expected_steps, expected_departures) in [
+        (
+            "2026-03-28",
+            [23 * 3600, 24 * 3600],
+            [
+                "2026-03-28T08:00:00+01:00",
+                "2026-03-29T08:00:00+02:00",
+                "2026-03-30T08:00:00+02:00",
+            ],
+        ),
+        (
+            "2026-10-24",
+            [25 * 3600, 24 * 3600],
+            [
+                "2026-10-24T08:00:00+02:00",
+                "2026-10-25T08:00:00+01:00",
+                "2026-10-26T08:00:00+01:00",
+            ],
+        ),
+    ] {
+        let bundle = timezone_fixture(start, 3, DAILY_MORNING_STOP_TIMES);
+        assert_eq!(bundle.agency_timezone, "Europe/Amsterdam");
+        assert_eq!(bundle.connections.len(), 3);
+        for (pair, expected) in bundle.connections.windows(2).zip(expected_steps) {
+            assert_eq!(pair[1].departure_s - pair[0].departure_s, expected);
+        }
+        for (connection, expected) in bundle.connections.iter().zip(expected_departures) {
+            assert_eq!(
+                bundle
+                    .time_context()
+                    .datetime(connection.departure_s)
+                    .unwrap(),
+                expected
+            );
+        }
+    }
+}
+
+#[test]
+fn query_offsets_and_naive_agency_times_resolve_to_the_same_instant() {
+    let bundle = timezone_fixture("2026-03-28", 3, DAILY_MORNING_STOP_TIMES);
+    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    for arrive_by in [false, true] {
+        let datetimes = if arrive_by {
+            [
+                "2026-03-29T08:31:00+02:00",
+                "2026-03-29T06:31:00Z",
+                "2026-03-29T08:31:00",
+            ]
+        } else {
+            [
+                "2026-03-29T07:59:00+02:00",
+                "2026-03-29T05:59:00Z",
+                "2026-03-29T07:59:00",
+            ]
+        };
+        let mut expected_summary = None;
+        for datetime in datetimes {
+            let mut request = arrive_by_request(datetime, short_access_modes());
+            request.time.arrive_by = arrive_by;
+            let route = router.execute_route(&request).unwrap();
+            assert_eq!(route.outcome, TransitOutcome::Scheduled);
+            assert_eq!(
+                route
+                    .time_context
+                    .datetime(route.summary.arrival_s.unwrap())
+                    .unwrap(),
+                "2026-03-29T08:30:01+02:00"
+            );
+            let summary = (route.summary.departure_s, route.summary.arrival_s);
+            if let Some(expected) = expected_summary {
+                assert_eq!(summary, expected);
+            }
+            expected_summary = Some(summary);
+            let area = router
+                .execute_service_area(&TransitServiceAreaRequest {
+                    analysis_id: "dst-area".to_string(),
+                    origins: vec![if arrive_by {
+                        request.destination.clone()
+                    } else {
+                        request.origin.clone()
+                    }],
+                    time: request.time,
+                    modes: request.modes,
+                    max_travel_time_s: 3600,
+                    returns: TransitServiceAreaReturnOptions::default(),
+                })
+                .unwrap();
+            let endpoint = area
+                .stops
+                .iter()
+                .find(|stop| stop.stop_id == if arrive_by { "A" } else { "C" })
+                .unwrap();
+            assert_eq!(
+                area.time_context.datetime(endpoint.arrival_s).unwrap(),
+                if arrive_by {
+                    "2026-03-29T07:59:30+02:00"
+                } else {
+                    "2026-03-29T08:30:00+02:00"
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn ambiguous_and_nonexistent_naive_datetimes_are_rejected() {
+    for (start, datetime, message) in [
+        ("2026-03-28", "2026-03-29T02:30:00", "does not exist"),
+        ("2026-10-24", "2026-10-25T02:30:00", "ambiguous"),
+    ] {
+        let router = PreparedTransitRouter::new(Arc::new(timezone_fixture(
+            start,
+            3,
+            DAILY_MORNING_STOP_TIMES,
+        )));
+        for arrive_by in [false, true] {
+            let mut request = arrive_by_request(datetime, short_access_modes());
+            request.time.arrive_by = arrive_by;
+            assert!(
+                router
+                    .execute_route(&request)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message)
+            );
+            let area = TransitServiceAreaRequest {
+                analysis_id: "ambiguous-area".to_string(),
+                origins: vec![request.origin],
+                time: request.time,
+                modes: request.modes,
+                max_travel_time_s: 3600,
+                returns: TransitServiceAreaReturnOptions::default(),
+            };
+            assert!(
+                router
+                    .execute_service_area(&area)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(message)
+            );
+        }
+    }
+}
+
+#[test]
+fn explicit_offsets_distinguish_both_occurrences_of_the_autumn_hour() {
+    let mut files = fixture_files();
+    files.insert("calendar.txt", "service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nWEEK,1,1,1,1,1,1,1,20260101,20261231\n".to_string());
+    files.insert(
+        "trips.txt",
+        "route_id,service_id,trip_id,trip_headsign\nR,WEEK,EARLY,C\nR,WEEK,LATE,C\n".to_string(),
+    );
+    files.insert("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nEARLY,01:45:00,01:45:00,A,1\nEARLY,02:15:00,02:15:00,C,2\nLATE,02:45:00,02:45:00,A,1\nLATE,03:15:00,03:15:00,C,2\n".to_string());
+    let bundle = build_bundle_from_files(
+        files,
+        "fold".to_string(),
+        TransitImportOptions {
+            name: "fold".to_string(),
+            source_label: "fold".to_string(),
+            service_start_date: "2026-10-25".to_string(),
+            service_days: 1,
+        },
+    )
+    .unwrap();
+    // This day's GTFS zero is 01:00 summer time; origin still covers midnight.
+    assert_eq!(
+        bundle.time_context().datetime(0).unwrap(),
+        "2026-10-25T00:00:00+02:00"
+    );
+    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    let mut departures = Vec::new();
+    for (datetime, trip_id, arrival) in [
+        (
+            "2026-10-25T02:30:00+02:00",
+            "EARLY",
+            "2026-10-25T02:15:01+01:00",
+        ),
+        (
+            "2026-10-25T02:30:00+01:00",
+            "LATE",
+            "2026-10-25T03:15:01+01:00",
+        ),
+    ] {
+        let mut request = arrive_by_request(datetime, short_access_modes());
+        request.time.arrive_by = false;
+        let result = router.execute_route(&request).unwrap();
+        assert_eq!(result.outcome, TransitOutcome::Scheduled);
+        assert_eq!(
+            result
+                .time_context
+                .datetime(result.summary.arrival_s.unwrap())
+                .unwrap(),
+            arrival
+        );
+        assert_eq!(
+            result.legs.iter().find_map(|leg| leg.trip_id.as_deref()),
+            Some(trip_id)
+        );
+        departures.push(result.summary.departure_s);
+    }
+    assert_eq!(departures[1] - departures[0], 3600);
+    let request = arrive_by_request("2026-10-25T02:20:00+01:00", short_access_modes());
+    let result = router.execute_route(&request).unwrap();
+    assert_eq!(
+        result
+            .time_context
+            .datetime(result.summary.departure_s)
+            .unwrap(),
+        "2026-10-25T02:44:29+02:00"
+    );
+}
+
+#[test]
+fn overnight_service_routes_beyond_last_imported_date_across_both_dst_changes() {
+    for (service_date, stop_times, departure, expected_boarding, expected_arrival) in [
+        (
+            "2026-03-28",
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,25:30:00,25:30:00,A,1\nT1,26:30:00,26:30:00,C,2\n",
+            "2026-03-29T01:20:00+01:00",
+            "2026-03-29T01:30:00+01:00",
+            "2026-03-29T03:30:01+02:00",
+        ),
+        (
+            "2026-10-24",
+            "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,26:15:00,26:15:00,A,1\nT1,27:15:00,27:15:00,C,2\n",
+            "2026-10-25T02:00:00+02:00",
+            "2026-10-25T02:15:00+02:00",
+            "2026-10-25T02:15:01+01:00",
+        ),
+    ] {
+        let bundle = timezone_fixture(service_date, 1, stop_times);
+        let router = PreparedTransitRouter::new(Arc::new(bundle));
+        let mut request = arrive_by_request(departure, short_access_modes());
+        request.time.arrive_by = false;
+        request.time.search_window_s = 7200;
+        let result = router.execute_route(&request).unwrap();
+        assert_eq!(result.outcome, TransitOutcome::Scheduled);
+        let ride = result
+            .legs
+            .iter()
+            .find(|leg| leg.leg_type == TransitLegType::Transit)
+            .unwrap();
+        assert_eq!(ride.arrival_s - ride.departure_s, 3600);
+        assert_eq!(
+            result.time_context.datetime(ride.departure_s).unwrap(),
+            expected_boarding
+        );
+        assert_eq!(
+            result
+                .time_context
+                .datetime(result.summary.arrival_s.unwrap())
+                .unwrap(),
+            expected_arrival
+        );
+        request.time.arrive_by = true;
+        request.time.datetime = expected_arrival.to_string();
+        let reverse = router.execute_route(&request).unwrap();
+        assert_eq!(reverse.outcome, TransitOutcome::Scheduled);
+        assert_eq!(reverse.summary.arrival_s, result.summary.arrival_s);
+        assert_eq!(reverse.summary.boarding_count, 1);
+    }
+}
+
+#[test]
+fn gtfs_import_requires_one_valid_shared_agency_timezone() {
+    for raw in [
+        "agency_timezone\nNot/AZone\n",
+        "agency_timezone\nEurope/Amsterdam\nEurope/London\n",
+        "agency_timezone\n",
+        "agency_name\nMissing timezone\n",
+    ] {
+        let mut files = fixture_files();
+        files.insert("agency.txt", raw.to_string());
+        let result = build_bundle_from_files(
+            files,
+            "invalid-zone".to_string(),
+            TransitImportOptions {
+                name: "invalid-zone".to_string(),
+                source_label: "invalid-zone".to_string(),
+                service_start_date: "2026-05-11".to_string(),
+                service_days: 1,
+            },
+        );
+        assert!(result.is_err(), "invalid agency data should fail: {raw}");
     }
 }

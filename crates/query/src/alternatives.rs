@@ -324,13 +324,14 @@ fn route_segments_for_path(
 ) -> Vec<RouteSegment> {
     edge_indexes
         .iter()
-        .map(|&edge_index| {
+        .enumerate()
+        .map(|(position, &edge_index)| {
             let edge = topology.edge(edge_index);
             let metric = &metrics.edge_metrics[edge_index];
             let factor = edge_traversal_factor(
                 edge_index,
-                edge_indexes.first().copied(),
-                edge_indexes.last().copied(),
+                position == 0,
+                position + 1 == edge_indexes.len(),
                 origin,
                 destination,
             );

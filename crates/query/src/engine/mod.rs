@@ -80,6 +80,18 @@ impl PreparedRoutingEngine {
         self.metrics.clone()
     }
 
+    pub fn execute_waypoints(
+        &self,
+        request: &crate::WaypointRequest,
+    ) -> Result<crate::WaypointResult> {
+        crate::waypoints::execute_waypoints_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            request,
+        )
+    }
+
     pub fn execute_route(&self, request: &RouteRequest) -> Result<RouteResult> {
         self.execute_route_with_optional_edge_names(request, None, EngineMode::Auto)
     }
@@ -390,7 +402,7 @@ impl PreparedRoutingEngine {
         description
     }
 
-    fn routing_graph_for_mode(
+    pub(crate) fn routing_graph_for_mode(
         &self,
         mode: EngineMode,
     ) -> (&RoutingGraph, EffectiveEngineDescription) {
@@ -449,11 +461,15 @@ pub(crate) fn finalize_route_path(
 ) -> RoutePath {
     let mut total_generalized_cost = 0.0;
     let mut previous_edge_index = None;
-    let first_edge = edge_indexes.first().copied();
-    let last_edge = edge_indexes.last().copied();
-    for &edge_index in &edge_indexes {
+    for (position, &edge_index) in edge_indexes.iter().enumerate() {
         let metric = &metrics.edge_metrics[edge_index];
-        let factor = edge_traversal_factor(edge_index, first_edge, last_edge, origin, destination);
+        let factor = edge_traversal_factor(
+            edge_index,
+            position == 0,
+            position + 1 == edge_indexes.len(),
+            origin,
+            destination,
+        );
         total_generalized_cost += metric.generalized_cost.unwrap_or_default() * factor;
         if let Some(previous_edge_index) = previous_edge_index {
             total_generalized_cost +=
@@ -471,27 +487,27 @@ pub(crate) fn finalize_route_path(
 
 pub(crate) fn edge_traversal_factor(
     edge_index: usize,
-    first_edge: Option<usize>,
-    last_edge: Option<usize>,
+    is_first: bool,
+    is_last: bool,
     origin: &SnappedPoint,
     destination: &SnappedPoint,
 ) -> f64 {
     let mut start_factor = 1.0;
     let mut end_factor = 1.0;
-    if first_edge == Some(edge_index)
+    if is_first
         && origin.snapped_edge_id == Some(edge_index as u32)
         && origin.snapped_edge_fraction.is_some()
     {
         start_factor = 1.0 - origin.snapped_edge_fraction.unwrap_or_default();
     }
-    if last_edge == Some(edge_index)
+    if is_last
         && destination.snapped_edge_id == Some(edge_index as u32)
         && destination.snapped_edge_fraction.is_some()
     {
         end_factor = destination.snapped_edge_fraction.unwrap_or(1.0);
     }
-    if first_edge == Some(edge_index)
-        && last_edge == Some(edge_index)
+    if is_first
+        && is_last
         && origin.snapped_edge_id == Some(edge_index as u32)
         && destination.snapped_edge_id == Some(edge_index as u32)
     {
@@ -510,7 +526,12 @@ pub(crate) fn build_route_geometry(
 ) -> Vec<[f64; 3]> {
     let mut geometry = Vec::with_capacity(edge_indexes.len() + 2);
     geometry.push([origin.snapped_lon, origin.snapped_lat, origin.snapped_z]);
-    for &edge_index in edge_indexes {
+    for (position, &edge_index) in edge_indexes.iter().enumerate() {
+        if position + 1 == edge_indexes.len()
+            && destination.snapped_edge_id == Some(edge_index as u32)
+        {
+            break;
+        }
         let node = &topology.nodes[topology.routing_edge(edge_index).to.0 as usize];
         geometry.push([
             node.lon,

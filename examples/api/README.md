@@ -273,3 +273,23 @@ curl -X POST http://127.0.0.1:8080/v1/locate \
   -H 'Content-Type: application/json' \
   --data @examples/api/locate.json
 ```
+
+## Routes with intermediate locations
+
+`POST /v1/waypoints` visits ordered locations and returns route legs and their
+combined distance, travel time and generalized cost. A `break` location splits
+legs and resets turn history. A `through` location stays inside its leg,
+preserves turn history and prohibits an immediate U-turn at the location.
+
+```bash
+curl -X POST 'http://127.0.0.1:8080/v1/waypoints?format=geojson' \
+  -H 'Content-Type: application/json' \
+  --data @examples/api/north_nl_waypoints.json
+```
+
+Set `optimize_order: true` to minimize directed static costs while keeping the
+first and last locations fixed. Optimization supports at most 16 intermediate
+`break` locations; the returned `waypoint_order` contains their original input
+indexes. Ordered routing supports up to 128 locations. Temporal, scenario and
+component-constrained requests are rejected. Requests use a loaded profile and
+the same elevation and attribute snapping options as street routes.

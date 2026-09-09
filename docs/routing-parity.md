@@ -12,13 +12,13 @@ for some large matrix workloads. NetWeevil already has edge-based CCH, so a
 wholesale replacement of its routing algorithm is not the first step.
 Measure the query, snapping, reconstruction, matrix, and HTTP costs separately.
 See the [OSRM project](https://github.com/Project-OSRM/osrm-backend) and
-[service documentation](https://project-osrm.org/docs/v5.24.0/api/).
+[service documentation](https://github.com/Project-OSRM/osrm-backend/blob/master/docs/http.md).
 
 Valhalla covers dynamic mode costing, directions, optimized waypoint order,
 matrices, isochrones, map matching, elevation, and network location inspection.
 NetWeevil's existing dynamic profiles, temporal routing, alternatives, matrices,
-and service areas cover part of that workload. They do not provide navigation
-guidance or GPS trace matching.
+and service areas cover part of that workload. Basic English street directions
+and ordered/optimized waypoints are implemented; GPS trace matching is absent.
 See the [Valhalla service index](https://valhalla.github.io/valhalla/api/).
 
 MOTIS combines street and public transport routing with multiple timetable
@@ -32,24 +32,54 @@ See the [MOTIS project](https://github.com/motis-project/motis).
 
 | Area | NetWeevil implementation | Work needed for parity |
 | --- | --- | --- |
-| Road search | Edge-based CCH with metric customization, exact reference search, restriction validation | Matched local OSRM measurements; reduce hierarchy memory and costly restriction fallback |
+| Road search | Edge-based CCH with metric customization, exact reference search, restriction validation; local OSRM HTTP comparison | Align car profiles and snap eligibility; close the measured latency gap and reduce hierarchy memory/restriction fallback |
 | Snapping | Directed edge-interior snapping with profile, elevation and attribute filters; prepared edge spatial index | Bearing and curb-side constraints, spherical date-line handling |
 | Dynamic costing | Cached request-defined profiles and overrides | Compare cold customization cost, cache churn and concurrent preparation against Valhalla |
 | Matrix | Shared CCH search spaces with legal-route validation and a reusable exact frontier per origin | Accelerate restriction-state searches; test large asymmetric matrices |
 | Service areas | Network and polygon output, multiple thresholds/origins, temporal sequences | Match Valhalla contour semantics and measure polygon generation independently |
 | Locate | `POST /v1/locate` returns the same profile-aware candidates as route snapping | Add richer edge metadata where consumers need it |
-| Navigation | Route geometry, segments and costs | Maneuver generation, intersections, roundabout exits, lane guidance, localized text and voice instructions |
-| Waypoints | Route batches and OD matrices | Ordered waypoint routing with break/through semantics and optimized waypoint order |
+| Navigation | Static legal street directions: English turns, road-name changes, legal roundabout exit counts, edge ranges | Lane/signpost guidance, localized text and voice, richer intersection classification, temporal directions |
+| Waypoints | Ordered static break/through routing with turn-history continuity; exact directed stop ordering with fixed endpoints and at most 16 intermediate stops | Via/break-through variants, time-dependent stop order, faster large stop sets |
 | Map matching | No trace-matching request or engine | Candidate emissions, transition-distance likelihoods, Viterbi search, timestamps, gaps and confidence |
 | Elevation | Z-aware topology and multilayer pedestrian routing | DEM sampling and an elevation-along-path service |
 | Transit search | Depart-at, arrive-by, transfer limits, alternatives, frequency trips, access/egress and network transfer tables | Brute-force timetable oracle and a shared MOTIS journey corpus |
-| Transit storage | Imported connections expanded across a selected date window | Pattern/run storage, service-day bitsets, agency timezone-aware lookup across midnight and DST |
+| Transit storage | Connections expanded across a selected date window; agency timezone/DST-aware service anchors and explicit-offset query times | Pattern/run storage, service-day bitsets and year-scale memory measurements |
 | Transit feeds | Separate imported GTFS feeds | Feed-qualified identifiers, cross-feed transfers, NeTEx and flexible services |
 | Live transit | Static timetable | Immutable real-time snapshots, delays, cancellations, stop changes and alerts; GTFS-RT first |
 | Passenger constraints | Transfer/access/egress options | GTFS transfers/pathways, wheelchair and bicycle carriage rules, fares, platform-level passenger information |
 | Shared mobility | No GBFS routing integration | Availability, vehicle/station constraints, geofencing and rental legs |
 
 ## Changes in this pass
+
+The local OSRM comparison now runs against the official OSRM binaries on this
+machine and the identical North Netherlands PBF. It shows a remaining HTTP
+latency gap: NetWeevil p50/p95 1.57/3.31 ms versus OSRM MLD 0.71/1.46 ms.
+These profiles are not equivalent, and OSRM rejects 84 pairs at snapping and
+seven as unreachable. Restricting to the 909 common successes gives
+NetWeevil p50/p95 1.561/3.306 ms versus OSRM 0.750/1.485 ms.
+See [the reproducible setup and common-success analysis](local-osrm-benchmark.md).
+
+`POST /v1/directions` adds primary-route maneuver instructions. It suppresses
+false turns on unbranched bends and counts only legal roundabout exit junctions,
+including multi-edge restriction history. It rejects temporal or degraded
+routes and restriction-bypassing execution. Maneuver ranges cover the route's
+edges; segment travel times exclude turn penalties, which remain in the summary.
+
+`POST /v1/waypoints` supports breaks that reset turn history and through points
+that retain it. Through points do not split legs or permit a U-turn at the
+point. Exact directed Held–Karp ordering supports up to 16 intermediate breaks
+with fixed endpoints. Repeated occurrences of the first or last edge now receive
+partial-edge costs only at the actual first/last traversal, and final geometry
+ends at the destination snap without overshooting the edge.
+
+GTFS imports now require a shared IANA agency timezone. Connections use elapsed
+UTC seconds from an explicit origin; each service day's anchor follows the
+GTFS local-noon-minus-twelve-hours rule. Queries with explicit offsets identify
+an instant, and ambiguous or nonexistent local wall times are rejected.
+Depart-at, arrive-by and service areas share this interpretation. Bundle schema
+5 replaces the prior storage layout; feeds must be reimported. See
+[transit time semantics](transit-time.md) and the
+[GTFS schedule reference](https://gtfs.org/documentation/schedule/reference/).
 
 The CCH search now accounts for negative destination seed costs from
 partial-edge snapping when deciding whether to stop. Exact bidirectional search
@@ -118,17 +148,16 @@ than a full multicriteria label set. These need separate correctness work.
    CCH candidates, then represent multi-edge restriction automaton states in
    the accelerated graph. Validate every new path against exact routing before
    judging speed. Removing restrictions or legal u-turns changes the problem.
-3. Add ordered waypoints and optimized stops over the existing matrix engine.
-   Specify which waypoint types permit reversals and whether restrictions may
-   span a waypoint. Guidance should consume a reconstructed route with road
-   names and intersection metadata, rather than influence shortest-path code.
+3. Extend the static waypoint and English guidance implementation with the
+   remaining waypoint types, signposts, lane guidance and localization.
+   Measure large directed stop sets before choosing an approximate optimizer.
 4. Build map matching as a query module. Reuse the edge spatial index for
    candidates and the routing engine for transitions. Test parallel roads,
    tunnels, sparse GPS points, gaps, stationary samples and disconnected traces.
 5. Replace expanded transit storage before importing year-long, multi-feed
    schedules. Keep public trip IDs separate from dated/frequency run IDs.
-   Group trips by stopping pattern, store operating days as bitsets, and add
-   timezone-aware service-day lookup. Compare a round-based pattern scanner
+   Group trips by stopping pattern and store operating days as bitsets while
+   preserving the implemented timezone/DST semantics. Compare a round-based pattern scanner
    with the current connection search using the same journey oracle.
 6. Apply GTFS-RT to immutable timetable snapshots. Each request must see one
    complete update generation. Validate missed and newly possible transfers,
@@ -136,6 +165,24 @@ than a full multicriteria label set. These need separate correctness work.
    Add cross-feed transfers, accessibility, fares and GBFS after that foundation.
 
 ## Acceptance and reproducibility
+
+The waypoint, guidance and timezone implementation passes 313 workspace tests
+with two benchmark/experiment tests ignored, `cargo check`, formatting, Clippy
+with warnings denied, and rustdoc with warnings denied. The rebuilt API passes
+11 live endpoint checks, all 1,000 route reconstructions against the saved exact
+reference, and all 400 cells of a 20×20 matrix against newly executed exact
+routes. Break/through/optimized requests, JSON/GeoJSON directions, and equivalent
+local/UTC transit queries were exercised. Reports are in
+`.netweevil/reports/parity-next/`. QGIS packaging and Python export checks pass;
+a full QGIS runtime was not available.
+
+The next small road-performance experiment is to remove per-edge `None`
+entries in legal-route violation maps: readers already treat missing entries
+as no violation. Other inspected costs include cloning successful paths into
+a request-local cache immediately before returning, repeated cost walks and
+shortcut witness reconstruction. These are code observations, not profiler
+attribution; measure each change against exact routes and the same local HTTP
+corpus before claiming a gain.
 
 Run comparisons on locally hosted engines with the same OSM extract, hardware,
 thread count, service date, profile rules and output detail. Record executable
@@ -161,7 +208,7 @@ request rate. They cannot establish equal-hardware engine capacity. This
 environment has no installed OSRM, Valhalla, MOTIS or Docker executable, so
 cross-engine performance parity remains unverified.
 
-## Local measurements from this pass
+## Initial implementation measurements
 
 Both runs use `north_nl_2026_05_10`, the car profile and the 1,000-pair North
 Netherlands corpus. The existing release executable reports revision `450f2d9`;
@@ -190,7 +237,7 @@ readiness, locate and transit endpoints returned successful responses. A
 synthetic GTFS import exercised a through journey across an intermediate stop
 where boarding and alighting are prohibited.
 
-Workspace validation passed 291 tests, `cargo check`, formatting, and Clippy
+That implementation passed 291 tests, `cargo check`, formatting, and Clippy
 with warnings denied. The QGIS plugin packaged successfully and its Python
 modules parsed without a QGIS runtime. The sparse transit benchmark ran
 separately; the unrelated hierarchy-ordering experiment remains ignored.

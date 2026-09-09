@@ -306,6 +306,7 @@ fn execute_transit_route_with_runtime(
     if access.is_empty() || egress.is_empty() {
         return Ok(TransitRouteResult {
             route_id: request.route_id.clone(),
+            time_context: bundle.time_context(),
             outcome: TransitOutcome::Unreachable,
             summary: TransitRouteSummary {
                 departure_s,
@@ -525,6 +526,7 @@ fn execute_transit_route_with_runtime(
     else {
         return Ok(TransitRouteResult {
             route_id: request.route_id.clone(),
+            time_context: bundle.time_context(),
             outcome: TransitOutcome::Unreachable,
             summary: TransitRouteSummary {
                 departure_s,
@@ -564,6 +566,7 @@ fn execute_transit_route_with_runtime(
     )?;
     Ok(TransitRouteResult {
         route_id: request.route_id.clone(),
+        time_context: bundle.time_context(),
         outcome: TransitOutcome::Scheduled,
         summary,
         legs,

@@ -2043,6 +2043,10 @@ features:
         std::fs::create_dir_all(path).expect("mini-station GTFS directory creates");
         for (name, contents) in [
             (
+                "agency.txt",
+                "agency_id,agency_name,agency_url,agency_timezone\nMINI,Mini station,https://example.test,Asia/Hong_Kong\n",
+            ),
+            (
                 "stops.txt",
                 "stop_id,stop_name,stop_lat,stop_lon\nO,Origin,22.0,113.9998\nA,Concourse,22.0,114.0001\nB,Platform,22.0,114.0003\nD,Destination,22.0,114.0006\n",
             ),

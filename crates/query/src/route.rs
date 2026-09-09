@@ -574,13 +574,14 @@ pub(crate) fn execute_route_with_candidates(
         Some(
             path.edge_indexes
                 .iter()
-                .map(|&edge_index| {
+                .enumerate()
+                .map(|(position, &edge_index)| {
                     let edge = topology.edge(edge_index);
                     let metric = &metrics.edge_metrics[edge_index];
                     let factor = edge_traversal_factor(
                         edge_index,
-                        path.edge_indexes.first().copied(),
-                        path.edge_indexes.last().copied(),
+                        position == 0,
+                        position + 1 == path.edge_indexes.len(),
                         &origin,
                         &destination,
                     );
@@ -846,13 +847,16 @@ pub(crate) fn analyze_route_path(
     let mut violations = Vec::new();
     let mut violation_types = std::collections::BTreeSet::<RouteViolationType>::new();
     let mut segment_violation_types = HashMap::<usize, Option<RouteViolationType>>::new();
-    let first_edge = path.edge_indexes.first().copied();
-    let last_edge = path.edge_indexes.last().copied();
-
-    for &edge_index in &path.edge_indexes {
+    for (position, &edge_index) in path.edge_indexes.iter().enumerate() {
         let edge = topology.routing_edge(edge_index);
         let metric = &metrics.edge_metrics[edge_index];
-        let factor = edge_traversal_factor(edge_index, first_edge, last_edge, origin, destination);
+        let factor = edge_traversal_factor(
+            edge_index,
+            position == 0,
+            position + 1 == path.edge_indexes.len(),
+            origin,
+            destination,
+        );
         network_distance_m += (edge.length_m as f64 * factor).round() as u64;
         network_travel_time_s += metric.travel_time_s.unwrap_or_default() * factor;
         network_generalized_cost += metric.generalized_cost.unwrap_or_default() * factor;

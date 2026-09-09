@@ -436,6 +436,155 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn directions_endpoint_preserves_profile_context_in_json_and_geojson() {
+        let service = fixture();
+        service
+            .edge_names
+            .set(Arc::from([
+                "First Road".into(),
+                "Second Road".into(),
+                "Service Road".into(),
+            ]))
+            .unwrap();
+        let state = ApiState {
+            service: service.clone(),
+            simulations: Arc::new(crate::simulation::SimulationRegistry::default()),
+        };
+        for format in [None, Some("geojson")] {
+            let response = crate::handlers::directions_handler(
+                State(state.clone()),
+                Query(ResponseFormatQuery {
+                    format: format.map(str::to_string),
+                }),
+                Json(serde_json::from_value(json!({"request":request()})).unwrap()),
+            )
+            .await
+            .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            let result = if format.is_some() {
+                &body
+            } else {
+                &body["result"]
+            };
+            assert_eq!(result["language"], "en");
+            let maneuvers = result["maneuvers"].as_array().unwrap();
+            assert_eq!(maneuvers.first().unwrap()["kind"], "depart");
+            assert_eq!(maneuvers.last().unwrap()["kind"], "arrive");
+            assert!(
+                maneuvers
+                    .iter()
+                    .all(|m| !m["instruction"].as_str().unwrap().is_empty())
+            );
+            if format.is_none() {
+                assert_eq!(body["service"]["profile_id"], service.default_profile_id);
+                assert_eq!(result["route"]["route_id"], "test");
+                assert!(result["route"]["geometry"].as_array().unwrap().len() >= 2);
+            } else {
+                assert_eq!(body["type"], "FeatureCollection");
+                assert_eq!(
+                    body["features"][0]["properties"]["profile_id"],
+                    service.default_profile_id
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn waypoint_endpoint_returns_legs_order_and_geojson_and_rejects_temporal_requests() {
+        let state = ApiState {
+            service: fixture(),
+            simulations: Arc::new(crate::simulation::SimulationRegistry::default()),
+        };
+        let base = json!({"request": {
+            "route_id":"waypoints-test", "snap":{"max_distance_m":10},
+            "waypoints":[
+                {"point":{"id":"start","lon":6.0,"lat":53.0}},
+                {"point":{"id":"visit","lon":6.001,"lat":53.0},"kind":"break"},
+                {"point":{"id":"end","lon":6.002,"lat":53.0}}
+            ]
+        }});
+        for (middle_kind, optimized, leg_count) in [
+            ("break", false, 2),
+            ("through", false, 1),
+            ("break", true, 2),
+        ] {
+            let mut payload = base.clone();
+            payload["request"]["waypoints"][1]["kind"] = json!(middle_kind);
+            payload["request"]["optimize_order"] = json!(optimized);
+            let response = crate::waypoints::waypoints_handler(
+                State(state.clone()),
+                Query(ResponseFormatQuery { format: None }),
+                Json(serde_json::from_value(payload).unwrap()),
+            )
+            .await
+            .unwrap();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let response: Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(response["result"]["waypoint_order"], json!([0, 1, 2]));
+            assert_eq!(
+                response["result"]["legs"].as_array().unwrap().len(),
+                leg_count
+            );
+            assert_eq!(
+                response["result"]["optimization_method"],
+                if optimized {
+                    "held_karp_exact"
+                } else {
+                    "input_order"
+                }
+            );
+            assert_eq!(
+                response["service"]["route_engine"],
+                "waypoint_dijkstra_with_turn_history"
+            );
+            assert!(response["result"]["total_distance_m"].as_u64().unwrap() > 0);
+        }
+        let response = crate::waypoints::waypoints_handler(
+            State(state.clone()),
+            Query(ResponseFormatQuery {
+                format: Some("geojson".into()),
+            }),
+            Json(serde_json::from_value(base.clone()).unwrap()),
+        )
+        .await
+        .unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(response["type"], "FeatureCollection");
+        assert_eq!(response["waypoint_order"], json!([0, 1, 2]));
+        let features = response["features"].as_array().unwrap();
+        assert_eq!(features.len(), 2);
+        assert_eq!(features[1]["properties"]["leg_index"], 1);
+        assert!(
+            features[0]["geometry"]["coordinates"]
+                .as_array()
+                .unwrap()
+                .len()
+                >= 2
+        );
+        let mut temporal = base;
+        temporal["request"]["departure_time"] = json!("2026-09-09T08:00:00Z");
+        let error = crate::waypoints::waypoints_handler(
+            State(state),
+            Query(ResponseFormatQuery { format: None }),
+            Json(serde_json::from_value(temporal).unwrap()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.into_response().status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
     async fn locate_candidates_match_route_snapping_and_reject_invalid_requests() {
         let service = fixture();
         let state = ApiState {

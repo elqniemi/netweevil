@@ -17,6 +17,7 @@ mod edge_spatial_index;
 mod engine;
 mod geometry;
 mod isochrone_polygon;
+mod navigation;
 mod pareto;
 mod provenance;
 mod requests;
@@ -27,6 +28,7 @@ mod service_area;
 mod service_area_sequence;
 mod snapping;
 mod temporal;
+mod waypoints;
 
 pub use accessibility::*;
 pub(crate) use alternatives::*;
@@ -40,6 +42,7 @@ pub use diagnostics::*;
 pub use documents::*;
 pub use engine::*;
 pub(crate) use geometry::*;
+pub use navigation::*;
 pub(crate) use pareto::*;
 pub(crate) use provenance::*;
 pub use requests::*;
@@ -54,6 +57,7 @@ pub use temporal::{
     TemporalOverlaySeries, everyday_mask, load_holiday_calendar, load_scenario_overlay,
     load_temporal_overlay, parse_datetime,
 };
+pub use waypoints::*;
 
 #[cfg(test)]
 mod tests;

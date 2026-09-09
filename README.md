@@ -363,6 +363,16 @@ true` returns the latest departure that still arrives by then, with
 departure. The QGIS transit and service-area tabs expose the same switch as an
 Arrive by checkbox.
 
+GTFS imports require a shared IANA `agency_timezone` in `agency.txt`. Service
+days follow GTFS's local-noon-minus-twelve-hours rule across daylight-saving
+changes, including stop times beyond 24:00. Request datetimes with offsets
+identify exact instants; naive datetimes use the agency timezone and reject
+ambiguous or skipped clock times. Results include `time_context` with
+`agency_timezone` and `time_origin_unix_s`; add the origin to any returned
+`departure_s` or `arrival_s` to obtain its Unix timestamp. Exported QGIS and
+GeoJSON features retain both fields. Transit bundles use schema 5 and require
+re-import after this change. See [transit time and service days](docs/transit-time.md).
+
 First and last miles are not limited to walking: `modes.access` and
 `modes.egress` accept `walk`, `bicycle`, or `car`, each with its own speed
 (`walk_speed_kph`, `bicycle_speed_kph`, `car_access_speed_kph`) and distance
@@ -466,6 +476,7 @@ Discovery endpoints:
 Execution endpoints:
 
 - `POST /v1/route`
+- `POST /v1/directions`
 - `POST /v1/locate`
 - `POST /v1/od`
 - `POST /v1/matrix`
@@ -477,7 +488,7 @@ Execution endpoints:
 - `POST /v1/transit-route`
 - `POST /v1/transit-service-area`
 
-For `route`, `od`, `matrix`, `service-area`, `service-area-sequence`,
+For `route`, `directions`, `od`, `matrix`, `service-area`, `service-area-sequence`,
 `betweenness`, and `scenario-batch`, add `?format=geojson` to request GeoJSON
 instead of JSON:
 
@@ -485,6 +496,23 @@ instead of JSON:
 curl -X POST 'http://127.0.0.1:8080/v1/route?format=geojson' \
   -H 'content-type: application/json' \
   --data @examples/api/ile_de_france_route_car.json
+```
+
+`POST /v1/directions` accepts the same payload and dynamic profiles as `route`.
+It returns `{service, result: {language, route, maneuvers}}`, with full geometry
+and segments. English maneuvers include departures, turns, name changes,
+roundabout entries/exits and arrival. Each maneuver identifies a half-open
+range in `route.edge_path`; distance and edge time sum those segments. Turn
+penalties remain in the route summary. Roundabout exit counts include legal
+exit junctions, including the chosen exit. No exit number is inferred when
+starting or ending inside a roundabout. Directions require a static legal
+street route with all turn restrictions enforced. Lane, signpost, localized
+voice and alternative-route instructions are not implemented.
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/directions \
+  -H 'content-type: application/json' \
+  --data @examples/api/north_nl_directions.json
 ```
 
 Route request shape:

@@ -63,6 +63,8 @@ pub fn transit_import_summary(bundle: &TransitBundle) -> TransitImportSummary {
         source_sha256: bundle.source_sha256.clone(),
         service_start_date: bundle.service_dates.first().cloned().unwrap_or_default(),
         service_days: bundle.service_dates.len() as u32,
+        agency_timezone: bundle.agency_timezone.clone(),
+        time_origin_unix_s: bundle.time_origin_unix_s,
         stop_count: bundle.stops.len(),
         route_count: bundle.routes.len(),
         trip_count: bundle.trips.len(),
@@ -129,6 +131,7 @@ fn read_gtfs_files(path: &Path) -> Result<GtfsFiles> {
             }
         }
     }
+    files.require("agency.txt")?;
     files.require("stops.txt")?;
     files.require("routes.txt")?;
     files.require("trips.txt")?;
@@ -182,6 +185,10 @@ pub(crate) fn build_bundle_from_files(
     options: TransitImportOptions,
 ) -> Result<TransitBundle> {
     let service_dates = service_date_window(&options.service_start_date, options.service_days)?;
+    files.require("agency.txt")?;
+    let agency_timezone = parse_agency_timezone(files.get("agency.txt").unwrap())?;
+    let (time_origin_unix_s, service_day_offsets_s) =
+        crate::timetable_time::service_time_basis(&agency_timezone, &service_dates)?;
     let active_services = active_services_by_date(&files, &service_dates)?;
     let (stops, stop_by_id) = parse_stops(files.get("stops.txt").unwrap())?;
     let (routes, route_by_id) = parse_routes(files.get("routes.txt").unwrap())?;
@@ -203,6 +210,7 @@ pub(crate) fn build_bundle_from_files(
         &trip_by_id,
         &trips,
         &retained_gtfs_trips,
+        &service_day_offsets_s,
     )?;
 
     Ok(TransitBundle {
@@ -211,6 +219,8 @@ pub(crate) fn build_bundle_from_files(
         source_label: options.source_label,
         source_sha256,
         stop_binding_sha256: None,
+        agency_timezone,
+        time_origin_unix_s,
         service_dates: service_dates
             .iter()
             .map(|date| date.to_string())
@@ -389,6 +399,26 @@ fn parse_trips(
     Ok((trips, trip_by_id, retained))
 }
 
+fn parse_agency_timezone(raw: &str) -> Result<String> {
+    let mut reader = csv::Reader::from_reader(raw.as_bytes());
+    let timezone_column = header_index(reader.headers()?, "agency_timezone")?;
+    let mut timezone = None::<String>;
+    for record in reader.records() {
+        let record = record?;
+        let name = record.get(timezone_column).unwrap_or_default().trim();
+        let parsed: chrono_tz::Tz = name
+            .parse()
+            .with_context(|| format!("invalid agency_timezone '{name}'"))?;
+        if let Some(known) = timezone.as_ref()
+            && known != parsed.name()
+        {
+            bail!("all agencies in one GTFS feed must use the same agency_timezone");
+        }
+        timezone = Some(parsed.name().to_string());
+    }
+    timezone.context("GTFS agency.txt has no agency rows")
+}
+
 fn parse_connections(
     raw: &str,
     frequencies_raw: Option<&str>,
@@ -396,6 +426,7 @@ fn parse_connections(
     trip_by_id: &HashMap<String, u32>,
     trips: &[TransitTrip],
     retained_gtfs_trips: &HashMap<String, Vec<u32>>,
+    service_day_offsets_s: &[u32],
 ) -> Result<Vec<TransitConnection>> {
     let mut reader = csv::Reader::from_reader(raw.as_bytes());
     let headers = reader.headers()?.clone();
@@ -461,7 +492,7 @@ fn parse_connections(
             vec![anchor_departure_s]
         };
         for date_offset in date_offsets {
-            let base = date_offset.saturating_mul(86_400);
+            let base = service_day_offsets_s[date_offset as usize];
             for &start_s in &starts {
                 let run_index = next_run_index;
                 next_run_index = next_run_index

@@ -125,6 +125,8 @@ pub(crate) fn transit_import(paths: &WorkspacePaths, args: TransitImportArgs) ->
         imported_at: netweevil_manifest::now_rfc3339()?,
         service_start_date: args.service_start,
         service_days: args.service_days,
+        agency_timezone: summary.agency_timezone.clone(),
+        time_origin_unix_s: summary.time_origin_unix_s,
         stop_count: summary.stop_count as u64,
         route_count: summary.route_count as u64,
         trip_count: summary.trip_count as u64,

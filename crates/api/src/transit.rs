@@ -105,6 +105,8 @@ pub(crate) async fn transit_route_handler(
             feed_id: manifest.feed_id,
             service_start_date: manifest.service_start_date,
             service_days: manifest.service_days,
+            agency_timezone: manifest.agency_timezone,
+            time_origin_unix_s: manifest.time_origin_unix_s,
             route_engine: "scheduled_connection_scan_street_transit".to_string(),
             walking_geometry: match walking_geometry {
                 TransitWalkingGeometry::StraightLine => "straight_line".to_string(),
@@ -177,6 +179,8 @@ pub(crate) async fn transit_service_area_handler(
         feed_id: manifest.feed_id,
         service_start_date: manifest.service_start_date,
         service_days: manifest.service_days,
+        agency_timezone: manifest.agency_timezone,
+        time_origin_unix_s: manifest.time_origin_unix_s,
         route_engine: "scheduled_connection_scan_transit_service_area".to_string(),
         walking_geometry: "straight_line".to_string(),
         transfer_profile_id,

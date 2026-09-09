@@ -678,6 +678,8 @@ pub(crate) fn transit_service_area_result_geojson(
             },
             "properties": {
                 "feed_id": execution.feed_id,
+                "agency_timezone": result.time_context.agency_timezone,
+                "time_origin_unix_s": result.time_context.time_origin_unix_s,
                 "analysis_id": result.analysis_id,
                 "geometry_type": "stop",
                 "origin_id": stop.origin_id,
@@ -703,6 +705,8 @@ pub(crate) fn transit_service_area_result_geojson(
             },
             "properties": {
                 "feed_id": execution.feed_id,
+                "agency_timezone": result.time_context.agency_timezone,
+                "time_origin_unix_s": result.time_context.time_origin_unix_s,
                 "analysis_id": result.analysis_id,
                 "geometry_type": "stop_segment",
                 "origin_id": segment.origin_id,
@@ -727,6 +731,8 @@ pub(crate) fn transit_service_area_result_geojson(
         "features": features,
         "metadata": {
             "feed_id": execution.feed_id,
+                "agency_timezone": result.time_context.agency_timezone,
+                "time_origin_unix_s": result.time_context.time_origin_unix_s,
             "service_start_date": execution.service_start_date,
             "service_days": execution.service_days,
             "transfer_profile_id": execution.transfer_profile_id,
@@ -896,5 +902,53 @@ mod tests {
             geojson["features"][1]["properties"]["components"]["slope"],
             0.75
         );
+    }
+
+    #[test]
+    fn transit_geojson_features_keep_the_time_origin_when_exported_alone() {
+        let time_origin_unix_s = 1_792_792_800_i64;
+        let context = crate::dto::TransitExecutionContext {
+            feed_id: "dst".to_string(),
+            service_start_date: "2026-10-24".to_string(),
+            service_days: 1,
+            agency_timezone: "Europe/Amsterdam".to_string(),
+            time_origin_unix_s,
+            route_engine: "scheduled".to_string(),
+            walking_geometry: "straight_line".to_string(),
+            transfer_profile_id: None,
+            pedestrian_profile_id: None,
+            access_profile_id: None,
+            egress_profile_id: None,
+        };
+        let result: netweevil_transit::TransitServiceAreaResult = serde_json::from_value(serde_json::json!({
+            "analysis_id": "dst-area", "outcome": "scheduled",
+            "time_context": {"agency_timezone": "Europe/Amsterdam", "time_origin_unix_s": time_origin_unix_s},
+            "origin_count": 1, "processed_origin_count": 1, "skipped_origin_count": 0,
+            "max_travel_time_s": 7200,
+            "stops": [{"origin_id": "A", "stop_id": "C", "stop_name": "C", "lon": 6.02, "lat": 53.0,
+                "arrival_s": 98100, "travel_time_s": 3600, "boarding_count": 1}],
+            "stop_segments": [{"origin_id": "A", "from_stop_id": "A", "to_stop_id": "C", "from_stop_name": "A", "to_stop_name": "C",
+                "departure_s": 94500, "arrival_s": 98100, "duration_s": 3600, "travel_time_s": 3600, "boarding_count": 1,
+                "geometry": [[6.0, 53.0], [6.02, 53.0]]}]
+        })).unwrap();
+        let geojson = super::transit_service_area_result_geojson(&context, &result);
+        assert_eq!(
+            geojson["metadata"]["time_origin_unix_s"],
+            time_origin_unix_s
+        );
+        assert_eq!(geojson["metadata"]["agency_timezone"], "Europe/Amsterdam");
+        let features = geojson["features"].as_array().unwrap();
+        assert_eq!(features.len(), 2);
+        for feature in features {
+            // A consumer can recover an instant from a single exported row.
+            let properties = &feature["properties"];
+            assert_eq!(properties["agency_timezone"], "Europe/Amsterdam");
+            assert_eq!(properties["time_origin_unix_s"], time_origin_unix_s);
+            assert_eq!(
+                properties["time_origin_unix_s"].as_i64().unwrap()
+                    + properties["arrival_s"].as_i64().unwrap(),
+                1_792_890_900
+            );
+        }
     }
 }

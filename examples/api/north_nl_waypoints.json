@@ -1,0 +1,14 @@
+{
+  "profile_id": "car_north_nl_2026_05",
+  "request": {
+    "route_id": "groningen_waypoints",
+    "waypoints": [
+      {"point": {"id": "start", "lon": 6.5665, "lat": 53.2194}},
+      {"point": {"id": "visit", "lon": 6.5716, "lat": 53.2148}, "kind": "break"},
+      {"point": {"id": "end", "lon": 6.5840, "lat": 53.2190}}
+    ],
+    "snap": {"max_distance_m": 500.0},
+    "optimize_order": false,
+    "returns": {"geometry": "full"}
+  }
+}

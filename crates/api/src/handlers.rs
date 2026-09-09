@@ -104,6 +104,23 @@ pub(crate) async fn route_handler(
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<RouteExecutionRequest>,
 ) -> Result<Response, ApiError> {
+    execute_route_response(state, query, payload, false).await
+}
+
+pub(crate) async fn directions_handler(
+    State(state): State<ApiState>,
+    Query(query): Query<ResponseFormatQuery>,
+    Json(payload): Json<RouteExecutionRequest>,
+) -> Result<Response, ApiError> {
+    execute_route_response(state, query, payload, true).await
+}
+
+async fn execute_route_response(
+    state: ApiState,
+    query: ResponseFormatQuery,
+    payload: RouteExecutionRequest,
+    directions: bool,
+) -> Result<Response, ApiError> {
     let dynamic = if payload.profile.is_some() || payload.profile_overrides.is_some() {
         Some(
             resolve_dynamic_profile(
@@ -145,17 +162,26 @@ pub(crate) async fn route_handler(
         acceleration: effective_engine.acceleration.to_string(),
     };
     let route_id = request.route_id.clone();
-    let edge_names = if request.returns.segment_rows {
+    let edge_names = if request.returns.segment_rows || directions {
         Some(load_edge_names(state.service.as_ref())?)
     } else {
         None
     };
-    let result = run_analysis(&state, "route", Some(&route_id), move || {
-        if let Some(edge_names) = edge_names.as_deref() {
+    let (result, maneuvers) = run_analysis(&state, "route", Some(&route_id), move || {
+        if directions {
+            let result = engine.execute_directions(
+                &request,
+                edge_names.as_deref().unwrap_or_default(),
+                engine_mode,
+            )?;
+            return Ok((result.route, Some(result.maneuvers)));
+        }
+        let result = if let Some(edge_names) = edge_names.as_deref() {
             engine.execute_route_with_edge_names_and_mode(&request, edge_names, engine_mode)
         } else {
             engine.execute_route_with_mode(&request, engine_mode)
-        }
+        }?;
+        Ok((result, None))
     })
     .await?;
     info!(
@@ -166,9 +192,24 @@ pub(crate) async fn route_handler(
         segments = result.summary.segment_count,
         "response"
     );
-    let mut response = analysis_response(&query, service, result, |context, result| {
-        route_result_geojson(state.service.as_ref(), context, result)
-    })?;
+    let mut response = if let Some(maneuvers) = maneuvers {
+        let result = netweevil_query::DirectionsResult {
+            language: "en".into(),
+            route: result,
+            maneuvers,
+        };
+        analysis_response(&query, service, result, |context, result| {
+            let mut geojson = route_result_geojson(state.service.as_ref(), context, &result.route);
+            geojson["maneuvers"] =
+                serde_json::to_value(&result.maneuvers).expect("serializable maneuvers");
+            geojson["language"] = "en".into();
+            geojson
+        })?
+    } else {
+        analysis_response(&query, service, result, |context, result| {
+            route_result_geojson(state.service.as_ref(), context, result)
+        })?
+    };
     if let Some(dynamic) = dynamic {
         response.headers_mut().insert(
             "x-netweevil-profile-cache",
@@ -544,6 +585,8 @@ fn build_transit_feed_infos(service: &ServiceRuntime) -> Vec<TransitFeedInfo> {
             source_path: feed.manifest.source_path.clone(),
             service_start_date: feed.manifest.service_start_date.clone(),
             service_days: feed.manifest.service_days,
+            agency_timezone: feed.manifest.agency_timezone.clone(),
+            time_origin_unix_s: feed.manifest.time_origin_unix_s,
             stop_count: feed.manifest.stop_count,
             route_count: feed.manifest.route_count,
             trip_count: feed.manifest.trip_count,

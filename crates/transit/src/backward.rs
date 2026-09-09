@@ -290,6 +290,7 @@ pub(crate) fn execute_transit_route_arrive_by(
     if access.is_empty() || egress.is_empty() {
         return Ok(TransitRouteResult {
             route_id: request.route_id.clone(),
+            time_context: bundle.time_context(),
             outcome: TransitOutcome::Unreachable,
             summary: TransitRouteSummary::default(),
             legs: Vec::new(),
@@ -531,6 +532,7 @@ pub(crate) fn execute_transit_route_arrive_by(
     else {
         return Ok(TransitRouteResult {
             route_id: request.route_id.clone(),
+            time_context: bundle.time_context(),
             outcome: TransitOutcome::Unreachable,
             summary: TransitRouteSummary::default(),
             legs: Vec::new(),
@@ -566,6 +568,7 @@ pub(crate) fn execute_transit_route_arrive_by(
     )?;
     Ok(TransitRouteResult {
         route_id: request.route_id.clone(),
+        time_context: bundle.time_context(),
         outcome: TransitOutcome::Scheduled,
         summary,
         legs,
