@@ -17,10 +17,11 @@ pub(crate) async fn waypoints_handler(
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<ProfiledRequest<WaypointRequest>>,
 ) -> Result<Response, ApiError> {
-    let profile = resolve_profile(&state.service, payload.profile_id.as_deref())?;
+    let runtime = state.runtime()?;
+    let profile = resolve_profile(&runtime, payload.profile_id.as_deref())?;
     let engine = Arc::clone(&profile.engine);
     let service = ExecutionContext {
-        dataset_id: state.service.dataset_manifest.dataset_id.0.clone(),
+        dataset_id: runtime.dataset_manifest.dataset_id.0.clone(),
         profile_id: profile.document.profile.id.clone(),
         profile_hash: profile.manifest.profile_hash.clone(),
         route_engine: "waypoint_dijkstra_with_turn_history".into(),
@@ -36,14 +37,13 @@ pub(crate) async fn waypoints_handler(
     if wants_geojson(&query) {
         request.returns.geometry = ReturnGeometry::Full;
     }
-    let result =
-        execute_on_routing_worker(&state.service, move || engine.execute_waypoints(&request))
-            .await
-            .map_err(ApiError::from_execution_error)?;
+    let result = execute_on_routing_worker(&runtime, move || engine.execute_waypoints(&request))
+        .await
+        .map_err(ApiError::from_execution_error)?;
     if wants_geojson(&query) {
         let mut features = Vec::new();
         for (leg_index, leg) in result.legs.iter().enumerate() {
-            let collection = route_result_geojson(&state.service, &service, leg);
+            let collection = route_result_geojson(&runtime, &service, leg);
             if let Some(leg_features) = collection["features"].as_array() {
                 for feature in leg_features {
                     let mut feature = feature.clone();

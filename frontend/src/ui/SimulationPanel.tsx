@@ -246,7 +246,7 @@ function SimulationDetail({ simulationId }: { simulationId: string }) {
   };
 
   const addZoneFromMap = async () => {
-    const corners = getState().points["simulation:zone"] ?? [];
+    const corners = getState().points.zone ?? [];
     if (corners.length < 3) {
       setControlError("Place at least 3 zone corners on the map first (Zone corners slot).");
       return;
@@ -385,7 +385,7 @@ function SimulationDetail({ simulationId }: { simulationId: string }) {
           <input type="checkbox" checked={showEdges} onChange={(e) => setState((prev) => ({ simulation: { ...prev.simulation, showEdges: e.target.checked } }))} />
           <span>congestion overlay</span>
         </label>
-        <button type="button" className="btn btn-ghost btn-small" onClick={requestFit}>
+        <button type="button" className="btn btn-ghost btn-small" onClick={() => requestFit()}>
           Zoom to
         </button>
         <a className="btn btn-ghost btn-small" href={temporalUrl} download={`${simulationId}.temporal.geojson`} target="_blank" rel="noreferrer">

@@ -6,6 +6,10 @@ use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 use crate::*;
 use rayon::prelude::*;
 
+mod seeded;
+pub use seeded::ServiceAreaSeed;
+pub(crate) use seeded::execute_seeded_service_area_with_graph;
+
 pub fn execute_service_area(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,

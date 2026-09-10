@@ -141,3 +141,241 @@ export interface SimulationFramesResponse {
   frames_available: number;
   frames: SimulationFrame[];
 }
+
+// --- Workspace setup ---
+
+export interface WorkspaceLocation {
+  key: string;
+  path: string;
+  purpose: string;
+}
+
+export interface WorkspaceConfig {
+  dataset_id: string;
+  default_profile: string;
+  profiles: string[];
+  transit_feeds: string[];
+  updated_at?: string | null;
+}
+
+export interface DatasetSummary {
+  dataset_id: string;
+  label: string;
+  source_path: string;
+  source_format: string;
+  source_size_bytes: number;
+  imported_at: string;
+  node_count: number | null;
+  edge_count: number | null;
+  has_acceleration: boolean;
+  compiled_profile_ids: string[];
+  active: boolean;
+}
+
+export interface ProfileFileInfo {
+  path: string;
+  file_name: string;
+  source: "workspace" | "examples";
+  profile_id: string | null;
+  label: string | null;
+  mode: string | null;
+  error: string | null;
+  active: boolean;
+  is_default: boolean;
+}
+
+export interface TransitFeedSummary {
+  feed_id: string;
+  label: string;
+  source_path: string;
+  imported_at: string;
+  service_start_date: string;
+  service_days: number;
+  agency_timezone: string;
+  stop_count: number;
+  route_count: number;
+  trip_count: number;
+  bundle_path: string;
+  loaded: boolean;
+  scenario_id: string | null;
+}
+
+export interface UploadInfo {
+  name: string;
+  path: string;
+  size_bytes: number;
+  kind: "osm" | "overture" | "gpkg" | "gtfs" | "profile" | "other";
+}
+
+export interface JobRecord {
+  job_id: string;
+  kind: string;
+  label: string;
+  state: "running" | "done" | "failed";
+  stage: string;
+  message: string;
+  percent?: number;
+  started_at: string;
+  finished_at?: string;
+  error?: string;
+  result?: Record<string, unknown>;
+}
+
+export interface WorkspaceInfo {
+  root: string;
+  state_dir: string;
+  config_path: string;
+  locations: WorkspaceLocation[];
+  loaded: boolean;
+  active: WorkspaceConfig | null;
+  saved: WorkspaceConfig | null;
+  datasets: DatasetSummary[];
+  profiles: ProfileFileInfo[];
+  transit_feeds: TransitFeedSummary[];
+  uploads: UploadInfo[];
+  jobs: JobRecord[];
+  example_profiles_dir: string | null;
+}
+
+export interface ProfileTemplate {
+  template_id: string;
+  label: string;
+  mode: string;
+  description: string;
+  yaml: string;
+}
+
+// --- GTFS editor ---
+
+export type TransitMode = "tram" | "subway" | "rail" | "bus" | "ferry" | "cable_car" | "gondola" | "funicular" | "coach" | "air" | "other";
+
+export interface ScenarioStop {
+  stop_id: string;
+  name: string;
+  lon: number;
+  lat: number;
+}
+
+export interface ScenarioLineStop {
+  stop_id: string;
+  travel_s?: number | null;
+  dwell_s?: number | null;
+}
+
+export interface ScenarioHeadwayWindow {
+  start: string;
+  end: string;
+  headway_min: number;
+}
+
+export interface ScenarioService {
+  days: [boolean, boolean, boolean, boolean, boolean, boolean, boolean];
+  windows: ScenarioHeadwayWindow[];
+  departures: string[];
+}
+
+export interface ScenarioLine {
+  line_id: string;
+  short_name: string;
+  long_name: string;
+  mode: TransitMode;
+  color?: string | null;
+  headsign?: string | null;
+  stops: ScenarioLineStop[];
+  average_speed_kph: number;
+  default_dwell_s: number;
+  bidirectional: boolean;
+  services: ScenarioService[];
+}
+
+export interface GtfsScenario {
+  schema_version: number;
+  scenario_id: string;
+  label: string;
+  base_feed_id: string | null;
+  output_feed_id: string | null;
+  agency: { name: string; url: string; timezone: string };
+  service_start_date: string | null;
+  service_days: number | null;
+  stops: ScenarioStop[];
+  lines: ScenarioLine[];
+  removed_route_ids: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScenarioSummary {
+  stop_count: number;
+  line_count: number;
+  trip_count: number;
+  stop_time_count: number;
+}
+
+export interface BuiltFeedInfo {
+  feed_id: string;
+  bundle_path: string;
+  built_at: string;
+  loaded: boolean;
+  stop_count: number;
+  route_count: number;
+  trip_count: number;
+}
+
+export interface ScenarioInfo {
+  scenario_id: string;
+  label: string;
+  base_feed_id: string | null;
+  output_feed_id: string;
+  path: string;
+  export_path: string;
+  stop_count: number;
+  line_count: number;
+  updated_at: string;
+  base_loaded: boolean;
+  built: BuiltFeedInfo | null;
+  summary: ScenarioSummary | null;
+  validation_error: string | null;
+}
+
+export interface ScenarioResponse {
+  info: ScenarioInfo;
+  scenario: GtfsScenario;
+}
+
+export interface FeedStop {
+  stop_id: string;
+  name: string;
+  lon: number;
+  lat: number;
+}
+
+export interface FeedRoute {
+  route_id: string;
+  short_name: string;
+  long_name: string;
+  mode: TransitMode;
+  trip_count: number;
+}
+
+export interface PatternStop extends FeedStop {
+  arrival_offset_s: number;
+  departure_offset_s: number;
+}
+
+export interface RoutePattern {
+  route_id: string;
+  headsign: string;
+  run_count: number;
+  stops: PatternStop[];
+}
+
+// --- Network explorer ---
+
+export interface NetworkEdgesMeta {
+  dataset_id: string;
+  profile_id: string;
+  compare_profile_id: string | null;
+  edge_count: number;
+  truncated: boolean;
+  ranges: Record<string, [number, number]>;
+}

@@ -1,0 +1,24 @@
+{
+  "analysis_id": "groningen_transit_isochrone",
+  "catchment_mode": "street_isochrone",
+  "origins": [{ "id": "groningen_station", "lon": 6.5654, "lat": 53.2106 }],
+  "time": {
+    "datetime": "2026-05-11T08:30:00+02:00",
+    "arrive_by": false,
+    "search_window_s": 3600
+  },
+  "modes": {
+    "access": ["walk"],
+    "egress": ["walk"],
+    "street_access": "network",
+    "max_access_distance_m": 1200,
+    "max_transfer_distance_m": 500,
+    "max_transfers": 3
+  },
+  "max_travel_time_s": 1800,
+  "returns": {
+    "include_stops": true,
+    "include_stop_segments": true,
+    "include_geometry": true
+  }
+}

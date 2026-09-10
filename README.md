@@ -40,6 +40,68 @@ The production surface is the `netweevil` CLI plus a preloadable HTTP API. The Q
 - `curl` for API smoke tests.
 - Optional: `osmium` if you want to prefilter your own OSM extracts.
 
+## Beginner Quickstart (Web Console)
+
+NetWeevil is one program: the `netweevil` executable serves both the API and
+the web console. Start it, the browser opens, and **Setup** (bottom left)
+walks through importing a street network, creating routing profiles and
+adding GTFS feeds. Everything it creates lives in one folder,
+`.netweevil/`, inside the folder it was started in. Source files are never
+modified.
+
+Pick whichever of these fits:
+
+**1. Prebuilt archive (nothing to install).** Extract it and run
+`start-netweevil.sh` (macOS/Linux). Data goes to `~/NetWeevil`. Maintainers
+produce the archive with `scripts/package_release.sh`.
+
+**2. From this repository, one command.** The start script builds the
+console and the executable the first time (Rust and Node.js are needed for
+that build only, see the script's messages), then starts NetWeevil in
+`~/NetWeevil` and opens the browser:
+
+```bash
+./scripts/start.sh              # macOS / Linux
+scripts\start.cmd               # Windows: double-click it
+```
+
+Set `NETWEEVIL_WORKSPACE=/some/folder` to keep the data elsewhere.
+
+**3. Docker.** `docker compose up -d api` builds an image with the console
+embedded and starts it in setup mode at `http://localhost:8080/`. Files put in
+`./datasets` are reachable inside the container as `/data/datasets/<file>`,
+so large extracts can be referenced by path instead of uploaded.
+
+**4. The command itself.** After `pnpm build` in `frontend/` and
+`cargo build --release -p netweevil-cli`, the console is embedded in the
+executable. In the folder that should hold the data:
+
+```bash
+netweevil bootstrap                 # API + console at http://127.0.0.1:8080/, opens the browser
+netweevil bootstrap --no-open       # same without opening a browser (servers, Docker)
+netweevil api serve                 # same as bootstrap, no banner, no browser
+```
+
+`bootstrap` prints where every kind of file will be saved. The Setup steps:
+
+1. *Where things live* lists every folder NetWeevil writes to. Uploads are
+   copied into `.netweevil/uploads/`; files chosen by path are read in place.
+2. *Street network*: upload an OSM `.osm.pbf` or Overture `.parquet` extract
+   (or give a path on the machine) and import it.
+3. *Routing profiles*: create car, bicycle and pedestrian profiles from the
+   built-in defaults, edit the YAML if you like, and save them to
+   `.netweevil/profiles/`.
+4. *Transit (optional)*: import GTFS zips.
+5. *Load and go*: pick the dataset, profiles and feeds to serve. Profiles are
+   compiled on first load. The choice is saved to `.netweevil/workspace.json`,
+   so the next `netweevil bootstrap` or `netweevil api serve` (without
+   arguments) reloads it.
+
+Without an embedded console (executable built before `pnpm build`),
+`bootstrap` still finds `frontend/dist` when run inside this repository, or
+takes `--console-dir <path>`; `pnpm dev` in `frontend/` works as well (see
+[frontend/README.md](frontend/README.md)).
+
 ## Local Quickstart
 
 OD CSV files use `id,source_lon,source_lat,target_lon,target_lat`, with optional
@@ -241,8 +303,12 @@ docker compose up -d api
 
 All CLI and API state is under `.netweevil/` in the current workspace:
 
+- `.netweevil/workspace.json`: the dataset/profile/feed selection loaded when `api serve` or `bootstrap` runs without arguments (written by the console setup flow and by explicit `api serve` arguments)
+- `.netweevil/uploads`: files uploaded through the console setup flow (source files given by path are read in place)
+- `.netweevil/profiles`: routing profiles created in the console, as editable YAML
+- `.netweevil/gtfs_scenarios`: GTFS editor scenario documents (`<id>.json`) and their exported archives (`<id>.gtfs.zip`)
 - `.netweevil/datasets`: imported dataset manifests
-- `.netweevil/transit_feeds`: imported GTFS feed manifests
+- `.netweevil/transit_feeds`: imported GTFS feed manifests, including feeds built from editor scenarios
 - `.netweevil/compiled_profiles`: compiled profile manifests
 - `.netweevil/bundles/topology`: topology bundles
 - `.netweevil/bundles/names`: cold edge-name bundles
@@ -275,6 +341,7 @@ Top-level commands:
 - `report render`
 - `cache list`
 - `api serve`
+- `bootstrap` (API plus web console in setup mode, for new workspaces)
 
 Useful local examples:
 
@@ -308,6 +375,14 @@ already in the document. See the multilayer runbook for matrix and
 service-area-sequence semantics.
 
 ## Transit
+
+The web console has a GTFS editor (rail: "GTFS editor") for drawing new lines
+on the map, copying existing routes as express variants, and giving them a
+timetable (days, headway windows, extra departures). A scenario builds into a
+separate feed, either on top of an imported feed (new lines added, chosen
+routes removed) or from scratch. The imported feed and its zip stay untouched;
+"Revert" removes the built feed again. Scenario documents are JSON under
+`.netweevil/gtfs_scenarios/` and can be exported as GTFS zips.
 
 Import an existing GTFS archive:
 
@@ -388,6 +463,32 @@ areas accept the same `modes` block, so cycling+transit or car+transit
 catchments work out of the box (see
 `examples/requests/transit_service_area_car_access.json`).
 
+Transit catchments default to `catchment_mode: "stops"`. Choose **Street
+isochrone** in the web console's Transit reach tool or QGIS's transit
+service-area options, or set `catchment_mode: "street_isochrone"` in the
+request. This mode uses network access and continues from each stop where
+alighting is allowed, spending the remaining `max_travel_time_s` on the
+egress street network. It also includes direct street travel from the origin.
+The time budget includes access, waiting, rides, transfers and egress; the
+final street expansion is limited by time rather than the stop-access
+distance limit. Arrive-by catchments expand backwards along incoming streets
+to stops from which transit can reach the target by the deadline.
+
+Load a foot profile and a matching street profile for any bicycle or car
+modes. Street speeds, access restrictions and turn rules come from those
+profiles. Returned `features` contain the reachable network with edges cut
+at the time limit and polygons traced around it. Street costs use the loaded
+static profile; the polygon boundary is an approximation around the reachable
+network. Stops and transit segments can be returned alongside it or disabled
+independently. See
+[`transit_service_area_isochrone.json`](examples/requests/transit_service_area_isochrone.json).
+The API envelope accepts `pedestrian_profile_id`, `access_profile_id` and
+`egress_profile_id` to select profiles explicitly.
+
+The web console displays GTFS departures and arrivals as dates and clock
+times in the feed's timezone, including the UTC offset at daylight-saving
+changes. Travel durations remain in hours, minutes and seconds.
+
 By default the access and egress mode lists must match. To plan an asymmetric
 first/last mile, for example cycle to the station but walk from the final
 stop, set `modes.mixed_access_egress: true` (see
@@ -465,8 +566,12 @@ cargo run -p netweevil-cli -- api serve \
 
 Options:
 
-- `--dataset <dataset_id>`: required imported dataset id
-- `--default-profile <path>`: required default profile
+- `--dataset <dataset_id>`: imported dataset id. When omitted together with
+  `--default-profile`, the selection saved in `.netweevil/workspace.json` is
+  loaded; if there is none the API starts in setup mode and waits for the
+  console (or `POST /v1/workspace/activate`).
+- `--default-profile <path>`: default profile (required with `--dataset`)
+- `--console-dir <path>`: built web console to serve at `/` (the copy embedded at build time is used by default; otherwise `frontend/dist` is auto-detected)
 - `--profile <path>`: optional, repeatable extra profiles
 - `--transit-feed <feed_id>`: optional, repeatable imported GTFS feeds
 - `--bind <host:port>`: default `127.0.0.1:8080`
@@ -495,6 +600,29 @@ Execution endpoints:
 - `POST /v1/scenario-batch`
 - `POST /v1/transit-route`
 - `POST /v1/transit-service-area`
+- `POST /v1/network/edges`: the directed edges inside a `bbox` with their source attributes and the selected profile's travel time, speed and cost; `compare_profile_id` adds a second profile and deltas (network explorer)
+
+Workspace setup endpoints (what the console's Setup flow uses; every write
+stays under `.netweevil/`):
+
+- `GET /v1/workspace`: folders and their purpose, saved and active selection, datasets, profile files, feeds, uploads, running jobs
+- `POST /v1/workspace/uploads?name=<file>` (raw body, streamed to `.netweevil/uploads/`), `DELETE /v1/workspace/uploads/{name}`
+- `POST /v1/workspace/datasets/import` `{sources, name, format?}` → job; `DELETE /v1/workspace/datasets/{id}`
+- `GET /v1/workspace/profile-templates`; `POST /v1/workspace/profiles` `{yaml, file_name?}`; `GET|DELETE /v1/workspace/profiles/{file}`
+- `POST /v1/workspace/transit/import` `{source, name, service_start, service_days}` → job; `DELETE /v1/workspace/transit-feeds/{id}`
+- `POST /v1/workspace/activate` `{dataset_id, default_profile, profiles, transit_feeds}` → job that compiles missing profiles, swaps the loaded runtime, and writes `workspace.json`
+- `GET /v1/workspace/jobs`, `GET /v1/workspace/jobs/{id}`
+
+Until a dataset is loaded, `/readyz`, `/v1/service` and the analysis endpoints
+answer `503` with an explanation.
+
+GTFS editor endpoints:
+
+- `GET|POST /v1/gtfs-editor/scenarios`, `GET|PUT|DELETE /v1/gtfs-editor/scenarios/{id}`: scenario documents (`.netweevil/gtfs_scenarios/<id>.json`)
+- `POST /v1/gtfs-editor/scenarios/{id}/build`: job that expands the scenario timetable, merges it on top of the base feed (or builds a stand-alone feed), writes a new feed and loads it. The base feed and its GTFS file are never modified.
+- `POST /v1/gtfs-editor/scenarios/{id}/revert`: unloads and deletes the built feed, keeping the scenario and the base feed
+- `GET /v1/gtfs-editor/scenarios/{id}/export`: the scenario as a GTFS zip (also written next to the document)
+- `GET /v1/transit-feeds/{feed}/stops?bbox=&q=`, `GET /v1/transit-feeds/{feed}/routes?q=`, `GET /v1/transit-feeds/{feed}/patterns?route_id=`: stops, routes and stop patterns of a loaded feed, for drawing lines and express variants against
 
 For `route`, `directions`, `od`, `matrix`, `service-area`, `service-area-sequence`,
 `betweenness`, and `scenario-batch`, add `?format=geojson` to request GeoJSON

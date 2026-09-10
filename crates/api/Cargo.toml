@@ -9,10 +9,14 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 publish = false
+build = "build.rs"
 
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
+futures-util.workspace = true
+mime_guess.workspace = true
+netweevil-ingest = { path = "../ingest" }
 netweevil-core = { path = "../core" }
 netweevil-manifest = { path = "../manifest" }
 netweevil-persist = { path = "../persist" }
@@ -23,6 +27,7 @@ netweevil-transit = { path = "../transit" }
 rayon.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tracing.workspace = true

@@ -41,20 +41,26 @@ pub(crate) async fn healthz() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
-pub(crate) async fn service_info(State(state): State<ApiState>) -> Json<ServiceInfoResponse> {
-    Json(build_service_info(state.service.as_ref()))
+pub(crate) async fn service_info(
+    State(state): State<ApiState>,
+) -> Result<Json<ServiceInfoResponse>, ApiError> {
+    let runtime = state.runtime()?;
+    Ok(Json(build_service_info(runtime.as_ref())))
 }
 
-pub(crate) async fn list_profiles(State(state): State<ApiState>) -> Json<Vec<ProfileInfo>> {
-    Json(build_profile_infos(state.service.as_ref()))
+pub(crate) async fn list_profiles(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<ProfileInfo>>, ApiError> {
+    let runtime = state.runtime()?;
+    Ok(Json(build_profile_infos(runtime.as_ref())))
 }
 
 pub(crate) async fn get_profile(
     State(state): State<ApiState>,
     AxumPath(profile_id): AxumPath<String>,
 ) -> Result<Json<ProfileInfo>, ApiError> {
-    let profile = state
-        .service
+    let runtime = state.runtime()?;
+    let profile = runtime
         .profiles
         .get(&profile_id)
         .ok_or_else(|| ApiError::not_found(format!("unknown profile_id '{}'", profile_id)))?;
@@ -72,7 +78,8 @@ async fn run_analysis<T>(
 where
     T: Send + 'static,
 {
-    execute_on_routing_worker(state.service.as_ref(), job)
+    let runtime = state.runtime()?;
+    execute_on_routing_worker(runtime.as_ref(), job)
         .await
         .map_err(|error| {
             warn!(
@@ -121,10 +128,11 @@ async fn execute_route_response(
     payload: RouteExecutionRequest,
     directions: bool,
 ) -> Result<Response, ApiError> {
+    let runtime = state.runtime()?;
     let dynamic = if payload.profile.is_some() || payload.profile_overrides.is_some() {
         Some(
             resolve_dynamic_profile(
-                Arc::clone(&state.service),
+                Arc::clone(&runtime),
                 payload.profile_id.as_deref(),
                 payload.profile,
                 payload.profile_overrides,
@@ -137,7 +145,7 @@ async fn execute_route_response(
     let engine = if let Some(dynamic) = &dynamic {
         Arc::clone(&dynamic.engine)
     } else {
-        Arc::clone(&resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?.engine)
+        Arc::clone(&resolve_profile(runtime.as_ref(), payload.profile_id.as_deref())?.engine)
     };
     info!(
         endpoint = "route",
@@ -154,7 +162,7 @@ async fn execute_route_response(
     }
     let effective_engine = engine.effective_route_engine_description(&request, engine_mode);
     let service = ExecutionContext {
-        dataset_id: state.service.dataset_manifest.dataset_id.0.clone(),
+        dataset_id: runtime.dataset_manifest.dataset_id.0.clone(),
         profile_id: engine.metrics().profile_id.clone(),
         profile_hash: engine.metrics().profile_hash.clone(),
         route_engine: effective_engine.route_engine.to_string(),
@@ -163,7 +171,7 @@ async fn execute_route_response(
     };
     let route_id = request.route_id.clone();
     let edge_names = if request.returns.segment_rows || directions {
-        Some(load_edge_names(state.service.as_ref())?)
+        Some(load_edge_names(runtime.as_ref())?)
     } else {
         None
     };
@@ -199,7 +207,7 @@ async fn execute_route_response(
             maneuvers,
         };
         analysis_response(&query, service, result, |context, result| {
-            let mut geojson = route_result_geojson(state.service.as_ref(), context, &result.route);
+            let mut geojson = route_result_geojson(runtime.as_ref(), context, &result.route);
             geojson["maneuvers"] =
                 serde_json::to_value(&result.maneuvers).expect("serializable maneuvers");
             geojson["language"] = "en".into();
@@ -207,7 +215,7 @@ async fn execute_route_response(
         })?
     } else {
         analysis_response(&query, service, result, |context, result| {
-            route_result_geojson(state.service.as_ref(), context, result)
+            route_result_geojson(runtime.as_ref(), context, result)
         })?
     };
     if let Some(dynamic) = dynamic {
@@ -228,7 +236,8 @@ pub(crate) async fn od_handler(
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<OdExecutionRequest>,
 ) -> Result<Response, ApiError> {
-    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let runtime = state.runtime()?;
+    let profile = resolve_profile(runtime.as_ref(), payload.profile_id.as_deref())?;
     info!(
         endpoint = "od",
         profile_id = %profile.document.profile.id,
@@ -247,7 +256,7 @@ pub(crate) async fn od_handler(
         &request.temporal,
         "time_dependent_exact_pairwise_label_setting",
     );
-    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let service = execution_context(runtime.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
     let result = run_analysis(&state, "od", None, move || {
         engine.execute_od_with_mode(&request, engine_mode)
@@ -269,7 +278,8 @@ pub(crate) async fn matrix_handler(
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<MatrixExecutionRequest>,
 ) -> Result<Response, ApiError> {
-    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let runtime = state.runtime()?;
+    let profile = resolve_profile(runtime.as_ref(), payload.profile_id.as_deref())?;
     let origin_count = payload.request.origins.points.len();
     let destination_count = payload.request.destinations.points.len();
     info!(
@@ -298,7 +308,7 @@ pub(crate) async fn matrix_handler(
         temporal,
         "time_dependent_exact_pairwise_label_setting",
     );
-    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let service = execution_context(runtime.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
     let result = run_analysis(&state, "matrix", None, move || {
         engine.execute_matrix_with_mode(&request.origins, &request.destinations, engine_mode)
@@ -319,7 +329,8 @@ pub(crate) async fn accessibility_handler(
     State(state): State<ApiState>,
     Json(payload): Json<AccessibilityExecutionRequest>,
 ) -> Result<Response, ApiError> {
-    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let runtime = state.runtime()?;
+    let profile = resolve_profile(runtime.as_ref(), payload.profile_id.as_deref())?;
     info!(
         endpoint = "accessibility",
         profile_id = %profile.document.profile.id,
@@ -335,7 +346,7 @@ pub(crate) async fn accessibility_handler(
         &payload.request.origins.temporal,
         "time_dependent_bounded_accessibility",
     );
-    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let service = execution_context(runtime.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
     let engine_mode = payload.engine_mode;
     let request = payload.request;
@@ -358,7 +369,8 @@ pub(crate) async fn service_area_handler(
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<ServiceAreaExecutionRequest>,
 ) -> Result<Response, ApiError> {
-    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let runtime = state.runtime()?;
+    let profile = resolve_profile(runtime.as_ref(), payload.profile_id.as_deref())?;
     info!(
         endpoint = "service_area",
         profile_id = %profile.document.profile.id,
@@ -379,7 +391,7 @@ pub(crate) async fn service_area_handler(
         &request.temporal,
         "time_dependent_exact_service_area",
     );
-    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let service = execution_context(runtime.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
     let analysis_id = request.analysis_id.clone();
     let result = run_analysis(&state, "service_area", Some(&analysis_id), move || {
@@ -402,7 +414,8 @@ pub(crate) async fn service_area_sequence_handler(
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<ServiceAreaSequenceExecutionRequest>,
 ) -> Result<Response, ApiError> {
-    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let runtime = state.runtime()?;
+    let profile = resolve_profile(runtime.as_ref(), payload.profile_id.as_deref())?;
     info!(
         endpoint = "service_area_sequence",
         profile_id = %profile.document.profile.id,
@@ -419,7 +432,7 @@ pub(crate) async fn service_area_sequence_handler(
         batch_engine: "time_dependent_exact_service_area_sequence",
         acceleration: "spatial_index+edge_phantoms+turn_automaton",
     };
-    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let service = execution_context(runtime.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
     let sequence_id = request.sequence_id.clone();
     let result = run_analysis(
@@ -442,7 +455,8 @@ pub(crate) async fn betweenness_handler(
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<BetweennessExecutionRequest>,
 ) -> Result<Response, ApiError> {
-    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let runtime = state.runtime()?;
+    let profile = resolve_profile(runtime.as_ref(), payload.profile_id.as_deref())?;
     info!(
         endpoint = "betweenness",
         profile_id = %profile.document.profile.id,
@@ -458,7 +472,7 @@ pub(crate) async fn betweenness_handler(
         &payload.request.temporal,
         "time_dependent_exact_betweenness",
     );
-    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let service = execution_context(runtime.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
     let request = payload.request;
     let analysis_id = request.analysis_id.clone();
@@ -474,7 +488,8 @@ pub(crate) async fn scenario_batch_handler(
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<ScenarioBatchExecutionRequest>,
 ) -> Result<Response, ApiError> {
-    let profile = resolve_profile(state.service.as_ref(), payload.profile_id.as_deref())?;
+    let runtime = state.runtime()?;
+    let profile = resolve_profile(runtime.as_ref(), payload.profile_id.as_deref())?;
     let mut request = payload.request;
     info!(
         endpoint = "scenario_batch",
@@ -509,7 +524,7 @@ pub(crate) async fn scenario_batch_handler(
         batch_engine: "scenario_batch_overlay_replay",
         acceleration: "static_baseline+exact_temporal_scenarios",
     };
-    let service = execution_context(state.service.as_ref(), profile, effective_engine);
+    let service = execution_context(runtime.as_ref(), profile, effective_engine);
     let engine = Arc::clone(&profile.engine);
     let batch_id = request.batch_id.clone();
     let result = run_analysis(&state, "scenario_batch", Some(&batch_id), move || {
@@ -517,7 +532,7 @@ pub(crate) async fn scenario_batch_handler(
     })
     .await?;
     analysis_response(&query, service, result, |context, result| {
-        scenario_batch_result_geojson(state.service.as_ref(), context, result)
+        scenario_batch_result_geojson(runtime.as_ref(), context, result)
     })
 }
 
@@ -578,8 +593,8 @@ fn build_profile_infos(service: &ServiceRuntime) -> Vec<ProfileInfo> {
 
 fn build_transit_feed_infos(service: &ServiceRuntime) -> Vec<TransitFeedInfo> {
     service
-        .transit_feeds
-        .values()
+        .transit_feeds()
+        .iter()
         .map(|feed| TransitFeedInfo {
             feed_id: feed.manifest.feed_id.clone(),
             source_path: feed.manifest.source_path.clone(),

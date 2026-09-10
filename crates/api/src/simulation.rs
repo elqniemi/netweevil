@@ -138,7 +138,7 @@ pub(crate) async fn create_simulation(
         .validate()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
 
-    let service = state.service.clone();
+    let service = state.runtime()?;
     let mut profiles: BTreeMap<String, Arc<PreparedRoutingEngine>> = BTreeMap::new();
     for (profile_id, profile) in &service.profiles {
         profiles.insert(profile_id.clone(), Arc::clone(&profile.engine));

@@ -669,6 +669,17 @@ pub(crate) fn transit_service_area_result_geojson(
     result: &TransitServiceAreaResult,
 ) -> Value {
     let mut features = Vec::new();
+    for feature in &result.features {
+        let mut properties = serde_json::to_value(feature).expect("serializable isochrone feature");
+        properties.as_object_mut().unwrap().remove("geometry");
+        properties["feed_id"] = json!(execution.feed_id);
+        properties["analysis_id"] = json!(result.analysis_id);
+        properties["agency_timezone"] = json!(result.time_context.agency_timezone);
+        properties["time_origin_unix_s"] = json!(result.time_context.time_origin_unix_s);
+        features.push(
+            json!({"type": "Feature", "geometry": feature.geometry, "properties": properties}),
+        );
+    }
     for stop in &result.stops {
         features.push(json!({
             "type": "Feature",
@@ -743,6 +754,8 @@ pub(crate) fn transit_service_area_result_geojson(
             "skipped_origin_count": result.skipped_origin_count,
             "max_travel_time_s": result.max_travel_time_s,
             "stop_count": result.stops.len(),
+            "catchment_mode": result.catchment_mode,
+            "isochrone_feature_count": result.features.len(),
             "stop_segment_count": result.stop_segments.len(),
             "diagnostics": result.diagnostics,
         }

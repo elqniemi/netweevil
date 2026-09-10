@@ -91,6 +91,7 @@ class SettingsIoMixin:
             "service_area_mode": self.service_area_mode_combo.currentData(),
             "service_area_transit_datetime": self.service_area_transit_datetime_edit.text().strip(),
             "service_area_transit_arrive_by": self.service_area_transit_arrive_by_check.isChecked(),
+            "service_area_transit_catchment": self.service_area_transit_catchment_combo.currentData(),
             "service_area_transit_max_time": self.service_area_transit_max_time_edit.text().strip(),
             "service_area_access_mode": self.service_area_access_mode_combo.currentData(),
             "service_area_access_distance": self.service_area_access_distance_edit.text().strip(),
@@ -376,6 +377,10 @@ class SettingsIoMixin:
         self.service_area_transit_arrive_by_check.setChecked(
             self.read_bool_setting("service_area_transit_arrive_by", False)
         )
+        catchment_index = self.service_area_transit_catchment_combo.findData(
+            self.read_setting("service_area_transit_catchment", "stops")
+        )
+        self.service_area_transit_catchment_combo.setCurrentIndex(max(0, catchment_index))
         self.update_service_area_transit_time_labels()
         self.service_area_transit_max_time_edit.setText(
             self.read_setting(

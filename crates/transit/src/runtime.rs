@@ -207,6 +207,17 @@ pub(crate) fn build_transfer_candidates(
 /// transit crate can price legs with real network times while staying
 /// decoupled from the street router.
 pub trait StreetTimeEstimator: Send + Sync {
+    /// Expand from the origin and legally reachable stops with their elapsed
+    /// travel times. Arrive-by requests expand backwards towards the stops.
+    fn street_isochrone(
+        &self,
+        _origin: &crate::TransitPoint,
+        _stops: &[(&TransitStop, u32)],
+        _request: &crate::TransitServiceAreaRequest,
+    ) -> Result<Vec<crate::TransitIsochroneFeature>> {
+        anyhow::bail!("street_isochrone requires a street-network service-area engine")
+    }
+
     /// Network travel time in seconds between two points for a street mode,
     /// or `None` when no engine covers the mode or the pair is unreachable.
     /// In network street-access mode, `None` makes the candidate unreachable;

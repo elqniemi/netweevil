@@ -340,6 +340,28 @@ impl PreparedRoutingEngine {
         self.execute_service_area_with_mode(request, EngineMode::Auto)
     }
 
+    /// A static street isochrone with an elapsed travel time at each snapped
+    /// start. Reverse expansion follows incoming edges and reversed turn rules.
+    pub fn execute_seeded_service_area(
+        &self,
+        origin_id: &str,
+        seeds: &[ServiceAreaSeed],
+        max_travel_time_s: f64,
+        reverse: bool,
+        returns: &ServiceAreaReturnOptions,
+    ) -> Result<Vec<ServiceAreaFeature>> {
+        execute_seeded_service_area_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            origin_id,
+            seeds,
+            max_travel_time_s,
+            reverse,
+            returns,
+        )
+    }
+
     pub fn execute_service_area_sequence(
         &self,
         request: &ServiceAreaSequenceRequest,

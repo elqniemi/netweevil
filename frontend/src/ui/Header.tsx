@@ -3,21 +3,24 @@ import type { ServiceInfo } from "../api/types";
 import { BASEMAP_LABELS } from "../map/basemaps";
 import { setState, useStore, type Basemap } from "../state/store";
 import { fmtNumber } from "./format";
+import { PlaceSearch } from "./PlaceSearch";
 
 interface Props {
   service: ServiceInfo | null;
   error: string | null;
   loading: boolean;
+  /** API is up but no dataset is loaded yet. */
+  setupNeeded?: boolean;
 }
 
-export function Header({ service, error, loading }: Props) {
+export function Header({ service, error, loading, setupNeeded }: Props) {
   const apiBase = useStore((s) => s.apiBase);
   const basemap = useStore((s) => s.basemap);
   const [editingBase, setEditingBase] = useState(false);
   const [draftBase, setDraftBase] = useState(apiBase);
   const [showInfo, setShowInfo] = useState(false);
 
-  const status = loading ? "connecting" : error ? "offline" : "online";
+  const status = loading ? "connecting" : setupNeeded ? "setup" : error ? "offline" : "online";
 
   return (
     <header className="header">
@@ -25,10 +28,11 @@ export function Header({ service, error, loading }: Props) {
         <span className="brand-mark" aria-hidden="true" />
         <span className="brand-name">NetWeevil console</span>
       </div>
-      <button type="button" className={`status status-${status}`} onClick={() => setShowInfo((v) => !v)} title="Show dataset details">
+      <button type="button" className={`status status-${status}`} onClick={() => (status === "setup" ? setState({ setupOpen: true }) : setShowInfo((v) => !v))} title={status === "setup" ? "Open Setup" : "Show dataset details"}>
         <span className="status-dot" />
-        {status === "online" && service ? service.dataset.dataset_id : status === "offline" ? "API unreachable" : "Connecting"}
+        {status === "online" && service ? service.dataset.dataset_id : status === "offline" ? "API unreachable" : status === "setup" ? "No dataset loaded – open Setup" : "Connecting"}
       </button>
+      <PlaceSearch service={service} />
       <div className="header-spacer" />
       <div className="segmented" role="group" aria-label="Basemap">
         {(Object.keys(BASEMAP_LABELS) as Basemap[]).map((id) => (

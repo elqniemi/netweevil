@@ -46,7 +46,8 @@ pub(crate) async fn locate_handler(
     State(state): State<ApiState>,
     Json(payload): Json<ProfiledRequest<LocateRequest>>,
 ) -> Result<Json<ExecutionResponse<LocateContext, Vec<LocatedPoint>>>, ApiError> {
-    let profile = resolve_profile(&state.service, payload.profile_id.as_deref())?;
+    let runtime = state.runtime()?;
+    let profile = resolve_profile(&runtime, payload.profile_id.as_deref())?;
     if payload.request.points.is_empty() {
         return Err(ApiError::bad_request("locate requires at least one point"));
     }
@@ -59,12 +60,12 @@ pub(crate) async fn locate_handler(
         }
     }
     let service = LocateContext {
-        dataset_id: state.service.dataset_manifest.dataset_id.0.clone(),
+        dataset_id: runtime.dataset_manifest.dataset_id.0.clone(),
         profile_id: profile.document.profile.id.clone(),
         profile_hash: profile.manifest.profile_hash.clone(),
     };
     let engine = Arc::clone(&profile.engine);
-    let result = execute_on_routing_worker(&state.service, move || {
+    let result = execute_on_routing_worker(&runtime, move || {
         payload
             .request
             .points

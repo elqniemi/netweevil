@@ -215,6 +215,14 @@ class ServiceAreaTabMixin:
 
         self.service_area_transit_group = QGroupBox("Transit options")
         transit_form = QFormLayout(self.service_area_transit_group)
+        self.service_area_transit_catchment_combo = QComboBox()
+        self.service_area_transit_catchment_combo.addItem("Reachable stops", "stops")
+        self.service_area_transit_catchment_combo.addItem("Street isochrone", "street_isochrone")
+        self.service_area_transit_catchment_combo.setToolTip(
+            "Continue along streets after transit until the total time runs out, "
+            "including direct street travel. Requires loaded street profiles."
+        )
+        transit_form.addRow("Catchment mode", self.service_area_transit_catchment_combo)
         self.service_area_transit_datetime_edit = QLineEdit("2026-05-11T08:30:00+02:00")
         self.service_area_transit_datetime_label = QLabel("Transit departure")
         self.service_area_transit_arrive_by_check = QCheckBox(
@@ -586,6 +594,7 @@ class ServiceAreaTabMixin:
             return {
                 "analysis_id": self.service_area_analysis_id_edit.text().strip()
                 or "qgis_transit_service_area",
+                "catchment_mode": self.service_area_transit_catchment_combo.currentData(),
                 "origins": self.build_service_area_origins(),
                 "time": {
                     "datetime": self.service_area_transit_datetime_edit.text().strip(),

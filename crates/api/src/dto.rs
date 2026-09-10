@@ -132,6 +132,9 @@ pub(crate) struct TransitRouteExecutionRequest {
 #[derive(Debug, Deserialize)]
 pub(crate) struct TransitServiceAreaExecutionRequest {
     pub(crate) feed_id: String,
+    pub(crate) pedestrian_profile_id: Option<String>,
+    pub(crate) access_profile_id: Option<String>,
+    pub(crate) egress_profile_id: Option<String>,
     pub(crate) request: TransitServiceAreaRequest,
 }
 

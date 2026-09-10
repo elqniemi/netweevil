@@ -7,11 +7,13 @@ use axum::response::{IntoResponse, Response};
 use netweevil_core::{TopologyBundle, TravelMode};
 use netweevil_profile::{ReturnConfig, ReturnGeometry};
 use netweevil_query::{
-    LabeledPoint, PreparedRoutingEngine, RouteRequest, SnapOptions, SnappedPoint,
+    LabeledPoint, PreparedRoutingEngine, RouteRequest, ServiceAreaReturnOptions, ServiceAreaSeed,
+    SnapOptions, SnappedPoint,
 };
 use netweevil_transit::{
-    AccessMode, StreetTimeEstimator, TransitLeg, TransitLegType, TransitModeOptions,
-    TransitRouteResult, TransitStop, TransitStopBindingTarget, TransitStreetAccessModel,
+    AccessMode, StreetTimeEstimator, TransitCatchmentMode, TransitIsochroneFeature, TransitLeg,
+    TransitLegType, TransitModeOptions, TransitPoint, TransitRouteResult,
+    TransitServiceAreaRequest, TransitStop, TransitStopBindingTarget, TransitStreetAccessModel,
     TransitStreetPath, TransitWalkingGeometry,
 };
 use tracing::{info, warn};
@@ -31,13 +33,10 @@ pub(crate) async fn transit_route_handler(
     State(state): State<ApiState>,
     Json(payload): Json<TransitRouteExecutionRequest>,
 ) -> Result<Json<TransitRouteExecutionResponse>, ApiError> {
-    let feed = state
-        .service
-        .transit_feeds
-        .get(&payload.feed_id)
-        .ok_or_else(|| {
-            ApiError::not_found(format!("unknown transit feed '{}'", payload.feed_id))
-        })?;
+    let runtime = state.runtime()?;
+    let feed = runtime.transit_feed(&payload.feed_id).ok_or_else(|| {
+        ApiError::not_found(format!("unknown transit feed '{}'", payload.feed_id))
+    })?;
     info!(
         endpoint = "transit_route",
         feed_id = %payload.feed_id,
@@ -57,7 +56,7 @@ pub(crate) async fn transit_route_handler(
                 request.returns.include_geometry = true;
             }
             Some(resolve_transit_street_engines(
-                state.service.as_ref(),
+                runtime.as_ref(),
                 payload.pedestrian_profile_id.as_deref(),
                 payload.access_profile_id.as_deref(),
                 payload.egress_profile_id.as_deref(),
@@ -79,7 +78,7 @@ pub(crate) async fn transit_route_handler(
         .as_ref()
         .and_then(|engines| side_profile_ids(&engines.egress));
     let replace_geometry = matches!(walking_geometry, TransitWalkingGeometry::Network);
-    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+    let result = execute_on_routing_worker(runtime.as_ref(), move || {
         let estimator = street_engines
             .as_ref()
             .filter(|_| network_street_access)
@@ -126,13 +125,10 @@ pub(crate) async fn transit_service_area_handler(
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<TransitServiceAreaExecutionRequest>,
 ) -> Result<Response, ApiError> {
-    let feed = state
-        .service
-        .transit_feeds
-        .get(&payload.feed_id)
-        .ok_or_else(|| {
-            ApiError::not_found(format!("unknown transit feed '{}'", payload.feed_id))
-        })?;
+    let runtime = state.runtime()?;
+    let feed = runtime.transit_feed(&payload.feed_id).ok_or_else(|| {
+        ApiError::not_found(format!("unknown transit feed '{}'", payload.feed_id))
+    })?;
     info!(
         endpoint = "transit_service_area",
         feed_id = %payload.feed_id,
@@ -146,22 +142,32 @@ pub(crate) async fn transit_service_area_handler(
     let router = Arc::clone(&feed.router);
     let request = payload.request;
     let transfer_profile_id = request.modes.transfer_profile_id.clone();
+    let isochrone = request.catchment_mode == TransitCatchmentMode::StreetIsochrone;
     let network_street_access = matches!(
         request.modes.street_access,
         TransitStreetAccessModel::Network
     );
-    let street_engines = if network_street_access {
+    let street_engines = if network_street_access || isochrone {
         Some(resolve_transit_street_engines(
-            state.service.as_ref(),
-            None,
-            None,
-            None,
+            runtime.as_ref(),
+            payload.pedestrian_profile_id.as_deref(),
+            payload.access_profile_id.as_deref(),
+            payload.egress_profile_id.as_deref(),
             &request.modes,
         )?)
     } else {
         None
     };
-    let result = execute_on_routing_worker(state.service.as_ref(), move || {
+    let pedestrian_profile_id = street_engines
+        .as_ref()
+        .map(|engines| engines.walk.0.clone());
+    let access_profile_id = street_engines
+        .as_ref()
+        .and_then(|engines| side_profile_ids(&engines.access));
+    let egress_profile_id = street_engines
+        .as_ref()
+        .and_then(|engines| side_profile_ids(&engines.egress));
+    let result = execute_on_routing_worker(runtime.as_ref(), move || {
         let estimator = street_engines.as_ref().map(StreetEngineTimeEstimator::new);
         router.execute_service_area_with_street_estimator(
             &request,
@@ -182,11 +188,16 @@ pub(crate) async fn transit_service_area_handler(
         agency_timezone: manifest.agency_timezone,
         time_origin_unix_s: manifest.time_origin_unix_s,
         route_engine: "scheduled_connection_scan_transit_service_area".to_string(),
-        walking_geometry: "straight_line".to_string(),
+        walking_geometry: if isochrone {
+            "network"
+        } else {
+            "straight_line"
+        }
+        .to_string(),
         transfer_profile_id,
-        pedestrian_profile_id: None,
-        access_profile_id: None,
-        egress_profile_id: None,
+        pedestrian_profile_id,
+        access_profile_id,
+        egress_profile_id,
     };
     info!(
         endpoint = "transit_service_area",
@@ -416,6 +427,114 @@ impl<'a> StreetEngineTimeEstimator<'a> {
 }
 
 impl StreetTimeEstimator for StreetEngineTimeEstimator<'_> {
+    fn street_isochrone(
+        &self,
+        origin: &TransitPoint,
+        stops: &[(&TransitStop, u32)],
+        request: &TransitServiceAreaRequest,
+    ) -> anyhow::Result<Vec<TransitIsochroneFeature>> {
+        let reverse = request.time.arrive_by;
+        let direct_modes = if reverse {
+            request.modes.validated_egress_modes()?
+        } else {
+            request.modes.validated_access_modes()?
+        };
+        let stop_modes = if reverse {
+            request.modes.validated_access_modes()?
+        } else {
+            request.modes.validated_egress_modes()?
+        };
+        let mut groups: Vec<(
+            AccessMode,
+            &str,
+            &PreparedRoutingEngine,
+            Vec<ServiceAreaSeed>,
+        )> = Vec::new();
+        for (egress, modes, direct) in
+            [(reverse, direct_modes, true), (!reverse, stop_modes, false)]
+        {
+            for mode in modes {
+                let Some((profile_id, engine)) = self.engine(mode, egress) else {
+                    anyhow::bail!(
+                        "street_isochrone requires a loaded {} profile",
+                        mode.label()
+                    );
+                };
+                let group_index = groups
+                    .iter()
+                    .position(|(known_mode, id, _, _)| *known_mode == mode && *id == profile_id)
+                    .unwrap_or_else(|| {
+                        groups.push((mode, profile_id, engine.as_ref(), Vec::new()));
+                        groups.len() - 1
+                    });
+                let seeds = &mut groups[group_index].3;
+                let mut add_candidates = |candidates: Vec<SnappedPoint>, elapsed: u32| {
+                    seeds.extend(candidates.into_iter().map(|point| ServiceAreaSeed {
+                        // Reaching the snapped street location also spends time.
+                        initial_time_s: f64::from(elapsed)
+                            + point.snap_distance_m / (mode.speed_kph(&request.modes) / 3.6),
+                        point,
+                    }));
+                };
+                if direct {
+                    let point = LabeledPoint {
+                        id: origin.id.clone(),
+                        lon: origin.lon,
+                        lat: origin.lat,
+                        z: None,
+                    };
+                    add_candidates(
+                        engine
+                            .snap_route_candidates(&point, 500.0, !reverse)
+                            .unwrap_or_default(),
+                        0,
+                    );
+                } else {
+                    for &(stop, elapsed) in stops {
+                        add_candidates(
+                            self.candidates_for_stop(mode, stop, !reverse)
+                                .unwrap_or_default(),
+                            elapsed,
+                        );
+                    }
+                }
+            }
+        }
+        let mut features = Vec::new();
+        for (mode, _, engine, seeds) in groups {
+            let street_features = engine.execute_seeded_service_area(
+                &origin.id,
+                &seeds,
+                f64::from(request.max_travel_time_s),
+                reverse,
+                &ServiceAreaReturnOptions {
+                    geometry: request.returns.include_geometry,
+                    max_geometry_points: request.returns.max_geometry_points,
+                    ..Default::default()
+                },
+            )?;
+            features.extend(street_features.into_iter().map(|feature| {
+                TransitIsochroneFeature {
+                    origin_id: origin.id.clone(),
+                    mode,
+                    geometry_type: match feature.geometry_type {
+                        netweevil_query::ServiceAreaGeometryType::Polygon => "polygon",
+                        _ => "network",
+                    }
+                    .to_string(),
+                    threshold_limit: feature.threshold_limit,
+                    threshold_metric: "travel_time_s".to_string(),
+                    reachable_network_length_m: feature
+                        .reachable_network_length_m
+                        .unwrap_or_default(),
+                    reachable_edge_count: feature.reachable_edge_count.unwrap_or_default(),
+                    geometry: feature.geometry,
+                }
+            }));
+        }
+        Ok(features)
+    }
+
     fn street_time_s(
         &self,
         mode: AccessMode,

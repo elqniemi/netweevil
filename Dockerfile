@@ -1,5 +1,15 @@
 # syntax=docker/dockerfile:1
 
+# The web console is built first and embedded into the executable, so the
+# image serves it at / without a separate web server.
+FROM node:22-bookworm-slim AS console
+WORKDIR /console
+RUN corepack enable
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY frontend ./
+RUN pnpm build
+
 FROM rust:1.96.1-slim-bookworm AS builder
 WORKDIR /build
 
@@ -9,6 +19,7 @@ RUN apt-get update \
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
+COPY --from=console /console/dist ./frontend/dist
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \

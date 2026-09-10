@@ -6,6 +6,7 @@
 //! [`StreetTimeEstimator`] for real network times.
 
 mod backward;
+pub mod editor;
 mod fusion;
 mod gtfs;
 mod legs;
@@ -16,6 +17,12 @@ mod service_area;
 mod timetable_time;
 mod transfer_rules;
 
+pub use editor::{
+    GTFS_SCENARIO_SCHEMA_VERSION, GtfsScenario, ScenarioAgency, ScenarioBuildOptions,
+    ScenarioHeadwayWindow, ScenarioLine, ScenarioLineStop, ScenarioService, ScenarioStop,
+    ScenarioSummary, TransitPatternStop, TransitRoutePattern, build_scenario_bundle,
+    route_patterns, write_gtfs_zip,
+};
 pub use fusion::{
     apply_transit_stop_bindings, build_transit_transfer_table, load_transit_stop_bindings,
     network_transfer, read_transit_transfer_table, write_transit_transfer_table,
@@ -36,6 +43,7 @@ pub use model::{
     TransitTransferTableManifest, TransitTransferType, TransitTrip, TransitWalkingGeometry,
     load_transit_request,
 };
+pub use model::{TransitCatchmentMode, TransitIsochroneFeature};
 pub use router::{PreparedTransitRouter, execute_transit_route};
 pub use runtime::StreetTimeEstimator;
 pub use service_area::execute_transit_service_area;

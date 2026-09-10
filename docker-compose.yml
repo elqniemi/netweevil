@@ -13,17 +13,13 @@ services:
         OVERTURE_BBOX: "${NETWEEVIL_FETCH_OVERTURE_BBOX:-}"
         DATASET_NAME: "${NETWEEVIL_DATASET:-osm}"
     image: netweevil:latest
-    command:
-      [
-        "api",
-        "serve",
-        "--dataset",
-        "${NETWEEVIL_DATASET:-osm}",
-        "--default-profile",
-        "${NETWEEVIL_PROFILE:-examples/profiles/car_research_v1.yml}",
-        "--bind",
-        "0.0.0.0:8080",
-      ]
+    # Setup mode: open http://localhost:8080/ and use Setup to import data.
+    # Files placed in ./datasets are visible inside the container as
+    # /data/datasets/<file> and can be referenced by path instead of uploaded.
+    # To pin a dataset at start instead, replace the command with:
+    #   ["api", "serve", "--dataset", "osm", "--default-profile",
+    #    "examples/profiles/car_research_v1.yml", "--bind", "0.0.0.0:8080"]
+    command: ["bootstrap", "--no-open", "--bind", "0.0.0.0:8080"]
     ports:
       - "${NETWEEVIL_PORT:-8080}:8080"
     volumes:

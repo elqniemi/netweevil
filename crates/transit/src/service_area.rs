@@ -9,8 +9,8 @@ use crate::backward::{
 };
 use crate::legs::{ShapePointIndexCache, seconds_for_distance, transit_connection_geometry_cached};
 use crate::model::{
-    AccessMode, TransitBundle, TransitConnection, TransitOutcome, TransitPoint,
-    TransitServiceAreaRequest, TransitServiceAreaResult, TransitServiceAreaSegment,
+    AccessMode, TransitBundle, TransitCatchmentMode, TransitConnection, TransitOutcome,
+    TransitPoint, TransitServiceAreaRequest, TransitServiceAreaResult, TransitServiceAreaSegment,
     TransitServiceAreaStop,
 };
 use crate::runtime::{
@@ -110,6 +110,19 @@ pub(crate) fn execute_transit_service_area_with_runtime(
     runtime: &TransitRuntime<'_>,
     request: &TransitServiceAreaRequest,
 ) -> Result<TransitServiceAreaResult> {
+    if request.catchment_mode == TransitCatchmentMode::StreetIsochrone
+        && runtime.street_estimator.is_none()
+    {
+        bail!("street_isochrone requires a loaded street-network service-area engine");
+    }
+    let mut network_request;
+    let request = if request.catchment_mode == TransitCatchmentMode::StreetIsochrone {
+        network_request = request.clone();
+        network_request.modes.street_access = crate::TransitStreetAccessModel::Network;
+        &network_request
+    } else {
+        request
+    };
     let mut result = search_transit_service_area_with_runtime(runtime, request)?;
     result
         .diagnostics
@@ -157,7 +170,7 @@ fn search_transit_service_area_with_runtime(
         .collect::<Result<Vec<_>>>()?;
 
     assemble_transit_service_area_result(
-        runtime.bundle,
+        runtime,
         request,
         ServiceAreaAnchor::DepartAfter { departure_s },
         origin_outputs,
@@ -213,7 +226,7 @@ fn execute_transit_service_area_arrive_by(
         .collect::<Result<Vec<_>>>()?;
 
     assemble_transit_service_area_result(
-        runtime.bundle,
+        runtime,
         request,
         ServiceAreaAnchor::ArriveBy { deadline_s },
         origin_outputs,
@@ -221,22 +234,40 @@ fn execute_transit_service_area_arrive_by(
 }
 
 fn assemble_transit_service_area_result(
-    bundle: &TransitBundle,
+    runtime: &TransitRuntime<'_>,
     request: &TransitServiceAreaRequest,
     anchor: ServiceAreaAnchor,
     origin_outputs: Vec<OriginSearchOutput>,
 ) -> Result<TransitServiceAreaResult> {
+    let bundle = runtime.bundle;
     let mut all_stops = Vec::new();
     let mut all_segment_refs = Vec::new();
+    let mut features = Vec::new();
     let mut diagnostics = Vec::new();
     let mut processed_origin_count = 0_usize;
     let mut skipped_origin_count = 0_usize;
-    for output in origin_outputs {
+    for (origin, output) in request.origins.iter().zip(origin_outputs) {
+        let street_features = if request.catchment_mode == TransitCatchmentMode::StreetIsochrone {
+            let stops = output
+                .street_seeds
+                .iter()
+                .map(|&(index, elapsed)| (&bundle.stops[index as usize], elapsed))
+                .collect::<Vec<_>>();
+            runtime
+                .street_estimator
+                .expect("validated street estimator")
+                .street_isochrone(origin, &stops, request)?
+        } else {
+            Vec::new()
+        };
         if let Some(diagnostic) = output.skipped_diagnostic {
-            skipped_origin_count += 1;
             diagnostics.push(diagnostic);
-            continue;
+            if street_features.is_empty() {
+                skipped_origin_count += 1;
+                continue;
+            }
         }
+        features.extend(street_features);
         processed_origin_count += 1;
         for stop in output.stops {
             ensure_transit_service_area_output_room(
@@ -260,6 +291,22 @@ fn assemble_transit_service_area_result(
 
     let all_segments =
         materialize_transit_service_area_segments(bundle, request, anchor, all_segment_refs)?;
+    let geometry_points = all_segments
+        .iter()
+        .map(|segment| segment.geometry.len())
+        .sum::<usize>()
+        + features
+            .iter()
+            .filter_map(|feature| feature.geometry.as_ref())
+            .map(geometry_point_count)
+            .sum::<usize>();
+    if geometry_points > request.returns.max_geometry_points {
+        bail!(
+            "transit service-area output has {} geometry points but returns.max_geometry_points is {}; reduce max_travel_time_s or raise returns.max_geometry_points",
+            geometry_points,
+            request.returns.max_geometry_points
+        );
+    }
 
     let outcome = if processed_origin_count == 0 {
         TransitOutcome::Unreachable
@@ -268,6 +315,7 @@ fn assemble_transit_service_area_result(
     };
     Ok(TransitServiceAreaResult {
         analysis_id: request.analysis_id.clone(),
+        catchment_mode: request.catchment_mode,
         time_context: bundle.time_context(),
         outcome,
         origin_count: request.origins.len(),
@@ -276,8 +324,24 @@ fn assemble_transit_service_area_result(
         max_travel_time_s: request.max_travel_time_s,
         stops: all_stops,
         stop_segments: all_segments,
+        features,
         diagnostics,
     })
+}
+
+fn geometry_point_count(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(values)
+            if values.first().is_some_and(serde_json::Value::is_number) =>
+        {
+            1
+        }
+        serde_json::Value::Array(values) => values.iter().map(geometry_point_count).sum(),
+        serde_json::Value::Object(values) => {
+            values.get("coordinates").map_or(0, geometry_point_count)
+        }
+        _ => 0,
+    }
 }
 
 /// Per-origin search output, merged in origin order after the parallel sweep.
@@ -285,6 +349,7 @@ struct OriginSearchOutput {
     skipped_diagnostic: Option<String>,
     stops: Vec<TransitServiceAreaStop>,
     segment_refs: Vec<TransitServiceAreaSegmentRef>,
+    street_seeds: Vec<(u32, u32)>,
 }
 
 /// Search state reused across origins on the same rayon worker thread.
@@ -338,6 +403,7 @@ fn search_service_area_origin(
             )),
             stops: Vec::new(),
             segment_refs: Vec::new(),
+            street_seeds: Vec::new(),
         });
     }
 
@@ -539,6 +605,18 @@ fn search_service_area_origin(
         }
     }
 
+    let mut street_seeds = BTreeMap::<u32, u32>::new();
+    if request.catchment_mode == TransitCatchmentMode::StreetIsochrone {
+        for (state, &arrival) in best.iter() {
+            if state.boardings > 0 && state.can_alight && arrival <= time_limit_s {
+                let elapsed = arrival.saturating_sub(departure_s);
+                street_seeds
+                    .entry(state.stop_index)
+                    .and_modify(|known| *known = (*known).min(elapsed))
+                    .or_insert(elapsed);
+            }
+        }
+    }
     let mut stops = Vec::new();
     if request.returns.include_stops {
         let mut stop_best = BTreeMap::<u32, (u32, u8, StateKey)>::new();
@@ -584,6 +662,7 @@ fn search_service_area_origin(
         skipped_diagnostic: None,
         stops,
         segment_refs,
+        street_seeds: street_seeds.into_iter().collect(),
     })
 }
 
@@ -643,6 +722,7 @@ fn search_service_area_target(
             )),
             stops: Vec::new(),
             segment_refs: Vec::new(),
+            street_seeds: Vec::new(),
         });
     }
 
@@ -833,6 +913,21 @@ fn search_service_area_target(
         }
     }
 
+    let mut street_seeds = BTreeMap::<u32, u32>::new();
+    if request.catchment_mode == TransitCatchmentMode::StreetIsochrone {
+        for (state, &departure) in best.iter() {
+            if state.boardings > 0
+                && !matches!(state.stance, BackwardStance::Aboard(_))
+                && departure >= time_floor_s
+            {
+                let elapsed = deadline_s.saturating_sub(departure);
+                street_seeds
+                    .entry(state.stop_index)
+                    .and_modify(|known| *known = (*known).min(elapsed))
+                    .or_insert(elapsed);
+            }
+        }
+    }
     let mut stops = Vec::new();
     if request.returns.include_stops {
         let mut stop_best = BTreeMap::<u32, (u32, u8, BackwardStateKey)>::new();
@@ -878,6 +973,7 @@ fn search_service_area_target(
         skipped_diagnostic: None,
         stops,
         segment_refs,
+        street_seeds: street_seeds.into_iter().collect(),
     })
 }
 

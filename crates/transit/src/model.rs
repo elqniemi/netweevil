@@ -405,6 +405,8 @@ pub struct TransitRouteRequest {
 pub struct TransitServiceAreaRequest {
     pub analysis_id: String,
     #[serde(default)]
+    pub catchment_mode: TransitCatchmentMode,
+    #[serde(default)]
     pub origins: Vec<TransitPoint>,
     pub time: TransitQueryTime,
     #[serde(default)]
@@ -413,6 +415,15 @@ pub struct TransitServiceAreaRequest {
     pub max_travel_time_s: u32,
     #[serde(default)]
     pub returns: TransitServiceAreaReturnOptions,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitCatchmentMode {
+    #[default]
+    Stops,
+    /// Continue on the street network after transit, up to the total time budget.
+    StreetIsochrone,
 }
 
 fn default_transit_service_area_max_travel_time_s() -> u32 {
@@ -762,6 +773,8 @@ pub struct TransitRouteResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitServiceAreaResult {
     pub analysis_id: String,
+    #[serde(default)]
+    pub catchment_mode: TransitCatchmentMode,
     pub time_context: TransitTimeContext,
     pub outcome: TransitOutcome,
     pub origin_count: usize,
@@ -773,7 +786,21 @@ pub struct TransitServiceAreaResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stop_segments: Vec<TransitServiceAreaSegment>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<TransitIsochroneFeature>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitIsochroneFeature {
+    pub origin_id: String,
+    pub mode: AccessMode,
+    pub geometry_type: String,
+    pub threshold_limit: f64,
+    pub threshold_metric: String,
+    pub reachable_network_length_m: f64,
+    pub reachable_edge_count: u64,
+    pub geometry: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

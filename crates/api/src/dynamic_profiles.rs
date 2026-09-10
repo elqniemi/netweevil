@@ -437,10 +437,7 @@ mod tests {
 
     #[tokio::test]
     async fn trace_matching_endpoint_exports_sequence_and_rejects_partial_timestamps() {
-        let state = ApiState {
-            service: fixture(),
-            simulations: Arc::new(crate::simulation::SimulationRegistry::default()),
-        };
+        let state = ApiState::for_test(fixture());
         let base = json!({"request": {
             "trace_id":"test-trace", "snap":{"max_distance_m":10},
             "observations": [
@@ -522,10 +519,7 @@ mod tests {
                 "Service Road".into(),
             ]))
             .unwrap();
-        let state = ApiState {
-            service: service.clone(),
-            simulations: Arc::new(crate::simulation::SimulationRegistry::default()),
-        };
+        let state = ApiState::for_test(service.clone());
         for format in [None, Some("geojson")] {
             let response = crate::handlers::directions_handler(
                 State(state.clone()),
@@ -570,10 +564,7 @@ mod tests {
 
     #[tokio::test]
     async fn waypoint_endpoint_returns_legs_order_and_geojson_and_rejects_temporal_requests() {
-        let state = ApiState {
-            service: fixture(),
-            simulations: Arc::new(crate::simulation::SimulationRegistry::default()),
-        };
+        let state = ApiState::for_test(fixture());
         let base = json!({"request": {
             "route_id":"waypoints-test", "snap":{"max_distance_m":10},
             "waypoints":[
@@ -663,10 +654,7 @@ mod tests {
     #[tokio::test]
     async fn locate_candidates_match_route_snapping_and_reject_invalid_requests() {
         let service = fixture();
-        let state = ApiState {
-            service: service.clone(),
-            simulations: Arc::new(crate::simulation::SimulationRegistry::default()),
-        };
+        let state = ApiState::for_test(service.clone());
         for direction in ["origin", "destination"] {
             let payload = json!({"request": {
                 "points": [{"id":"first","lon":6.0005,"lat":53.0},
@@ -754,10 +742,7 @@ mod tests {
 
     #[tokio::test]
     async fn locate_applies_bearing_and_curb_constraints_to_directed_candidates() {
-        let state = ApiState {
-            service: fixture(),
-            simulations: Arc::new(crate::simulation::SimulationRegistry::default()),
-        };
+        let state = ApiState::for_test(fixture());
         for direction in ["origin", "destination"] {
             let payload = json!({"request": {
                 "points": [{"id":"curb","lon":6.0005,"lat":52.9999}],
@@ -901,10 +886,7 @@ mod tests {
             .unwrap();
         let _cache = service.dynamic_profiles.entries.lock().unwrap();
         let response = crate::handlers::route_handler(
-            State(ApiState {
-                service: service.clone(),
-                simulations: Arc::new(crate::simulation::SimulationRegistry::default()),
-            }),
+            State(ApiState::for_test(service.clone())),
             Query(ResponseFormatQuery { format: None }),
             Json(serde_json::from_value(json!({"request":request()})).unwrap()),
         )
@@ -936,10 +918,7 @@ mod tests {
     #[tokio::test]
     async fn dynamic_json_and_geojson_report_effective_profile_and_cache_status() {
         let service = fixture();
-        let state = ApiState {
-            service: service.clone(),
-            simulations: Arc::new(crate::simulation::SimulationRegistry::default()),
-        };
+        let state = ApiState::for_test(service.clone());
         let payload = json!({"profile_overrides":changed_speeds(), "request":request()});
         let response = crate::handlers::route_handler(
             State(state.clone()),

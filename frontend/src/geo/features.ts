@@ -7,6 +7,9 @@
 // shape it recognises, and tags it with `_kind` (the enclosing key) so the
 // style step can colour it.
 
+import { DEFAULT_MAP_STYLE, type MapStyle } from "../state/store";
+import { transitTimeContext, type TransitTimeContext } from "../api/time";
+
 export type Position = number[];
 
 export interface Geometry {
@@ -108,14 +111,15 @@ export function extractFeatures(root: unknown): FeatureCollection {
     features.push({ type: "Feature", id: counter++, geometry, properties: props });
   }
 
-  function walk(value: unknown, key: string, path: string, kind: string, index: number | null, depth: number) {
+  function walk(value: unknown, key: string, path: string, kind: string, index: number | null, depth: number, inherited?: TransitTimeContext) {
     if (depth > 14 || value === null || typeof value !== "object") return;
     if (seen.has(value as object)) return;
     seen.add(value as object);
+    const context = transitTimeContext(value) ?? inherited;
 
     if (Array.isArray(value)) {
       // Coordinate arrays under known keys are handled by their parent object.
-      for (let i = 0; i < value.length; i++) walk(value[i], key, `${path}[${i}]`, key, i, depth + 1);
+      for (let i = 0; i < value.length; i++) walk(value[i], key, `${path}[${i}]`, key, i, depth + 1, context);
       return;
     }
 
@@ -123,15 +127,15 @@ export function extractFeatures(root: unknown): FeatureCollection {
     if (isGeometryObject(obj)) return; // consumed by the parent
     if (obj.type === "Feature" && isGeometryObject(obj.geometry)) {
       const props = { ...(typeof obj.properties === "object" && obj.properties ? (obj.properties as Record<string, unknown>) : {}) };
-      push(obj.geometry, { ...scalarProps(props), _kind: kind, _path: path, _index: index });
+      push(obj.geometry, { ...context, ...scalarProps(props), _kind: kind, _path: path, _index: index });
       return;
     }
     if (obj.type === "FeatureCollection" && Array.isArray(obj.features)) {
-      walk(obj.features, "features", `${path}.features`, kind === "root" ? "features" : kind, null, depth + 1);
+      walk(obj.features, "features", `${path}.features`, kind === "root" ? "features" : kind, null, depth + 1, context);
       return;
     }
 
-    const base = { ...scalarProps(obj), _kind: kind, _path: path, _index: index };
+    const base = { ...context, ...scalarProps(obj), _kind: kind, _path: path, _index: index };
     let emitted = false;
 
     // 1. GeoJSON geometry object or coordinate array under `geometry`.
@@ -202,7 +206,7 @@ export function extractFeatures(root: unknown): FeatureCollection {
       if (SKIP_KEYS.has(childKey)) continue;
       if (childKey === "geometry" || childKey === "polygon" || childKey === "location") continue;
       if (child === null || typeof child !== "object") continue;
-      walk(child, childKey, `${path}.${childKey}`, Array.isArray(child) ? childKey : kind === "root" ? childKey : kind, null, depth + 1);
+      walk(child, childKey, `${path}.${childKey}`, Array.isArray(child) ? childKey : kind === "root" ? childKey : kind, null, depth + 1, context);
     }
   }
 
@@ -214,6 +218,44 @@ export function extractFeatures(root: unknown): FeatureCollection {
 
 export interface StyleContext {
   tool: string;
+  /** Colour index of this response (route or profile), for per-run hues. */
+  runIndex?: number;
+  /** How many responses ran together; above one, each gets a distinct hue. */
+  runCount?: number;
+  /** User styling of polygons, network and route lines. */
+  mapStyle?: MapStyle;
+}
+
+/** Sequential green ramp (light to dark). */
+export function greenRamp(t: number): string {
+  const a = hexToRgb("#d9f0e3");
+  const b = hexToRgb("#065a3f");
+  const u = Math.max(0, Math.min(1, t));
+  return rgbToHex([a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u]);
+}
+
+/** Sequential grey ramp (light to dark). */
+export function greyRamp(t: number): string {
+  const a = hexToRgb("#e3e7eb");
+  const b = hexToRgb("#2b3640");
+  const u = Math.max(0, Math.min(1, t));
+  return rgbToHex([a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u]);
+}
+
+/** Colour of a reach band at position t (0 = nearest threshold, 1 = farthest) under a palette. */
+export function bandColor(style: MapStyle, t: number): string {
+  switch (style.polygonPalette) {
+    case "heat":
+      return heatRamp(0.15 + 0.85 * t);
+    case "green":
+      return greenRamp(0.3 + 0.7 * (1 - t));
+    case "grey":
+      return greyRamp(0.25 + 0.7 * (1 - t));
+    case "single":
+      return style.polygonColor;
+    default:
+      return ramp(0.25 + 0.7 * (1 - t));
+  }
 }
 
 const TRANSIT_MODE_COLORS: Record<string, string> = {
@@ -266,7 +308,12 @@ export function heatRamp(t: number): string {
   return stops[stops.length - 1][1];
 }
 
-const ORDINAL = [PALETTE.crimson, PALETTE.blue, PALETTE.green, PALETTE.ochre, PALETTE.violet, PALETTE.pink];
+export const ORDINAL = [PALETTE.crimson, PALETTE.blue, PALETTE.green, PALETTE.ochre, PALETTE.violet, PALETTE.pink];
+
+/** Colour of the n-th placed route (markers and result lines agree). */
+export function routeColor(index: number): string {
+  return ORDINAL[((index % ORDINAL.length) + ORDINAL.length) % ORDINAL.length];
+}
 
 /**
  * Adds `_color`, `_width`, `_opacity`, `_radius`, `_dash`, `_fill` and `_sort`
@@ -296,6 +343,9 @@ export function styleFeatures(collection: FeatureCollection, ctx: StyleContext):
   ).sort((a, b) => a - b);
   const occupancyRange = range("congestion_level");
   const loadRange = range("congestion_share");
+  const multi = (ctx.runCount ?? 1) > 1;
+  const runHue = routeColor(ctx.runIndex ?? 0);
+  const style = ctx.mapStyle ?? DEFAULT_MAP_STYLE;
 
   for (const f of features) {
     const p = f.properties;
@@ -310,9 +360,9 @@ export function styleFeatures(collection: FeatureCollection, ctx: StyleContext):
     let sort = 0;
 
     if (kind === "alternatives") {
-      color = PALETTE.blue;
+      color = multi ? runHue : PALETTE.blue;
       width = 4;
-      opacity = 0.75;
+      opacity = multi ? 0.45 : 0.75;
       sort = -1;
     } else if (kind === "snap_link") {
       color = PALETTE.grey;
@@ -359,7 +409,7 @@ export function styleFeatures(collection: FeatureCollection, ctx: StyleContext):
         dash = 1;
       }
     } else if (kind === "legs") {
-      color = ORDINAL[(isNumber(p._index) ? p._index : 0) % ORDINAL.length];
+      color = multi ? runHue : ORDINAL[(isNumber(p._index) ? p._index : 0) % ORDINAL.length];
       width = 5;
     } else if (kind === "stop_segments") {
       color = TRANSIT_MODE_COLORS[String(p.mode ?? "")] ?? PALETTE.blue;
@@ -376,9 +426,12 @@ export function styleFeatures(collection: FeatureCollection, ctx: StyleContext):
     } else if (kind === "features" || p.threshold_limit !== undefined) {
       const idx = thresholdLimits.indexOf(p.threshold_limit as number);
       const t = thresholdLimits.length > 1 ? idx / (thresholdLimits.length - 1) : 0.5;
-      color = ramp(0.25 + 0.7 * (1 - t));
-      width = geomType === "Polygon" || geomType === "MultiPolygon" ? 1.5 : 2;
-      fill = 0.22;
+      const isPolygon = geomType === "Polygon" || geomType === "MultiPolygon";
+      color = bandColor(style, t);
+      width = isPolygon ? style.polygonOutline : style.networkWidth;
+      // With a single colour, farther bands fade so nearer ones stay readable.
+      fill = style.polygonPalette === "single" ? style.polygonOpacity * (1 - 0.5 * t) : style.polygonOpacity;
+      opacity = isPolygon ? 0.9 : style.polygonPalette === "single" ? 0.9 - 0.5 * t : 0.9;
       sort = -idx;
     } else if (kind === "zones") {
       color = PALETTE.green;
@@ -393,13 +446,13 @@ export function styleFeatures(collection: FeatureCollection, ctx: StyleContext):
       radius = 5;
     } else if (geomType === "LineString" || geomType === "MultiLineString") {
       // Main route lines (route, directions, waypoint legs, scenario routes).
-      color = PALETTE.crimson;
+      color = multi ? runHue : PALETTE.crimson;
       width = 5;
       sort = 1;
       if (p.route_rank !== undefined && p.route_rank !== 0 && p.route_rank !== null) {
-        color = PALETTE.blue;
+        color = multi ? runHue : PALETTE.blue;
         width = 4;
-        opacity = 0.75;
+        opacity = multi ? 0.45 : 0.75;
         sort = -1;
       }
       if (p.scenario_id && ctx.tool === "scenario_batch") {
@@ -408,6 +461,21 @@ export function styleFeatures(collection: FeatureCollection, ctx: StyleContext):
     } else if (geomType === "Point") {
       color = PALETTE.ink;
       radius = 4;
+    }
+
+    // User overrides: bands keep their own controls; everything else scales.
+    const isBand = kind === "features" || p.threshold_limit !== undefined;
+    const isLine = geomType === "LineString" || geomType === "MultiLineString";
+    if (!isBand && isLine) {
+      width *= style.lineScale;
+      opacity *= style.lineOpacity;
+      if (style.lineColor && kind !== "snap_link") color = style.lineColor;
+    } else if (geomType === "Point") {
+      radius *= style.pointScale;
+      if (style.pointColor) color = style.pointColor;
+    } else if (!isBand) {
+      opacity *= style.lineOpacity;
+      if (style.lineColor) color = style.lineColor;
     }
 
     p._color = color;

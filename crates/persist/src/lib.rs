@@ -17,8 +17,8 @@ use netweevil_core::{
     CompiledProfileBundle, DatasetAccelerationBundle, EdgeNameBundle, TopologyBundle,
 };
 use netweevil_manifest::{CompiledProfileManifest, DatasetManifest, RunManifest};
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
 pub struct WorkspacePaths {
@@ -35,6 +35,14 @@ pub struct WorkspacePaths {
     pub compiled_profiles_dir: PathBuf,
     pub runs_dir: PathBuf,
     pub reports_dir: PathBuf,
+    /// Files uploaded through the API setup flow (OSM/Overture extracts, GTFS zips).
+    pub uploads_dir: PathBuf,
+    /// Routing profiles created through the API setup flow.
+    pub profiles_dir: PathBuf,
+    /// GTFS editor scenario documents and their exported GTFS archives.
+    pub gtfs_scenarios_dir: PathBuf,
+    /// Active dataset/profile/feed selection used when `api serve` runs without arguments.
+    pub workspace_config_path: PathBuf,
 }
 
 impl WorkspacePaths {
@@ -54,6 +62,10 @@ impl WorkspacePaths {
             compiled_profiles_dir: state_dir.join("compiled_profiles"),
             runs_dir: state_dir.join("runs"),
             reports_dir: state_dir.join("reports"),
+            uploads_dir: state_dir.join("uploads"),
+            profiles_dir: state_dir.join("profiles"),
+            gtfs_scenarios_dir: state_dir.join("gtfs_scenarios"),
+            workspace_config_path: state_dir.join("workspace.json"),
             state_dir,
         };
         paths.ensure()?;
@@ -74,12 +86,114 @@ impl WorkspacePaths {
             &self.compiled_profiles_dir,
             &self.runs_dir,
             &self.reports_dir,
+            &self.uploads_dir,
+            &self.profiles_dir,
+            &self.gtfs_scenarios_dir,
         ] {
             fs::create_dir_all(dir)
                 .with_context(|| format!("creating workspace directory {}", dir.display()))?;
         }
         Ok(())
     }
+}
+
+/// One directory of the `.netweevil/` layout with a plain-language purpose,
+/// shown to users so they know where their data ends up.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkspaceLocation {
+    pub key: &'static str,
+    pub path: String,
+    pub purpose: &'static str,
+}
+
+impl WorkspacePaths {
+    /// Every location in the state directory, in the order a newcomer meets them.
+    pub fn locations(&self) -> Vec<WorkspaceLocation> {
+        let entry = |key, path: &Path, purpose| WorkspaceLocation {
+            key,
+            path: path.display().to_string(),
+            purpose,
+        };
+        vec![
+            entry(
+                "state",
+                &self.state_dir,
+                "Everything NetWeevil writes lives under this directory. Back it up or delete it as one unit.",
+            ),
+            entry(
+                "workspace_config",
+                &self.workspace_config_path,
+                "The dataset, profiles and transit feeds the API loads when started without arguments.",
+            ),
+            entry(
+                "uploads",
+                &self.uploads_dir,
+                "Copies of files uploaded through the console (OSM/Overture extracts, GTFS zips). Files chosen by path are read in place and never modified.",
+            ),
+            entry(
+                "datasets",
+                &self.datasets_dir,
+                "One manifest per imported street network, pointing at its bundles.",
+            ),
+            entry(
+                "profiles",
+                &self.profiles_dir,
+                "Routing profiles created in the console, as editable YAML files.",
+            ),
+            entry(
+                "compiled_profiles",
+                &self.compiled_profiles_dir,
+                "Manifests of profiles compiled against a dataset (rebuilt automatically when a profile changes).",
+            ),
+            entry(
+                "transit_feeds",
+                &self.transit_feeds_dir,
+                "One manifest per imported or edited GTFS feed.",
+            ),
+            entry(
+                "gtfs_scenarios",
+                &self.gtfs_scenarios_dir,
+                "GTFS editor scenarios (new lines, express variants) and their exported GTFS archives. The original feed is never changed.",
+            ),
+            entry(
+                "bundles",
+                &self.bundles_dir,
+                "Binary bundles derived from imports: topology, names, acceleration, compiled metrics and transit timetables. Safe to delete and re-import.",
+            ),
+            entry(
+                "runs",
+                &self.runs_dir,
+                "Analysis outputs written by the CLI (routes, matrices, service areas, simulations).",
+            ),
+            entry("reports", &self.reports_dir, "Rendered reports."),
+        ]
+    }
+}
+
+/// The selection `api serve` loads when started without explicit arguments.
+/// Written by the console setup flow and by `api serve` when it is given
+/// explicit arguments, so the next plain start reproduces the last session.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceConfig {
+    pub dataset_id: String,
+    pub default_profile: String,
+    #[serde(default)]
+    pub profiles: Vec<String>,
+    #[serde(default)]
+    pub transit_feeds: Vec<String>,
+    #[serde(default)]
+    pub updated_at: Option<String>,
+}
+
+pub fn read_workspace_config(paths: &WorkspacePaths) -> Result<Option<WorkspaceConfig>> {
+    if !paths.workspace_config_path.exists() {
+        return Ok(None);
+    }
+    read_json(&paths.workspace_config_path).map(Some)
+}
+
+pub fn write_workspace_config(paths: &WorkspacePaths, config: &WorkspaceConfig) -> Result<()> {
+    write_json(&paths.workspace_config_path, config)
 }
 
 pub fn write_json<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Result<()> {

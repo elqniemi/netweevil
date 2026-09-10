@@ -1,3 +1,5 @@
+import type { TransitTimeContext } from "../api/time";
+
 export function fmtMs(ms: number): string {
   if (!Number.isFinite(ms)) return "–";
   if (ms < 1) return `${ms.toFixed(2)} ms`;
@@ -25,8 +27,8 @@ export function fmtDuration(seconds: number): string {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   const rest = s % 60;
-  if (h > 0) return `${h} h ${m} min`;
-  if (m > 0) return `${m} min ${rest} s`;
+  if (h > 0) return m ? `${h} h ${m} min` : `${h} h`;
+  if (m > 0) return rest ? `${m} min ${rest} s` : `${m} min`;
   return `${rest} s`;
 }
 
@@ -37,9 +39,32 @@ export function fmtDistance(metres: number): string {
   return `${Math.round(metres)} m`;
 }
 
-export function fmtValue(key: string, value: unknown): string {
+export function fmtTransitTime(seconds: number, context?: TransitTimeContext): string {
+  if (!Number.isFinite(seconds)) return "–";
+  if (context) {
+    const instant = new Date((context.time_origin_unix_s + seconds) * 1000);
+    if (!Number.isFinite(instant.getTime())) return "–";
+    return new Intl.DateTimeFormat("en-GB", {
+      timeZone: context.agency_timezone,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", second: "2-digit",
+      hourCycle: "h23", timeZoneName: "shortOffset",
+    }).format(instant);
+  }
+  const s = Math.round(seconds);
+  const days = Math.floor(s / 86400);
+  const clock = [Math.floor(s / 3600) % 24, Math.floor(s / 60) % 60, s % 60]
+    .map((part) => String(part).padStart(2, "0")).join(":");
+  return days ? `${clock} (+${days} ${days === 1 ? "day" : "days"})` : clock;
+}
+
+export function fmtValue(key: string, value: unknown, context?: TransitTimeContext): string {
   if (value === null || value === undefined) return "–";
   if (typeof value === "number") {
+    if (!Number.isFinite(value)) return "–";
+    const field = key.split(".").at(-1) ?? key;
+    if (field === "departure_s" || field === "arrival_s" || (context && (field === "start_s" || field === "end_s"))) return fmtTransitTime(value, context);
+    if (field.endsWith("_unix_s")) return new Date(value * 1000).toISOString();
     if (/_time_s$|^time_s$|_s$/.test(key) && !/^(id|z)$/.test(key)) return `${fmtDuration(value)} (${fmtNumber(value)})`;
     if (/_m$/.test(key)) return fmtDistance(value);
     return fmtNumber(value);

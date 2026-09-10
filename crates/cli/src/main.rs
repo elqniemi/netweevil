@@ -27,7 +27,7 @@ use crate::analyze::{
     analyze_route, analyze_route_batch, analyze_scenario_batch, analyze_service_area,
     analyze_service_area_sequence, analyze_transit_batch, analyze_transit_route,
 };
-use crate::api::{ApiCommand, api_serve};
+use crate::api::{ApiCommand, BootstrapArgs, api_serve, bootstrap};
 use crate::bench::{BenchCommand, bench_compare, bench_corpus, bench_http, bench_run};
 use crate::cache::{CacheCommand, cache_list};
 use crate::dataset::{DatasetCommand, dataset_audit, dataset_import, dataset_list};
@@ -112,6 +112,7 @@ fn main() -> Result<()> {
         Command::Api { command: api } => match api {
             ApiCommand::Serve(args) => api_serve(paths, args),
         },
+        Command::Bootstrap(args) => bootstrap(paths, args),
     }
 }
 
@@ -168,6 +169,8 @@ enum Command {
         #[command(subcommand)]
         command: ApiCommand,
     },
+    /// Start the API and web console in setup mode for a new workspace.
+    Bootstrap(BootstrapArgs),
 }
 
 pub(crate) fn software_info() -> SoftwareInfo {

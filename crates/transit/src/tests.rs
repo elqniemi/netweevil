@@ -82,6 +82,7 @@ fn executes_transit_service_area_to_reachable_stops_and_segments() {
     )
     .expect("fixture imports");
     let request = TransitServiceAreaRequest {
+        catchment_mode: TransitCatchmentMode::Stops,
         analysis_id: "sa1".to_string(),
         origins: vec![TransitPoint {
             id: "origin".to_string(),
@@ -135,6 +136,7 @@ fn rejects_transit_service_area_above_stop_segment_limit() {
     )
     .expect("fixture imports");
     let request = TransitServiceAreaRequest {
+        catchment_mode: TransitCatchmentMode::Stops,
         analysis_id: "sa-output-limit".to_string(),
         origins: vec![TransitPoint {
             id: "origin".to_string(),
@@ -162,6 +164,108 @@ fn rejects_transit_service_area_above_stop_segment_limit() {
         .expect_err("stop segment cap should reject large output");
 
     assert!(error.to_string().contains("max_stop_segments"));
+}
+
+#[test]
+fn street_isochrones_seed_only_legal_stops_even_without_stop_returns() {
+    #[derive(Default)]
+    struct IsochroneEstimator(std::sync::Mutex<Vec<(String, Vec<(String, u32)>)>>);
+    impl StreetTimeEstimator for IsochroneEstimator {
+        fn street_time_s(
+            &self,
+            _: AccessMode,
+            _: bool,
+            from_lon: f64,
+            _: f64,
+            to_lon: f64,
+            _: f64,
+        ) -> Option<u32> {
+            (from_lon == to_lon).then_some(0)
+        }
+        fn street_isochrone(
+            &self,
+            origin: &TransitPoint,
+            stops: &[(&TransitStop, u32)],
+            request: &TransitServiceAreaRequest,
+        ) -> anyhow::Result<Vec<TransitIsochroneFeature>> {
+            assert_eq!(
+                request.modes.street_access,
+                TransitStreetAccessModel::Network
+            );
+            self.0.lock().unwrap().push((
+                origin.id.clone(),
+                stops
+                    .iter()
+                    .map(|(stop, elapsed)| (stop.stop_id.clone(), *elapsed))
+                    .collect(),
+            ));
+            Ok(vec![TransitIsochroneFeature {
+                origin_id: origin.id.clone(),
+                mode: AccessMode::Walk,
+                geometry_type: "network".to_string(),
+                threshold_limit: f64::from(request.max_travel_time_s),
+                threshold_metric: "travel_time_s".to_string(),
+                reachable_network_length_m: 100.0,
+                reachable_edge_count: 1,
+                geometry: None,
+            }])
+        }
+    }
+    let mut bundle = build_bundle_from_files(
+        fixture_files(),
+        "isochrone".to_string(),
+        TransitImportOptions {
+            name: "fixture".to_string(),
+            source_label: "fixture".to_string(),
+            service_start_date: "2026-05-11".to_string(),
+            service_days: 1,
+        },
+    )
+    .unwrap();
+    // B is a through stop: passengers may stay aboard, but cannot get on/off.
+    bundle.connections[0].drop_off_allowed = false;
+    bundle.connections[1].pickup_allowed = false;
+    let router = PreparedTransitRouter::new(Arc::new(bundle));
+    for (arrive_by, lon, datetime, expected_stop) in [
+        (false, 6.0, "2026-05-11T08:00:00+02:00", "C"),
+        (true, 6.02, "2026-05-11T08:30:00+02:00", "A"),
+    ] {
+        let request: TransitServiceAreaRequest = serde_json::from_value(serde_json::json!({
+            "analysis_id": "isochrone", "catchment_mode": "street_isochrone",
+            "origins": [{"id": "near", "lon": lon, "lat": 53.0}, {"id": "no_stops", "lon": 10.0, "lat": 53.0}],
+            "time": {"datetime": datetime, "arrive_by": arrive_by, "search_window_s": 3600},
+            "modes": {"max_access_distance_m": 100, "max_egress_distance_m": 100, "max_transfer_distance_m": 0},
+            "max_travel_time_s": 1800,
+            "returns": {"include_stops": false, "include_stop_segments": false, "max_stops": 0}
+        })).unwrap();
+        assert!(
+            router
+                .execute_service_area(&request)
+                .unwrap_err()
+                .to_string()
+                .contains("street-network")
+        );
+        let estimator = IsochroneEstimator::default();
+        let result = router
+            .execute_service_area_with_street_estimator(&request, Some(&estimator))
+            .unwrap();
+        assert!(result.stops.is_empty());
+        assert!(result.stop_segments.is_empty());
+        assert_eq!(result.features.len(), 2);
+        assert_eq!(result.processed_origin_count, 2);
+        assert_eq!(result.skipped_origin_count, 0);
+        let calls = estimator.0.lock().unwrap();
+        let near = calls.iter().find(|(id, _)| id == "near").unwrap();
+        assert_eq!(near.1, vec![(expected_stop.to_string(), 1200)]);
+        assert!(
+            calls
+                .iter()
+                .find(|(id, _)| id == "no_stops")
+                .unwrap()
+                .1
+                .is_empty()
+        );
+    }
 }
 
 #[test]
@@ -737,6 +841,7 @@ fn car_access_extends_transit_service_area_reach() {
         lat: 53.0,
     };
     let walk_request = TransitServiceAreaRequest {
+        catchment_mode: TransitCatchmentMode::Stops,
         analysis_id: "sa_walk".to_string(),
         origins: vec![origin.clone()],
         time: TransitQueryTime {
@@ -749,6 +854,7 @@ fn car_access_extends_transit_service_area_reach() {
         returns: TransitServiceAreaReturnOptions::default(),
     };
     let car_request = TransitServiceAreaRequest {
+        catchment_mode: TransitCatchmentMode::Stops,
         analysis_id: "sa_car".to_string(),
         modes: TransitModeOptions {
             access: vec![AccessMode::Car],
@@ -1664,6 +1770,7 @@ fn arrive_by_service_area_reports_latest_departures_towards_the_target() {
     let bundle = import_fixture(fixture_files(), "arrive-by-service-area");
     let deadline_s = 8 * 3600 + 30 * 60;
     let request = TransitServiceAreaRequest {
+        catchment_mode: TransitCatchmentMode::Stops,
         analysis_id: "arrive-by-service-area".to_string(),
         origins: vec![TransitPoint {
             id: "target".to_string(),
@@ -1737,6 +1844,7 @@ fn same_stop_changes_pay_transfer_slack_in_both_directions_and_service_areas() {
             );
             let area = router
                 .execute_service_area(&TransitServiceAreaRequest {
+                    catchment_mode: TransitCatchmentMode::Stops,
                     analysis_id: "same-stop-transfer".to_string(),
                     origins: vec![if arrive_by {
                         request.destination.clone()
@@ -1801,6 +1909,7 @@ fn departure_search_keeps_same_trip_among_unboardable_departures() {
     assert_eq!(route.summary.arrival_s, Some(8 * 3600 + 20 * 60));
     let area = router
         .execute_service_area(&TransitServiceAreaRequest {
+            catchment_mode: TransitCatchmentMode::Stops,
             analysis_id: "interleaved".to_string(),
             origins: vec![request.origin.clone()],
             time: request.time,
@@ -1935,6 +2044,7 @@ fn gtfs_pickup_and_drop_off_restrictions_allow_riding_through_a_stop() {
         );
         let area = router
             .execute_service_area(&TransitServiceAreaRequest {
+                catchment_mode: TransitCatchmentMode::Stops,
                 analysis_id: "restricted-stop".to_string(),
                 origins: vec![if arrive_by {
                     request.destination.clone()
@@ -2172,6 +2282,7 @@ fn repeated_stop_vehicle_positions_preserve_pickup_and_full_loop_geometry() {
         assert_eq!(result.stop_segments.len(), 3);
         let area = router
             .execute_service_area(&TransitServiceAreaRequest {
+                catchment_mode: TransitCatchmentMode::Stops,
                 analysis_id: "repeated-stop".to_string(),
                 origins: vec![if arrive_by {
                     request.destination.clone()
@@ -2297,6 +2408,7 @@ fn query_offsets_and_naive_agency_times_resolve_to_the_same_instant() {
             expected_summary = Some(summary);
             let area = router
                 .execute_service_area(&TransitServiceAreaRequest {
+                    catchment_mode: TransitCatchmentMode::Stops,
                     analysis_id: "dst-area".to_string(),
                     origins: vec![if arrive_by {
                         request.destination.clone()
@@ -2348,6 +2460,7 @@ fn ambiguous_and_nonexistent_naive_datetimes_are_rejected() {
                     .contains(message)
             );
             let area = TransitServiceAreaRequest {
+                catchment_mode: TransitCatchmentMode::Stops,
                 analysis_id: "ambiguous-area".to_string(),
                 origins: vec![request.origin],
                 time: request.time,
@@ -2533,6 +2646,7 @@ fn assert_transfer_reachability(bundle: TransitBundle, expected: bool) {
         );
         let area = router
             .execute_service_area(&TransitServiceAreaRequest {
+                catchment_mode: TransitCatchmentMode::Stops,
                 analysis_id: "transfer-rules".to_string(),
                 origins: vec![if arrive_by {
                     request.destination.clone()
@@ -2666,6 +2780,7 @@ fn timed_transfers_report_static_semantics_and_do_not_hold_departed_vehicles() {
         );
         let area = router
             .execute_service_area(&TransitServiceAreaRequest {
+                catchment_mode: TransitCatchmentMode::Stops,
                 analysis_id: "timed".to_string(),
                 origins: vec![request.destination.clone()],
                 time: request.time.clone(),
@@ -2818,6 +2933,7 @@ fn zero_distance_access_and_egress_preserve_exact_timetable_boundaries() {
         }
         let area = router
             .execute_service_area(&TransitServiceAreaRequest {
+                catchment_mode: TransitCatchmentMode::Stops,
                 analysis_id: "exact-stop-times".to_string(),
                 origins: vec![if arrive_by {
                     request.destination.clone()

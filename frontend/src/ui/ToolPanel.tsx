@@ -2,24 +2,35 @@ import { useMemo, useState } from "react";
 import type { ServiceInfo } from "../api/types";
 import { toCurl } from "../api/client";
 import { copyText } from "../geo/export";
-import { SLOT_COLORS } from "../geo/features";
-import { currentBody, runTool } from "../state/run";
+import { PALETTE, SLOT_COLORS, routeColor } from "../geo/features";
+import { currentPlan, runTool } from "../state/run";
 import {
-  clearToolPoints,
+  addRoute,
+  clearRoutes,
+  clearSlots,
+  emptyRoute,
   getForm,
   nextPointId,
   removePoint,
+  removeRoute,
+  removeVia,
   resetForm,
+  setActiveRoute,
   setFormValue,
   setPoints,
+  setRoutes,
   setState,
+  swapRoute,
   updatePoint,
+  updateVia,
   useStore,
   type InputPoint,
+  type RouteInput,
   type ToolId,
 } from "../state/store";
 import { TOOL_BY_ID, fieldDefaults, type Field, type SlotDef, type ToolDef } from "../tools/registry";
 import { SimulationPanel } from "./SimulationPanel";
+import { GtfsEditorPanel } from "./GtfsEditorPanel";
 
 interface Props {
   service: ServiceInfo | null;
@@ -27,18 +38,29 @@ interface Props {
 
 export function ToolPanel({ service }: Props) {
   const toolId = useStore((s) => s.tool);
+  const open = useStore((s) => s.settingsOpen);
   const tool = TOOL_BY_ID[toolId];
   return (
-    <section className="tool-panel" aria-label={tool.label}>
+    <section className={`tool-panel${open ? "" : " is-collapsed"}`} aria-label={tool.label}>
       <div className="tool-head">
-        <h1>{tool.label}</h1>
-        <code className="endpoint">{tool.method} {tool.path}</code>
-        <p className="tool-desc">{tool.description}</p>
+        <div className="tool-title-row">
+          <h1>{tool.label}</h1>
+          <code className="endpoint">{tool.method} {tool.path}</code>
+          <button type="button" className="icon-btn tool-collapse" onClick={() => setState({ settingsOpen: !open })} title={open ? "Minimise settings" : "Show settings"} aria-label={open ? "Minimise settings" : "Show settings"}>
+            {open ? "–" : "+"}
+          </button>
+        </div>
+        {open && <p className="tool-desc">{tool.description}</p>}
       </div>
-      <ProfilePicker tool={tool} service={service} />
-      <PointsEditor tool={tool} />
-      <FormFields tool={tool} service={service} />
-      {tool.id === "simulation" ? <SimulationPanel service={service} /> : <RunBar tool={tool} service={service} />}
+      {open && tool.input !== "editor" && (
+        <>
+          <ProfilePicker tool={tool} service={service} />
+          {tool.input === "routes" && <RoutesEditor tool={tool} />}
+          <PointsEditor tool={tool} />
+          <FormFields tool={tool} service={service} />
+        </>
+      )}
+      {tool.input === "editor" ? (open ? <GtfsEditorPanel service={service} /> : null) : tool.id === "simulation" ? (open ? <SimulationPanel service={service} /> : null) : <RunBar tool={tool} service={service} />}
     </section>
   );
 }
@@ -48,9 +70,14 @@ function ProfilePicker({ tool, service }: { tool: ToolDef; service: ServiceInfo 
   const feedId = useStore((s) => s.feedId);
   const form = useStore((s) => s.form[tool.id]);
   const engineMode = String(form?.engine_mode ?? "auto");
+  const compare = useStore((s) => s.compareProfiles);
   const showEngine = ["route", "od", "matrix", "accessibility"].includes(tool.id);
   const showFeed = tool.group === "transit";
+  const showCompare = tool.usesProfile && !!tool.buildEach;
+  const active = profileId ?? service?.default_profile_id ?? "";
+  const others = (service?.loaded_profiles ?? []).filter((p) => p.profile_id !== active);
   if (!tool.usesProfile && !showFeed) return null;
+  const toggleCompare = (id: string) => setState((prev) => ({ compareProfiles: prev.compareProfiles.includes(id) ? prev.compareProfiles.filter((x) => x !== id) : [...prev.compareProfiles, id] }));
   return (
     <div className="picker-row">
       {tool.usesProfile && (
@@ -88,38 +115,189 @@ function ProfilePicker({ tool, service }: { tool: ToolDef; service: ServiceInfo 
           </select>
         </label>
       )}
+      {showCompare && others.length > 0 && (
+        <div className="field field-wide compare-row">
+          <span>Compare with</span>
+          <div className="chip-row">
+            {others.map((p) => (
+              <button key={p.profile_id} type="button" className={`chip${compare.includes(p.profile_id) ? " is-active" : ""}`} onClick={() => toggleCompare(p.profile_id)} title={p.label}>
+                {p.profile_id} <span className="muted">({p.mode})</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
-// --- Points ---
+// --- Routes (shared start/end pairs) ---
+
+function coord(p: InputPoint | null): string {
+  return p ? `${p.lon.toFixed(4)}, ${p.lat.toFixed(4)}` : "";
+}
+
+function RoutesEditor({ tool }: { tool: ToolDef }) {
+  const routes = useStore((s) => s.routes);
+  const activeRoute = useStore((s) => s.activeRoute);
+  const activeEnd = useStore((s) => s.activeEnd);
+  const viewport = useStore((s) => s.viewport.bbox);
+  const [count, setCount] = useState(10);
+  const [pasteOpen, setPasteOpen] = useState(false);
+  const [pasteText, setPasteText] = useState("");
+  const multi = routes.length > 1;
+  const active = routes[Math.min(activeRoute, routes.length - 1)];
+  const placed = routes.filter((r) => r.origin && r.destination).length;
+
+  const scatter = () => {
+    if (!viewport) return;
+    const [w, s, e, n] = viewport;
+    const padX = (e - w) * 0.1;
+    const padY = (n - s) * 0.1;
+    const random = (prefix: string): InputPoint => ({
+      id: nextPointId(prefix),
+      lon: w + padX + Math.random() * (e - w - 2 * padX),
+      lat: s + padY + Math.random() * (n - s - 2 * padY),
+    });
+    const generated = Array.from({ length: Math.max(1, count) }, () => ({ ...emptyRoute(), origin: random("origin"), destination: random("destination") }));
+    const kept = routes.filter((r) => r.origin || r.destination);
+    setRoutes([...kept, ...generated], kept.length);
+  };
+
+  const applyPaste = () => {
+    const parsed: RouteInput[] = [];
+    const point = (prefix: string, lon: number, lat: number): InputPoint => ({ id: nextPointId(prefix), lon, lat });
+    try {
+      const value = JSON.parse(pasteText);
+      const list = Array.isArray(value) ? value : Array.isArray((value as { routes?: unknown[] }).routes) ? (value as { routes: unknown[] }).routes : [];
+      for (const item of list as Record<string, unknown>[]) {
+        const o = item.origin as Record<string, unknown> | undefined;
+        const d = item.destination as Record<string, unknown> | undefined;
+        if (o && d && typeof o.lon === "number" && typeof o.lat === "number" && typeof d.lon === "number" && typeof d.lat === "number") {
+          parsed.push({ ...emptyRoute(), origin: point("origin", o.lon, o.lat), destination: point("destination", d.lon, d.lat) });
+        } else if (Array.isArray(item) && item.length >= 4 && item.every((v) => typeof v === "number")) {
+          parsed.push({ ...emptyRoute(), origin: point("origin", item[0], item[1]), destination: point("destination", item[2], item[3]) });
+        }
+      }
+    } catch {
+      // Fall back to four numbers per line: "lon lat lon lat" with any separators.
+      for (const line of pasteText.split(/\n/)) {
+        const nums = line.match(/-?\d+(?:\.\d+)?/g)?.map(Number) ?? [];
+        if (nums.length >= 4) parsed.push({ ...emptyRoute(), origin: point("origin", nums[0], nums[1]), destination: point("destination", nums[2], nums[3]) });
+      }
+    }
+    if (parsed.length) {
+      const kept = routes.filter((r) => r.origin || r.destination);
+      setRoutes([...kept, ...parsed], kept.length);
+      setPasteText("");
+      setPasteOpen(false);
+    }
+  };
+
+  return (
+    <div className="points routes">
+      <div className="points-head">
+        <span className="section-title">{multi ? `${routes.length} routes` : "Start and end"}</span>
+        <button type="button" className="btn btn-ghost btn-small" onClick={() => addRoute()} title="Add another route">
+          + Add
+        </button>
+        {(placed > 0 || multi) && (
+          <button type="button" className="btn btn-ghost btn-small" onClick={clearRoutes}>
+            Clear
+          </button>
+        )}
+      </div>
+      <ul className="route-list">
+        {routes.slice(0, 80).map((route, index) => {
+          const isActive = index === activeRoute;
+          const color = multi ? routeColor(index) : PALETTE.crimson;
+          return (
+            <li key={route.id} className={`route-row${isActive ? " is-active" : ""}`}>
+              <button type="button" className="route-swatch" style={{ background: color }} onClick={() => setActiveRoute(index)} title="Make this the active route">
+                {multi ? index + 1 : ""}
+              </button>
+              <EndButton label="A" point={route.origin} active={isActive && activeEnd === "origin"} onClick={() => setActiveRoute(index, "origin")} />
+              <EndButton label="B" point={route.destination} active={isActive && activeEnd === "destination"} onClick={() => setActiveRoute(index, "destination")} />
+              <button type="button" className="icon-btn" onClick={() => swapRoute(index)} title="Swap start and end" disabled={!route.origin && !route.destination}>
+                ⇄
+              </button>
+              <button type="button" className="icon-btn" onClick={() => removeRoute(index)} aria-label="Remove route" title="Remove route">
+                ×
+              </button>
+            </li>
+          );
+        })}
+        {routes.length > 80 && <li className="muted">and {routes.length - 80} more</li>}
+      </ul>
+      {tool.usesVias && active && active.vias.length > 0 && (
+        <ul className="point-list via-list">
+          {active.vias.map((via, v) => (
+            <li key={`${via.id}-${v}`}>
+              <span className="point-index">via {v + 1}</span>
+              <span className="point-coord">{coord(via)}</span>
+              <select value={via.kind ?? "break"} onChange={(e) => updateVia(activeRoute, v, { kind: e.target.value })} aria-label="Stop kind">
+                <option value="break">break</option>
+                <option value="through">through</option>
+              </select>
+              <button type="button" className="icon-btn" onClick={() => removeVia(activeRoute, v)} aria-label="Remove via">
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="slot-body">
+        <div className="slot-actions">
+          <input type="number" min={1} max={2000} value={count} onChange={(e) => setCount(Number(e.target.value))} aria-label="Random route count" />
+          <button type="button" className="btn btn-small" onClick={scatter} disabled={!viewport}>
+            Scatter routes in view
+          </button>
+          <button type="button" className="btn btn-ghost btn-small" onClick={() => setPasteOpen((v) => !v)}>
+            Paste
+          </button>
+        </div>
+        {pasteOpen && (
+          <div className="paste">
+            <textarea rows={4} value={pasteText} onChange={(e) => setPasteText(e.target.value)} placeholder={'[{"origin":{"lon":6.56,"lat":53.22},"destination":{"lon":6.6,"lat":53.2}}] or one "lon,lat,lon,lat" per line'} />
+            <button type="button" className="btn btn-small" onClick={applyPaste}>
+              Add routes
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EndButton({ label, point, active, onClick }: { label: string; point: InputPoint | null; active: boolean; onClick: () => void }) {
+  return (
+    <button type="button" className={`route-end${active ? " is-target" : ""}${point ? "" : " is-empty"}`} onClick={onClick} title={point ? `Next click moves ${label}` : `Next click places ${label}`}>
+      <span className="route-end-label">{label}</span>
+      <span className="route-end-coord">{point ? coord(point) : "click map"}</span>
+    </button>
+  );
+}
+
+// --- Slot points (tools with their own point lists) ---
 
 function PointsEditor({ tool }: { tool: ToolDef }) {
   const points = useStore((s) => s.points);
   const activeSlot = useStore((s) => s.activeSlot[tool.id]) ?? tool.slots[0]?.id;
   const viewport = useStore((s) => s.viewport.bbox);
   if (!tool.slots.length) return null;
-  const total = tool.slots.reduce((n, slot) => n + (points[`${tool.id}:${slot.id}`]?.length ?? 0), 0);
+  const total = tool.slots.reduce((n, slot) => n + (points[slot.id]?.length ?? 0), 0);
   return (
     <div className="points">
       <div className="points-head">
         <span className="section-title">Map points</span>
-        <span className="muted">click to add, drag to move, right-click to remove</span>
         {total > 0 && (
-          <button type="button" className="btn btn-ghost btn-small" onClick={() => clearToolPoints(tool.id)}>
+          <button type="button" className="btn btn-ghost btn-small" onClick={() => clearSlots(tool.slots.map((s) => s.id))}>
             Clear
           </button>
         )}
       </div>
       {tool.slots.map((slot) => (
-        <SlotRow
-          key={slot.id}
-          tool={tool}
-          slot={slot}
-          points={points[`${tool.id}:${slot.id}`] ?? []}
-          active={activeSlot === slot.id}
-          viewport={viewport}
-        />
+        <SlotRow key={slot.id} tool={tool} slot={slot} points={points[slot.id] ?? []} active={activeSlot === slot.id} viewport={viewport} />
       ))}
     </div>
   );
@@ -142,9 +320,8 @@ function SlotRow({ tool, slot, points, active, viewport }: { tool: ToolDef; slot
       id: nextPointId(slot.id),
       lon: w + padX + Math.random() * (e - w - 2 * padX),
       lat: s + padY + Math.random() * (n - s - 2 * padY),
-      kind: slot.kinds ? "break" : undefined,
     }));
-    setPoints(tool.id, slot.id, multi ? [...points, ...generated] : generated.slice(0, 1));
+    setPoints(slot.id, multi ? [...points, ...generated] : generated.slice(0, 1));
   };
 
   const applyPaste = () => {
@@ -165,7 +342,7 @@ function SlotRow({ tool, slot, points, active, viewport }: { tool: ToolDef; slot
       }
     }
     if (parsed.length) {
-      setPoints(tool.id, slot.id, multi ? [...points, ...parsed] : parsed.slice(0, 1));
+      setPoints(slot.id, multi ? [...points, ...parsed] : parsed.slice(0, 1));
       setPasteText("");
       setPasteOpen(false);
     }
@@ -203,23 +380,14 @@ function SlotRow({ tool, slot, points, active, viewport }: { tool: ToolDef; slot
               {points.slice(0, 60).map((p, index) => (
                 <li key={`${p.id}-${index}`}>
                   <span className="point-index">{index + 1}</span>
-                  <input value={p.id} onChange={(e) => updatePoint(tool.id, slot.id, index, { id: e.target.value })} aria-label="Point id" />
+                  <input value={p.id} onChange={(e) => updatePoint(slot.id, index, { id: e.target.value })} aria-label="Point id" />
                   <span className="point-coord">
                     {p.lon.toFixed(5)}, {p.lat.toFixed(5)}
                   </span>
-                  {slot.kinds && index > 0 && index < points.length - 1 && (
-                    <select value={p.kind ?? "break"} onChange={(e) => updatePoint(tool.id, slot.id, index, { kind: e.target.value })} aria-label="Stop kind">
-                      {slot.kinds.map((k) => (
-                        <option key={k} value={k}>
-                          {k}
-                        </option>
-                      ))}
-                    </select>
-                  )}
                   {slot.weighted && (
-                    <input type="number" className="point-weight" step={0.5} min={0} value={p.weight ?? 1} onChange={(e) => updatePoint(tool.id, slot.id, index, { weight: Number(e.target.value) })} aria-label="Weight" title="Demand weight" />
+                    <input type="number" className="point-weight" step={0.5} min={0} value={p.weight ?? 1} onChange={(e) => updatePoint(slot.id, index, { weight: Number(e.target.value) })} aria-label="Weight" title="Demand weight" />
                   )}
-                  <button type="button" className="icon-btn" onClick={() => removePoint(tool.id, slot.id, index)} aria-label="Remove point">
+                  <button type="button" className="icon-btn" onClick={() => removePoint(slot.id, index)} aria-label="Remove point">
                     ×
                   </button>
                 </li>
@@ -325,24 +493,29 @@ function FieldControl({ tool, field, value, service }: { tool: ToolId; field: Fi
 function RunBar({ tool, service }: { tool: ToolDef; service: ServiceInfo | null }) {
   const running = useStore((s) => s.running);
   const format = useStore((s) => s.format);
+  const live = useStore((s) => s.live);
   const apiBase = useStore((s) => s.apiBase);
   const raw = useStore((s) => s.raw[tool.id] ?? null);
-  // Re-derive the preview when points or form values change.
+  // Re-derive the preview when points, routes or form values change.
   useStore((s) => s.points);
+  useStore((s) => s.routes);
   useStore((s) => s.form[tool.id]);
   useStore((s) => s.profileId);
   useStore((s) => s.feedId);
   const [showJson, setShowJson] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
-  const preview = currentBody(tool.id, service);
-  const previewText = raw ?? (preview.body ? JSON.stringify(preview.body, null, 2) : "");
+  const plan = currentPlan(tool.id, service);
+  const first = plan.requests[0]?.body ?? null;
+  const previewText = raw ?? (first ? JSON.stringify(first, null, 2) : "");
+  const count = plan.requests.length;
+  const liveOn = live && !!tool.live;
 
   const run = () => {
-    void runTool(tool.id, service);
+    void runTool(tool.id, { fit: true });
   };
 
   const copy = async (what: "json" | "curl") => {
-    const text = what === "json" ? previewText : toCurl(apiBase, tool.supportsGeojson && format === "geojson" ? `${tool.path}?format=geojson` : tool.path, preview.body);
+    const text = what === "json" ? previewText : toCurl(apiBase, tool.supportsGeojson && format === "geojson" ? `${tool.path}?format=geojson` : tool.path, first);
     if (await copyText(text)) {
       setCopied(what);
       setTimeout(() => setCopied(null), 1200);
@@ -352,9 +525,16 @@ function RunBar({ tool, service }: { tool: ToolDef; service: ServiceInfo | null 
   return (
     <div className="run-bar">
       <div className="run-row">
-        <button type="button" className="btn btn-primary" onClick={run} disabled={running || !!preview.error}>
-          {running ? "Running…" : `Run ${tool.label.toLowerCase()}`}
+        <button type="button" className="btn btn-primary" onClick={run} disabled={running || !!plan.error}>
+          {running ? "Running…" : count > 1 ? `Run ${count} routes` : `Run ${tool.label.toLowerCase()}`}
         </button>
+        {tool.live && (
+          <label className={`live-toggle${liveOn ? " is-on" : ""}`} title="Re-run automatically while markers are dragged or options change">
+            <input type="checkbox" checked={live} onChange={(e) => setState({ live: e.target.checked })} />
+            <span className="live-dot" />
+            Live
+          </label>
+        )}
         {tool.supportsGeojson && (
           <div className="segmented" role="group" aria-label="Response format">
             <button type="button" className={format === "json" ? "is-active" : ""} onClick={() => setState({ format: "json" })}>
@@ -369,7 +549,7 @@ function RunBar({ tool, service }: { tool: ToolDef; service: ServiceInfo | null 
           Request
         </button>
       </div>
-      {preview.error && <div className="hint-text">{preview.error}</div>}
+      {plan.error && <div className="hint-text">{plan.error}</div>}
       {showJson && (
         <div className="json-editor">
           <textarea
@@ -383,7 +563,7 @@ function RunBar({ tool, service }: { tool: ToolDef; service: ServiceInfo | null 
             {raw !== null ? (
               <span className="pill pill-warn">edited by hand</span>
             ) : (
-              <span className="muted">Editing here overrides the form until reset.</span>
+              <span className="muted">{count > 1 ? `first of ${count} requests` : ""}</span>
             )}
             <span className="spacer" />
             <button type="button" className="btn btn-ghost btn-small" onClick={() => copy("json")}>

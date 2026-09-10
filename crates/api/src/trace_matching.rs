@@ -16,17 +16,18 @@ pub(crate) async fn trace_match_handler(
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<ProfiledRequest<TraceMatchRequest>>,
 ) -> Result<Response, ApiError> {
-    let profile = resolve_profile(&state.service, payload.profile_id.as_deref())?;
+    let runtime = state.runtime()?;
+    let profile = resolve_profile(&runtime, payload.profile_id.as_deref())?;
     let engine = Arc::clone(&profile.engine);
     let service = ExecutionContext {
-        dataset_id: state.service.dataset_manifest.dataset_id.0.clone(),
+        dataset_id: runtime.dataset_manifest.dataset_id.0.clone(),
         profile_id: profile.document.profile.id.clone(),
         profile_hash: profile.manifest.profile_hash.clone(),
         route_engine: "viterbi_with_legal_network_distance".into(),
         batch_engine: "bounded_distance_dijkstra".into(),
         acceleration: "spatial_index+edge_phantoms+turn_automaton".into(),
     };
-    let result = execute_on_routing_worker(&state.service, move || {
+    let result = execute_on_routing_worker(&runtime, move || {
         engine.execute_trace_match(&payload.request)
     })
     .await

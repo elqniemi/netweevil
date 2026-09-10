@@ -1,4 +1,4 @@
-import type { InputPoint, ResponseFormat, ToolId } from "../state/store";
+import type { InputPoint, ResponseFormat, RouteInput, ToolId } from "../state/store";
 import type { ServiceInfo } from "../api/types";
 
 export type FieldType = "number" | "text" | "select" | "checkbox" | "datetime" | "json" | "list";
@@ -37,14 +37,25 @@ export interface SlotDef {
   hint?: string;
 }
 
+/** A route with both ends placed, with its index in the shared routes list. */
+export type StyleLayer = "line" | "point" | "polygon" | "network";
+
+export interface PlacedRoute {
+  route: RouteInput;
+  index: number;
+}
+
 export interface BuildContext {
   form: Record<string, unknown>;
   points: (slot: string) => InputPoint[];
+  /** Complete routes (origin and destination placed). */
+  routes: PlacedRoute[];
   profileId: string | null;
   feedId: string | null;
   engineMode: string;
   service: ServiceInfo | null;
   viewportBbox: [number, number, number, number] | null;
+  viewportZoom: number | null;
 }
 
 export interface ToolDef {
@@ -56,9 +67,22 @@ export interface ToolDef {
   description: string;
   supportsGeojson: boolean;
   usesProfile: boolean;
+  /** Whether the tool takes the shared start/end routes, its own point slots, the map view, or the GTFS editor. */
+  input: "routes" | "slots" | "viewport" | "editor";
+  /** Whether route vias (intermediate stops) are edited and used. */
+  usesVias?: boolean;
+  /** Cheap enough to re-run live while points are dragged. */
+  live?: boolean;
+  /** Row set shown first in the table view, by result key (e.g. "pairs"). */
+  tableKey?: string;
+  /** Result layer kinds the tool draws, used to pick which style controls to show. */
+  layers: StyleLayer[];
   slots: SlotDef[];
   fields: Field[];
-  build: (ctx: BuildContext) => unknown;
+  /** One request body for the whole run (slot tools, OD, scenario batch). */
+  build?: (ctx: BuildContext) => unknown;
+  /** One request body per placed route; all routes run concurrently. */
+  buildEach?: (ctx: BuildContext, route: RouteInput, index: number) => unknown;
   /** Validation message when the request cannot be built yet. */
   ready: (ctx: BuildContext) => string | null;
 }
@@ -276,6 +300,16 @@ function needPoints(ctx: BuildContext, slot: string, min: number, label: string)
   return ctx.points(slot).length >= min ? null : `Place ${min === 1 ? "a" : `at least ${min}`} ${label} on the map`;
 }
 
+function needRoute(ctx: BuildContext): string | null {
+  return ctx.routes.length ? null : "Click the map to place a start and an end point";
+}
+
+/** Route id from the form, suffixed with the route number when several routes run. */
+function routeId(ctx: BuildContext, key: string, fallback: string, index: number) {
+  const base = str(ctx.form, key) ?? fallback;
+  return ctx.routes.length > 1 ? `${base}_${index + 1}` : base;
+}
+
 function pointSet(ctx: BuildContext, slot: string, opts: { geometry?: boolean } = {}) {
   const form = ctx.form;
   return {
@@ -317,14 +351,12 @@ const routeFields: Field[] = [
   { key: "profile_inline", label: "Inline profile document (JSON)", type: "json", group: "Request-defined profile", placeholder: '{"profile": {"id": "...", "mode": "car", ...}}' },
 ];
 
-function buildRoute(ctx: BuildContext, directions: boolean) {
+function buildRoute(ctx: BuildContext, route: RouteInput, index: number, directions: boolean) {
   const form = ctx.form;
-  const [origin] = ctx.points("origin");
-  const [destination] = ctx.points("destination");
   const request: Record<string, unknown> = {
-    route_id: str(form, "route_id") ?? "console_route",
-    origin: labeled(origin),
-    destination: labeled(destination),
+    route_id: routeId(ctx, "route_id", directions ? "console_directions" : "console_route", index),
+    origin: labeled(route.origin!),
+    destination: labeled(route.destination!),
     snap: snap(form),
     connectivity: connectivity(form),
     fallback: fallback(form),
@@ -352,17 +384,18 @@ const routeTool: ToolDef = {
   label: "Route",
   group: "street",
   path: "/v1/route",
+  layers: ["line", "point"],
   method: "POST",
   description: "Point-to-point street route with alternatives, time dependence, fallbacks and request-defined profiles.",
   supportsGeojson: true,
   usesProfile: true,
-  slots: [
-    { id: "origin", label: "Origin", max: 1 },
-    { id: "destination", label: "Destination", max: 1 },
-  ],
+  input: "routes",
+  live: true,
+  tableKey: "alternatives",
+  slots: [],
   fields: routeFields,
-  build: (ctx) => buildRoute(ctx, false),
-  ready: (ctx) => needPoints(ctx, "origin", 1, "origin") ?? needPoints(ctx, "destination", 1, "destination"),
+  buildEach: (ctx, route, index) => buildRoute(ctx, route, index, false),
+  ready: needRoute,
 };
 
 const directionsTool: ToolDef = {
@@ -370,17 +403,18 @@ const directionsTool: ToolDef = {
   label: "Directions",
   group: "street",
   path: "/v1/directions",
+  layers: ["line", "point"],
   method: "POST",
   description: "Turn-by-turn maneuvers with street names for a static route.",
   supportsGeojson: true,
   usesProfile: true,
-  slots: [
-    { id: "origin", label: "Origin", max: 1 },
-    { id: "destination", label: "Destination", max: 1 },
-  ],
+  input: "routes",
+  live: true,
+  tableKey: "maneuvers",
+  slots: [],
   fields: [{ key: "route_id", label: "Route id", type: "text", default: "console_directions" }, ...snapFields, ...connectivityFields, ...fallbackFields],
-  build: (ctx) => buildRoute(ctx, true),
-  ready: (ctx) => needPoints(ctx, "origin", 1, "origin") ?? needPoints(ctx, "destination", 1, "destination"),
+  buildEach: (ctx, route, index) => buildRoute(ctx, route, index, true),
+  ready: needRoute,
 };
 
 const locateTool: ToolDef = {
@@ -388,10 +422,14 @@ const locateTool: ToolDef = {
   label: "Locate",
   group: "street",
   path: "/v1/locate",
+  layers: ["point"],
   method: "POST",
   description: "Profile-aware snap candidates for each point: snapped position, edge, fraction, component and distance.",
   supportsGeojson: false,
   usesProfile: true,
+  input: "slots",
+  live: true,
+  tableKey: "points",
   slots: [{ id: "points", label: "Points", hint: "Each click adds a point." }],
   fields: [
     {
@@ -418,11 +456,16 @@ const waypointsTool: ToolDef = {
   label: "Waypoints",
   group: "street",
   path: "/v1/waypoints",
+  layers: ["line", "point"],
   method: "POST",
   description: "Ordered multi-stop route. Break stops split legs; through stops keep turn history. Optionally optimise the stop order.",
   supportsGeojson: true,
   usesProfile: true,
-  slots: [{ id: "waypoints", label: "Stops", kinds: ["break", "through"], hint: "Click to add stops in order; toggle break/through per stop." }],
+  input: "routes",
+  usesVias: true,
+  live: true,
+  tableKey: "legs",
+  slots: [],
   fields: [
     { key: "route_id", label: "Route id", type: "text", default: "console_waypoints" },
     { key: "optimize_order", label: "Optimise stop order (Held-Karp, up to 16 breaks)", type: "checkbox", default: false },
@@ -430,15 +473,15 @@ const waypointsTool: ToolDef = {
     ...returnFields,
     ...temporalFields.slice(0, 1),
   ],
-  build: (ctx) => {
-    const pts = ctx.points("waypoints");
+  buildEach: (ctx, route, index) => {
+    const pts = [route.origin!, ...route.vias, route.destination!];
     const waypoints = pts.map((p, i) => {
       const entry: Record<string, unknown> = { point: labeled(p) };
       if (i > 0 && i < pts.length - 1 && p.kind) entry.kind = p.kind;
       return entry;
     });
     const request: Record<string, unknown> = {
-      route_id: str(ctx.form, "route_id") ?? "console_waypoints",
+      route_id: routeId(ctx, "route_id", "console_waypoints", index),
       waypoints,
       snap: snap(ctx.form),
       optimize_order: bool(ctx.form, "optimize_order"),
@@ -447,7 +490,7 @@ const waypointsTool: ToolDef = {
     };
     return envelope(ctx, request, false);
   },
-  ready: (ctx) => needPoints(ctx, "waypoints", 2, "stops"),
+  ready: needRoute,
 };
 
 const odTool: ToolDef = {
@@ -455,11 +498,15 @@ const odTool: ToolDef = {
   label: "OD pairs",
   group: "batch",
   path: "/v1/od",
+  layers: ["line", "point"],
   method: "POST",
   description: "Batch of origin-destination pairs sharing snap, connectivity and return settings.",
   supportsGeojson: true,
   usesProfile: true,
-  slots: [{ id: "od", label: "Pairs (alternating origin, destination)", hint: "Clicks alternate: origin, destination, origin, ..." }],
+  input: "routes",
+  live: true,
+  tableKey: "pairs",
+  slots: [],
   fields: [
     ...snapFields,
     ...connectivityFields,
@@ -479,11 +526,7 @@ const odTool: ToolDef = {
     ...temporalFields,
   ],
   build: (ctx) => {
-    const pts = ctx.points("od");
-    const pairs = [];
-    for (let i = 0; i + 1 < pts.length; i += 2) {
-      pairs.push({ pair_id: `pair_${pairs.length + 1}`, origin: labeled(pts[i]), destination: labeled(pts[i + 1]) });
-    }
+    const pairs = ctx.routes.map(({ route, index }) => ({ pair_id: `pair_${index + 1}`, origin: labeled(route.origin!), destination: labeled(route.destination!) }));
     const request: Record<string, unknown> = {
       pairs,
       snap: snap(ctx.form),
@@ -496,7 +539,7 @@ const odTool: ToolDef = {
     if (alt) request.alternatives = alt;
     return envelope(ctx, request);
   },
-  ready: (ctx) => needPoints(ctx, "od", 2, "points (one pair)"),
+  ready: needRoute,
 };
 
 const matrixTool: ToolDef = {
@@ -504,10 +547,14 @@ const matrixTool: ToolDef = {
   label: "Matrix",
   group: "batch",
   path: "/v1/matrix",
+  layers: ["line", "point"],
+  tableKey: "cells",
+  live: true,
   method: "POST",
   description: "Many-to-many travel time and distance matrix between two point sets.",
   supportsGeojson: true,
   usesProfile: true,
+  input: "slots",
   slots: [
     { id: "origins", label: "Origins" },
     { id: "destinations", label: "Destinations" },
@@ -542,10 +589,13 @@ const accessibilityTool: ToolDef = {
   label: "Accessibility",
   group: "batch",
   path: "/v1/accessibility",
+  layers: ["point"],
+  tableKey: "rows",
   method: "POST",
   description: "Per-origin counts of reachable destinations within travel-time thresholds, by category.",
   supportsGeojson: false,
   usesProfile: true,
+  input: "slots",
   slots: [
     { id: "origins", label: "Origins" },
     { id: "destinations", label: "Destinations (one category)" },
@@ -675,10 +725,13 @@ const serviceAreaTool: ToolDef = {
   label: "Service area",
   group: "batch",
   path: "/v1/service-area",
+  layers: ["polygon", "network", "point"],
+  tableKey: "features",
   method: "POST",
   description: "Isochrone or isodistance polygons and reachable network from one or more origins.",
   supportsGeojson: true,
   usesProfile: true,
+  input: "slots",
   slots: [{ id: "origins", label: "Origins" }],
   fields: [...serviceAreaFields, ...temporalFields],
   build: (ctx) => envelope(ctx, serviceAreaRequest(ctx), false),
@@ -690,10 +743,13 @@ const serviceAreaSequenceTool: ToolDef = {
   label: "Area sequence",
   group: "batch",
   path: "/v1/service-area-sequence",
+  layers: ["polygon", "network", "point"],
+  tableKey: "features",
   method: "POST",
   description: "Time-dependent service areas replayed over a range of departure times.",
   supportsGeojson: true,
   usesProfile: true,
+  input: "slots",
   slots: [{ id: "origins", label: "Origins" }],
   fields: [
     { key: "sequence_id", label: "Sequence id", type: "text", default: "console_sequence" },
@@ -727,10 +783,13 @@ const betweennessTool: ToolDef = {
   label: "Betweenness",
   group: "batch",
   path: "/v1/betweenness",
+  layers: ["line"],
+  tableKey: "edges",
   method: "POST",
   description: "Demand-weighted edge betweenness from all origin-destination combinations.",
   supportsGeojson: true,
   usesProfile: true,
+  input: "slots",
   slots: [
     { id: "origins", label: "Origins", weighted: true },
     { id: "destinations", label: "Destinations", weighted: true },
@@ -766,15 +825,14 @@ const scenarioBatchTool: ToolDef = {
   label: "Scenario batch",
   group: "batch",
   path: "/v1/scenario-batch",
+  layers: ["line", "polygon", "point"],
+  tableKey: "routes",
   method: "POST",
   description: "Baseline versus scenario cases (overlay file, top-k closures, attribute group) for routes and service areas in one call. Leave cases blank for a baseline-only run; edit the JSON to add OD, matrix or betweenness analyses.",
   supportsGeojson: true,
   usesProfile: true,
-  slots: [
-    { id: "origin", label: "Route origin", max: 1 },
-    { id: "destination", label: "Route destination", max: 1 },
-    { id: "origins", label: "Service-area origins" },
-  ],
+  input: "routes",
+  slots: [{ id: "origins", label: "Service-area origins", hint: "Optional; routes come from the shared start/end list." }],
   fields: [
     { key: "batch_id", label: "Batch id", type: "text", default: "console_batch" },
     { key: "departure_time", label: "Departure time", type: "datetime", default: "2026-05-12T08:30:00+02:00" },
@@ -797,18 +855,13 @@ const scenarioBatchTool: ToolDef = {
     const attribute = str(form, "group_attribute");
     const value = str(form, "group_value");
     if (attribute && value) scenarios.push({ id: `close_${attribute}_${value}`, group: { attribute, value } });
-    const routes: unknown[] = [];
-    const [origin] = ctx.points("origin");
-    const [destination] = ctx.points("destination");
-    if (origin && destination) {
-      routes.push({
-        route_id: "console_route",
-        origin: labeled(origin),
-        destination: labeled(destination),
-        snap: snap(form),
-        returns: { geometry: "full" },
-      });
-    }
+    const routes = ctx.routes.map(({ route, index }) => ({
+      route_id: `console_route_${index + 1}`,
+      origin: labeled(route.origin!),
+      destination: labeled(route.destination!),
+      snap: snap(form),
+      returns: { geometry: "full" },
+    }));
     const serviceAreas: unknown[] = [];
     const origins = ctx.points("origins");
     if (origins.length) {
@@ -837,7 +890,7 @@ const scenarioBatchTool: ToolDef = {
       false,
     );
   },
-  ready: (ctx) => (ctx.points("origin").length && ctx.points("destination").length) || ctx.points("origins").length ? null : "Place a route origin and destination, or service-area origins",
+  ready: (ctx) => (ctx.routes.length || ctx.points("origins").length ? null : "Place a start and end point, or service-area origins"),
 };
 
 const accessModeOptions: FieldOption[] = [
@@ -920,14 +973,15 @@ const transitRouteTool: ToolDef = {
   label: "Transit route",
   group: "transit",
   path: "/v1/transit-route",
+  layers: ["line", "point"],
+  tableKey: "legs",
   method: "POST",
   description: "GTFS itinerary with walk, bicycle or car access and egress legs.",
   supportsGeojson: true,
   usesProfile: false,
-  slots: [
-    { id: "origin", label: "Origin", max: 1 },
-    { id: "destination", label: "Destination", max: 1 },
-  ],
+  input: "routes",
+  live: true,
+  slots: [],
   fields: [
     { key: "route_id", label: "Route id", type: "text", default: "console_transit" },
     ...transitModeFields(),
@@ -972,10 +1026,8 @@ const transitRouteTool: ToolDef = {
       options: (service) => [{ value: "", label: "auto" }, ...(service?.loaded_profiles.map((p) => ({ value: p.profile_id, label: p.profile_id })) ?? [])],
     },
   ],
-  build: (ctx) => {
+  buildEach: (ctx, route, index) => {
     const form = ctx.form;
-    const [origin] = ctx.points("origin");
-    const [destination] = ctx.points("destination");
     const body: Record<string, unknown> = { feed_id: ctx.feedId ?? "" };
     for (const key of ["pedestrian_profile_id", "access_profile_id", "egress_profile_id"]) {
       const v = str(form, key);
@@ -983,9 +1035,9 @@ const transitRouteTool: ToolDef = {
     }
     const maxRoutes = num(form, "alt_max_routes") ?? 1;
     body.request = {
-      route_id: str(form, "route_id") ?? "console_transit",
-      origin: labeled(origin),
-      destination: labeled(destination),
+      route_id: routeId(ctx, "route_id", "console_transit", index),
+      origin: labeled(route.origin!),
+      destination: labeled(route.destination!),
       time: transitTime(form),
       modes: transitModes(form),
       returns: {
@@ -998,7 +1050,7 @@ const transitRouteTool: ToolDef = {
     };
     return body;
   },
-  ready: (ctx) => (!ctx.feedId ? "No transit feed loaded in the API" : (needPoints(ctx, "origin", 1, "origin") ?? needPoints(ctx, "destination", 1, "destination"))),
+  ready: (ctx) => (!ctx.feedId ? "No transit feed loaded in the API" : needRoute(ctx)),
 };
 
 const transitServiceAreaTool: ToolDef = {
@@ -1006,15 +1058,23 @@ const transitServiceAreaTool: ToolDef = {
   label: "Transit reach",
   group: "transit",
   path: "/v1/transit-service-area",
+  layers: ["point", "line", "network", "polygon"],
+  tableKey: "stops",
   method: "POST",
-  description: "Stops reachable by transit within a travel-time budget from each origin.",
+  description: "Reachable transit stops, or a street isochrone that continues from stops until the total travel time runs out.",
   supportsGeojson: true,
   usesProfile: false,
+  input: "slots",
   slots: [{ id: "origins", label: "Origins" }],
   fields: [
     { key: "analysis_id", label: "Analysis id", type: "text", default: "console_transit_reach" },
+    {
+      key: "catchment_mode", label: "Catchment mode", type: "select", default: "stops",
+      options: [{ value: "stops", label: "Reachable stops" }, { value: "street_isochrone", label: "Street isochrone" }],
+      hint: "Street isochrones include direct street travel and use the remaining time after transit. Load a street profile for each chosen mode.",
+    },
     { key: "max_travel_time_s", label: "Max travel time (s)", type: "number", default: 1800, min: 60, step: 300 },
-    ...transitModeFields(),
+    ...transitModeFields().map((field) => field.key === "street_access" ? { ...field, when: (form: Record<string, unknown>) => form.catchment_mode !== "street_isochrone" } : field),
     { key: "include_stops", label: "Include stops", type: "checkbox", default: true, group: "Returns" },
     { key: "include_stop_segments", label: "Include stop segments", type: "checkbox", default: true, group: "Returns" },
     { key: "include_geometry", label: "Include geometry", type: "checkbox", default: true, group: "Returns" },
@@ -1033,9 +1093,10 @@ const transitServiceAreaTool: ToolDef = {
       feed_id: ctx.feedId ?? "",
       request: {
         analysis_id: str(form, "analysis_id") ?? "console_transit_reach",
+        catchment_mode: str(form, "catchment_mode") ?? "stops",
         origins: ctx.points("origins").map(labeled),
         time: transitTime(form),
-        modes: transitModes(form),
+        modes: { ...transitModes(form), ...(form.catchment_mode === "street_isochrone" ? { street_access: "network" } : {}) },
         max_travel_time_s: num(form, "max_travel_time_s") ?? 1800,
         returns,
       },
@@ -1049,10 +1110,12 @@ const simulationTool: ToolDef = {
   label: "Simulation",
   group: "simulation",
   path: "/v1/simulation",
+  layers: ["line", "point"],
   method: "POST",
   description: "Agent-based traffic simulation: create a scenario, watch agents move, add zones mid-run, and inspect congestion.",
   supportsGeojson: false,
   usesProfile: true,
+  input: "slots",
   slots: [
     { id: "destinations", label: "Destinations (weighted)", weighted: true, hint: "Optional; agents head here. Empty = random." },
     { id: "zone", label: "Zone corners", hint: "Optional; 3+ corners form a slow zone." },
@@ -1146,6 +1209,89 @@ const simulationTool: ToolDef = {
   ready: () => null,
 };
 
+
+export const NETWORK_COLOR_BY: FieldOption[] = [
+  { value: "road_class", label: "road class" },
+  { value: "highway", label: "highway tag" },
+  { value: "speed_kph", label: "profile speed (km/h)" },
+  { value: "travel_time_s", label: "profile travel time (s)" },
+  { value: "cost_per_km", label: "profile cost per km" },
+  { value: "allowed", label: "allowed by profile" },
+  { value: "max_speed_kph", label: "posted speed limit" },
+  { value: "surface", label: "surface" },
+  { value: "smoothness", label: "smoothness" },
+  { value: "grade_pct", label: "gradient (%)" },
+  { value: "access", label: "source access (car/bike/foot)" },
+  { value: "direction", label: "one-way / two-way" },
+  { value: "component", label: "connected component" },
+  { value: "temporal", label: "has opening hours" },
+];
+
+export const NETWORK_COMPARE_BY: FieldOption[] = [
+  { value: "delta_speed_kph", label: "speed difference (B − A, km/h)" },
+  { value: "time_ratio", label: "time ratio (B / A)" },
+  { value: "delta_cost", label: "cost difference (B − A)" },
+  { value: "allowed_diff", label: "allowed by A / B / both" },
+];
+
+const networkTool: ToolDef = {
+  id: "network",
+  label: "Network explorer",
+  group: "street",
+  path: "/v1/network/edges",
+  method: "POST",
+  description: "Shows the directed edges in the current view with their source attributes and what the selected profile makes of them (speed, travel time, cost, access). Pick a second profile to see where they differ.",
+  supportsGeojson: false,
+  usesProfile: true,
+  input: "viewport",
+  live: true,
+  layers: ["line"],
+  slots: [],
+  fields: [
+    { key: "color_by", label: "Colour by", type: "select", default: "speed_kph", options: NETWORK_COLOR_BY },
+    {
+      key: "compare_profile_id",
+      label: "Compare with profile",
+      type: "select",
+      default: "",
+      options: (service) => [{ value: "", label: "none" }, ...(service?.loaded_profiles ?? []).map((p) => ({ value: p.profile_id, label: `${p.profile_id} (${p.mode})` }))],
+    },
+    { key: "compare_by", label: "Compare colour", type: "select", default: "delta_speed_kph", options: NETWORK_COMPARE_BY, when: (form) => !!form.compare_profile_id },
+    { key: "only_allowed", label: "Hide edges the profile excludes", type: "checkbox", default: false },
+    { key: "max_edges", label: "Max edges", type: "number", default: 25000, min: 100, step: 5000, group: "Limits" },
+    { key: "min_zoom", label: "Minimum zoom", type: "number", default: 12, min: 6, step: 1, group: "Limits", hint: "Below this zoom nothing is requested." },
+  ],
+  build: (ctx) => ({
+    bbox: ctx.viewportBbox,
+    profile_id: ctx.profileId,
+    compare_profile_id: ctx.form.compare_profile_id ? String(ctx.form.compare_profile_id) : null,
+    max_edges: Number(ctx.form.max_edges ?? 25000),
+  }),
+  ready: (ctx) => {
+    if (!ctx.viewportBbox) return "Move the map to an area first.";
+    const minZoom = Number(ctx.form.min_zoom ?? 12);
+    const zoom = ctx.viewportZoom ?? 0;
+    if (zoom < minZoom - 0.5) return `Zoom in to at least zoom ${minZoom} (now ${zoom.toFixed(1)}), or lower the minimum zoom.`;
+    return null;
+  },
+};
+
+const transitEditorTool: ToolDef = {
+  id: "transit_editor",
+  label: "GTFS editor",
+  group: "transit",
+  path: "/v1/gtfs-editor/scenarios",
+  method: "POST",
+  description: "Draw new transit lines on the map (or express variants of existing routes), give them a timetable, and build them into a routable feed: on top of an imported feed or from scratch. The imported feed stays untouched and the scenario can be reverted.",
+  supportsGeojson: false,
+  usesProfile: false,
+  input: "editor",
+  layers: ["line", "point"],
+  slots: [],
+  fields: [],
+  ready: () => "Use the editor panel.",
+};
+
 export const TOOLS: ToolDef[] = [
   routeTool,
   directionsTool,
@@ -1158,8 +1304,10 @@ export const TOOLS: ToolDef[] = [
   serviceAreaSequenceTool,
   betweennessTool,
   scenarioBatchTool,
+  networkTool,
   transitRouteTool,
   transitServiceAreaTool,
+  transitEditorTool,
   simulationTool,
 ];
 
