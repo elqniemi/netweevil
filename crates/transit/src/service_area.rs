@@ -382,14 +382,7 @@ fn search_service_area_origin(
     origin: &TransitPoint,
     scratch: &mut OriginSearchScratch,
 ) -> Result<OriginSearchOutput> {
-    let access = best_street_candidates(
-        runtime,
-        origin.lon,
-        origin.lat,
-        access_modes,
-        &request.modes,
-        false,
-    );
+    let access = best_street_candidates(runtime, origin, access_modes, &request.modes, false);
     if access.is_empty() {
         return Ok(OriginSearchOutput {
             skipped_diagnostic: Some(format!(
@@ -701,14 +694,7 @@ fn search_service_area_target(
     origin: &TransitPoint,
     scratch: &mut BackwardOriginSearchScratch,
 ) -> Result<OriginSearchOutput> {
-    let egress = best_street_candidates(
-        runtime,
-        origin.lon,
-        origin.lat,
-        egress_modes,
-        &request.modes,
-        true,
-    );
+    let egress = best_street_candidates(runtime, origin, egress_modes, &request.modes, true);
     if egress.is_empty() {
         return Ok(OriginSearchOutput {
             skipped_diagnostic: Some(format!(

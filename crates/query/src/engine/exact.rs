@@ -148,11 +148,30 @@ pub(crate) fn route_between_candidates(
         return Err(no_route_failure(topology, origin_candidates, destination_candidates).into());
     }
 
-    // Successful paths return immediately. Only failed pairs can be reused.
+    // Keep the first routable physical attachment, but compare its valid
+    // orientations. Opposite edge projections can differ by nanometres; that
+    // noise must not force a walk past an endpoint and back. Candidate counts
+    // remain bounded by snapping, and other locations/floors are not searched
+    // after an attachment succeeds.
+    let mut attachment: Option<(usize, usize)> = None;
+    let mut best: Option<(SnappedPoint, SnappedPoint, RoutePath, HopSelectionInfo)> = None;
     let mut failed_pairs = HashSet::<((u32, u64, u64), (u32, u64, u64))>::new();
 
-    for origin in origin_candidates {
-        for destination in destination_candidates {
+    for (origin_index, origin) in origin_candidates.iter().enumerate() {
+        if let Some((first_origin, _)) = attachment
+            && !same_physical_attachment(origin, &origin_candidates[first_origin])
+        {
+            continue;
+        }
+        for (destination_index, destination) in destination_candidates.iter().enumerate() {
+            if let Some((_, first_destination)) = attachment
+                && !same_physical_attachment(
+                    destination,
+                    &destination_candidates[first_destination],
+                )
+            {
+                continue;
+            }
             if same_edge_reverse_pair(origin, destination) {
                 continue;
             }
@@ -283,12 +302,52 @@ pub(crate) fn route_between_candidates(
             if let Some(path) = path {
                 let path =
                     finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
-                return Ok((origin.clone(), destination.clone(), path, hop_info));
+                if has_failure_modes(fallback) {
+                    return Ok((origin.clone(), destination.clone(), path, hop_info));
+                }
+                attachment.get_or_insert((origin_index, destination_index));
+                if best.as_ref().is_none_or(|(_, _, previous, _)| {
+                    path.total_generalized_cost < previous.total_generalized_cost
+                }) {
+                    best = Some((origin.clone(), destination.clone(), path, hop_info));
+                }
             }
         }
     }
 
-    Err(no_route_failure(topology, origin_candidates, destination_candidates).into())
+    best.ok_or_else(|| no_route_failure(topology, origin_candidates, destination_candidates).into())
+}
+
+pub(crate) fn same_physical_attachment(left: &SnappedPoint, right: &SnappedPoint) -> bool {
+    const TOLERANCE_M: f64 = 1e-4;
+    // Only alternate directions of the same topological edge compete. At a
+    // junction, coincident but distinct edges can carry different restrictions.
+    let same_edge = left.snapped_edge_id.is_some()
+        && right.snapped_edge_id.is_some()
+        && left.snapped_from_node_id.is_some()
+        && right.snapped_from_node_id.is_some()
+        && ((left.snapped_from_node_id == right.snapped_from_node_id
+            && left.snapped_to_node_id == right.snapped_to_node_id)
+            || (left.snapped_from_node_id == right.snapped_to_node_id
+                && left.snapped_to_node_id == right.snapped_from_node_id));
+    let same_node = left.snapped_edge_id.is_none()
+        && right.snapped_edge_id.is_none()
+        && left.snapped_node_id == right.snapped_node_id;
+    if !same_edge && !same_node {
+        return false;
+    }
+    let same_height = if left.snapped_z.is_finite() && right.snapped_z.is_finite() {
+        (left.snapped_z - right.snapped_z).abs() <= TOLERANCE_M
+    } else {
+        !left.snapped_z.is_finite() && !right.snapped_z.is_finite()
+    };
+    same_height
+        && netweevil_core::geo::haversine_meters(
+            left.snapped_lon,
+            left.snapped_lat,
+            right.snapped_lon,
+            right.snapped_lat,
+        ) <= TOLERANCE_M
 }
 
 pub(crate) fn route_between_candidates_with_banned_edges(

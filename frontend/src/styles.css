@@ -1468,7 +1468,20 @@ table.is-clickable tbody tr.is-active {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  max-height: calc(100dvh - 210px);
+  overflow-y: auto;
 }
+
+.style-check { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.style-note { font-size: 11px; line-height: 1.45; color: var(--ink-2); margin: 4px 0; }
+.altitude-inputs { display: flex; gap: 8px; }
+.altitude-inputs label { flex: 1; font-size: 11px; }
+.altitude-inputs input { width: 100%; margin-top: 3px; }
+.elevation-ramp { display: flex; gap: 8px; align-items: center; font-size: 10px; }
+.elevation-ramp i { flex: 1; height: 8px; background: linear-gradient(90deg, #2563eb, #f97316); border-radius: 4px; }
+.map-3d-error { position: absolute; top: 12px; left: 12px; max-width: 360px; background: white; padding: 12px; z-index: 3; font-size: 12px; }
+.reference-layer { display: flex; gap: 6px; align-items: center; font-size: 11px; }
+.reference-layer span { flex: 1; overflow-wrap: anywhere; }
 
 .style-row {
   display: flex;
@@ -1869,6 +1882,25 @@ table.is-clickable tbody tr.is-active {
   padding-top: 8px;
   white-space: nowrap;
 }
+
+/* Summary owns scrolling. Unlike the standalone street-directions tab,
+   this list must take its full content height before Execution context. */
+.transit-directions {
+  margin-top: 14px;
+  display: block;
+  flex: none;
+  min-height: auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.transit-directions .steps { flex: none; min-height: auto; overflow: visible; }
+.transit-directions .step-btn { grid-template-columns: 28px minmax(0, 1fr) auto; }
+.transit-directions + .service-context { flex: none; }
+.transit-walking-steps { margin: 0 0 10px 40px; font-size: 12px; }
+.transit-walking-steps summary { cursor: pointer; color: var(--muted); }
+.transit-walking-steps ol { padding-left: 20px; }
+.transit-walking-steps li { margin: 5px 0; }
+.transit-walking-steps button { white-space: normal; text-align: left; }
 
 .style-section {
   display: flex;
@@ -2400,3 +2432,17 @@ details.points:not([open]) > summary.points-head {
   margin-top: 3px;
   font-size: 10.5px;
 }
+
+.mode-selection {
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--hair);
+  border-radius: 6px;
+}
+.mode-selection legend { font-size: 12px; color: var(--ink-2); }
+.mode-selection-actions { display: flex; gap: 6px; margin-bottom: 6px; }
+.mode-selection-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px 10px; margin-bottom: 6px; }
+.mode-selection-options .field-check { grid-column: auto; align-items: flex-start; }
+.request-override-notice { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 8px; border: 1px solid var(--hair); border-radius: 6px; font-size: 12px; line-height: 1.4; }
+.request-override-notice span { flex: 1; }
+.request-override-notice button { flex: none; }

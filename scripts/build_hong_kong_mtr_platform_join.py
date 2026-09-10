@@ -151,11 +151,18 @@ def locate_dataset(extracted_to: str) -> Path:
 def load_downloaded_stations(downloads: Path) -> list[dict[str, Any]]:
     manifest_path = downloads / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if manifest.get("failure_count") != 0 or manifest.get("downloaded_count") != 98:
+    if (manifest.get("failure_count") != 0
+            or not manifest.get("station_count")
+            or manifest.get("downloaded_count") != manifest.get("station_count")):
         raise RuntimeError(f"download manifest is incomplete: {manifest_path}")
     resources = manifest["resources"]
     for resource in resources:
-        resource["dataset_dir"] = str(locate_dataset(resource["extracted_to"]))
+        # Manifests move with datasets between machines. Resolve the archived
+        # relative layout before falling back to the historical absolute path.
+        archived = Path(resource.get("archive", ""))
+        local_root = downloads / "extracted" / archived.stem
+        extracted = local_root if local_root.is_dir() else Path(resource["extracted_to"])
+        resource["dataset_dir"] = str(locate_dataset(str(extracted)))
     return resources
 
 

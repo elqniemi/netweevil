@@ -1798,11 +1798,13 @@ features:
             .execute_route(&netweevil_transit::TransitRouteRequest {
                 route_id: "mini-station-transit".to_string(),
                 origin: netweevil_transit::TransitPoint {
+                    z: None,
                     id: "origin".to_string(),
                     lon: 113.9998,
                     lat: 22.0,
                 },
                 destination: netweevil_transit::TransitPoint {
+                    z: None,
                     id: "destination".to_string(),
                     lon: 114.0006,
                     lat: 22.0,

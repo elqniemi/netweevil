@@ -5,6 +5,10 @@ use netweevil_core::TravelMode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+// Bump when compilation semantics change without a profile YAML or bundle
+// layout change. This also invalidates transfer tables tied to profile hashes.
+const COST_MODEL_REVISION: &[u8] = b"netweevil-profile-cost-v2\0";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileDocument {
     pub profile: ProfileHeader,
@@ -102,7 +106,10 @@ impl ProfileDocument {
 
     pub fn fingerprint(&self) -> Result<String> {
         let bytes = serde_yaml::to_string(self).context("serializing profile for hashing")?;
-        Ok(hex::encode(Sha256::digest(bytes.as_bytes())))
+        let mut hash = Sha256::new();
+        hash.update(COST_MODEL_REVISION);
+        hash.update(bytes.as_bytes());
+        Ok(hex::encode(hash.finalize()))
     }
 }
 
@@ -609,4 +616,25 @@ pub enum ReturnGeometry {
 pub enum BreakdownMetric {
     TimeS,
     DistanceM,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fingerprint_invalidates_metrics_from_unversioned_cost_model() {
+        let profile: ProfileDocument = serde_yaml::from_str(include_str!(
+            "../../../examples/profiles/pedestrian_multilayer.yml"
+        ))
+        .unwrap();
+        let yaml = serde_yaml::to_string(&profile).unwrap();
+        let legacy_hash = hex::encode(Sha256::digest(yaml.as_bytes()));
+        let hash = profile.fingerprint().unwrap();
+        assert_ne!(hash, legacy_hash);
+        assert_eq!(hash, profile.fingerprint().unwrap());
+        let mut changed = profile;
+        changed.profile.label.push_str(" changed");
+        assert_ne!(hash, changed.fingerprint().unwrap());
+    }
 }

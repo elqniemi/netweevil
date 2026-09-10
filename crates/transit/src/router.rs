@@ -300,16 +300,14 @@ fn search_transit_route_with_runtime(
     let search_end_s = departure_s.saturating_add(request.time.search_window_s);
     let access = best_street_candidates(
         runtime,
-        request.origin.lon,
-        request.origin.lat,
+        &request.origin,
         &access_modes,
         &request.modes,
         false,
     );
     let egress = best_street_candidates(
         runtime,
-        request.destination.lon,
-        request.destination.lat,
+        &request.destination,
         &egress_modes,
         &request.modes,
         true,

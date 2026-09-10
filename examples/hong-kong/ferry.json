@@ -1,0 +1,45 @@
+{
+  "feed_id": "hong_kong_multimodal",
+  "pedestrian_profile_id": "pedestrian_fastest_multilayer",
+  "request": {
+    "route_id": "hk_verified_ferry",
+    "origin": {
+      "id": "td:101339",
+      "lon": 114.16114,
+      "lat": 22.28694
+    },
+    "destination": {
+      "id": "td:101119",
+      "lon": 114.16863,
+      "lat": 22.29376
+    },
+    "time": {
+      "datetime": "2026-09-10T09:00:00+08:00",
+      "search_window_s": 7200
+    },
+    "modes": {
+      "transit": [
+        "ferry"
+      ],
+      "access": [
+        "walk"
+      ],
+      "egress": [
+        "walk"
+      ],
+      "street_access": "network",
+      "transfer_profile_id": "pedestrian_fastest_multilayer",
+      "max_access_distance_m": 150,
+      "max_egress_distance_m": 150,
+      "max_transfer_distance_m": 500,
+      "max_transfers": 0,
+      "max_endpoint_snap_distance_m": 50
+    },
+    "returns": {
+      "include_geometry": true,
+      "walking_geometry": "network",
+      "include_stops": true,
+      "include_stop_segments": true
+    }
+  }
+}

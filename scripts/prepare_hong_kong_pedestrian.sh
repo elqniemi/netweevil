@@ -70,6 +70,18 @@ validate_source() {
     || die "layer '$layer' in '$source' has no readable Z coordinate"
 }
 
+validate_platform_source() {
+  local source="$1"
+  local info
+  info="$(layer_info "$source" indoor_pedestrian_route)"
+  for field in \
+    MTRVenueID MTRStationCode MTRStationID MTRLineCodes \
+    MTRPlatformLevel MTRPlatformLineCodes MTRPlatformSourceIDs MTRPlatformStopIDs; do
+    grep -q "^${field}:" <<<"$info" \
+      || die "platform-enriched indoor network is missing required field '$field': $source"
+  done
+}
+
 validate_output() {
   local source="$1"
   local output="$2"
@@ -157,12 +169,25 @@ require_command sha256sum
 
 outdoor_source="$source_dir/3D_Pedestrian_Network.gpkg"
 indoor_source="$source_dir/3D_Indoor_Network.gpkg"
-platform_indoor_source="$source_dir/mtr_platform_join/3D_Indoor_Network_MTR_Platforms.gpkg"
-if [[ -f "$platform_indoor_source" ]]; then
+platform_indoor_source=""
+for candidate in \
+  "$source_dir/mtr_platform_join/3D_Indoor_Network_MTR_Platforms.gpkg" \
+  "$source_dir/3D_Indoor_Network_MTR_Platforms.gpkg"; do
+  if [[ -f "$candidate" ]]; then
+    platform_indoor_source="$candidate"
+    break
+  fi
+done
+if [[ -n "$platform_indoor_source" ]]; then
   indoor_source="$platform_indoor_source"
+elif [[ -f "$source_dir/mtr_platform_join/qa_report.json" ]]; then
+  die "MTR platform join metadata exists, but 3D_Indoor_Network_MTR_Platforms.gpkg was not found beside it or in datasets/"
 fi
 validate_source "$outdoor_source" pedestrian_route
 validate_source "$indoor_source" indoor_pedestrian_route
+if [[ -n "$platform_indoor_source" ]]; then
+  validate_platform_source "$indoor_source"
+fi
 
 echo "GDAL: $(ogr2ogr --version)"
 echo "Validated source: $outdoor_source"

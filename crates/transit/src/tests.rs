@@ -6,6 +6,39 @@ use crate::gtfs::{GtfsFiles, build_bundle_from_files};
 use super::*;
 
 #[test]
+fn buffered_bundle_write_flushes_complete_compatible_bytes() {
+    let bundle = build_bundle_from_files(
+        fixture_files(),
+        "abc".into(),
+        TransitImportOptions {
+            name: "buffered".into(),
+            source_label: "fixture".into(),
+            service_start_date: "2026-05-11".into(),
+            service_days: 1,
+        },
+    )
+    .unwrap();
+    let path = std::env::temp_dir().join(format!(
+        "netweevil-buffered-bundle-{}-{}.bin",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    write_transit_bundle(&path, &bundle).unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        bincode::serialize(&bundle).unwrap()
+    );
+    assert_eq!(
+        read_transit_bundle(&path).unwrap().connections.len(),
+        bundle.connections.len()
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
+#[test]
 fn imports_one_week_and_routes_walk_transit_walk() {
     let bundle = build_bundle_from_files(
         fixture_files(),
@@ -22,11 +55,13 @@ fn imports_one_week_and_routes_walk_transit_walk() {
     let request = TransitRouteRequest {
         route_id: "r1".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -85,6 +120,7 @@ fn executes_transit_service_area_to_reachable_stops_and_segments() {
         catchment_mode: TransitCatchmentMode::Stops,
         analysis_id: "sa1".to_string(),
         origins: vec![TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
@@ -139,6 +175,7 @@ fn rejects_transit_service_area_above_stop_segment_limit() {
         catchment_mode: TransitCatchmentMode::Stops,
         analysis_id: "sa-output-limit".to_string(),
         origins: vec![TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
@@ -287,11 +324,13 @@ fn prepared_router_reuses_departures_and_spatial_index() {
     let request = TransitRouteRequest {
         route_id: "r1".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -332,11 +371,13 @@ fn filters_disallowed_transit_modes() {
     let request = TransitRouteRequest {
         route_id: "r1".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -378,11 +419,13 @@ fn does_not_walk_transfer_before_first_boarding() {
     let request = TransitRouteRequest {
         route_id: "no_preboard_transfer".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.01,
             lat: 53.0,
@@ -424,11 +467,13 @@ fn does_not_finish_by_transferring_to_an_egress_stop() {
     let request = TransitRouteRequest {
         route_id: "no_terminal_transfer".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.01,
             lat: 53.0,
@@ -470,11 +515,13 @@ fn rejects_routes_with_transit_legs_below_minimum_duration() {
     let request = TransitRouteRequest {
         route_id: "min_leg_duration".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -516,11 +563,13 @@ fn accepts_routes_when_transit_leg_distance_minimum_passes() {
     let request = TransitRouteRequest {
         route_id: "min_leg_distance".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -565,11 +614,13 @@ fn expands_frequency_based_trips() {
     let request = TransitRouteRequest {
         route_id: "freq".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -618,11 +669,13 @@ fn uses_gtfs_shapes_for_transit_geometry() {
     let request = TransitRouteRequest {
         route_id: "shape".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -679,11 +732,13 @@ fn routes_bicycle_access_with_walk_egress_when_mixed_modes_enabled() {
     let request = TransitRouteRequest {
         route_id: "bike_first_mile".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 5.97,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -738,11 +793,13 @@ fn rejects_mixed_access_egress_modes_without_opt_in() {
     let request = TransitRouteRequest {
         route_id: "mixed_without_flag".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 5.97,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -781,11 +838,13 @@ fn routes_with_matching_bicycle_access_and_egress_without_opt_in() {
     let request = TransitRouteRequest {
         route_id: "bike_both_miles".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 5.97,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.05,
             lat: 53.0,
@@ -836,6 +895,7 @@ fn car_access_extends_transit_service_area_reach() {
     .expect("fixture imports");
     // Origin is ~10 km from stop A: only car access can bridge the first mile.
     let origin = TransitPoint {
+        z: None,
         id: "park_and_ride".to_string(),
         lon: 5.85,
         lat: 53.0,
@@ -1060,6 +1120,25 @@ fn transfer_builder_routes_bound_stops_directionally() {
     )
     .expect("transfer table builds");
 
+    let path = std::env::temp_dir().join(format!(
+        "netweevil-buffered-transfers-{}-{}.bin",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    write_transit_transfer_table(&path, &table).unwrap();
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        bincode::serialize(&table).unwrap()
+    );
+    assert_eq!(
+        read_transit_transfer_table(&path).unwrap().transfers.len(),
+        table.transfers.len()
+    );
+    std::fs::remove_file(path).unwrap();
+
     assert_eq!(table.profile_id, "step_free");
     assert_eq!(table.transfers.len(), 3);
     assert!(
@@ -1155,11 +1234,13 @@ fn csa_consumes_network_transfer_table_and_exposes_station_path() {
     let request = TransitRouteRequest {
         route_id: "station-transfer".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "destination".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -1470,11 +1551,13 @@ fn network_street_access_prices_legs_with_the_estimator() {
     let request = |street_access: TransitStreetAccessModel| TransitRouteRequest {
         route_id: "r1".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -1615,11 +1698,13 @@ fn arrive_by_request(deadline: &str, modes: TransitModeOptions) -> TransitRouteR
     TransitRouteRequest {
         route_id: "arrive-by".to_string(),
         origin: TransitPoint {
+            z: None,
             id: "origin".to_string(),
             lon: 6.0,
             lat: 53.0,
         },
         destination: TransitPoint {
+            z: None,
             id: "dest".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -1773,6 +1858,7 @@ fn arrive_by_service_area_reports_latest_departures_towards_the_target() {
         catchment_mode: TransitCatchmentMode::Stops,
         analysis_id: "arrive-by-service-area".to_string(),
         origins: vec![TransitPoint {
+            z: None,
             id: "target".to_string(),
             lon: 6.02,
             lat: 53.0,
@@ -2977,4 +3063,212 @@ fn coincident_platforms_allow_zero_time_transfers_without_walking_cycles() {
     files.insert("stops.txt", "stop_id,stop_name,stop_lat,stop_lon\nA,A,53,6\nB1,Platform1,53,6.01\nMID,Intermediate,53,6.01\nB2,Platform2,53,6.01\nC,C,53,6.02\n".to_string());
     files.insert("stop_times.txt", "trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT1,08:05:00,08:05:00,A,1\nT1,08:10:00,08:10:00,B1,2\nT2,08:10:00,08:10:00,B2,1\nT2,08:25:00,08:25:00,C,2\n".to_string());
     assert_transfer_reachability(import_fixture(files, "zero-transfer"), true);
+}
+
+#[test]
+fn network_endpoints_preserve_z_and_cannot_fall_back_to_xy_estimators() {
+    struct Legacy;
+    impl StreetTimeEstimator for Legacy {
+        fn street_time_s(
+            &self,
+            _: AccessMode,
+            _: bool,
+            _: f64,
+            _: f64,
+            _: f64,
+            _: f64,
+        ) -> Option<u32> {
+            Some(1)
+        }
+    }
+    struct ThreeD;
+    impl StreetTimeEstimator for ThreeD {
+        fn street_time_s(
+            &self,
+            _: AccessMode,
+            _: bool,
+            _: f64,
+            _: f64,
+            _: f64,
+            _: f64,
+        ) -> Option<u32> {
+            panic!("3D endpoint must not call XY fallback")
+        }
+        fn point_to_stop_path_3d(
+            &self,
+            _: AccessMode,
+            from: &TransitPoint,
+            _: &TransitStop,
+        ) -> Option<TransitStreetPath> {
+            assert_eq!(from.z, Some(-12.0));
+            Some(TransitStreetPath::time_only(1))
+        }
+        fn stop_to_point_path_3d(
+            &self,
+            _: AccessMode,
+            _: &TransitStop,
+            to: &TransitPoint,
+        ) -> Option<TransitStreetPath> {
+            assert_eq!(to.z, Some(7.0));
+            Some(TransitStreetPath::time_only(1))
+        }
+    }
+    let router =
+        PreparedTransitRouter::new(Arc::new(import_fixture(fixture_files(), "3d-endpoints")));
+    for arrive_by in [false, true] {
+        let mut request = arrive_by_request(
+            &fixture_datetime(if arrive_by {
+                8 * 3600 + 30 * 60
+            } else {
+                7 * 3600 + 55 * 60
+            }),
+            short_access_modes(),
+        );
+        request.time.arrive_by = arrive_by;
+        request.modes.street_access = TransitStreetAccessModel::Network;
+        request.origin.z = Some(-12.0);
+        request.destination.z = Some(7.0);
+        let json = serde_json::to_string(&request).unwrap();
+        let decoded: TransitRouteRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.origin.z, request.origin.z);
+        assert_eq!(
+            router
+                .execute_route_with_street_estimator(&decoded, Some(&Legacy))
+                .unwrap()
+                .outcome,
+            TransitOutcome::Unreachable
+        );
+        assert_eq!(
+            router
+                .execute_route_with_street_estimator(&decoded, Some(&ThreeD))
+                .unwrap()
+                .outcome,
+            TransitOutcome::Scheduled
+        );
+    }
+}
+
+#[test]
+fn network_endpoint_snap_limit_rejects_remote_attachments_and_accounts_for_small_gaps() {
+    struct AttachedPath {
+        offset_lon: f64,
+    }
+    impl AttachedPath {
+        fn path(
+            &self,
+            point: &TransitPoint,
+            stop: &TransitStop,
+            egress: bool,
+        ) -> TransitStreetPath {
+            let attachment = [
+                point.lon + self.offset_lon,
+                point.lat,
+                point.z.unwrap_or(0.0),
+            ];
+            let mut geometry = vec![attachment, [stop.lon, stop.lat, 0.0]];
+            if egress {
+                geometry.reverse();
+            }
+            TransitStreetPath {
+                travel_time_s: 1,
+                distance_m: Some(1.0),
+                geometry,
+                edge_path: Vec::new(),
+                components: BTreeMap::new(),
+            }
+        }
+    }
+    impl StreetTimeEstimator for AttachedPath {
+        fn requires_network_path(&self) -> bool {
+            true
+        }
+        fn street_time_s(
+            &self,
+            _: AccessMode,
+            _: bool,
+            _: f64,
+            _: f64,
+            _: f64,
+            _: f64,
+        ) -> Option<u32> {
+            panic!("failed endpoint attachment must not retry unconstrained coordinate times")
+        }
+        fn point_to_stop_path_with_snap_limit(
+            &self,
+            _: AccessMode,
+            point: &TransitPoint,
+            stop: &TransitStop,
+            _: f64,
+        ) -> Option<TransitStreetPath> {
+            Some(self.path(point, stop, false))
+        }
+        fn stop_to_point_path_with_snap_limit(
+            &self,
+            _: AccessMode,
+            stop: &TransitStop,
+            point: &TransitPoint,
+            _: f64,
+        ) -> Option<TransitStreetPath> {
+            Some(self.path(point, stop, true))
+        }
+    }
+    let router =
+        PreparedTransitRouter::new(Arc::new(import_fixture(fixture_files(), "endpoint-gap")));
+    for arrive_by in [false, true] {
+        let mut request = arrive_by_request(
+            &fixture_datetime(if arrive_by {
+                8 * 3600 + 30 * 60
+            } else {
+                7 * 3600 + 55 * 60
+            }),
+            short_access_modes(),
+        );
+        request.time.arrive_by = arrive_by;
+        request.modes.street_access = TransitStreetAccessModel::Network;
+        assert_eq!(request.modes.max_endpoint_snap_distance_m, 50.0);
+        let remote = AttachedPath { offset_lon: 0.01 };
+        assert_eq!(
+            router
+                .execute_route_with_street_estimator(&request, Some(&remote))
+                .unwrap()
+                .outcome,
+            TransitOutcome::Unreachable
+        );
+        let nearby = AttachedPath { offset_lon: 0.0001 };
+        let result = router
+            .execute_route_with_street_estimator(&request, Some(&nearby))
+            .unwrap();
+        assert_eq!(result.outcome, TransitOutcome::Scheduled);
+        for leg in result.legs.iter().filter(|leg| {
+            matches!(
+                leg.leg_type,
+                TransitLegType::Access | TransitLegType::Egress
+            )
+        }) {
+            let path = leg.network_path.as_ref().unwrap();
+            let gap_m = path.components["off_network_connection_distance_m"];
+            let gap_s = path.components["off_network_connection_time_s"];
+            assert!(gap_m > 1.0 && gap_m < 50.0);
+            assert!(gap_s > 0.0);
+            assert_eq!(path.travel_time_s, 1 + gap_s as u32);
+            assert_eq!(path.distance_m, Some(1.0 + gap_m));
+            assert_eq!(leg.arrival_s - leg.departure_s, path.travel_time_s);
+        }
+        request.modes.max_endpoint_snap_distance_m = 0.0;
+        assert_eq!(
+            router
+                .execute_route_with_street_estimator(&request, Some(&nearby))
+                .unwrap()
+                .outcome,
+            TransitOutcome::Unreachable
+        );
+        for invalid in [-1.0, f64::INFINITY, f64::NAN] {
+            request.modes.max_endpoint_snap_distance_m = invalid;
+            assert!(
+                router
+                    .execute_route_with_street_estimator(&request, Some(&nearby))
+                    .is_err()
+            );
+        }
+    }
 }

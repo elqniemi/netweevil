@@ -5,6 +5,7 @@ import { exportRequest, exportResponse, fetchServerGeojson, mapGeojson } from ".
 import { requestFit, setState, useStore, type ResultRecord, type RunRecord } from "../state/store";
 import { TOOL_BY_ID } from "../tools/registry";
 import { DirectionsList } from "./DirectionsList";
+import { TransitDirectionsList } from "./TransitDirectionsList";
 import { fmtBytes, fmtMs, fmtValue } from "./format";
 import { transitTimeContext, type TransitTimeContext } from "../api/time";
 
@@ -464,6 +465,7 @@ function SummaryTab({ result }: { result: ResultRecord }) {
           ))}
         </dl>
       )}
+      {run && result.tool === "transit_directions" && <TransitDirectionsList run={run} />}
       {(service || hints.length > 0) && (
         <details className="service-context">
           <summary>Execution context</summary>

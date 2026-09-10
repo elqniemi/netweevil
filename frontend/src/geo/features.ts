@@ -90,12 +90,15 @@ function scalarProps(obj: Record<string, unknown>): Record<string, unknown> {
       props[key] = value.join(", ");
     } else if (key === "components" && typeof value === "object" && value !== null) {
       for (const [k, v] of Object.entries(value as Record<string, unknown>)) if (isScalar(v)) props[`component.${k}`] = v;
+    } else if (key === "source_attributes" && typeof value === "object" && value !== null) {
+      for (const [k, v] of Object.entries(value as Record<string, unknown>)) if (isScalar(v)) props[`source.${k}`] = v;
     }
   }
   return props;
 }
 
-const SKIP_KEYS = new Set(["node_path", "edge_path", "bbox", "topology_bounds"]);
+// Transit instructions reference geometry already present in result.legs.
+const SKIP_KEYS = new Set(["node_path", "edge_path", "bbox", "topology_bounds", "directions"]);
 
 /**
  * Extracts every recognisable geometry from an API response. Results are
@@ -144,14 +147,14 @@ export function extractFeatures(root: unknown): FeatureCollection {
       push(geometry, base);
       emitted = true;
     } else if (isPositionArray(geometry)) {
-      const coords = geometry.map((p) => [p[0], p[1]]);
+      const coords = geometry.map((p) => p.slice());
       push(coords.length === 1 ? { type: "Point", coordinates: coords[0] } : { type: "LineString", coordinates: coords }, base);
       emitted = true;
     }
 
     // 2. Polygon rings (simulation zones, endpoint distributions).
     if (isPositionArray(obj.polygon)) {
-      const ring = obj.polygon.map((p) => [p[0], p[1]]);
+      const ring = obj.polygon.map((p) => p.slice());
       const first = ring[0];
       const last = ring[ring.length - 1];
       if (first[0] !== last[0] || first[1] !== last[1]) ring.push(first);
@@ -164,7 +167,8 @@ export function extractFeatures(root: unknown): FeatureCollection {
 
     // 3. Point-like objects.
     if (isNumber(obj.lon) && isNumber(obj.lat) && !emitted) {
-      push({ type: "Point", coordinates: [obj.lon, obj.lat] }, base);
+      const elevation = obj.z_m ?? obj.z ?? obj.elevation_m;
+      push({ type: "Point", coordinates: isNumber(elevation) ? [obj.lon, obj.lat, elevation] : [obj.lon, obj.lat] }, base);
       emitted = true;
     }
     if (isNumber(obj.snapped_lon) && isNumber(obj.snapped_lat)) {
@@ -184,7 +188,7 @@ export function extractFeatures(root: unknown): FeatureCollection {
       emitted = true;
     }
     if (isPosition(obj.location) && key !== "root") {
-      push({ type: "Point", coordinates: [obj.location[0], obj.location[1]] }, base);
+      push({ type: "Point", coordinates: obj.location.slice() }, base);
       emitted = true;
     }
     if (isPosition(obj.origin) && isPosition(obj.destination)) {
@@ -192,8 +196,8 @@ export function extractFeatures(root: unknown): FeatureCollection {
         {
           type: "LineString",
           coordinates: [
-            [obj.origin[0], obj.origin[1]],
-            [obj.destination[0], obj.destination[1]],
+            obj.origin.slice(),
+            obj.destination.slice(),
           ],
         },
         { ...base, _kind: "od_pairs" },
@@ -364,6 +368,10 @@ export function styleFeatures(collection: FeatureCollection, ctx: StyleContext):
       width = 4;
       opacity = multi ? 0.45 : 0.75;
       sort = -1;
+    } else if (kind === "off_network_connection") {
+      color = PALETTE.ochre;
+      width = 2;
+      dash = 1;
     } else if (kind === "snap_link") {
       color = PALETTE.grey;
       width = 1.5;
@@ -398,7 +406,7 @@ export function styleFeatures(collection: FeatureCollection, ctx: StyleContext):
         : ((p.congestion_share as number) - loadRange.min) / loadRange.span;
       color = heatRamp(value);
       width = 1.5 + 4 * value;
-    } else if (kind === "legs" && (ctx.tool === "transit_route" || p.leg_type !== undefined)) {
+    } else if (kind === "legs" && (ctx.tool === "transit_route" || ctx.tool === "transit_directions" || p.leg_type !== undefined)) {
       const legType = String(p.leg_type ?? "transit");
       if (legType === "transit") {
         color = TRANSIT_MODE_COLORS[String(p.mode ?? "")] ?? PALETTE.crimson;
@@ -469,7 +477,7 @@ export function styleFeatures(collection: FeatureCollection, ctx: StyleContext):
     if (!isBand && isLine) {
       width *= style.lineScale;
       opacity *= style.lineOpacity;
-      if (style.lineColor && kind !== "snap_link") color = style.lineColor;
+      if (style.lineColor && kind !== "snap_link" && kind !== "off_network_connection") color = style.lineColor;
     } else if (geomType === "Point") {
       radius *= style.pointScale;
       if (style.pointColor) color = style.pointColor;

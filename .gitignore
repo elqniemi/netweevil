@@ -22,6 +22,21 @@
 *.osm.xml
 *.gtfs.zip
 
+# Local DEM/raster sources and derived arrays. Terrain PNG tiles and manifests
+# belong under .netweevil/terrain/, already excluded above.
+*.asc
+*.dem
+*.dtm
+*.tif
+*.tiff
+*.vrt
+*.npy
+*.npz
+Whole_HK_DTM_5m.zip
+*.gpkg-wal
+*.gpkg-shm
+*.gpkg-journal
+
 # Generated analysis outputs and report artifacts
 *.geojson
 *.gpkg
@@ -60,6 +75,10 @@ index.html
 !examples/experiments/**/*.jsonl
 !examples/experiments/**/*.ndjson
 
+!examples/hong-kong/**/*.geojson
+!examples/hong-kong/**/*.jsonl
+!examples/hong-kong/**/*.ndjson
+
 # Generated API examples and benchmark outputs are reproducible local artifacts.
 examples/api/*_result*.json
 examples/api/*_results*.json
@@ -91,6 +110,8 @@ Thumbs.db
 build/
 dist/
 /frontend/node_modules/
+.pnpm-store/
+*.tsbuildinfo
 coverage/
 *.profraw
 *.profdata
@@ -108,6 +129,7 @@ coverage/
 # Temporary files
 *.tmp
 *.temp
+*.part
 *.cache
 
 # Local environment settings and secrets

@@ -28,6 +28,7 @@ The production surface is the `netweevil` CLI plus a preloadable HTTP API. The Q
 - `examples/temporal`: holiday and continuous-overlay examples
 - `examples/transit`: stop-to-network binding examples
 - `examples/api`: API payload examples
+- `examples/hong-kong`: full-data 3D walking and multimodal transit tutorial requests
 - `examples/perf`: performance route corpora
 - `scripts`: QGIS packaging and data-preparation scripts
 - `datasets`: local development OSM extracts and GTFS archives
@@ -144,6 +145,18 @@ cargo run -p netweevil-cli -- analyze route \
 
 ## 3D GeoPackage And Temporal Analysis
 
+For the complete local Hong Kong example, follow the
+[Hong Kong tutorial](docs/hong-kong-tutorial.md). It prepares the full road and
+pedestrian datasets, combines surface transit with platform-bound MTR/light
+rail, audits exits, and starts the console with 3D styling, height exaggeration
+and underground viewing:
+
+```bash
+scripts/setup_hong_kong.sh --analysis-repo /path/to/hong-kong-analysis
+# After preparation:
+scripts/setup_hong_kong.sh --serve-only
+```
+
 GeoPackage ingest expects inputs already transformed to WGS84
 longitude/latitude with Z in metres. NetWeevil does not directly transform raw
 Hong Kong EPSG:2326+5738 data or read FileGDB; perform that conversion in the
@@ -177,9 +190,10 @@ The preparation script validates GDAL and both source files, preserves the
 GeoPackage basenames, layers, fields, and HKPD Z values, transforms horizontal
 coordinates to WGS84, and writes source hashes plus transformation details to
 `prepared/netweevil-preprocessing-manifest.txt`. Use `--output-dir` to choose a
-different destination. Platform-level GTFS synthesis and real stop bindings
-remain project-specific input generation; the routing, transfer-table, and
-analysis engine workflow is otherwise runnable from this repository.
+different destination. The [full Hong Kong workflow](docs/hong-kong-tutorial.md)
+adds real numbered-platform bindings and audited precision connectors. Its
+transit manifest distinguishes community rail timing estimates from official
+surface-service headways.
 
 Run time-dependent, constrained/Pareto, criticality, and failure-scenario
 examples after adapting their clearly marked illustrative Hong Kong coordinates
@@ -583,6 +597,8 @@ Discovery endpoints:
 - `GET /v1/service`
 - `GET /v1/profiles`
 - `GET /v1/profiles/{profile_id}`
+- `GET /v1/terrain-sources`: prepared DEM metadata and local terrain tile URLs
+- `GET /v1/terrain/{source}/{version}/{z}/{x}/{y}.png`: immutable local DEM tiles
 
 Execution endpoints:
 
@@ -599,6 +615,8 @@ Execution endpoints:
 - `POST /v1/betweenness`
 - `POST /v1/scenario-batch`
 - `POST /v1/transit-route`
+- `POST /v1/transit-directions`: the same journey request with ordered access, boarding, riding, station-transfer and egress instructions, platform details and timezone-aware timestamps
+- `POST /v1/transit-feeds/{feed_id}/station-geometry`: platform polygons and bound boarding points inside a WGS84 `bbox`, retaining source XYZ
 - `POST /v1/transit-service-area`
 - `POST /v1/network/edges`: the directed edges inside a `bbox` with their source attributes and the selected profile's travel time, speed and cost; `compare_profile_id` adds a second profile and deltas (network explorer)
 

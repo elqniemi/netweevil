@@ -23,13 +23,23 @@ pub(crate) fn edge_travel_time_s(
     edge: &DirectedEdge,
     highway: HighwayClass,
 ) -> Option<f64> {
-    edge_traversal_cost(profile, edge, highway, 0.0, 0.0, None, &|_, _| false)
-        .map(|cost| cost.travel_time_s)
+    edge_traversal_cost(
+        profile,
+        edge,
+        f64::from(edge.length_m),
+        highway,
+        0.0,
+        0.0,
+        None,
+        &|_, _| false,
+    )
+    .map(|cost| cost.travel_time_s)
 }
 
 pub(crate) fn edge_traversal_cost(
     profile: &ProfileDocument,
     edge: &DirectedEdge,
+    length_m: f64,
     highway: HighwayClass,
     ascent_m: f32,
     descent_m: f32,
@@ -44,7 +54,7 @@ pub(crate) fn edge_traversal_cost(
             let effective_speed_kph = (speed_kph
                 * matching_speed_factor(profile, edge, highway, attribute_matches))
             .max(1.0);
-            edge.length_m as f64 / (effective_speed_kph * 1000.0 / 3600.0)
+            length_m / (effective_speed_kph * 1000.0 / 3600.0)
         });
 
         return scheduled_duration_s
@@ -78,16 +88,16 @@ pub(crate) fn edge_traversal_cost(
     let slope_factor = profile
         .slope_model
         .as_ref()
-        .map(|model| slope_speed_factor(model, edge.length_m, ascent_m, descent_m))
+        .map(|model| slope_speed_factor(model, length_m, ascent_m, descent_m))
         .unwrap_or(1.0);
     let effective_speed_kph = (speed_kph
         * matching_speed_factor(profile, edge, highway, attribute_matches)
         * slope_factor)
         .max(0.1);
     let base_speed_mps = effective_speed_kph / 3.6;
-    let base_time_s = edge.length_m as f64 / base_speed_mps;
+    let base_time_s = length_m / base_speed_mps;
     let vertical_m = f64::from(ascent_m + descent_m);
-    let horizontal_m = horizontal_length_m(edge.length_m, ascent_m, descent_m);
+    let horizontal_m = horizontal_length_m(length_m, ascent_m, descent_m);
     let mut facility_components = BTreeMap::new();
     let travel_time_s = match facility {
         None => base_time_s,
@@ -114,7 +124,7 @@ pub(crate) fn edge_traversal_cost(
             conveyor_speed_mps,
             walking_speed_mps,
             boarding_penalty_s,
-        }) => edge.length_m as f64 / (conveyor_speed_mps + walking_speed_mps) + boarding_penalty_s,
+        }) => length_m / (conveyor_speed_mps + walking_speed_mps) + boarding_penalty_s,
         Some(FacilityCost::Lift {
             wait_s,
             vertical_speed_mps,
@@ -372,8 +382,8 @@ fn default_speed_kph(road_class: RoadClass) -> f64 {
     }
 }
 
-fn horizontal_length_m(length_m: u32, ascent_m: f32, descent_m: f32) -> f64 {
-    let length = f64::from(length_m);
+fn horizontal_length_m(length_m: f64, ascent_m: f32, descent_m: f32) -> f64 {
+    let length = length_m;
     let vertical = f64::from(ascent_m + descent_m);
     (length.mul_add(length, -(vertical * vertical)))
         .max(0.0)
@@ -382,7 +392,7 @@ fn horizontal_length_m(length_m: u32, ascent_m: f32, descent_m: f32) -> f64 {
 
 fn slope_speed_factor(
     model: &SlopeModelConfig,
-    length_m: u32,
+    length_m: f64,
     ascent_m: f32,
     descent_m: f32,
 ) -> f64 {
@@ -422,10 +432,11 @@ fn slope_speed_factor(
 pub(crate) fn generalized_cost(
     profile: &ProfileDocument,
     edge: &DirectedEdge,
+    length_m: f64,
     travel_time_s: f64,
 ) -> f64 {
-    let mut cost = travel_time_s * profile.cost.time_weight
-        + edge.length_m as f64 * profile.cost.distance_weight;
+    let mut cost =
+        travel_time_s * profile.cost.time_weight + length_m * profile.cost.distance_weight;
 
     if edge.road_class == RoadClass::Service {
         cost += profile.preferences.service_penalty_s;

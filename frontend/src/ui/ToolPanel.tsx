@@ -4,6 +4,7 @@ import { toCurl } from "../api/client";
 import { copyText } from "../geo/export";
 import { PALETTE, SLOT_COLORS, routeColor } from "../geo/features";
 import { currentPlan, runTool } from "../state/run";
+import { selectedModes } from "../state/transitModes";
 import {
   addRoute,
   clearRoutes,
@@ -19,6 +20,7 @@ import {
   setFormValue,
   setPoints,
   setRoutes,
+  setRouteEnd,
   setState,
   swapRoute,
   updatePoint,
@@ -51,6 +53,7 @@ export function ToolPanel({ service }: Props) {
           </button>
         </div>
         {open && <p className="tool-desc">{tool.description}</p>}
+        {open && tool.group === "transit" && service?.loaded_transit_feeds.some((feed) => feed.agency_timezone === "Asia/Hong_Kong") && <p className="style-note">MTR and light rail use community estimated times. Surface services use Transport Department headways. Choose a date inside the imported service window.</p>}
       </div>
       {open && tool.input !== "editor" && (
         <>
@@ -91,6 +94,8 @@ function ProfilePicker({ tool, service }: { tool: ToolDef; service: ServiceInfo 
             ))}
             {!service && <option value="">loading…</option>}
           </select>
+          <small className="muted">{service?.loaded_profiles.find((p) => p.profile_id === active)?.label}</small>
+          <WalkingProfileHint profile={active} service={service} />
         </label>
       )}
       {showFeed && (
@@ -131,6 +136,13 @@ function ProfilePicker({ tool, service }: { tool: ToolDef; service: ServiceInfo 
   );
 }
 
+function WalkingProfileHint({ profile, service }: { profile: string; service: ServiceInfo | null }) {
+  const fastest = profile === "pedestrian_multilayer" ? "pedestrian_fastest_multilayer"
+    : profile === "pedestrian_step_free_multilayer" ? "pedestrian_step_free_fastest_multilayer" : null;
+  if (!fastest) return null;
+  return <small className="muted">This profile favours covered paths and reduced climbing, which can lengthen routes.{service?.loaded_profiles.some(p => p.profile_id === fastest) && <> Choose {fastest} for fastest walking.</>}</small>;
+}
+
 // --- Routes (shared start/end pairs) ---
 
 function coord(p: InputPoint | null): string {
@@ -145,8 +157,10 @@ function RoutesEditor({ tool }: { tool: ToolDef }) {
   const [count, setCount] = useState(10);
   const [pasteOpen, setPasteOpen] = useState(false);
   const [pasteText, setPasteText] = useState("");
+  const view3d = useStore((s) => s.mapStyle.view3d);
   const multi = routes.length > 1;
   const active = routes[Math.min(activeRoute, routes.length - 1)];
+  const showAltitude = view3d || [active?.origin?.z, active?.destination?.z].some((z) => typeof z === "number" && Number.isFinite(z));
   const placed = routes.filter((r) => r.origin && r.destination).length;
 
   const scatter = () => {
@@ -166,7 +180,7 @@ function RoutesEditor({ tool }: { tool: ToolDef }) {
 
   const applyPaste = () => {
     const parsed: RouteInput[] = [];
-    const point = (prefix: string, lon: number, lat: number): InputPoint => ({ id: nextPointId(prefix), lon, lat });
+    const point = (prefix: string, lon: number, lat: number, z?: unknown): InputPoint => ({ id: nextPointId(prefix), lon, lat, ...(typeof z === "number" && Number.isFinite(z) ? { z } : {}) });
     try {
       const value = JSON.parse(pasteText);
       const list = Array.isArray(value) ? value : Array.isArray((value as { routes?: unknown[] }).routes) ? (value as { routes: unknown[] }).routes : [];
@@ -174,7 +188,7 @@ function RoutesEditor({ tool }: { tool: ToolDef }) {
         const o = item.origin as Record<string, unknown> | undefined;
         const d = item.destination as Record<string, unknown> | undefined;
         if (o && d && typeof o.lon === "number" && typeof o.lat === "number" && typeof d.lon === "number" && typeof d.lat === "number") {
-          parsed.push({ ...emptyRoute(), origin: point("origin", o.lon, o.lat), destination: point("destination", d.lon, d.lat) });
+          parsed.push({ ...emptyRoute(), origin: point("origin", o.lon, o.lat, o.z), destination: point("destination", d.lon, d.lat, d.z) });
         } else if (Array.isArray(item) && item.length >= 4 && item.every((v) => typeof v === "number")) {
           parsed.push({ ...emptyRoute(), origin: point("origin", item[0], item[1]), destination: point("destination", item[2], item[3]) });
         }
@@ -229,6 +243,13 @@ function RoutesEditor({ tool }: { tool: ToolDef }) {
         })}
         {routes.length > 80 && <li className="muted">and {routes.length - 80} more</li>}
       </ul>
+      {showAltitude && active && <div className="altitude-inputs">
+        {(["origin", "destination"] as const).map((end) => <label key={end}>{end === "origin" ? "A" : "B"} altitude m<input type="number" step={0.1} placeholder="auto snap" disabled={!active[end]} value={active[end]?.z ?? ""} onChange={(e) => {
+          const point = active[end];
+          if (point) setRouteEnd(activeRoute, end, { ...point, z: e.target.value === "" ? undefined : Number(e.target.value) });
+        }} /></label>)}
+      </div>}
+      {showAltitude && active && <p className="style-note">Moving a marker clears its fixed elevation.</p>}
       {tool.usesVias && active && active.vias.length > 0 && (
         <ul className="point-list via-list">
           {active.vias.map((via, v) => (
@@ -440,6 +461,34 @@ function FormFields({ tool, service }: { tool: ToolDef; service: ServiceInfo | n
 
 function FieldControl({ tool, field, value, service }: { tool: ToolId; field: Field; value: unknown; service: ServiceInfo | null }) {
   const set = (v: unknown) => setFormValue(tool, field.key, v);
+  if (field.type === "multiselect") {
+    const options = typeof field.options === "function" ? field.options(service) : (field.options ?? []);
+    let selected: string[] = [];
+    let error: string | null = null;
+    const defaults = Array.isArray(field.default) ? field.default.map(String) : options.map((option) => option.value);
+    try { selected = selectedModes(value, options.map((option) => option.value), defaults); }
+    catch (cause) { error = (cause as Error).message; }
+    return (
+      <fieldset className="field field-wide mode-selection">
+        <legend>{field.label}</legend>
+        <div className="mode-selection-actions">
+          <button type="button" className="btn btn-ghost btn-small" onClick={() => set(options.map((option) => option.value))}>Allow all</button>
+          <button type="button" className="btn btn-ghost btn-small" onClick={() => set([])}>Allow none</button>
+        </div>
+        <div className="mode-selection-options">
+          {options.map((option) => (
+            <label key={option.value} className="field field-check">
+              <input type="checkbox" checked={selected.includes(option.value)} onChange={(event) => set(event.target.checked ? [...selected, option.value] : selected.filter((mode) => mode !== option.value))} />
+              <span>{option.label}</span>
+            </label>
+          ))}
+        </div>
+        {error && <small role="alert">{error}</small>}
+        {!error && !selected.length && <small className="muted">No transit modes allowed.</small>}
+        {field.hint && <small className="muted">{field.hint}</small>}
+      </fieldset>
+    );
+  }
   if (field.type === "checkbox") {
     return (
       <label className="field field-check">
@@ -460,6 +509,7 @@ function FieldControl({ tool, field, value, service }: { tool: ToolId; field: Fi
             </option>
           ))}
         </select>
+        {(field.key === "pedestrian_profile_id" || field.key === "transfer_profile_id") && <WalkingProfileHint profile={String(value ?? "")} service={service} />}
       </label>
     );
   }
@@ -502,6 +552,7 @@ function RunBar({ tool, service }: { tool: ToolDef; service: ServiceInfo | null 
   useStore((s) => s.form[tool.id]);
   useStore((s) => s.profileId);
   useStore((s) => s.feedId);
+  useStore((s) => s.viewport);
   const [showJson, setShowJson] = useState(false);
   const [copied, setCopied] = useState<string | null>(null);
   const plan = currentPlan(tool.id, service);
@@ -549,6 +600,10 @@ function RunBar({ tool, service }: { tool: ToolDef; service: ServiceInfo | null 
           Request
         </button>
       </div>
+      {raw !== null && <div className="request-override-notice" role="status">
+        <span>Custom request JSON is active. Form changes will not change the submitted request.</span>
+        <button type="button" className="btn btn-small" onClick={() => setState((prev) => ({ raw: { ...prev.raw, [tool.id]: null } }))}>Use form</button>
+      </div>}
       {plan.error && <div className="hint-text">{plan.error}</div>}
       {showJson && (
         <div className="json-editor">

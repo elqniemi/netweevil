@@ -275,16 +275,14 @@ pub(crate) fn execute_transit_route_arrive_by(
     let search_start_s = deadline_s.saturating_sub(request.time.search_window_s);
     let access = best_street_candidates(
         runtime,
-        request.origin.lon,
-        request.origin.lat,
+        &request.origin,
         &access_modes,
         &request.modes,
         false,
     );
     let egress = best_street_candidates(
         runtime,
-        request.destination.lon,
-        request.destination.lat,
+        &request.destination,
         &egress_modes,
         &request.modes,
         true,

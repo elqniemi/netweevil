@@ -15,6 +15,7 @@ import { ToolPanel } from "./ui/ToolPanel";
 import { fmtValue } from "./ui/format";
 import { transitTimeContext } from "./api/time";
 import { ApiError } from "./api/client";
+import { hongKongTransitDefaults, TRANSIT_ANALYSIS_TOOLS } from "./state/transitDefaults";
 
 let autoOpenedSetup = false;
 
@@ -45,6 +46,11 @@ export function App() {
     if (!current.profileId || !profiles.includes(current.profileId)) patch.profileId = info.default_profile_id;
     const feeds = info.loaded_transit_feeds.map((f) => f.feed_id);
     if (!current.feedId || !feeds.includes(current.feedId)) patch.feedId = feeds[0] ?? null;
+    const transitDefaults = hongKongTransitDefaults(info);
+    if (transitDefaults) {
+      patch.form = { ...current.form };
+      for (const tool of TRANSIT_ANALYSIS_TOOLS) patch.form[tool] = { ...transitDefaults, ...current.form[tool] };
+    }
     setState(patch);
   }, [info]);
 
@@ -119,10 +125,12 @@ export function App() {
 }
 
 const HIDDEN_PROPS = new Set(["dataset_id", "profile_hash", "feed_id", "agency_timezone", "time_origin_unix_s"]);
+const ELEVATION_PROPS = ["name", "station_code", "platform_numbers", "platform_code", "direction", "source_kind", "surface_note", "display_elevation", "horizontal_gap_m", "connection_note", "z_min_m", "z_max_m", "source_binding_z_m", "elevation_m", "from_z_m", "to_z_m", "elevation_known", "geometry_elevation_source", "structure", "pedestrian_kind", "level", "floor_id", "indoor_location"];
 
 function HoverCard({ x, y, props }: { x: number; y: number; props: Record<string, unknown> }) {
   const entries = Object.entries(props)
     .filter(([k, v]) => !k.startsWith("_") && !HIDDEN_PROPS.has(k) && v !== null && v !== undefined && v !== "")
+    .sort(([a], [b]) => (ELEVATION_PROPS.includes(a) ? ELEVATION_PROPS.indexOf(a) : 100) - (ELEVATION_PROPS.includes(b) ? ELEVATION_PROPS.indexOf(b) : 100))
     .slice(0, 12);
   if (!entries.length) return null;
   const kind = typeof props._kind === "string" && props._kind !== "root" ? props._kind : null;

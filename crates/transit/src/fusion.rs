@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{self, File};
+use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -346,8 +347,12 @@ pub fn write_transit_transfer_table(
         return fs::write(path, raw).with_context(|| format!("writing {}", path.display()));
     }
     let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    bincode::serialize_into(file, table)
-        .with_context(|| format!("serializing transit transfer table {}", path.display()))
+    let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+    bincode::serialize_into(&mut writer, table)
+        .with_context(|| format!("serializing transit transfer table {}", path.display()))?;
+    writer
+        .flush()
+        .with_context(|| format!("flushing transit transfer table {}", path.display()))
 }
 
 pub fn read_transit_transfer_table(path: impl AsRef<Path>) -> Result<TransitTransferTable> {

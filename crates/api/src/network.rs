@@ -6,7 +6,9 @@ use std::collections::HashMap;
 
 use axum::Json;
 use axum::extract::State;
-use netweevil_core::{AccessMask, TopologyBundle};
+use netweevil_core::{
+    AccessMask, FeatureAttributeTable, FeatureAttributeValueRef, TopologyBundle, TopologyNode,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use tracing::info;
@@ -81,8 +83,9 @@ pub(crate) async fn network_edges_handler(
     let mode_bit_b = compare.map(mode_bit);
     let max_edges = payload.max_edges.clamp(1, 200_000);
     let response = execute_on_routing_worker(&runtime, move || {
-        let edges = edges_in_bbox(&topology, payload.bbox, max_edges);
-        let truncated = edges.len() >= max_edges;
+        let mut edges = edges_in_bbox(&topology, payload.bbox, max_edges + 1);
+        let truncated = edges.len() > max_edges;
+        edges.truncate(max_edges);
         let mut ranges: HashMap<&'static str, [f64; 2]> = HashMap::new();
         let mut track = |key: &'static str, value: Option<f64>| {
             if let Some(value) = value.filter(|value| value.is_finite()) {
@@ -99,7 +102,7 @@ pub(crate) async fn network_edges_handler(
             let from = &topology.nodes[routing.from.0 as usize];
             let to = &topology.nodes[routing.to.0 as usize];
             let length_m = f64::from(routing.length_m);
-            let mut properties = Map::new();
+            let mut properties = vertical_properties(from, to, &topology.feature_attributes, routing.feature_row);
             properties.insert("edge_id".into(), json!(routing.edge_id.0));
             properties.insert("way_id".into(), json!(routing.source_way_id));
             properties.insert("direction".into(), json!(routing.source_direction));
@@ -133,6 +136,9 @@ pub(crate) async fn network_edges_handler(
                 None
             };
             properties.insert("grade_pct".into(), json!(slope));
+            track("elevation_m", properties["elevation_m"].as_f64());
+            track("min_elevation_m", properties["min_elevation_m"].as_f64());
+            track("max_elevation_m", properties["max_elevation_m"].as_f64());
             track("length_m", Some(length_m));
             track("max_speed_kph", attributes.max_speed_kph.map(f64::from));
             track("grade_pct", slope);
@@ -188,7 +194,7 @@ pub(crate) async fn network_edges_handler(
             features.push(json!({
                 "type": "Feature",
                 "id": routing.edge_id.0,
-                "geometry": {"type": "LineString", "coordinates": [[from.lon, from.lat], [to.lon, to.lat]]},
+                "geometry": {"type": "LineString", "coordinates": [node_coordinate(from), node_coordinate(to)]},
                 "properties": Value::Object(properties),
             }));
         }
@@ -208,6 +214,116 @@ pub(crate) async fn network_edges_handler(
     .await
     .map_err(ApiError::from_execution_error)?;
     Ok(Json(response))
+}
+
+/// Unknown Z is drawn at zero, but remains explicitly unknown in properties.
+fn node_coordinate(node: &TopologyNode) -> [f64; 3] {
+    [node.lon, node.lat, node.elevation_m().unwrap_or_default()]
+}
+
+fn attribute_json(value: FeatureAttributeValueRef<'_>) -> Value {
+    match value {
+        FeatureAttributeValueRef::Boolean(value) => json!(value),
+        FeatureAttributeValueRef::Integer(value) => json!(value),
+        FeatureAttributeValueRef::Float(value) => json!(value),
+        FeatureAttributeValueRef::String(value) => json!(value),
+        FeatureAttributeValueRef::Json(value) => {
+            serde_json::from_str(value).unwrap_or_else(|_| json!(value))
+        }
+    }
+}
+
+fn decoded_attribute(table: &FeatureAttributeTable, row: u32, name: &str) -> Option<Value> {
+    let index = table.column_index(name)?;
+    let value = table.value_at(row, index)?;
+    Some(
+        table.columns[index]
+            .definition
+            .domain
+            .get(&value.canonical_string())
+            .map_or_else(|| attribute_json(value), |label| json!(label)),
+    )
+}
+
+fn vertical_properties(
+    from: &TopologyNode,
+    to: &TopologyNode,
+    table: &FeatureAttributeTable,
+    row: u32,
+) -> Map<String, Value> {
+    let elevations = from.elevation_m().zip(to.elevation_m());
+    let mut properties = Map::new();
+    properties.insert("from_z_m".into(), json!(from.elevation_m()));
+    properties.insert("to_z_m".into(), json!(to.elevation_m()));
+    properties.insert("elevation_known".into(), json!(elevations.is_some()));
+    properties.insert(
+        "elevation_m".into(),
+        json!(elevations.map(|(a, b)| (a + b) / 2.0)),
+    );
+    properties.insert(
+        "min_elevation_m".into(),
+        json!(elevations.map(|(a, b)| a.min(b))),
+    );
+    properties.insert(
+        "max_elevation_m".into(),
+        json!(elevations.map(|(a, b)| a.max(b))),
+    );
+    let mut source_attributes = Map::new();
+    for (index, column) in table.columns.iter().enumerate() {
+        // Lossless reconstruction metadata can contain the entire source geometry
+        // and schema. It is not an edge styling attribute and can dwarf the map.
+        if column.definition.name.starts_with("__") {
+            continue;
+        }
+        if let Some(value) = table.value_at(row, index) {
+            source_attributes.insert(column.definition.name.clone(), attribute_json(value));
+        }
+    }
+    properties.insert("source_attributes".into(), Value::Object(source_attributes));
+    for name in [
+        "feature_type",
+        "indoor_location",
+        "floor_id",
+        "level",
+        "layer",
+        "covered",
+        "wheelchair_access",
+        "wheelchair_barrier",
+        "mtr_station_code",
+        "mtr_platform_level",
+        "mtr_platform_line_codes",
+        "mtr_platform_stop_ids",
+    ] {
+        if let Some(value) = decoded_attribute(table, row, name) {
+            properties.insert(name.into(), value);
+        }
+    }
+    let kind = decoded_attribute(table, row, "feature_type");
+    if let Some(kind) = &kind {
+        properties.insert("pedestrian_kind".into(), kind.clone());
+    }
+    let location = decoded_attribute(table, row, "indoor_location");
+    let structure = match kind.as_ref().and_then(Value::as_str) {
+        Some("subway") => Some("underground"),
+        Some("footbridge") => Some("bridge"),
+        _ => match location.as_ref().and_then(Value::as_str) {
+            Some("indoor" | "paid_area") => Some("indoor"),
+            Some("outdoor") => Some("outdoor"),
+            _ => None,
+        },
+    };
+    properties.insert("structure".into(), json!(structure));
+    // Absolute elevation is not depth below terrain. Only classify underground
+    // when the source explicitly identifies a subway, not merely negative Z.
+    properties.insert(
+        "underground".into(),
+        json!(if structure == Some("underground") {
+            Some(true)
+        } else {
+            None
+        }),
+    );
+    properties
 }
 
 fn enum_label<T: Serialize>(value: &T) -> Value {
@@ -332,4 +448,77 @@ fn edges_in_bbox(topology: &TopologyBundle, bbox: [f64; 4], max_edges: usize) ->
         }
     }
     edges
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use netweevil_core::{
+        FeatureAttributeColumn, FeatureAttributeColumnData, FeatureAttributeDefinition,
+        FeatureAttributeType, NodeId,
+    };
+    use std::collections::BTreeMap;
+
+    fn node(z: f64) -> TopologyNode {
+        TopologyNode {
+            node_id: NodeId(0),
+            lon: 114.16,
+            lat: 22.28,
+            z,
+        }
+    }
+
+    #[test]
+    fn network_coordinates_and_ranges_preserve_vertical_edges() {
+        let from = node(-18.5);
+        let to = node(6.5);
+        assert_eq!(node_coordinate(&from), [114.16, 22.28, -18.5]);
+        let properties = vertical_properties(&from, &to, &FeatureAttributeTable::default(), 0);
+        assert_eq!(properties["elevation_known"], true);
+        assert_eq!(properties["min_elevation_m"], -18.5);
+        assert_eq!(properties["max_elevation_m"], 6.5);
+        assert_eq!(properties["elevation_m"], -6.0);
+        assert!(
+            properties["underground"].is_null(),
+            "absolute source Z does not indicate depth below terrain"
+        );
+    }
+
+    #[test]
+    fn unknown_elevation_is_explicit_and_serializes_without_nan() {
+        let properties = vertical_properties(
+            &node(f64::NAN),
+            &node(12.0),
+            &FeatureAttributeTable::default(),
+            0,
+        );
+        assert_eq!(node_coordinate(&node(f64::NAN))[2], 0.0);
+        assert_eq!(properties["elevation_known"], false);
+        assert!(properties["elevation_m"].is_null());
+        assert!(properties["from_z_m"].is_null());
+        assert_eq!(properties["to_z_m"], 12.0);
+        serde_json::to_string(&properties).unwrap();
+    }
+
+    #[test]
+    fn network_decodes_pedestrian_kind_without_losing_source_codes() {
+        let table = FeatureAttributeTable {
+            row_count: 1,
+            strings: vec![],
+            columns: vec![FeatureAttributeColumn {
+                definition: FeatureAttributeDefinition {
+                    name: "FeatureType".into(),
+                    semantic_role: Some("feature_type".into()),
+                    value_type: FeatureAttributeType::Integer,
+                    domain: BTreeMap::from([("4".into(), "subway".into())]),
+                },
+                data: FeatureAttributeColumnData::Integer(vec![Some(4)]),
+            }],
+        };
+        let properties = vertical_properties(&node(2.0), &node(3.0), &table, 0);
+        assert_eq!(properties["pedestrian_kind"], "subway");
+        assert_eq!(properties["source_attributes"]["FeatureType"], 4);
+        assert_eq!(properties["structure"], "underground");
+        assert_eq!(properties["underground"], true);
+    }
 }

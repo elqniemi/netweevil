@@ -12,6 +12,7 @@ interface Band {
 /** Threshold bands of the current result (reach polygons and network), nearest first. */
 export function Legend() {
   const result = useStore((s) => s.result);
+  const elevationColors = useStore((s) => s.mapStyle.view3d && s.mapStyle.elevationColor);
   const bands = useMemo(() => {
     const byLimit = new Map<number, Band>();
     for (const f of result?.features.features ?? []) {
@@ -21,6 +22,9 @@ export function Legend() {
     }
     return Array.from(byLimit.values()).sort((a, b) => a.limit - b.limit);
   }, [result]);
+  // The 3D style panel shows its elevation range; a profile-speed legend
+  // would describe colours that the elevation override has replaced.
+  if (result?.tool === "network" && elevationColors) return null;
   if (result?.tool === "network" && networkLegend && result.features.features.length) {
     const legend = networkLegend;
     const meta = (result.runs[0]?.response as { meta?: { edge_count: number; truncated: boolean } } | null)?.meta;

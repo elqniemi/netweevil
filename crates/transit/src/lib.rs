@@ -14,6 +14,7 @@ mod model;
 mod router;
 mod runtime;
 mod service_area;
+mod stop_context;
 mod timetable_time;
 mod transfer_rules;
 
@@ -47,6 +48,7 @@ pub use model::{TransitCatchmentMode, TransitIsochroneFeature};
 pub use router::{PreparedTransitRouter, execute_transit_route};
 pub use runtime::StreetTimeEstimator;
 pub use service_area::execute_transit_service_area;
+pub use stop_context::{GtfsStopContext, read_gtfs_stop_context};
 
 #[cfg(test)]
 mod tests;

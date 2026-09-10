@@ -27,6 +27,26 @@ export interface ProfileInfo {
   default_returns: unknown;
 }
 
+export interface TerrainSourceInfo {
+  id: string;
+  name: string;
+  version: string;
+  tiles: string[];
+  bounds: [number, number, number, number];
+  minzoom: number;
+  maxzoom: number;
+  encoding: "terrarium";
+  tile_size: number;
+  resolution_m: number;
+  vertical_datum: string;
+  attribution: string;
+}
+
+export interface TerrainSourcesResponse {
+  sources: TerrainSourceInfo[];
+  diagnostics?: string[];
+}
+
 export interface TransitFeedInfo {
   feed_id: string;
   source_path: string;

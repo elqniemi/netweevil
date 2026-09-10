@@ -549,9 +549,9 @@ intermediate stop times when timed endpoints exist. The Hong Kong heavy/light
 rail schedule and any feed repair remain preprocessing artifacts; NetWeevil
 does not embed a Hong Kong timetable.
 
-The street/indoor engine workflow is runnable after the pedestrian preparation
-command above. Synthesizing a platform-level MTR GTFS feed and deriving real
-stop-to-node/edge bindings remain analysis-input generation tasks because the
-current Hong Kong analysis repository supplies only the underlying timetable
-and facility sources. The `ILLUSTRATIVE-*` binding fixture demonstrates the
-accepted schema; it is not asserted to identify real platforms.
+The [full Hong Kong tutorial](hong-kong-tutorial.md) now prepares numbered MTR
+platform bindings from the separate CSDI-derived catalogue, combines official
+surface services with community MTR/light rail, and audits source connectivity.
+Community rail times remain estimates. The older `ILLUSTRATIVE-*` fixture only
+demonstrates the accepted schema; the full example generates real bindings
+under `.netweevil/hong-kong/transit/`.

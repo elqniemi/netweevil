@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -34,8 +34,14 @@ pub fn write_transit_bundle(path: impl AsRef<Path>, bundle: &TransitBundle) -> R
             .with_context(|| format!("creating directory {}", parent.display()))?;
     }
     let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    bincode::serialize_into(file, bundle)
-        .with_context(|| format!("serializing transit bundle {}", path.display()))
+    // Bincode writes individual scalars. Buffering avoids one filesystem call
+    // per field for feeds with millions of timetable connections.
+    let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+    bincode::serialize_into(&mut writer, bundle)
+        .with_context(|| format!("serializing transit bundle {}", path.display()))?;
+    writer
+        .flush()
+        .with_context(|| format!("flushing transit bundle {}", path.display()))
 }
 
 pub fn read_transit_bundle(path: impl AsRef<Path>) -> Result<TransitBundle> {

@@ -508,6 +508,10 @@ pub struct TransitPoint {
     pub id: String,
     pub lon: f64,
     pub lat: f64,
+    /// Optional elevation in the street graph's source datum. Network hosts
+    /// constrain endpoint snaps to within one metre of this elevation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -525,6 +529,10 @@ fn default_search_window_s() -> u32 {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitModeOptions {
+    /// Maximum horizontal gap from a requested endpoint to its street-network attachment.
+    /// Independent of the radius used to find candidate transit stops.
+    #[serde(default = "default_endpoint_snap_distance_m")]
+    pub max_endpoint_snap_distance_m: f64,
     #[serde(default = "default_access_modes")]
     pub access: Vec<AccessMode>,
     #[serde(default = "default_access_modes")]
@@ -588,6 +596,7 @@ pub enum TransitStreetAccessModel {
 impl Default for TransitModeOptions {
     fn default() -> Self {
         Self {
+            max_endpoint_snap_distance_m: default_endpoint_snap_distance_m(),
             access: default_access_modes(),
             egress: default_access_modes(),
             mixed_access_egress: false,
@@ -616,6 +625,10 @@ impl Default for TransitModeOptions {
 impl TransitModeOptions {
     /// Deduplicated access modes; errors when the list is empty.
     pub fn validated_access_modes(&self) -> Result<Vec<AccessMode>> {
+        if !self.max_endpoint_snap_distance_m.is_finite() || self.max_endpoint_snap_distance_m < 0.0
+        {
+            bail!("modes.max_endpoint_snap_distance_m must be finite and non-negative");
+        }
         let modes = dedup_access_modes(&self.access);
         if modes.is_empty() {
             bail!("modes.access must contain at least one access mode");
@@ -656,6 +669,10 @@ fn dedup_access_modes(modes: &[AccessMode]) -> Vec<AccessMode> {
         }
     }
     deduped
+}
+
+fn default_endpoint_snap_distance_m() -> f64 {
+    50.0
 }
 
 fn default_access_modes() -> Vec<AccessMode> {
@@ -899,6 +916,10 @@ pub struct TransitLeg {
     pub headsign: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub geometry: Vec<[f64; 3]>,
+    /// Elevation provenance for the returned geometry. Interpolated GTFS shapes
+    /// are display geometry, not surveyed rail or tunnel elevations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_elevation_source: Option<String>,
     /// Exact street/indoor path details when the host or a precomputed
     /// transfer table supplied them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -912,6 +933,9 @@ pub struct TransitRouteStop {
     pub stop_name: String,
     pub lon: f64,
     pub lat: f64,
+    /// Known elevation of the explicit platform binding, in the graph datum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arrival_s: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -950,6 +974,8 @@ pub struct TransitRouteStopSegment {
     pub headsign: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub geometry: Vec<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geometry_elevation_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

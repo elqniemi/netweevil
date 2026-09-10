@@ -1,0 +1,20 @@
+{
+  "profile_id": "pedestrian_fastest_multilayer",
+  "request": {
+    "route_id": "causeway_bay_to_central",
+    "origin": {
+      "id": "Causeway Bay Hennessy",
+      "lon": 114.1843,
+      "lat": 22.27935
+    },
+    "destination": {
+      "id": "Central",
+      "lon": 114.1588,
+      "lat": 22.2818
+    },
+    "returns": {
+      "geometry": "full",
+      "segment_rows": true
+    }
+  }
+}

@@ -259,6 +259,58 @@ pub trait StreetTimeEstimator: Send + Sync {
         None
     }
 
+    /// Three-dimensional endpoint variant. Older XY-only estimators must not
+    /// silently discard a supplied floor/elevation constraint.
+    fn point_to_stop_path_3d(
+        &self,
+        mode: AccessMode,
+        from: &crate::TransitPoint,
+        stop: &TransitStop,
+    ) -> Option<TransitStreetPath> {
+        if from.z.is_some() {
+            return None;
+        }
+        self.point_to_stop_path(mode, from.lon, from.lat, stop)
+    }
+
+    fn stop_to_point_path_3d(
+        &self,
+        mode: AccessMode,
+        stop: &TransitStop,
+        to: &crate::TransitPoint,
+    ) -> Option<TransitStreetPath> {
+        if to.z.is_some() {
+            return None;
+        }
+        self.stop_to_point_path(mode, stop, to.lon, to.lat)
+    }
+
+    /// Hosts with complete network geometry must not retry a failed constrained
+    /// snap through the legacy coordinate-only time estimator.
+    fn requires_network_path(&self) -> bool {
+        false
+    }
+
+    fn point_to_stop_path_with_snap_limit(
+        &self,
+        mode: AccessMode,
+        from: &crate::TransitPoint,
+        stop: &TransitStop,
+        _max_endpoint_snap_distance_m: f64,
+    ) -> Option<TransitStreetPath> {
+        self.point_to_stop_path_3d(mode, from, stop)
+    }
+
+    fn stop_to_point_path_with_snap_limit(
+        &self,
+        mode: AccessMode,
+        stop: &TransitStop,
+        to: &crate::TransitPoint,
+        _max_endpoint_snap_distance_m: f64,
+    ) -> Option<TransitStreetPath> {
+        self.stop_to_point_path_3d(mode, stop, to)
+    }
+
     /// Directed path between two transit stops. This is the extension point
     /// used by transfer-table precomputation. Both stops carry any explicit
     /// node/edge/3D-coordinate bindings loaded for the feed. The default
@@ -432,8 +484,7 @@ pub(crate) struct StreetCandidate {
 
 pub(crate) fn best_street_candidates(
     runtime: &TransitRuntime<'_>,
-    lon: f64,
-    lat: f64,
+    point: &crate::TransitPoint,
     street_modes: &[AccessMode],
     options: &TransitModeOptions,
     egress: bool,
@@ -450,7 +501,7 @@ pub(crate) fn best_street_candidates(
         } else {
             mode.max_access_distance_m(options)
         };
-        for candidate in runtime.nearby_access_stops(lon, lat, max_distance_m) {
+        for candidate in runtime.nearby_access_stops(point.lon, point.lat, max_distance_m) {
             // Candidates are pre-filtered by straight-line distance (a lower
             // bound on network distance). In network mode, absence of a
             // routed path/time means the pair is unreachable; it must not
@@ -460,20 +511,64 @@ pub(crate) fn best_street_candidates(
                     continue;
                 };
                 let stop = &runtime.bundle.stops[candidate.stop_index as usize];
-                let network_path = if egress {
-                    estimator.stop_to_point_path(mode, stop, lon, lat)
+                let mut network_path = if egress {
+                    estimator.stop_to_point_path_with_snap_limit(
+                        mode,
+                        stop,
+                        point,
+                        options.max_endpoint_snap_distance_m,
+                    )
                 } else {
-                    estimator.point_to_stop_path(mode, lon, lat, stop)
+                    estimator.point_to_stop_path_with_snap_limit(
+                        mode,
+                        point,
+                        stop,
+                        options.max_endpoint_snap_distance_m,
+                    )
                 };
+                if let Some(path) = network_path.as_mut() {
+                    let attachment = if egress {
+                        path.geometry.last()
+                    } else {
+                        path.geometry.first()
+                    };
+                    if let Some(attachment) = attachment {
+                        let gap_m = haversine_m(point.lon, point.lat, attachment[0], attachment[1]);
+                        if !gap_m.is_finite() || gap_m > options.max_endpoint_snap_distance_m + 1e-6
+                        {
+                            continue;
+                        }
+                        let gap_s = if gap_m > 0.01 {
+                            seconds_for_distance(gap_m, mode.speed_kph(options))
+                        } else {
+                            0
+                        };
+                        path.travel_time_s = path.travel_time_s.saturating_add(gap_s);
+                        if let Some(distance) = path.distance_m.as_mut() {
+                            *distance += gap_m;
+                        }
+                        path.components
+                            .insert("off_network_connection_distance_m".into(), gap_m);
+                        path.components
+                            .insert("off_network_connection_time_s".into(), f64::from(gap_s));
+                    }
+                }
                 let network_time_s = network_path
                     .as_ref()
                     .map(|path| path.travel_time_s)
                     .or_else(|| {
-                        stop.binding.is_none().then(|| {
+                        (!estimator.requires_network_path()
+                            && stop.binding.is_none()
+                            && point.z.is_none())
+                        .then(|| {
                             if egress {
-                                estimator.street_time_s(mode, true, stop.lon, stop.lat, lon, lat)
+                                estimator.street_time_s(
+                                    mode, true, stop.lon, stop.lat, point.lon, point.lat,
+                                )
                             } else {
-                                estimator.street_time_s(mode, false, lon, lat, stop.lon, stop.lat)
+                                estimator.street_time_s(
+                                    mode, false, point.lon, point.lat, stop.lon, stop.lat,
+                                )
                             }
                         })?
                     });

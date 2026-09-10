@@ -66,6 +66,8 @@ fn default_max_wait_s() -> f64 {
 
 /// Fixed-point CCH weights use 1/1024 of the objective unit. Binary scaling
 /// keeps decoded sums exact. MAX is inaccessible; MAX-1 is finite overflow.
+/// Positive weights occupy at least one tick so rounding cannot create free
+/// physical traversals. Exact zero remains available for coincident connectors.
 pub const CCH_WEIGHT_SCALE: f64 = 1024.0;
 pub const CCH_WEIGHT_INFINITY: u32 = u32::MAX;
 pub const CCH_WEIGHT_OVERFLOW: u32 = u32::MAX - 1;
@@ -78,7 +80,7 @@ pub fn encode_cch_weight(weight: f64) -> u32 {
     if scaled >= CCH_WEIGHT_OVERFLOW as f64 {
         CCH_WEIGHT_OVERFLOW
     } else {
-        scaled as u32
+        (scaled as u32).max(u32::from(weight > 0.0))
     }
 }
 
@@ -143,17 +145,23 @@ mod fixed_point_tests {
     fn fixed_point_rounding_and_path_sum() {
         assert_eq!(std::mem::size_of::<u32>() * 3, 12);
         assert_eq!(encode_cch_weight(0.5 / CCH_WEIGHT_SCALE), 1);
+        assert_eq!(encode_cch_weight(f64::MIN_POSITIVE), 1);
         assert_eq!(encode_cch_weight(0.0), 0);
         let values = [0.0001, 0.123456, 123.456789, 500.123456];
         let mut sum = 0;
         for value in values {
             let encoded = encode_cch_weight(value);
-            assert!((decode_cch_weight(encoded) - value).abs() <= 0.5 / CCH_WEIGHT_SCALE);
+            let tolerance = if value < 0.5 / CCH_WEIGHT_SCALE {
+                1.0 / CCH_WEIGHT_SCALE
+            } else {
+                0.5 / CCH_WEIGHT_SCALE
+            };
+            assert!((decode_cch_weight(encoded) - value).abs() <= tolerance);
             sum = add_cch_weights(sum, encoded);
         }
         assert!(
             (decode_cch_weight(sum) - values.iter().sum::<f64>()).abs()
-                <= values.len() as f64 * 0.5 / CCH_WEIGHT_SCALE
+                <= values.len() as f64 / CCH_WEIGHT_SCALE
         );
     }
 

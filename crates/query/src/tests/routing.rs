@@ -2552,8 +2552,19 @@ scenarios:
 
 #[test]
 fn accelerated_many_to_many_matrix_matches_pairwise_routes() {
-    let topology = test_topology();
-    let (bundle, accelerated_metrics) = build_test_cch(&topology, &test_metrics());
+    let mut topology = test_topology();
+    let mut reverse = topology.edge(1);
+    reverse.edge_id = EdgeId(3);
+    std::mem::swap(&mut reverse.from, &mut reverse.to);
+    topology.push_edge(reverse);
+    let topology = with_edge_based_topology(topology);
+    let mut base_metrics = test_metrics();
+    base_metrics.edge_metrics.push(CompiledEdgeMetric {
+        edge_id: EdgeId(3),
+        travel_time_s: Some(20.0),
+        generalized_cost: Some(20.0),
+    });
+    let (bundle, accelerated_metrics) = build_test_cch(&topology, &base_metrics);
     let engine = PreparedRoutingEngine::new(
         Arc::new(topology),
         Arc::new(accelerated_metrics),
@@ -2886,6 +2897,62 @@ fn phast_fractional_time_labels_obey_fixed_point_error_bound() {
     assert!(error > 0.0 && error <= 1.0 / 2048.0);
     assert!(exact.edge_end_costs[1] > 30.00005);
     assert!(rounded.edge_end_costs[1] < 30.00005);
+}
+
+#[test]
+fn compiled_sub_metre_spur_does_not_add_a_free_backtrack() {
+    let mut topology = test_topology();
+    topology.nodes = [
+        (114.179, 22.28),
+        (114.18, 22.28),
+        (114.180003, 22.28),
+        (114.181, 22.28),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(index, (lon, lat))| netweevil_core::TopologyNode {
+        node_id: netweevil_core::NodeId(index as u32),
+        lon,
+        lat,
+        z: 0.0,
+    })
+    .collect();
+    let template = topology.edge(0);
+    let edges = [(0, 1, 100), (1, 2, 0), (2, 1, 0), (1, 3, 100)]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (from, to, length_m))| {
+            let mut edge = template.clone();
+            edge.edge_id = EdgeId(index as u32);
+            edge.from = netweevil_core::NodeId(from);
+            edge.to = netweevil_core::NodeId(to);
+            edge.length_m = length_m;
+            edge.access_mask = netweevil_core::AccessMask::new(netweevil_core::AccessMask::FOOT);
+            edge.road_class = netweevil_core::RoadClass::Path;
+            edge
+        })
+        .collect::<Vec<_>>();
+    topology.edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges);
+    let topology = with_edge_based_topology(topology);
+    let profile = serde_yaml::from_str(
+        "profile: {id: sub_metre, label: Sub-metre regression, mode: foot, defaults_pack: eu_foot_2026_01}",
+    )
+    .unwrap();
+    let metrics = netweevil_profile::compile_profile_bundle(
+        &profile,
+        &topology,
+        CacheBundleId::new("sub-metre-spur"),
+    )
+    .unwrap();
+    assert!(metrics.edge_metrics[1].generalized_cost.unwrap() > 0.0);
+    assert!(metrics.edge_metrics[2].generalized_cost.unwrap() > 0.0);
+    let (bundle, compiled) = build_test_cch(&topology, &metrics);
+    let graph = crate::build_routing_graph_from_shared(&topology, Arc::new(compiled), Some(bundle))
+        .unwrap();
+    let path = crate::accelerated_route_query(&topology, &graph, 0, 3)
+        .unwrap()
+        .unwrap();
+    assert_eq!(path.edge_indexes, vec![0, 3]);
 }
 
 #[test]
@@ -3240,5 +3307,90 @@ fn restricted_many_to_many_matrix_matches_independent_routes() {
             );
             assert_eq!(cell.geometry, route.geometry);
         }
+    }
+}
+
+#[test]
+fn coincident_opposite_snap_directions_choose_legal_lower_cost_despite_nanometre_noise() {
+    let mut topology = test_topology();
+    topology.edge_layers.routing[2].from = netweevil_core::NodeId(2);
+    topology.edge_layers.routing[2].to = netweevil_core::NodeId(1);
+    topology.edge_layers.routing[2].length_m = 200;
+    let topology = with_edge_based_topology(topology);
+    let mut metrics = test_metrics();
+    metrics.edge_metrics[2].travel_time_s = Some(20.0);
+    metrics.edge_metrics[2].generalized_cost = Some(20.0);
+    let (bundle, compiled) = build_test_cch(&topology, &metrics);
+    for acceleration in [false, true] {
+        let graph = if acceleration {
+            crate::build_routing_graph_from_shared(
+                &topology,
+                Arc::new(compiled.clone()),
+                Some(bundle.clone()),
+            )
+            .unwrap()
+        } else {
+            build_routing_graph(&topology, &metrics).unwrap()
+        };
+        let point = |id: &str, lon| crate::LabeledPoint {
+            id: id.into(),
+            lon,
+            lat: 53.0,
+            z: None,
+        };
+        let origins =
+            crate::snapping::snap_candidates(&topology, &graph, &point("origin", 6.0), 0.1, true)
+                .unwrap();
+        let destinations = crate::snapping::snap_candidates(
+            &topology,
+            &graph,
+            &point("target", 6.0015),
+            0.1,
+            false,
+        )
+        .unwrap();
+        let mut reverse = destinations
+            .iter()
+            .find(|point| point.snapped_edge_id == Some(2))
+            .unwrap()
+            .clone();
+        let mut forward = destinations
+            .iter()
+            .find(|point| point.snapped_edge_id == Some(1))
+            .unwrap()
+            .clone();
+        reverse.snap_distance_m = 0.2;
+        forward.snap_distance_m = 0.200000006;
+        forward.snapped_lon += 6e-14;
+        let route = |destinations: &[crate::SnappedPoint]| {
+            crate::route_between_candidates(
+                &topology,
+                &metrics,
+                &graph,
+                1.0,
+                &Default::default(),
+                &Default::default(),
+                &origins,
+                destinations,
+            )
+            .unwrap()
+        };
+        let (_, destination, path, _) = route(&[reverse.clone(), forward.clone()]);
+        assert_eq!(destination.snapped_edge_id, Some(1));
+        assert_eq!(path.edge_indexes, vec![0, 1]);
+        assert!((path.total_generalized_cost - 20.0).abs() < 1e-6);
+        // A different floor or a truly different location keeps nearest-snap
+        // preference, even when it happens to have a cheaper route.
+        forward.snapped_z += 1.0;
+        assert_eq!(
+            route(&[reverse.clone(), forward.clone()]).1.snapped_edge_id,
+            Some(2)
+        );
+        forward.snapped_z -= 1.0;
+        forward.snapped_lon += 0.00001;
+        assert_eq!(
+            route(&[reverse.clone(), forward]).1.snapped_edge_id,
+            Some(2)
+        );
     }
 }

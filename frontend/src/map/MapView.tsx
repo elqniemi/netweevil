@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl, { type Map as MapLibreMap, type MapMouseEvent } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { basemapStyle } from "./basemaps";
@@ -29,9 +29,13 @@ import {
 } from "../state/store";
 import { TOOL_BY_ID } from "../tools/registry";
 import { EMPTY_COLLECTION, PALETTE, SLOT_COLORS, featureBounds, routeColor, type Feature, type FeatureCollection } from "../geo/features";
-import type { FeedStop, ServiceInfo } from "../api/types";
+import type { FeedStop, ServiceInfo, TerrainSourcesResponse } from "../api/types";
 import { apiRequest } from "../api/client";
 import { lineColor } from "../ui/editorShared";
+import type { createThreeDOverlay } from "./ThreeDOverlay";
+import type { StationGeometryResponse } from "../geo/stationGeometry";
+import { StationGeometryCache } from "../geo/stationGeometryCache";
+import { applyTerrain, selectedTerrain, terrainTileError, TERRAIN_SOURCE } from "./terrain";
 
 const RESULT_SOURCE = "results";
 const INPUT_SOURCE = "inputs";
@@ -160,16 +164,14 @@ function inputFeatures(tool: ToolId, routes: RouteInput[]): FeatureCollection {
 /** Opacity multiplier that dims every run except the selected one. */
 function selectionExpression(selected: number | null): maplibregl.ExpressionSpecification | number {
   if (selected === null) return 1;
-  return ["case", ["==", ["get", "_run"], selected], 1, 0.18];
+  return ["case", ["any", ["==", ["get", "_run"], selected], ["==", ["get", "_reference"], true]], 1, 0.18];
 }
 
 function addLayers(map: MapLibreMap) {
   if (map.getSource(RESULT_SOURCE)) return;
-  map.addSource(RESULT_SOURCE, { type: "geojson", data: EMPTY_COLLECTION });
-  map.addSource(INPUT_SOURCE, { type: "geojson", data: EMPTY_COLLECTION });
-  map.addSource(SIM_EDGES_SOURCE, { type: "geojson", data: EMPTY_COLLECTION });
-  map.addSource(SIM_AGENTS_SOURCE, { type: "geojson", data: EMPTY_COLLECTION });
-  map.addSource(EDITOR_SOURCE, { type: "geojson", data: EMPTY_COLLECTION });
+  for (const id of [RESULT_SOURCE, INPUT_SOURCE, SIM_EDGES_SOURCE, SIM_AGENTS_SOURCE, EDITOR_SOURCE]) {
+    map.addSource(id, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  }
 
   map.addLayer({
     id: "results-fill",
@@ -264,7 +266,7 @@ function addLayers(map: MapLibreMap) {
     source: EDITOR_SOURCE,
     filter: ["==", ["get", "kind"], "base_stop"],
     paint: {
-      "circle-radius": ["case", ["==", ["get", "used"], 1], 6, ["interpolate", ["linear"], ["zoom"], 10, 2, 14, 4.5]],
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, ["case", ["==", ["get", "used"], 1], 6, 2], 14, ["case", ["==", ["get", "used"], 1], 6, 4.5]],
       "circle-color": ["case", ["==", ["get", "used"], 1], "#0e7c86", "#ffffff"],
       "circle-stroke-color": ["case", ["==", ["get", "selected"], 1], "#16232e", "#6b7a87"],
       "circle-stroke-width": ["case", ["==", ["get", "selected"], 1], 2.5, 1.2],
@@ -396,10 +398,19 @@ export function MapView({ service }: Props) {
   const routes = useStore((s) => s.routes);
   const activeRoute = useStore((s) => s.activeRoute);
   const result = useStore((s) => s.result);
+  const references = useStore((s) => s.referenceLayers);
+  const referenceFitRequest = useStore((s) => s.referenceFitRequest);
+  const stationGeometry = useStore((s) => s.stationGeometry);
   const selectedRun = useStore((s) => s.selectedRun);
   const fitRequest = useStore((s) => s.fitRequest);
   const flyRequest = useStore((s) => s.flyRequest);
   const markerScale = useStore((s) => s.mapStyle.markerScale);
+  const mapStyle = useStore((s) => s.mapStyle);
+  const terrainSources = useStore((s) => s.terrainSources);
+  const terrainRefreshRequest = useStore((s) => s.terrainRefreshRequest);
+  const displayedFeatures = useMemo(() => combinedFeatures(), [result, references, stationGeometry, mapStyle.view3d, mapStyle.stationPlatforms]);
+  const overlayRef = useRef<ReturnType<typeof createThreeDOverlay> | null>(null);
+  const [threeDError, setThreeDError] = useState<string | null>(null);
   const agentFeatures = useStore((s) => s.simulation.agentFeatures);
   const edgeFeatures = useStore((s) => s.simulation.edgeFeatures);
   const showEdges = useStore((s) => s.simulation.showEdges);
@@ -418,7 +429,7 @@ export function MapView({ service }: Props) {
       // Smooth playback and drag handling matter more than tile fidelity here.
       fadeDuration: 0,
     });
-    map.addControl(new maplibregl.NavigationControl({ visualizePitch: false }), "top-right");
+    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
     map.addControl(new maplibregl.ScaleControl({ maxWidth: 120 }), "bottom-left");
     mapRef.current = map;
     if (import.meta.env.DEV) (window as unknown as { __netweevilMap: MapLibreMap }).__netweevilMap = map;
@@ -430,13 +441,22 @@ export function MapView({ service }: Props) {
       addLayers(map);
       styleReady.current = true;
       setSource(map, INPUT_SOURCE, inputFeatures(getState().tool, getState().routes));
-      setSource(map, RESULT_SOURCE, getState().result?.features ?? EMPTY_COLLECTION);
+      setSource(map, RESULT_SOURCE, combinedFeatures());
       setSource(map, SIM_AGENTS_SOURCE, getState().simulation.agentFeatures ?? EMPTY_COLLECTION);
       setSource(map, SIM_EDGES_SOURCE, getState().simulation.edgeFeatures ?? EMPTY_COLLECTION);
       setSource(map, EDITOR_SOURCE, editorFeatures(getState().editor, getState().tool === "transit_editor"));
       applySelection(map, getState().selectedRun);
       applyMarkerScale(map, getState().mapStyle.markerScale);
+      apply3dPresentation(map, !!overlayRef.current && getState().mapStyle.view3d);
+      setState({ terrainError: null });
+      applyTerrainPresentation(map);
+      overlayRef.current?.update(combinedFeatures(), getState().mapStyle, getState().selectedRun);
       syncViewport();
+    });
+    map.on("error", (event) => {
+      if ((event as unknown as { sourceId?: string }).sourceId !== TERRAIN_SOURCE) return;
+      const message = terrainTileError(event.error);
+      if (getState().terrainError !== message) setState({ terrainError: message });
     });
 
     // --- Click to add points, drag to move them (routes re-run live while dragging). ---
@@ -573,6 +593,7 @@ export function MapView({ service }: Props) {
     const hoverLayers = ["results-point", "results-line", "results-line-dashed", "results-fill", "sim-agents", "sim-edges"];
     map.on("mousemove", (e) => {
       if (dragging || !styleReady.current) return;
+      if (getState().mapStyle.view3d && overlayRef.current) return;
       const layers = hoverLayers.filter((id) => map.getLayer(id));
       const hits = map.queryRenderedFeatures(e.point, { layers });
       if (!hits.length) {
@@ -584,6 +605,8 @@ export function MapView({ service }: Props) {
     });
 
     return () => {
+      if (overlayRef.current) map.removeControl(overlayRef.current.control);
+      overlayRef.current = null;
       map.remove();
       mapRef.current = null;
     };
@@ -598,15 +621,19 @@ export function MapView({ service }: Props) {
     map.setStyle(basemapStyle(basemap));
   }, [basemap]);
 
-  // Fit to the dataset bounds once the service is known.
+  // Restore the visible saved inputs on startup. The viewport itself is not
+  // persisted; skipping this fit would leave saved Hong Kong routes in the
+  // constructor's Groningen view. Later input edits and pans keep their view.
   useEffect(() => {
     const map = mapRef.current;
     const bounds = service?.dataset.topology_bounds;
-    if (!map || !bounds || fittedRef.current) return;
-    fittedRef.current = true;
+    if (!map || fittedRef.current) return;
     const state = getState();
-    const hasPoints = Object.values(state.points).some((p) => p.length > 0) || state.routes.some((r) => r.origin || r.destination);
-    if (!hasPoints) map.fitBounds([bounds.min_lon, bounds.min_lat, bounds.max_lon, bounds.max_lat], { padding: 40, duration: 0 });
+    const savedBounds = featureBounds(inputFeatures(state.tool, state.routes));
+    const initialBounds = savedBounds ?? (bounds ? [bounds.min_lon, bounds.min_lat, bounds.max_lon, bounds.max_lat] as [number, number, number, number] : null);
+    if (!initialBounds) return;
+    fittedRef.current = true;
+    map.fitBounds(initialBounds, { padding: 40, duration: 0, ...(savedBounds ? { maxZoom: 16 } : {}) });
   }, [service]);
 
   useEffect(() => {
@@ -619,8 +646,8 @@ export function MapView({ service }: Props) {
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleReady.current) return;
-    setSource(map, RESULT_SOURCE, result?.features ?? EMPTY_COLLECTION);
-  }, [result]);
+    setSource(map, RESULT_SOURCE, displayedFeatures);
+  }, [displayedFeatures]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -633,6 +660,78 @@ export function MapView({ service }: Props) {
   const baseFeedId = tool === "transit_editor" ? (editor.scenario?.base_feed_id ?? null) : null;
   const viewport = useStore((s) => s.viewport.bbox);
   const apiBase = useStore((s) => s.apiBase);
+  const terrainCatalogScope = useRef<string | null>(null);
+  const terrainScope = JSON.stringify([apiBase, service?.workspace_root ?? null]);
+  useEffect(() => {
+    const changed = terrainCatalogScope.current !== terrainScope;
+    terrainCatalogScope.current = terrainScope;
+    const controller = new AbortController();
+    setState(state => ({ terrainSources: changed ? [] : state.terrainSources, terrainStatus: "Loading terrain sources…", ...(changed ? { terrainError: null } : {}) }));
+    void apiRequest<TerrainSourcesResponse>(apiBase, "/v1/terrain-sources", { tool: "terrain", signal: controller.signal })
+      .then(({ data }) => {
+        if (controller.signal.aborted) return;
+        const diagnostics = data.diagnostics?.join(" ");
+        setState({ terrainSources: data.sources, terrainStatus: diagnostics || (data.sources.length ? null : "No local DEM is available. Prepare terrain for this API workspace, then refresh sources.") });
+      }).catch(error => {
+        if (!controller.signal.aborted) setState({ terrainStatus: `Terrain sources could not load: ${error instanceof Error ? error.message : String(error)}` });
+      });
+    return () => controller.abort();
+  }, [apiBase, terrainScope, terrainRefreshRequest]);
+
+  const terrainSelection = selectedTerrain(terrainSources, mapStyle.terrainSourceId);
+  const terrainIdentity = JSON.stringify([apiBase, terrainSelection?.id, terrainSelection?.version]);
+  useEffect(() => { setState({ terrainError: null }); }, [terrainIdentity, mapStyle.terrainEnabled, mapStyle.view3d]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (map && styleReady.current) applyTerrainPresentation(map);
+  }, [apiBase, terrainSources, mapStyle.terrainEnabled, mapStyle.terrainSourceId, mapStyle.view3d, mapStyle.verticalExaggeration]);
+
+  const selectedFeedId = useStore((s) => s.feedId);
+  const stationFeedId = selectedFeedId ?? service?.loaded_transit_feeds[0]?.feed_id;
+  const stationCache = useRef(new StationGeometryCache());
+  const stationScope = service && stationFeedId ? JSON.stringify([apiBase, service.workspace_root, service.dataset.dataset_id, service.dataset.source_sha256, service.dataset.imported_at, stationFeedId]) : null;
+  useEffect(() => {
+    const active = mapStyle.view3d && mapStyle.stationPlatforms && stationFeedId && viewport && stationScope;
+    const cache = stationCache.current;
+    // Below-ground or raised geometry can project into the screen even when
+    // its ground coordinates lie outside map.getBounds(). Small feeds fit in
+    // one request, then the GPU handles all camera movement without culling.
+    if (active && cache.coversFeed(stationScope)) return;
+    const { ticket, display } = cache.begin(active ? stationScope : null);
+    setState(display);
+    if (!active) {
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      const [w, s, e, n] = viewport;
+      const padX = Math.max(0.01, (e - w) * 0.5), padY = Math.max(0.01, (n - s) * 0.5);
+      const padded = [Math.max(-180, w - padX), Math.max(-90, s - padY), Math.min(180, e + padX), Math.min(90, n + padY)];
+      const fetchGeometry = (bbox: number[]) => apiRequest<StationGeometryResponse>(apiBase, `/v1/transit-feeds/${encodeURIComponent(stationFeedId)}/station-geometry`, {
+        tool: "station_geometry", body: { bbox, limit: 5000 }, signal: controller.signal,
+      });
+      void (async () => {
+        let wholeFeed = !cache.needsViewport(stationScope);
+        let { data } = await fetchGeometry(wholeFeed ? [-180, -90, 180, 90] : padded);
+        if (controller.signal.aborted) return;
+        if (wholeFeed && data.metadata.truncated) {
+          cache.markTruncated(ticket);
+          wholeFeed = false;
+          ({ data } = await fetchGeometry(padded));
+        }
+        if (controller.signal.aborted) return;
+        const display = cache.complete(ticket, data, wholeFeed);
+        if (display) setState(display);
+      })().catch((error) => {
+        if (controller.signal.aborted) return;
+        const display = cache.fail(ticket, error);
+        if (display) setState(display);
+      });
+    }, 180);
+    return () => { clearTimeout(timer); controller.abort(); cache.cancel(ticket); };
+  }, [apiBase, stationFeedId, stationScope, viewport, mapStyle.view3d, mapStyle.stationPlatforms]);
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !baseFeedId || !viewport) {
@@ -695,11 +794,78 @@ export function MapView({ service }: Props) {
     applyMarkerScale(map, markerScale);
   }, [markerScale]);
 
+  // Load the GPU renderer only when 3D is first requested. Style changes and
+  // route selection reuse the same canvas, including across basemap switches.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    let cancelled = false;
+    const sync = async () => {
+      if (mapStyle.view3d && !overlayRef.current) {
+        try {
+          const { createThreeDOverlay } = await import("./ThreeDOverlay");
+          if (cancelled || mapRef.current !== map) return;
+          const overlay = createThreeDOverlay((hoverInfo) => setState({ hoverInfo }));
+          map.addControl(overlay.control);
+          overlayRef.current = overlay;
+          setThreeDError(null);
+        } catch (error) {
+          if (!cancelled) setThreeDError(error instanceof Error ? error.message : String(error));
+          return;
+        }
+      }
+      if (cancelled) return;
+      overlayRef.current?.update(displayedFeatures, mapStyle, selectedRun);
+      if (styleReady.current) apply3dPresentation(map, mapStyle.view3d && !!overlayRef.current);
+    };
+    void sync();
+    return () => { cancelled = true; };
+  }, [mapStyle, displayedFeatures, selectedRun]);
+
+  useEffect(() => {
+    if (!referenceFitRequest || !mapRef.current) return;
+    const bounds = featureBounds({ type: "FeatureCollection", features: references.flatMap((layer) => layer.features.features) });
+    if (bounds) mapRef.current.fitBounds(bounds, { padding: 60, maxZoom: 18 });
+  }, [referenceFitRequest, references]);
+
+  useEffect(() => {
+    mapRef.current?.easeTo({ pitch: mapStyle.view3d ? mapStyle.pitch : 0, duration: 400 });
+  }, [mapStyle.view3d, mapStyle.pitch]);
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !flyRequest) return;
     map.flyTo({ center: [flyRequest.lon, flyRequest.lat], zoom: Math.max(map.getZoom(), flyRequest.zoom), duration: 700 });
   }, [flyRequest]);
 
-  return <div ref={containerRef} className="map" />;
+  return <><div ref={containerRef} className="map" />{threeDError && mapStyle.view3d && <div className="map-3d-error" role="alert">3D could not start. The flat map is still available. {threeDError}</div>}</>;
+}
+
+function apply3dPresentation(map: MapLibreMap, active: boolean) {
+  for (const id of ["results-line", "results-line-casing", "results-line-dashed", "results-point", "results-fill", "results-fill-outline"]) {
+    const visibility = active ? "none" : "visible";
+    if (map.getLayer(id) && map.getLayoutProperty(id, "visibility") !== visibility) map.setLayoutProperty(id, "visibility", visibility);
+  }
+  const style = getState().mapStyle;
+  // The separate overlay keeps below-datum geometry visible. Fade the base
+  // canvas for x-ray inspection without changing any source elevations.
+  const opacity = String(active && style.xray ? style.basemapOpacity : 1);
+  if (map.getCanvas().style.opacity !== opacity) map.getCanvas().style.opacity = opacity;
+}
+
+function applyTerrainPresentation(map: MapLibreMap) {
+  const state = getState();
+  try {
+    applyTerrain(map, { view3d: state.mapStyle.view3d, enabled: state.mapStyle.terrainEnabled,
+      exaggeration: state.mapStyle.verticalExaggeration, source: selectedTerrain(state.terrainSources, state.mapStyle.terrainSourceId), apiBase: state.apiBase });
+  } catch (error) {
+    setState({ terrainError: `Terrain could not start: ${error instanceof Error ? error.message : String(error)}` });
+  }
+}
+
+function combinedFeatures(): FeatureCollection {
+  const state = getState();
+  const station = state.mapStyle.view3d && state.mapStyle.stationPlatforms ? state.stationGeometry?.features ?? [] : [];
+  if (!state.referenceLayers.length && !station.length) return state.result?.features ?? EMPTY_COLLECTION;
+  return { type: "FeatureCollection", features: [...(state.result?.features.features ?? []), ...state.referenceLayers.flatMap((layer) => layer.features.features), ...station] };
 }

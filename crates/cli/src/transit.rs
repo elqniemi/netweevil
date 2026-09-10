@@ -451,20 +451,43 @@ impl BoundStopTransferEstimator {
         Some(route_result_to_street_path(result))
     }
 
-    fn point_candidates(&self, id: &str, lon: f64, lat: f64) -> Option<ResolvedStopCandidates> {
+    fn point_candidates(
+        &self,
+        id: &str,
+        lon: f64,
+        lat: f64,
+        z: Option<f64>,
+        max_endpoint_snap_distance_m: f64,
+    ) -> Option<ResolvedStopCandidates> {
         let point = LabeledPoint {
             id: id.to_string(),
             lon,
             lat,
-            z: None,
+            z,
         };
         let mut origins = self
             .engine
-            .snap_route_candidates(&point, 500.0, true)
+            .snap_route_candidates_with_options(
+                &point,
+                &SnapOptions {
+                    max_distance_m: max_endpoint_snap_distance_m,
+                    z_window_m: z.map(|_| 1.0),
+                    ..SnapOptions::default()
+                },
+                true,
+            )
             .ok()?;
         let mut destinations = self
             .engine
-            .snap_route_candidates(&point, 500.0, false)
+            .snap_route_candidates_with_options(
+                &point,
+                &SnapOptions {
+                    max_distance_m: max_endpoint_snap_distance_m,
+                    z_window_m: z.map(|_| 1.0),
+                    ..SnapOptions::default()
+                },
+                false,
+            )
             .ok()?;
         origins.truncate(8);
         destinations.truncate(8);
@@ -477,6 +500,10 @@ impl BoundStopTransferEstimator {
 }
 
 impl StreetTimeEstimator for BoundStopTransferEstimator {
+    fn requires_network_path(&self) -> bool {
+        true
+    }
+
     fn street_time_s(
         &self,
         _mode: netweevil_transit::AccessMode,
@@ -507,31 +534,43 @@ impl StreetTimeEstimator for BoundStopTransferEstimator {
             .map(|route| route_time_s(&route))
     }
 
-    fn point_to_stop_path(
+    fn point_to_stop_path_with_snap_limit(
         &self,
         _mode: netweevil_transit::AccessMode,
-        from_lon: f64,
-        from_lat: f64,
+        from: &netweevil_transit::TransitPoint,
         stop: &TransitStop,
+        max_endpoint_snap_distance_m: f64,
     ) -> Option<TransitStreetPath> {
         self.route_candidates(
             format!("access_{}", stop.stop_id),
-            &self.point_candidates("transit_access_origin", from_lon, from_lat)?,
+            &self.point_candidates(
+                "transit_access_origin",
+                from.lon,
+                from.lat,
+                from.z,
+                max_endpoint_snap_distance_m,
+            )?,
             self.stops.get(&stop.stop_id)?,
         )
     }
 
-    fn stop_to_point_path(
+    fn stop_to_point_path_with_snap_limit(
         &self,
         _mode: netweevil_transit::AccessMode,
         stop: &TransitStop,
-        to_lon: f64,
-        to_lat: f64,
+        to: &netweevil_transit::TransitPoint,
+        max_endpoint_snap_distance_m: f64,
     ) -> Option<TransitStreetPath> {
         self.route_candidates(
             format!("egress_{}", stop.stop_id),
             self.stops.get(&stop.stop_id)?,
-            &self.point_candidates("transit_egress_destination", to_lon, to_lat)?,
+            &self.point_candidates(
+                "transit_egress_destination",
+                to.lon,
+                to.lat,
+                to.z,
+                max_endpoint_snap_distance_m,
+            )?,
         )
     }
 

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Response};
 use netweevil_core::{TopologyBundle, TravelMode};
 use netweevil_profile::{ReturnConfig, ReturnGeometry};
@@ -28,6 +28,94 @@ use crate::geojson::{geojson_response, transit_service_area_result_geojson, want
 use crate::state::{
     ApiState, LoadedProfile, ServiceRuntime, execute_on_routing_worker, resolve_profile,
 };
+
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct TransitBindingsQuery {
+    #[serde(default)]
+    pedestrian_profile_id: Option<String>,
+    #[serde(default)]
+    stop_id: Option<String>,
+    #[serde(default = "default_binding_audit_limit")]
+    limit: usize,
+}
+
+fn default_binding_audit_limit() -> usize {
+    1000
+}
+
+/// Inspect explicit stop constraints against the currently loaded graph/profile.
+/// Both directions are checked because one-way station access may differ.
+pub(crate) async fn transit_bindings_handler(
+    State(state): State<ApiState>,
+    Path(feed_id): Path<String>,
+    Query(query): Query<TransitBindingsQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let runtime = state.runtime()?;
+    let feed = runtime
+        .transit_feed(&feed_id)
+        .ok_or_else(|| ApiError::not_found(format!("unknown transit feed '{feed_id}'")))?;
+    let profile =
+        resolve_transit_pedestrian_profile(&runtime, query.pedestrian_profile_id.as_deref())?;
+    let profile_id = profile.document.profile.id.clone();
+    let engine = Arc::clone(&profile.engine);
+    let dataset_id = runtime.dataset_manifest.dataset_id.0.clone();
+    let response = execute_on_routing_worker(&runtime, move || {
+        let topology = engine.topology();
+        let mut component_sizes = HashMap::<u32, usize>::new();
+        for component in &topology.node_component_ids { *component_sizes.entry(*component).or_default() += 1; }
+        let stops = feed.router.bundle().stops.iter().filter(|stop| stop.binding.is_some()
+            && query.stop_id.as_ref().is_none_or(|id| &stop.stop_id == id)).collect::<Vec<_>>();
+        let total = stops.len();
+        let mut features = Vec::new();
+        let mut failures = 0;
+        for stop in stops.into_iter().take(query.limit.clamp(1, 10_000)) {
+            let origins = resolve_api_stop_candidates(&engine, stop, true).unwrap_or_default();
+            let destinations = resolve_api_stop_candidates(&engine, stop, false).unwrap_or_default();
+            let resolved = !origins.is_empty() && !destinations.is_empty();
+            if !resolved { failures += 1; }
+            let status = match (origins.is_empty(), destinations.is_empty()) {
+                (false, false) => "resolved",
+                (true, false) => "no_departure_candidates",
+                (false, true) => "no_arrival_candidates",
+                (true, true) => "unresolved",
+            };
+            let candidates_json = |candidates: &[SnappedPoint]| candidates.iter().map(|candidate| serde_json::json!({
+                "node_id": candidate.snapped_node_id,
+                "edge_index": candidate.snapped_edge_id,
+                "edge_fraction": candidate.snapped_edge_fraction,
+                "coordinates": [candidate.snapped_lon, candidate.snapped_lat, candidate.snapped_z],
+                "snap_distance_m": candidate.snap_distance_m,
+                "component_id": candidate.component_id,
+                "component_node_count": candidate.component_id.and_then(|id| component_sizes.get(&id).copied()),
+            })).collect::<Vec<_>>();
+            let coordinate = origins.first().or_else(|| destinations.first())
+                .map(|candidate| [candidate.snapped_lon, candidate.snapped_lat, candidate.snapped_z])
+                .or_else(|| bound_stop_coordinate(stop, topology));
+            features.push(serde_json::json!({
+                "type": "Feature",
+                "geometry": coordinate.map(|coordinate| serde_json::json!({"type":"Point", "coordinates": coordinate})),
+                "properties": {
+                    "stop_id": stop.stop_id, "stop_name": stop.name,
+                    "gtfs_lon": stop.lon, "gtfs_lat": stop.lat,
+                    "binding": stop.binding, "resolution_status": status,
+                    "origin_candidates": candidates_json(&origins),
+                    "destination_candidates": candidates_json(&destinations),
+                    "diagnostic": (!resolved).then_some("Explicit binding has no traversable candidate in one or both directions. Check the source attributes, elevation window, profile access and graph connectivity; no coordinate fallback is used."),
+                }
+            }));
+        }
+        Ok(serde_json::json!({
+            "type": "FeatureCollection", "features": features,
+            "metadata": {
+                "feed_id": feed_id, "dataset_id": dataset_id, "profile_id": profile_id,
+                "total_bound_stops": total, "checked_bound_stops": features.len(),
+                "failed_bound_stops": failures, "truncated": features.len() < total,
+                "connectivity_check": "weak_component_membership_only_not_a_route_proof",
+            }
+        }))
+    }).await.map_err(ApiError::from_execution_error)?;
+    Ok(Json(response))
+}
 
 pub(crate) async fn transit_route_handler(
     State(state): State<ApiState>,
@@ -77,6 +165,7 @@ pub(crate) async fn transit_route_handler(
     let egress_profile_id = street_engines
         .as_ref()
         .and_then(|engines| side_profile_ids(&engines.egress));
+    let topology = runtime.topology.clone();
     let replace_geometry = matches!(walking_geometry, TransitWalkingGeometry::Network);
     let result = execute_on_routing_worker(runtime.as_ref(), move || {
         let estimator = street_engines
@@ -90,8 +179,14 @@ pub(crate) async fn transit_route_handler(
                 .map(|estimator| estimator as &dyn StreetTimeEstimator),
         )?;
         if replace_geometry && let Some(engines) = street_engines.as_ref() {
-            replace_transit_street_leg_geometries(&mut result, engines);
+            replace_transit_street_leg_geometries(
+                &mut result,
+                engines,
+                &router.bundle().stops,
+                &request,
+            );
         }
+        anchor_transit_platform_geometry(&mut result, router.bundle(), &topology);
         Ok(result)
     })
     .await
@@ -427,6 +522,10 @@ impl<'a> StreetEngineTimeEstimator<'a> {
 }
 
 impl StreetTimeEstimator for StreetEngineTimeEstimator<'_> {
+    fn requires_network_path(&self) -> bool {
+        true
+    }
+
     fn street_isochrone(
         &self,
         origin: &TransitPoint,
@@ -481,12 +580,16 @@ impl StreetTimeEstimator for StreetEngineTimeEstimator<'_> {
                         id: origin.id.clone(),
                         lon: origin.lon,
                         lat: origin.lat,
-                        z: None,
+                        z: origin.z,
                     };
                     add_candidates(
-                        engine
-                            .snap_route_candidates(&point, 500.0, !reverse)
-                            .unwrap_or_default(),
+                        api_endpoint_candidates(
+                            engine,
+                            &point,
+                            !reverse,
+                            request.modes.max_endpoint_snap_distance_m,
+                        )
+                        .unwrap_or_default(),
                         0,
                     );
                 } else {
@@ -565,22 +668,22 @@ impl StreetTimeEstimator for StreetEngineTimeEstimator<'_> {
         Some((route.summary.total_travel_time_s.ceil() as u32).max(1))
     }
 
-    fn point_to_stop_path(
+    fn point_to_stop_path_with_snap_limit(
         &self,
         mode: AccessMode,
-        from_lon: f64,
-        from_lat: f64,
+        from: &TransitPoint,
         stop: &TransitStop,
+        max_endpoint_snap_distance_m: f64,
     ) -> Option<TransitStreetPath> {
         let (_, engine) = self.engine(mode, false)?;
         let origin = LabeledPoint {
             id: "transit_access_origin".to_string(),
-            lon: from_lon,
-            lat: from_lat,
-            z: None,
+            lon: from.lon,
+            lat: from.lat,
+            z: from.z,
         };
         let destination = api_binding_point(stop);
-        let origins = engine.snap_route_candidates(&origin, 500.0, true).ok()?;
+        let origins = api_endpoint_candidates(engine, &origin, true, max_endpoint_snap_distance_m)?;
         let destinations = self.candidates_for_stop(mode, stop, false)?;
         self.route_with_candidates(
             engine,
@@ -592,25 +695,24 @@ impl StreetTimeEstimator for StreetEngineTimeEstimator<'_> {
         )
     }
 
-    fn stop_to_point_path(
+    fn stop_to_point_path_with_snap_limit(
         &self,
         mode: AccessMode,
         stop: &TransitStop,
-        to_lon: f64,
-        to_lat: f64,
+        to: &TransitPoint,
+        max_endpoint_snap_distance_m: f64,
     ) -> Option<TransitStreetPath> {
         let (_, engine) = self.engine(mode, true)?;
         let origin = api_binding_point(stop);
         let destination = LabeledPoint {
             id: "transit_egress_destination".to_string(),
-            lon: to_lon,
-            lat: to_lat,
-            z: None,
+            lon: to.lon,
+            lat: to.lat,
+            z: to.z,
         };
         let origins = self.candidates_for_stop(mode, stop, true)?;
-        let destinations = engine
-            .snap_route_candidates(&destination, 500.0, false)
-            .ok()?;
+        let destinations =
+            api_endpoint_candidates(engine, &destination, false, max_endpoint_snap_distance_m)?;
         self.route_with_candidates(
             engine,
             "transit_bound_egress",
@@ -620,6 +722,25 @@ impl StreetTimeEstimator for StreetEngineTimeEstimator<'_> {
             &destinations,
         )
     }
+}
+
+fn api_endpoint_candidates(
+    engine: &PreparedRoutingEngine,
+    point: &LabeledPoint,
+    is_origin: bool,
+    max_endpoint_snap_distance_m: f64,
+) -> Option<Vec<SnappedPoint>> {
+    engine
+        .snap_route_candidates_with_options(
+            point,
+            &SnapOptions {
+                max_distance_m: max_endpoint_snap_distance_m,
+                z_window_m: point.z.map(|_| 1.0),
+                ..SnapOptions::default()
+            },
+            is_origin,
+        )
+        .ok()
 }
 
 fn resolve_api_stop_candidates(
@@ -833,12 +954,16 @@ fn api_route_to_street_path(route: netweevil_query::RouteResult) -> TransitStree
 fn replace_transit_street_leg_geometries(
     result: &mut TransitRouteResult,
     engines: &TransitStreetEngines,
+    stops: &[TransitStop],
+    request: &netweevil_transit::TransitRouteRequest,
 ) {
     replace_transit_street_leg_geometries_for_legs(
         &result.route_id,
         &mut result.legs,
         &mut result.diagnostics,
         engines,
+        stops,
+        request,
     );
     for alternative in &mut result.alternatives {
         replace_transit_street_leg_geometries_for_legs(
@@ -846,6 +971,8 @@ fn replace_transit_street_leg_geometries(
             &mut alternative.legs,
             &mut result.diagnostics,
             engines,
+            stops,
+            request,
         );
     }
 }
@@ -855,6 +982,8 @@ fn replace_transit_street_leg_geometries_for_legs(
     legs: &mut [TransitLeg],
     diagnostics: &mut Vec<String>,
     engines: &TransitStreetEngines,
+    stops: &[TransitStop],
+    request: &netweevil_transit::TransitRouteRequest,
 ) {
     for (index, leg) in legs.iter_mut().enumerate() {
         if !matches!(
@@ -901,15 +1030,27 @@ fn replace_transit_street_leg_geometries_for_legs(
                 id: leg.from_id.clone(),
                 lon: first[0],
                 lat: first[1],
-                z: None,
+                z: if leg.leg_type == TransitLegType::Access {
+                    request.origin.z
+                } else {
+                    None
+                },
             },
             destination: LabeledPoint {
                 id: leg.to_id.clone(),
                 lon: last[0],
                 lat: last[1],
-                z: None,
+                z: if leg.leg_type == TransitLegType::Egress {
+                    request.destination.z
+                } else {
+                    None
+                },
             },
-            snap: Default::default(),
+            snap: SnapOptions {
+                max_distance_m: request.modes.max_endpoint_snap_distance_m,
+                z_window_m: Some(1.0),
+                ..SnapOptions::default()
+            },
             connectivity: Default::default(),
             fallback: Default::default(),
             returns: ReturnConfig {
@@ -919,13 +1060,64 @@ fn replace_transit_street_leg_geometries_for_legs(
             alternatives: Default::default(),
             temporal: Default::default(),
         };
-        match engine.execute_route(&route_request) {
+        // Geometry-only network requests must honor the same platform constraints
+        // as network-priced access. A fresh XY snap can jump to another floor.
+        let from_stop = (leg.leg_type != TransitLegType::Access)
+            .then(|| stops.iter().find(|stop| stop.stop_id == leg.from_id))
+            .flatten();
+        let to_stop = (leg.leg_type != TransitLegType::Egress)
+            .then(|| stops.iter().find(|stop| stop.stop_id == leg.to_id))
+            .flatten();
+        let bound = from_stop.is_some_and(|stop| stop.binding.is_some())
+            || to_stop.is_some_and(|stop| stop.binding.is_some());
+        let route = if bound {
+            let origins = from_stop.map_or_else(
+                || {
+                    api_endpoint_candidates(
+                        engine,
+                        &route_request.origin,
+                        true,
+                        request.modes.max_endpoint_snap_distance_m,
+                    )
+                },
+                |stop| resolve_api_stop_candidates(engine, stop, true),
+            );
+            let destinations = to_stop.map_or_else(
+                || {
+                    api_endpoint_candidates(
+                        engine,
+                        &route_request.destination,
+                        false,
+                        request.modes.max_endpoint_snap_distance_m,
+                    )
+                },
+                |stop| resolve_api_stop_candidates(engine, stop, false),
+            );
+            match origins.zip(destinations) {
+                Some((origins, destinations)) => {
+                    engine.execute_route_between_candidates(&route_request, &origins, &destinations)
+                }
+                None => Err(anyhow::anyhow!(
+                    "platform binding has no feasible network candidates"
+                )),
+            }
+        } else {
+            engine.execute_route(&route_request)
+        };
+        match route {
             Ok(route) => {
                 if let Some(geometry) = route.geometry {
                     leg.geometry = geometry;
+                    leg.geometry_elevation_source = Some("network_source_z".into());
                 }
             }
             Err(error) => {
+                if bound
+                    || route_request.origin.z.is_some()
+                    || route_request.destination.z.is_some()
+                {
+                    leg.geometry.clear();
+                }
                 diagnostics.push(format!(
                     "network street geometry failed for leg {} using profile '{}': {}",
                     index + 1,
@@ -934,5 +1126,274 @@ fn replace_transit_street_leg_geometries_for_legs(
                 ));
             }
         }
+    }
+}
+
+/// Bind vehicle display geometry to the same platform coordinates as network
+/// access. GTFS supplies only XY shapes; interpolated Z is labelled explicitly.
+fn anchor_transit_platform_geometry(
+    result: &mut TransitRouteResult,
+    bundle: &netweevil_transit::TransitBundle,
+    topology: &TopologyBundle,
+) {
+    let coordinates: HashMap<&str, [f64; 3]> = bundle
+        .stops
+        .iter()
+        .filter_map(|stop| {
+            bound_stop_coordinate(stop, topology).map(|point| (stop.stop_id.as_str(), point))
+        })
+        .collect();
+    for leg in result.legs.iter_mut().chain(
+        result
+            .alternatives
+            .iter_mut()
+            .flat_map(|alternative| &mut alternative.legs),
+    ) {
+        if leg.leg_type == TransitLegType::Transit {
+            leg.geometry_elevation_source = anchor_geometry(
+                &mut leg.geometry,
+                coordinates.get(leg.from_id.as_str()),
+                coordinates.get(leg.to_id.as_str()),
+            );
+        } else if leg
+            .network_path
+            .as_ref()
+            .is_some_and(|path| !path.geometry.is_empty())
+        {
+            leg.geometry_elevation_source = Some("network_source_z".into());
+        }
+    }
+    for stop in result.stops.iter_mut().chain(
+        result
+            .alternatives
+            .iter_mut()
+            .flat_map(|alternative| &mut alternative.stops),
+    ) {
+        if let Some(point) = coordinates.get(stop.stop_id.as_str()) {
+            stop.lon = point[0];
+            stop.lat = point[1];
+            stop.z = Some(point[2]);
+        }
+    }
+    for segment in result.stop_segments.iter_mut().chain(
+        result
+            .alternatives
+            .iter_mut()
+            .flat_map(|alternative| &mut alternative.stop_segments),
+    ) {
+        segment.geometry_elevation_source = anchor_geometry(
+            &mut segment.geometry,
+            coordinates.get(segment.from_stop_id.as_str()),
+            coordinates.get(segment.to_stop_id.as_str()),
+        );
+    }
+    rebuild_transit_leg_geometry(&mut result.legs, &result.stop_segments);
+    for alternative in &mut result.alternatives {
+        rebuild_transit_leg_geometry(&mut alternative.legs, &alternative.stop_segments);
+    }
+}
+
+/// Stop segments retain intermediate platform anchors lost when a whole vehicle
+/// ride is coalesced into a single leg. Reuse that verified chain when returned.
+fn rebuild_transit_leg_geometry(
+    legs: &mut [TransitLeg],
+    segments: &[netweevil_transit::TransitRouteStopSegment],
+) {
+    for leg in legs
+        .iter_mut()
+        .filter(|leg| leg.leg_type == TransitLegType::Transit)
+    {
+        let chain: Vec<_> = segments
+            .iter()
+            .filter(|segment| {
+                segment.trip_id == leg.trip_id
+                    && segment.departure_s >= leg.departure_s
+                    && segment.arrival_s <= leg.arrival_s
+            })
+            .collect();
+        if chain.is_empty()
+            || chain
+                .first()
+                .is_none_or(|segment| segment.from_stop_id != leg.from_id)
+            || chain
+                .last()
+                .is_none_or(|segment| segment.to_stop_id != leg.to_id)
+            || chain.iter().any(|segment| segment.geometry.len() < 2)
+            || !chain
+                .windows(2)
+                .all(|pair| pair[0].to_stop_id == pair[1].from_stop_id)
+        {
+            continue;
+        }
+        let mut geometry = Vec::new();
+        for segment in &chain {
+            for point in &segment.geometry {
+                if geometry.last() != Some(point) {
+                    geometry.push(*point);
+                }
+            }
+        }
+        leg.geometry = geometry;
+        leg.geometry_elevation_source = if chain
+            .iter()
+            .all(|segment| segment.geometry_elevation_source == chain[0].geometry_elevation_source)
+        {
+            chain[0].geometry_elevation_source.clone()
+        } else {
+            Some("mixed_stop_segment_elevations".into())
+        };
+    }
+}
+
+fn bound_stop_coordinate(stop: &TransitStop, topology: &TopologyBundle) -> Option<[f64; 3]> {
+    match stop.binding.as_ref()? {
+        TransitStopBindingTarget::Coordinate {
+            lon,
+            lat,
+            z: Some(z),
+            ..
+        } if z.is_finite() => Some([*lon, *lat, *z]),
+        TransitStopBindingTarget::Node { node_id } => {
+            let node = topology.nodes.get(*node_id as usize)?;
+            Some([node.lon, node.lat, node.elevation_m()?])
+        }
+        TransitStopBindingTarget::Edge { edge_id, fraction } => {
+            let edge_index = api_edge_index(topology, *edge_id)?;
+            let point = api_binding_point(stop);
+            let edge = topology.routing_edge(edge_index as usize);
+            topology.nodes[edge.from.0 as usize].elevation_m()?;
+            topology.nodes[edge.to.0 as usize].elevation_m()?;
+            let candidate = api_exact_edge_candidate(
+                topology,
+                &point,
+                edge_index,
+                fraction
+                    .unwrap_or_else(|| api_projected_edge_fraction(topology, edge_index, &point)),
+            )?;
+            Some([
+                candidate.snapped_lon,
+                candidate.snapped_lat,
+                candidate.snapped_z,
+            ])
+        }
+        _ => None,
+    }
+}
+
+fn anchor_geometry(
+    geometry: &mut [[f64; 3]],
+    from: Option<&[f64; 3]>,
+    to: Option<&[f64; 3]>,
+) -> Option<String> {
+    if geometry.len() < 2 {
+        return None;
+    }
+    if let Some(from) = from {
+        geometry[0] = *from;
+    }
+    if let Some(to) = to {
+        let last = geometry.len() - 1;
+        geometry[last] = *to;
+    }
+    if let (Some(from), Some(to)) = (from, to) {
+        let distances: Vec<f64> = geometry
+            .windows(2)
+            .map(|pair| {
+                netweevil_core::geo::haversine_meters(
+                    pair[0][0], pair[0][1], pair[1][0], pair[1][1],
+                )
+            })
+            .collect();
+        let total = distances.iter().sum::<f64>();
+        let last = geometry.len() - 1;
+        let mut elapsed = 0.0;
+        for (index, point) in geometry.iter_mut().enumerate() {
+            if index > 0 {
+                elapsed += distances[index - 1];
+            }
+            let fraction = if total > 0.0 {
+                elapsed / total
+            } else {
+                index as f64 / last as f64
+            };
+            point[2] = from[2] + (to[2] - from[2]) * fraction;
+        }
+        Some("interpolated_between_stop_bindings".into())
+    } else if from.is_some() || to.is_some() {
+        Some("bound_endpoint_only_other_elevations_unknown".into())
+    } else {
+        Some("unknown_gtfs_elevation".into())
+    }
+}
+
+#[cfg(test)]
+mod platform_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn main_vehicle_leg_keeps_intermediate_platform_elevation() {
+        let mut legs: Vec<TransitLeg> = serde_json::from_value(serde_json::json!([{
+            "leg_type": "transit", "from_id": "A", "to_id": "C", "from_name": "A", "to_name": "C",
+            "departure_s": 0, "arrival_s": 20, "trip_id": "T", "geometry": [[0.0,0.0,-20.0],[2.0,0.0,-20.0]]
+        }])).unwrap();
+        let segments: Vec<netweevil_transit::TransitRouteStopSegment> = serde_json::from_value(serde_json::json!([
+            {"segment_index":1,"from_stop_id":"A","to_stop_id":"B","from_stop_name":"A","to_stop_name":"B",
+             "departure_s":0,"arrival_s":10,"duration_s":10,"trip_id":"T","geometry":[[0.0,0.0,-20.0],[1.0,0.0,-5.0]],
+             "geometry_elevation_source":"interpolated_between_stop_bindings"},
+            {"segment_index":2,"from_stop_id":"B","to_stop_id":"C","from_stop_name":"B","to_stop_name":"C",
+             "departure_s":10,"arrival_s":20,"duration_s":10,"trip_id":"T","geometry":[[1.0,0.0,-5.0],[2.0,0.0,-20.0]],
+             "geometry_elevation_source":"interpolated_between_stop_bindings"}
+        ])).unwrap();
+        rebuild_transit_leg_geometry(&mut legs, &segments);
+        assert_eq!(
+            legs[0].geometry,
+            vec![[0.0, 0.0, -20.0], [1.0, 0.0, -5.0], [2.0, 0.0, -20.0]]
+        );
+        assert_eq!(
+            legs[0].geometry_elevation_source.as_deref(),
+            Some("interpolated_between_stop_bindings")
+        );
+    }
+
+    #[test]
+    fn rail_display_joins_platforms_and_labels_interpolated_elevations() {
+        let mut geometry = vec![
+            [114.0, 22.0, 0.0],
+            [114.005, 22.0, 0.0],
+            [114.01, 22.0, 0.0],
+        ];
+        let from = [114.0, 22.0, -20.0];
+        let to = [114.01, 22.0, -10.0];
+        let source = anchor_geometry(&mut geometry, Some(&from), Some(&to));
+        assert_eq!(geometry[0], from);
+        assert_eq!(geometry[2], to);
+        assert!((geometry[1][2] + 15.0).abs() < 1e-6);
+        assert_eq!(
+            source.as_deref(),
+            Some("interpolated_between_stop_bindings")
+        );
+    }
+
+    #[test]
+    fn partial_binding_keeps_unknown_elevations_explicit() {
+        let mut geometry = vec![[114.0, 22.0, 0.0], [114.01, 22.0, 0.0]];
+        let source = anchor_geometry(&mut geometry, Some(&[114.001, 22.0, -15.0]), None);
+        assert_eq!(geometry[0], [114.001, 22.0, -15.0]);
+        assert_eq!(geometry[1][2], 0.0);
+        assert_eq!(
+            source.as_deref(),
+            Some("bound_endpoint_only_other_elevations_unknown")
+        );
+    }
+
+    #[test]
+    fn coincident_platform_points_do_not_produce_nan() {
+        let mut geometry = vec![[114.0, 22.0, 0.0]; 3];
+        anchor_geometry(
+            &mut geometry,
+            Some(&[114.0, 22.0, -20.0]),
+            Some(&[114.0, 22.0, -10.0]),
+        );
+        assert_eq!(geometry[1][2], -15.0);
     }
 }

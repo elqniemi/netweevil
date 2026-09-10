@@ -27,8 +27,11 @@ mod locate;
 mod network;
 mod simulation;
 mod state;
+mod station_geometry;
+mod terrain;
 mod trace_matching;
 mod transit;
+mod transit_directions;
 mod waypoints;
 mod workspace;
 
@@ -116,6 +119,11 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
         .route("/healthz", get(handlers::healthz))
         .route("/readyz", get(handlers::service_info))
         .route("/v1/service", get(handlers::service_info))
+        .route("/v1/terrain-sources", get(terrain::terrain_sources_handler))
+        .route(
+            "/v1/terrain/{source}/{version}/{z}/{x}/{tile}",
+            get(terrain::terrain_tile_handler),
+        )
         .route("/v1/profiles", get(handlers::list_profiles))
         .route("/v1/profiles/{profile_id}", get(handlers::get_profile))
         .route("/v1/route", post(handlers::route_handler))
@@ -124,6 +132,14 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
         .route("/v1/locate", post(locate::locate_handler))
         .route("/v1/waypoints", post(waypoints::waypoints_handler))
         .route("/v1/transit-route", post(transit::transit_route_handler))
+        .route(
+            "/v1/transit-directions",
+            post(transit_directions::transit_directions_handler),
+        )
+        .route(
+            "/v1/transit-feeds/{feed_id}/station-geometry",
+            post(station_geometry::station_geometry_handler),
+        )
         .route(
             "/v1/transit-service-area",
             post(transit::transit_service_area_handler),
@@ -227,6 +243,10 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
         .route(
             "/v1/gtfs-editor/scenarios/{scenario_id}/export",
             get(gtfs_editor::export_scenario),
+        )
+        .route(
+            "/v1/transit-feeds/{feed_id}/bindings",
+            get(transit::transit_bindings_handler),
         )
         .route(
             "/v1/transit-feeds/{feed_id}/stops",

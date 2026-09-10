@@ -121,6 +121,7 @@ where
 
     for edge_index in 0..edge_count {
         let edge = topology.edge(edge_index);
+        let length_m = traversal_length_m(topology, &edge);
         let routing_edge = topology.routing_edge(edge_index);
         let edge_profile = topology.edge_profile(edge_index);
         let attribute_matches = |name: &str, expected: &str| {
@@ -153,6 +154,7 @@ where
         } else if let Some(traversal) = edge_traversal_cost(
             profile,
             &edge,
+            length_m,
             edge_profile.highway,
             routing_edge.ascent_m,
             routing_edge.descent_m,
@@ -165,7 +167,7 @@ where
                     component.parsed.as_ref().map_or(0.0, |parsed| {
                         parsed.edge_value(
                             traversal.travel_time_s,
-                            f64::from(edge.length_m),
+                            length_m,
                             f64::from(routing_edge.ascent_m),
                             f64::from(routing_edge.descent_m),
                             &attribute_matches,
@@ -196,7 +198,7 @@ where
                 };
                 values[component_index] += *value;
             }
-            let mut cost = generalized_cost(profile, &edge, traversal.travel_time_s);
+            let mut cost = generalized_cost(profile, &edge, length_m, traversal.travel_time_s);
             for (component, value) in components.iter_mut().zip(values) {
                 component.compiled.edge_values.push(value as f32);
                 let overlay_multiplier = component
@@ -760,6 +762,23 @@ fn compile_acceleration_with_progress(
     }
 }
 
+/// Persisted edge lengths are whole metres. Recover physical length only when
+/// rounding erased a real segment, otherwise retain the existing distance
+/// contract. Truly coincident graph connectors still have zero length.
+fn traversal_length_m(topology: &TopologyBundle, edge: &netweevil_core::DirectedEdge) -> f64 {
+    if edge.length_m != 0 {
+        return f64::from(edge.length_m);
+    }
+    let Some((from, to)) = topology
+        .nodes
+        .get(edge.from.0 as usize)
+        .zip(topology.nodes.get(edge.to.0 as usize))
+    else {
+        return 0.0;
+    };
+    netweevil_core::geo::distance_3d_meters(from.lon, from.lat, from.z, to.lon, to.lat, to.z)
+}
+
 fn build_pairwise_forbidden_turn_table(topology: &TopologyBundle, mode_bit: u16) -> Vec<Vec<u32>> {
     let mut forbidden = vec![Vec::new(); topology.edge_count()];
     for restriction in topology
@@ -796,6 +815,60 @@ mod tests {
         SurfaceClass, TopologyBundle, TopologyEdgeLayers, TopologyNode, TravelMode,
     };
     use std::collections::BTreeMap;
+
+    #[test]
+    fn sub_metre_edges_keep_physical_cost_without_penalizing_coincident_connectors() {
+        let mut profile = ferry_profile(false);
+        profile.profile.mode = TravelMode::Foot;
+        profile.cost.time_weight = 1.0;
+        profile.cost.distance_weight = 2.0;
+        let mut topology = ferry_topology(None);
+        topology.nodes = vec![
+            TopologyNode {
+                node_id: NodeId(0),
+                lon: 114.18,
+                lat: 22.28,
+                z: 0.0,
+            },
+            TopologyNode {
+                node_id: NodeId(1),
+                lon: 114.180003,
+                lat: 22.28,
+                z: 0.0,
+            },
+        ];
+        let edge = &mut topology.edge_layers.routing[0];
+        edge.length_m = 0;
+        topology.edge_layers.profile[0].road_class = RoadClass::Path;
+        topology.edge_layers.profile[0].access_mask = AccessMask::new(AccessMask::FOOT);
+        let physical_length =
+            netweevil_core::geo::distance_3d_meters(114.18, 22.28, 0.0, 114.180003, 22.28, 0.0);
+        assert!(physical_length > 0.0 && physical_length < 0.5);
+        let metric = |topology: &TopologyBundle| {
+            compile_profile_bundle(&profile, topology, CacheBundleId::new("sub-metre"))
+                .unwrap()
+                .edge_metrics[0]
+                .clone()
+        };
+        let cost = metric(&topology);
+        let expected_time = physical_length / (5.0 / 3.6);
+        assert!((cost.travel_time_s.unwrap() - expected_time).abs() < 1e-9);
+        assert!(
+            (cost.generalized_cost.unwrap() - expected_time - 2.0 * physical_length).abs() < 1e-9
+        );
+        assert!(netweevil_core::encode_cch_weight(cost.generalized_cost.unwrap()) > 0);
+        topology.nodes[1].lon = topology.nodes[0].lon;
+        topology.nodes[1].z = 0.25;
+        topology.edge_layers.routing[0].ascent_m = 0.25;
+        assert!(
+            metric(&topology).travel_time_s.unwrap() > 0.0,
+            "vertical sub-metre edges must cost time"
+        );
+        topology.nodes[1].z = 0.0;
+        topology.edge_layers.routing[0].ascent_m = 0.0;
+        assert_eq!(metric(&topology).travel_time_s, Some(0.0));
+        assert_eq!(metric(&topology).generalized_cost, Some(0.0));
+    }
 
     #[test]
     fn compiles_edge_metrics_from_topology() {

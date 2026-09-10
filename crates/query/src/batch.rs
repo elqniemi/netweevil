@@ -955,6 +955,8 @@ fn execute_batched_route_with_candidates(
         );
     }
 
+    let mut attachment: Option<(usize, usize)> = None;
+    let mut best: Option<RouteResult> = None;
     if use_cch_spaces {
         let CchSpaceCaches {
             forward: forward_cache,
@@ -962,7 +964,12 @@ fn execute_batched_route_with_candidates(
             restricted_origin,
             restricted_search,
         } = cch_space_caches;
-        for origin in origin_candidates {
+        for (origin_index, origin) in origin_candidates.iter().enumerate() {
+            if let Some((first_origin, _)) = attachment
+                && !same_physical_attachment(origin, &origin_candidates[first_origin])
+            {
+                continue;
+            }
             let forward = forward_cache
                 .entry(snap_cache_key(origin))
                 .or_insert_with(|| {
@@ -971,7 +978,15 @@ fn execute_batched_route_with_candidates(
                         &origin_edge_seeds(routing_graph, origin),
                     )
                 });
-            for destination in destination_candidates {
+            for (destination_index, destination) in destination_candidates.iter().enumerate() {
+                if let Some((_, first_destination)) = attachment
+                    && !same_physical_attachment(
+                        destination,
+                        &destination_candidates[first_destination],
+                    )
+                {
+                    continue;
+                }
                 if same_edge_reverse_pair(origin, destination) {
                     continue;
                 }
@@ -1037,7 +1052,7 @@ fn execute_batched_route_with_candidates(
                     path
                 };
                 if let Some(path) = path {
-                    return batch_route_result_for_path(
+                    let result = batch_route_result_for_path(
                         topology,
                         metrics,
                         routing_graph,
@@ -1048,15 +1063,35 @@ fn execute_batched_route_with_candidates(
                         destination,
                         hop_info,
                         path,
-                    );
+                    )?;
+                    attachment.get_or_insert((origin_index, destination_index));
+                    if best.as_ref().is_none_or(|previous| {
+                        result.summary.total_generalized_cost
+                            < previous.summary.total_generalized_cost
+                    }) {
+                        best = Some(result);
+                    }
                 }
             }
         }
     } else {
-        for origin in origin_candidates {
+        for (origin_index, origin) in origin_candidates.iter().enumerate() {
+            if let Some((first_origin, _)) = attachment
+                && !same_physical_attachment(origin, &origin_candidates[first_origin])
+            {
+                continue;
+            }
             let tree =
                 cached_single_source_edge_tree(origin_tree_cache, topology, routing_graph, origin)?;
-            for destination in destination_candidates {
+            for (destination_index, destination) in destination_candidates.iter().enumerate() {
+                if let Some((_, first_destination)) = attachment
+                    && !same_physical_attachment(
+                        destination,
+                        &destination_candidates[first_destination],
+                    )
+                {
+                    continue;
+                }
                 if same_edge_reverse_pair(origin, destination) {
                     continue;
                 }
@@ -1067,7 +1102,7 @@ fn execute_batched_route_with_candidates(
                 };
                 let path = best_path_from_origin_tree(routing_graph, tree, origin, destination);
                 if let Some(path) = path {
-                    return batch_route_result_for_path(
+                    let result = batch_route_result_for_path(
                         topology,
                         metrics,
                         routing_graph,
@@ -1078,12 +1113,22 @@ fn execute_batched_route_with_candidates(
                         destination,
                         hop_info,
                         path,
-                    );
+                    )?;
+                    attachment.get_or_insert((origin_index, destination_index));
+                    if best.as_ref().is_none_or(|previous| {
+                        result.summary.total_generalized_cost
+                            < previous.summary.total_generalized_cost
+                    }) {
+                        best = Some(result);
+                    }
                 }
             }
         }
     }
 
+    if let Some(result) = best {
+        return Ok(result);
+    }
     let failure = no_route_failure(topology, origin_candidates, destination_candidates);
     if matches!(
         connectivity.disconnected,

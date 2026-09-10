@@ -33,7 +33,7 @@ const ROAD_CLASS_COLORS: Record<string, string> = {
   unknown: "#A3ACB4",
 };
 
-const NUMERIC_KEYS = new Set(["speed_kph", "travel_time_s", "cost_per_km", "max_speed_kph", "grade_pct", "length_m", "delta_speed_kph", "delta_travel_time_s", "delta_cost", "time_ratio"]);
+const NUMERIC_KEYS = new Set(["speed_kph", "travel_time_s", "cost_per_km", "max_speed_kph", "grade_pct", "length_m", "delta_speed_kph", "delta_travel_time_s", "delta_cost", "time_ratio", "elevation_m"]);
 const DIVERGING_KEYS = new Set(["delta_speed_kph", "delta_travel_time_s", "delta_cost", "grade_pct"]);
 
 function divergingRamp(t: number): string {
@@ -149,6 +149,12 @@ function legendTitle(key: string, meta: NetworkEdgesMeta | null): string {
     allowed: `Allowed by ${a}`,
     max_speed_kph: "Posted speed limit (km/h)",
     grade_pct: "Gradient (%)",
+    elevation_m: "Elevation (source metres)",
+    elevation_known: "Source elevation available",
+    structure: "Structure",
+    pedestrian_kind: "Pedestrian connection type",
+    level: "Source level",
+    indoor_location: "Indoor / outdoor",
     delta_speed_kph: `Speed ${b} − ${a} (km/h)`,
     delta_travel_time_s: `Time ${b} − ${a} (s)`,
     delta_cost: `Cost ${b} − ${a}`,

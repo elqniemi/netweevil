@@ -1,7 +1,8 @@
 import { useSyncExternalStore } from "react";
 import type { Timing } from "../api/client";
-import type { FeedStop, GtfsScenario, LabeledPoint, ScenarioInfo, ServiceInfo } from "../api/types";
+import type { FeedStop, GtfsScenario, LabeledPoint, ScenarioInfo, ServiceInfo, TerrainSourceInfo } from "../api/types";
 import type { FeatureCollection } from "../geo/features";
+import { hongKongTransitDefaults, TRANSIT_ANALYSIS_TOOLS } from "./transitDefaults";
 
 export type ToolId =
   | "route"
@@ -16,6 +17,7 @@ export type ToolId =
   | "betweenness"
   | "scenario_batch"
   | "transit_route"
+  | "transit_directions"
   | "transit_service_area"
   | "transit_editor"
   | "network"
@@ -86,6 +88,18 @@ export interface MapStyle {
   polygonOutline: number;
   /** Width of reach network lines in px. */
   networkWidth: number;
+  view3d: boolean;
+  stationPlatforms: boolean;
+  terrainEnabled: boolean;
+  terrainSourceId: string | null;
+  verticalExaggeration: number;
+  pitch: number;
+  xray: boolean;
+  basemapOpacity: number;
+  elevationColor: boolean;
+  altitudeSlice: boolean;
+  minAltitude: number;
+  maxAltitude: number;
 }
 
 export const DEFAULT_MAP_STYLE: MapStyle = {
@@ -100,6 +114,18 @@ export const DEFAULT_MAP_STYLE: MapStyle = {
   polygonOpacity: 0.22,
   polygonOutline: 1.5,
   networkWidth: 2,
+  view3d: false,
+  stationPlatforms: true,
+  terrainEnabled: false,
+  terrainSourceId: null,
+  verticalExaggeration: 3,
+  pitch: 60,
+  xray: true,
+  basemapOpacity: 0.3,
+  elevationColor: false,
+  altitudeSlice: false,
+  minAltitude: -100,
+  maxAltitude: 100,
 };
 
 export interface ResultRecord {
@@ -162,6 +188,14 @@ export interface AppState {
   raw: Partial<Record<ToolId, string | null>>;
   service: ServiceInfo | null;
   result: ResultRecord | null;
+  referenceLayers: { name: string; features: FeatureCollection }[];
+  referenceFitRequest: number;
+  stationGeometry: FeatureCollection | null;
+  stationGeometryStatus: string | null;
+  terrainSources: TerrainSourceInfo[];
+  terrainStatus: string | null;
+  terrainError: string | null;
+  terrainRefreshRequest: number;
   /** Run selected in the results panel (highlighted on the map). */
   selectedRun: number | null;
   running: boolean;
@@ -220,6 +254,14 @@ const initialState: AppState = {
   raw: {},
   service: null,
   result: null,
+  referenceLayers: [],
+  referenceFitRequest: 0,
+  stationGeometry: null,
+  stationGeometryStatus: null,
+  terrainSources: [],
+  terrainStatus: null,
+  terrainError: null,
+  terrainRefreshRequest: 0,
   selectedRun: null,
   running: false,
   timings: [],
@@ -381,8 +423,17 @@ export function updatePoint(slot: string, index: number, patch: Partial<InputPoi
   const current = getPoints(slot);
   if (!current[index]) return;
   const next = current.slice();
-  next[index] = { ...current[index], ...patch };
+  next[index] = patchInputPoint(current[index], patch);
   setPoints(slot, next);
+}
+
+/** A horizontal map edit has no information about the new point's floor. */
+function patchInputPoint(point: InputPoint, patch: Partial<InputPoint>): InputPoint {
+  const moved = (patch.lon !== undefined && patch.lon !== point.lon)
+    || (patch.lat !== undefined && patch.lat !== point.lat);
+  const next = { ...point, ...patch };
+  if (moved && !Object.hasOwn(patch, "z")) delete next.z;
+  return next;
 }
 
 export function removePoint(slot: string, index: number) {
@@ -448,7 +499,7 @@ export function moveRouteEnd(index: number, end: RouteEnd, lon: number, lat: num
   const route = state.routes[index];
   const current = route?.[end];
   if (!current) return;
-  setRouteEnd(index, end, { ...current, lon, lat });
+  setRouteEnd(index, end, patchInputPoint(current, { lon, lat }));
 }
 
 export function swapRoute(index: number) {
@@ -474,7 +525,7 @@ export function updateVia(index: number, via: number, patch: Partial<InputPoint>
     const route = routes[index];
     if (!route || !route.vias[via]) return {};
     const vias = route.vias.slice();
-    vias[via] = { ...vias[via], ...patch };
+    vias[via] = patchInputPoint(vias[via], patch);
     routes[index] = { ...route, vias };
     return { routes };
   });
@@ -513,7 +564,7 @@ export function placeRoutePoint(lon: number, lat: number, viaMode = false): Rout
     addVia(index, { ...point("via"), kind: "break" });
     return "via";
   }
-  setRouteEnd(index, state.activeEnd, { ...route[state.activeEnd]!, lon, lat });
+  setRouteEnd(index, state.activeEnd, patchInputPoint(route[state.activeEnd]!, { lon, lat }));
   return state.activeEnd;
 }
 
@@ -559,6 +610,10 @@ export function resetForm(tool: ToolId) {
   setState((prev) => {
     const form = { ...prev.form };
     delete form[tool];
+    if (TRANSIT_ANALYSIS_TOOLS.some(id => id === tool) && prev.service) {
+      const defaults = hongKongTransitDefaults(prev.service);
+      if (defaults) form[tool] = defaults;
+    }
     const raw = { ...prev.raw };
     delete raw[tool];
     return { form, raw };

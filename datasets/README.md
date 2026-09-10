@@ -68,6 +68,18 @@ curl -L -o datasets/gtfs-openov-nl.zip https://gtfs.openov.nl/gtfs-rt/gtfs-openo
 Any other GTFS zip works with `transit import`; the examples assume the
 OpenOV feed because it overlaps the Groningen street extract.
 
+## Hong Kong full-data example
+
+The [Hong Kong tutorial](../docs/hong-kong-tutorial.md) covers the OSM road
+extract, full outdoor/indoor 3D pedestrian GeoPackages, separate numbered MTR
+platforms and exits, and bus/tram/MTR/light-rail/ferry transit. Run
+`python3 scripts/download_hong_kong_sources.py --list` from the repository root
+for direct downloads and the official CSDI spatial-export pages.
+
+`scripts/setup_hong_kong.sh` reuses local spatial files and writes preparation,
+combined feeds, bindings and audits under `.netweevil/hong-kong/`. Rail timing
+comes from community estimates, and the tutorial records coverage gaps.
+
 ## Licensing
 
 OpenStreetMap extracts are © OpenStreetMap contributors, available under the

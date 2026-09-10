@@ -1,7 +1,8 @@
 import type { InputPoint, ResponseFormat, RouteInput, ToolId } from "../state/store";
 import type { ServiceInfo } from "../api/types";
+import { DEFAULT_TRANSIT_MODES, TRANSIT_MODE_OPTIONS, transitModeSelection } from "../state/transitModes";
 
-export type FieldType = "number" | "text" | "select" | "checkbox" | "datetime" | "json" | "list";
+export type FieldType = "number" | "text" | "select" | "multiselect" | "checkbox" | "datetime" | "json" | "list";
 
 export interface FieldOption {
   value: string;
@@ -921,6 +922,7 @@ const transitModeFields = (): Field[] => [
   },
   { key: "walk_speed_kph", label: "Walk speed (km/h)", type: "number", min: 0.5, step: 0.5, group: "Street access", placeholder: "default" },
   { key: "max_access_distance_m", label: "Max walk access (m)", type: "number", min: 0, step: 100, group: "Street access", placeholder: "default" },
+  { key: "max_endpoint_snap_distance_m", label: "Max marker snap distance (m)", type: "number", default: 50, min: 0, step: 5, group: "Street access", hint: "Maximum distance from a marker to the street network. This is separate from the walking distance to a transit stop. Dashed amber connections are unsurveyed estimates, not routed paths." },
   { key: "max_transfer_distance_m", label: "Max transfer distance (m)", type: "number", min: 0, step: 50, group: "Street access", placeholder: "default" },
   {
     key: "transfer_profile_id",
@@ -934,7 +936,7 @@ const transitModeFields = (): Field[] => [
     ],
   },
   { key: "max_transfers", label: "Max transfers", type: "number", min: 0, step: 1, group: "Transit", placeholder: "default" },
-  { key: "transit_modes", label: "Transit modes (comma-separated, blank = all)", type: "text", group: "Transit", placeholder: "bus, rail, tram" },
+  { key: "transit_modes", label: "Allowed transit modes", type: "multiselect", default: DEFAULT_TRANSIT_MODES, options: TRANSIT_MODE_OPTIONS, group: "Transit", hint: "Checked modes are allowed. Unchecked modes are excluded. MTR uses Subway; light rail uses Tram." },
   { key: "board_slack_s", label: "Boarding slack (s)", type: "number", min: 0, step: 30, group: "Transit", placeholder: "default" },
   { key: "transfer_slack_s", label: "Transfer slack (s)", type: "number", min: 0, step: 30, group: "Transit", placeholder: "default" },
 ];
@@ -948,13 +950,14 @@ function transitModes(form: Record<string, unknown>) {
   if (access.join() !== egress.join()) out.mixed_access_egress = true;
   const streetAccess = str(form, "street_access");
   if (streetAccess) out.street_access = streetAccess;
-  for (const key of ["walk_speed_kph", "max_access_distance_m", "max_transfer_distance_m", "max_transfers", "board_slack_s", "transfer_slack_s"]) {
+  for (const key of ["walk_speed_kph", "max_access_distance_m", "max_endpoint_snap_distance_m", "max_transfer_distance_m", "max_transfers", "board_slack_s", "transfer_slack_s"]) {
     const v = num(form, key);
     if (v !== undefined) out[key] = v;
   }
   if (num(form, "max_access_distance_m") !== undefined) out.max_egress_distance_m = num(form, "max_access_distance_m");
-  const transit = list(form, "transit_modes");
-  if (transit.length) out.transit = transit;
+  // Send [] explicitly when every mode is unchecked; omitting the field
+  // would re-enable the API's default modes.
+  out.transit = transitModeSelection(form.transit_modes);
   const transfer = str(form, "transfer_profile_id");
   if (transfer) out.transfer_profile_id = transfer;
   return out;
@@ -1051,6 +1054,18 @@ const transitRouteTool: ToolDef = {
     return body;
   },
   ready: (ctx) => (!ctx.feedId ? "No transit feed loaded in the API" : needRoute(ctx)),
+};
+
+const transitDirectionsTool: ToolDef = {
+  ...transitRouteTool,
+  id: "transit_directions",
+  label: "Transit directions",
+  path: "/v1/transit-directions",
+  tableKey: "directions",
+  description: "Journey instructions for walking, boarding, riding, transfers and arrival. Route geometry, stops and intermediate stop segments are always included.",
+  supportsGeojson: false,
+  fields: transitRouteTool.fields.filter(field => !["include_geometry", "include_stops", "include_stop_segments"].includes(field.key)),
+  buildEach: (ctx, route, index) => transitRouteTool.buildEach!({ ...ctx, form: { ...ctx.form, include_geometry: true, include_stops: true, include_stop_segments: true } }, route, index),
 };
 
 const transitServiceAreaTool: ToolDef = {
@@ -1221,6 +1236,12 @@ export const NETWORK_COLOR_BY: FieldOption[] = [
   { value: "surface", label: "surface" },
   { value: "smoothness", label: "smoothness" },
   { value: "grade_pct", label: "gradient (%)" },
+  { value: "elevation_m", label: "elevation (source metres)" },
+  { value: "elevation_known", label: "elevation coverage" },
+  { value: "structure", label: "structure / underground" },
+  { value: "pedestrian_kind", label: "pedestrian connection type" },
+  { value: "level", label: "source level" },
+  { value: "indoor_location", label: "indoor / outdoor" },
   { value: "access", label: "source access (car/bike/foot)" },
   { value: "direction", label: "one-way / two-way" },
   { value: "component", label: "connected component" },
@@ -1306,6 +1327,7 @@ export const TOOLS: ToolDef[] = [
   scenarioBatchTool,
   networkTool,
   transitRouteTool,
+  transitDirectionsTool,
   transitServiceAreaTool,
   transitEditorTool,
   simulationTool,

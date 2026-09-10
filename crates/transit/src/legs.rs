@@ -43,6 +43,7 @@ pub(crate) fn reconstruct_legs(
             [final_stop.lon, final_stop.lat],
             [request.destination.lon, request.destination.lat],
         ),
+        geometry_elevation_source: None,
         network_path: egress_network_path,
     }];
     let mut cursor = final_state;
@@ -81,6 +82,7 @@ pub(crate) fn reconstruct_legs(
                         [*from_lon, *from_lat],
                         [stop.lon, stop.lat],
                     ),
+                    geometry_elevation_source: None,
                     network_path: network_path.clone(),
                 });
                 break;
@@ -115,6 +117,7 @@ pub(crate) fn reconstruct_legs(
                         [from.lon, from.lat],
                         [to.lon, to.lat],
                     ),
+                    geometry_elevation_source: None,
                     network_path: network_path.clone(),
                 });
                 cursor = *previous;
@@ -148,6 +151,7 @@ pub(crate) fn reconstruct_legs(
                         bundle,
                         *connection,
                     ),
+                    geometry_elevation_source: None,
                     network_path: None,
                 });
                 cursor = *previous;
@@ -199,6 +203,7 @@ pub(crate) fn reconstruct_arrive_by_legs(
             [request.origin.lon, request.origin.lat],
             [access_stop.lon, access_stop.lat],
         ),
+        geometry_elevation_source: None,
         network_path: access_network_path,
     }];
 
@@ -234,6 +239,7 @@ pub(crate) fn reconstruct_arrive_by_legs(
                         bundle,
                         *connection,
                     ),
+                    geometry_elevation_source: None,
                     network_path: None,
                 });
                 previous_arrival_s = connection.arrival_s;
@@ -270,6 +276,7 @@ pub(crate) fn reconstruct_arrive_by_legs(
                         [from.lon, from.lat],
                         [to.lon, to.lat],
                     ),
+                    geometry_elevation_source: None,
                     network_path: network_path.clone(),
                 });
                 cursor = *next;
@@ -302,6 +309,7 @@ pub(crate) fn reconstruct_arrive_by_legs(
                         [from.lon, from.lat],
                         [request.destination.lon, request.destination.lat],
                     ),
+                    geometry_elevation_source: None,
                     network_path: network_path.clone(),
                 });
                 return Ok((arrival_s, legs));
@@ -349,6 +357,7 @@ pub(crate) fn build_transit_route_stops(legs: &[TransitLeg]) -> Vec<TransitRoute
                 stop_name: leg.from_name.clone(),
                 lon: from[0],
                 lat: from[1],
+                z: None,
                 arrival_s: None,
                 departure_s: Some(leg.departure_s),
                 mode: leg.mode,
@@ -371,6 +380,7 @@ pub(crate) fn build_transit_route_stops(legs: &[TransitLeg]) -> Vec<TransitRoute
             stop_name: leg.to_name.clone(),
             lon: to[0],
             lat: to[1],
+            z: None,
             arrival_s: Some(leg.arrival_s),
             departure_s: None,
             mode: leg.mode,
@@ -404,6 +414,7 @@ pub(crate) fn build_transit_route_stop_segments(
             trip_id: leg.trip_id.clone(),
             headsign: leg.headsign.clone(),
             geometry: leg.geometry.clone(),
+            geometry_elevation_source: leg.geometry_elevation_source.clone(),
         })
         .collect()
 }
