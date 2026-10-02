@@ -54,10 +54,8 @@ pub(crate) fn edge_traversal_cost(
     // speed_limits) only apply to motorized modes — a 50 km/h zone must not
     // speed up pedestrians — and combine per the profile's
     // `speeds.posted_limits` policy.
-    if matches!(
-        profile.profile.mode,
-        TravelMode::Car | TravelMode::Hgv | TravelMode::Transit
-    ) && let Some(max_speed_kph) = edge.max_speed_kph
+    if profile.profile.mode.is_motorized()
+        && let Some(max_speed_kph) = edge.max_speed_kph
     {
         match profile.speeds.posted_limits {
             PostedLimitPolicy::Prefer => speed_kph = max_speed_kph as f64,
@@ -312,6 +310,7 @@ fn highway_name(highway: HighwayClass) -> Option<&'static str> {
         HighwayClass::Pedestrian => Some("pedestrian"),
         HighwayClass::Steps => Some("steps"),
         HighwayClass::Bridleway => Some("bridleway"),
+        HighwayClass::Busway => Some("busway"),
         HighwayClass::Ferry | HighwayClass::Unknown => None,
     }
 }

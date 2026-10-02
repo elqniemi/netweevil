@@ -16,7 +16,7 @@ mod turns;
 pub use compile::{
     ServiceAreaMetric, compile_profile_bundle, compile_profile_bundle_with_acceleration,
     compile_profile_bundle_with_acceleration_with_progress, compile_profile_metrics_with_progress,
-    customize_acceleration, customize_service_area_metric,
+    customize_acceleration, customize_service_area_metric, is_statically_usable,
 };
 pub use load::load_profile;
 pub use progress::{ProfileCompileProgress, ProfileCompileStage};
@@ -26,3 +26,4 @@ pub use schema::{
     ProfileDocument, ProfileHeader, ReturnConfig, ReturnGeometry, SlopeModelConfig, SlopePoint,
     SpeedRule, SpeedsConfig, TagMatch, TemporalProfileConfig, TurnConfig,
 };
+pub use turns::destination_only_entry_cost;

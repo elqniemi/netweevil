@@ -16,6 +16,10 @@ use netweevil_core::{
     TOPOLOGY_BUNDLE_SCHEMA_VERSION, TemporalEffect, TemporalRule, TemporalRuleSet, TopologyBundle,
     TopologyEdgeLayers, TopologyNode, TravelMode, TurnRestriction, TurnRestrictionKind,
 };
+use netweevil_core::{
+    AdrTunnelCategory, CalendarDate, CompiledTemporalProfile, CompiledTemporalRules, DateRange,
+    TurnRestrictionCondition, VehicleRestriction, VehicleRestrictionKind, VehicleRestrictionTable,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -117,12 +121,32 @@ fn round_trips_topology_bundle_binary() {
                 z: 18.0,
             },
         ],
-        edge_layers: TopologyEdgeLayers::from_directed_edges(&[forward, reverse]),
+        edge_layers: TopologyEdgeLayers {
+            vehicle_restrictions: VehicleRestrictionTable {
+                restrictions: vec![
+                    VehicleRestriction {
+                        modes: AccessMask::new(AccessMask::VEHICLES),
+                        kind: VehicleRestrictionKind::MaxHeightCm(380),
+                    },
+                    VehicleRestriction {
+                        modes: AccessMask::new(AccessMask::HGV),
+                        kind: VehicleRestrictionKind::AdrTunnel(AdrTunnelCategory::D),
+                    },
+                ],
+                edges: vec![0, 0, 1],
+                edge_restrictions: vec![0, 1, 0],
+            },
+            ..TopologyEdgeLayers::from_directed_edges(&[forward, reverse])
+        },
         turn_restrictions: vec![TurnRestriction {
             relation_id: 300,
             kind: TurnRestrictionKind::NoTurn,
             edge_path: vec![EdgeId(0)],
             mode_mask: AccessMask::new(AccessMask::FOOT),
+            condition: Some(TurnRestrictionCondition {
+                rule_set_id: 0,
+                applies_statically: true,
+            }),
         }],
         names: vec!["path name".to_string()],
         edge_based_topology: Default::default(),
@@ -149,12 +173,28 @@ fn round_trips_topology_bundle_binary() {
         },
         temporal_rule_sets: vec![TemporalRuleSet {
             rules: vec![TemporalRule {
-                day_mask: netweevil_core::EVERY_DAY,
-                intervals: vec![MinuteInterval {
-                    start_minute: 9 * 60,
-                    end_minute: 18 * 60,
-                }],
-                effect: TemporalEffect::OpenOnly,
+                modes: AccessMask::HGV,
+                dates: Some(DateRange {
+                    start: CalendarDate {
+                        year: None,
+                        month: 11,
+                        day: 1,
+                    },
+                    end: CalendarDate {
+                        year: None,
+                        month: 4,
+                        day: 1,
+                    },
+                }),
+                weekdays_include_holidays: true,
+                ..TemporalRule::new(
+                    netweevil_core::EVERY_DAY,
+                    vec![MinuteInterval {
+                        start_minute: 9 * 60,
+                        end_minute: 18 * 60,
+                    }],
+                    TemporalEffect::MaxSpeed(80.0),
+                )
             }],
         }],
     };
@@ -182,8 +222,16 @@ fn round_trips_topology_bundle_binary() {
         read.feature_attributes
             .value_matches(1, "indoor_location", "paid")
     );
-    assert_eq!(read.temporal_rule_sets.len(), 1);
+    assert_eq!(read.temporal_rule_sets, bundle.temporal_rule_sets);
+    assert_eq!(
+        read.edge_layers.vehicle_restrictions,
+        bundle.edge_layers.vehicle_restrictions
+    );
     assert_eq!(read.turn_restrictions.len(), 1);
+    assert_eq!(
+        read.turn_restrictions[0].condition,
+        bundle.turn_restrictions[0].condition
+    );
     assert_eq!(read.names, bundle.names);
 }
 
@@ -303,9 +351,23 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
             traffic_signal_penalty_s: 4.0,
             roundabout_entry_penalty_s: 2.0,
             cost_time_weight: 1.5,
+            destination_only_penalty_s: 600.0,
         },
         components: Vec::new(),
-        temporal: Default::default(),
+        temporal: CompiledTemporalProfile {
+            rules: CompiledTemporalRules {
+                rule_sets: vec![TemporalRuleSet {
+                    rules: vec![TemporalRule::new(
+                        netweevil_core::EVERY_DAY,
+                        Vec::new(),
+                        TemporalEffect::SpeedFactor(1.3),
+                    )],
+                }],
+                edges: vec![0],
+                edge_rule_sets: vec![0],
+            },
+            ..Default::default()
+        },
         source_topology_bundle_id: CacheBundleId::new("topology-test"),
         acceleration: None,
         edge_metrics: vec![CompiledEdgeMetric {
@@ -320,6 +382,8 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
     let read = read_compiled_profile_bundle(file.path()).expect("bundle should deserialize");
     assert_eq!(read.turn_costs.left_penalty_s, 7.0);
     assert_eq!(read.turn_costs.cost_time_weight, 1.5);
+    assert_eq!(read.turn_costs.destination_only_penalty_s, 600.0);
+    assert_eq!(read.temporal.rules, bundle.temporal.rules);
     assert_eq!(read.edge_metrics.len(), 1);
 
     // Fixed-point weights, including both sentinels, are dropped from every

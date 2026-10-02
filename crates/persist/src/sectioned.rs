@@ -25,11 +25,12 @@ use memmap2::Mmap;
 use netweevil_core::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId,
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
-    CompiledTemporalProfile, CompiledTurnCostConfig, DatasetAccelerationBundle,
-    EDGE_NAME_BUNDLE_SCHEMA_VERSION, EdgeBasedTopology, EdgeGuidance, EdgeId, EdgeNameBundle,
-    EdgePresentation, EdgeProfileAttributes, FeatureAttributeColumn, FeatureAttributeColumnData,
-    FeatureAttributeDefinition, FeatureAttributeTable, NodeId, NodeSpatialIndex, RoutingEdge,
-    TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle, TopologyEdgeLayers, TopologyNode, TravelMode,
+    CompiledTemporalProfile, CompiledTemporalRules, CompiledTurnCostConfig,
+    DatasetAccelerationBundle, EDGE_NAME_BUNDLE_SCHEMA_VERSION, EdgeBasedTopology, EdgeGuidance,
+    EdgeId, EdgeNameBundle, EdgePresentation, EdgeProfileAttributes, FeatureAttributeColumn,
+    FeatureAttributeColumnData, FeatureAttributeDefinition, FeatureAttributeTable, NodeId,
+    NodeSpatialIndex, RoutingEdge, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle,
+    TopologyEdgeLayers, TopologyNode, TravelMode, VehicleRestrictionTable,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -648,7 +649,10 @@ fn encode_compiled_profile(
                 source_acceleration_bundle_id: acceleration.source_acceleration_bundle_id.clone(),
                 algorithm: acceleration.algorithm.clone(),
             }),
-        temporal: bundle.temporal,
+        temporal: CompiledTemporalProfile {
+            rules: Default::default(),
+            ..bundle.temporal.clone()
+        },
         components: bundle
             .components
             .iter()
@@ -685,7 +689,13 @@ fn encode_compiled_profile(
         )?;
         writer.write_interned(&component.edge_values)?;
     }
-    Ok(())
+    let rules = &bundle.temporal.rules;
+    rules
+        .validate(bundle.edge_metrics.len())
+        .map_err(anyhow::Error::msg)?;
+    writer.write_bincode(&rules.rule_sets)?;
+    writer.write_u32s(&rules.edges)?;
+    writer.write_u32s(&rules.edge_rule_sets)
 }
 
 pub(crate) fn read_compiled_profile_sectioned(
@@ -734,6 +744,16 @@ pub(crate) fn read_compiled_profile_sectioned(
             invert_overlay: component.invert_overlay,
         });
     }
+    let mut temporal = header.temporal;
+    temporal.rules = CompiledTemporalRules {
+        rule_sets: reader.read_bincode()?,
+        edges: reader.read_u32s()?,
+        edge_rule_sets: reader.read_u32s()?,
+    };
+    temporal
+        .rules
+        .validate(edge_metrics.len())
+        .map_err(anyhow::Error::msg)?;
 
     Ok(CompiledProfileBundle {
         schema_version: header.schema_version,
@@ -742,7 +762,7 @@ pub(crate) fn read_compiled_profile_sectioned(
         mode: header.mode,
         turn_costs: header.turn_costs,
         components,
-        temporal: header.temporal,
+        temporal,
         source_topology_bundle_id: header.source_topology_bundle_id,
         acceleration: header
             .acceleration
@@ -1197,6 +1217,15 @@ fn encode_topology(writer: &mut SectionWriter, bundle: &TopologyBundle) -> Resul
             .map(|edge| edge.geometry_len)
             .collect::<Vec<_>>(),
     )?;
+    // Physical vehicle restrictions are sparse: a small record table plus
+    // edge-sorted rows, which delta-encode to about a byte each.
+    let vehicle_restrictions = &layers.vehicle_restrictions;
+    vehicle_restrictions
+        .validate(edge_count)
+        .map_err(anyhow::Error::msg)?;
+    writer.write_bincode(&vehicle_restrictions.restrictions)?;
+    writer.write_u32s(&vehicle_restrictions.edges)?;
+    writer.write_u32s(&vehicle_restrictions.edge_restrictions)?;
 
     let ebt = &bundle.edge_based_topology;
     if derived_edge_based_topology(bundle.nodes.len(), routing).as_ref() == Some(ebt) {
@@ -1241,7 +1270,7 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
     // independent: decode the three groups concurrently.
     let mut node_reader = reader.take(5)?;
     let mut routing_reader = reader.take(11)?;
-    let mut layer_reader = reader.take(5)?;
+    let mut layer_reader = reader.take(8)?;
     let (nodes, (routing, layers)) = rayon::join(
         move || -> Result<_> {
             let reader = &mut node_reader;
@@ -1345,15 +1374,23 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
                             })
                         })
                         .collect::<Result<Vec<_>>>()?;
+                    let vehicle_restrictions = VehicleRestrictionTable {
+                        restrictions: reader.read_bincode()?,
+                        edges: reader.read_u32s()?,
+                        edge_restrictions: reader.read_u32s()?,
+                    };
+                    vehicle_restrictions
+                        .validate(edge_count)
+                        .map_err(anyhow::Error::msg)?;
 
-                    Ok((profile, presentation))
+                    Ok((profile, presentation, vehicle_restrictions))
                 },
             )
         },
     );
     let (nodes, spatial_index) = nodes?;
     let routing = routing?;
-    let (profile, presentation) = layers?;
+    let (profile, presentation, vehicle_restrictions) = layers?;
 
     let explicit_transitions = match reader.read_bincode::<Stored<()>>()? {
         Stored::Derived => None,
@@ -1410,6 +1447,7 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
             routing,
             profile,
             presentation,
+            vehicle_restrictions,
         },
         turn_restrictions: header.turn_restrictions,
         names: header.names,

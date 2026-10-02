@@ -1,41 +1,20 @@
 use netweevil_core::{
-    AccessMask, EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW, EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY,
-    HighwayClass, RoadClass, SmoothnessClass, SurfaceClass,
+    HighwayClass, RoadClass, SmoothnessClass, SurfaceClass, TemporalEffect, TemporalRule,
 };
 use osmpbfreader::Tags;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EdgeDirection {
-    Both,
-    ForwardOnly,
-    ReverseOnly,
-}
+use crate::access::{ConditionalCounts, EdgeDirection, classify_direction};
+use crate::conditional::{Condition, parse_conditional};
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct DirectionalAccess {
-    pub(crate) forward_access: AccessMask,
-    pub(crate) reverse_access: AccessMask,
-    pub(crate) forward_flags: u32,
-    pub(crate) reverse_flags: u32,
-}
-
-pub(crate) fn classify_way(tags: &Tags) -> Option<(RoadClass, HighwayClass, AccessMask)> {
+/// Road and highway class of a routable way or ferry route.
+pub(crate) fn classify_way(tags: &Tags) -> Option<(RoadClass, HighwayClass)> {
     if let Some(highway) = tag(tags, "highway") {
         let highway_class = classify_highway(highway)?;
-        let road_class = highway_class.road_class();
-        return Some((
-            road_class,
-            highway_class,
-            classify_access(tags, highway, tag(tags, "route")),
-        ));
+        return Some((highway_class.road_class(), highway_class));
     }
 
     if tag(tags, "route") == Some("ferry") || tag(tags, "ferry").is_some() {
-        return Some((
-            RoadClass::Ferry,
-            HighwayClass::Ferry,
-            classify_access(tags, "", Some("ferry")),
-        ));
+        return Some((RoadClass::Ferry, HighwayClass::Ferry));
     }
 
     None
@@ -64,6 +43,7 @@ fn classify_highway(highway: &str) -> Option<HighwayClass> {
         "pedestrian" => Some(HighwayClass::Pedestrian),
         "steps" => Some(HighwayClass::Steps),
         "bridleway" => Some(HighwayClass::Bridleway),
+        "busway" => Some(HighwayClass::Busway),
         _ => None,
     }
 }
@@ -103,266 +83,8 @@ pub(crate) fn classify_toll(tags: &Tags) -> bool {
     matches!(tag(tags, "toll"), Some("yes" | "true" | "1"))
 }
 
-fn classify_access(tags: &Tags, highway: &str, route: Option<&str>) -> AccessMask {
-    if route == Some("ferry") {
-        return apply_access_overrides(
-            tags,
-            AccessMask::CAR
-                | AccessMask::BICYCLE
-                | AccessMask::FOOT
-                | AccessMask::TRANSIT
-                | AccessMask::HGV,
-        );
-    }
-
-    let bits = match highway {
-        "motorway" | "motorway_link" => AccessMask::CAR | AccessMask::HGV,
-        "trunk" | "trunk_link" | "primary" | "primary_link" | "secondary" | "secondary_link"
-        | "tertiary" | "tertiary_link" | "residential" | "unclassified" | "living_street"
-        | "service" => AccessMask::CAR | AccessMask::BICYCLE | AccessMask::FOOT | AccessMask::HGV,
-        "track" => AccessMask::CAR | AccessMask::BICYCLE | AccessMask::FOOT | AccessMask::HGV,
-        "path" | "footway" | "pedestrian" | "steps" => AccessMask::FOOT,
-        "cycleway" => AccessMask::BICYCLE | AccessMask::FOOT,
-        "bridleway" => AccessMask::FOOT,
-        _ => AccessMask::CAR | AccessMask::BICYCLE | AccessMask::FOOT,
-    };
-    apply_access_overrides(tags, bits)
-}
-
-fn apply_access_overrides(tags: &Tags, base_bits: u16) -> AccessMask {
-    let mut bits = base_bits;
-
-    if tag_is_restricted(tags, "access") {
-        bits = 0;
-    }
-    if tag_is_restricted(tags, "vehicle") {
-        bits &= !(AccessMask::CAR | AccessMask::BICYCLE | AccessMask::TRANSIT | AccessMask::HGV);
-    }
-    if tag_is_restricted(tags, "motor_vehicle") {
-        bits &= !(AccessMask::CAR | AccessMask::TRANSIT | AccessMask::HGV);
-    }
-    if tag_is_restricted(tags, "motorcar") {
-        bits &= !AccessMask::CAR;
-    }
-    if tag_is_restricted(tags, "bicycle") {
-        bits &= !AccessMask::BICYCLE;
-    }
-    if tag_is_restricted(tags, "foot") {
-        bits &= !AccessMask::FOOT;
-    }
-    if tag_is_restricted(tags, "psv") || tag_is_restricted(tags, "bus") {
-        bits &= !AccessMask::TRANSIT;
-    }
-    if tag_is_restricted(tags, "hgv") {
-        bits &= !AccessMask::HGV;
-    }
-
-    if tag_is_allowed(tags, "vehicle") {
-        bits |= AccessMask::CAR | AccessMask::BICYCLE | AccessMask::TRANSIT | AccessMask::HGV;
-    }
-    if tag_is_allowed(tags, "motor_vehicle") {
-        bits |= AccessMask::CAR | AccessMask::TRANSIT | AccessMask::HGV;
-    }
-    if tag_is_allowed(tags, "motorcar") {
-        bits |= AccessMask::CAR;
-    }
-    if tag_is_allowed(tags, "bicycle") {
-        bits |= AccessMask::BICYCLE;
-    }
-    if tag_is_allowed(tags, "foot") {
-        bits |= AccessMask::FOOT;
-    }
-    if tag_is_allowed(tags, "psv") || tag_is_allowed(tags, "bus") {
-        bits |= AccessMask::TRANSIT;
-    }
-    if tag_is_allowed(tags, "hgv") {
-        bits |= AccessMask::HGV;
-    }
-
-    AccessMask::new(bits)
-}
-
-fn tag_is_restricted(tags: &Tags, key: &str) -> bool {
-    matches!(tag(tags, key), Some("no" | "private"))
-}
-
-fn tag_is_allowed(tags: &Tags, key: &str) -> bool {
-    matches!(
-        tag(tags, key),
-        Some("yes" | "designated" | "official" | "permissive")
-    )
-}
-
 pub(crate) fn is_traffic_signal_node(tags: &Tags) -> bool {
     tag(tags, "highway") == Some("traffic_signals")
-}
-
-fn classify_direction(tags: &Tags, road_class: RoadClass) -> EdgeDirection {
-    match tag(tags, "oneway") {
-        Some("-1") => EdgeDirection::ReverseOnly,
-        Some("yes" | "true" | "1") => EdgeDirection::ForwardOnly,
-        Some("no" | "false" | "0") => EdgeDirection::Both,
-        _ if road_class == RoadClass::Motorway => EdgeDirection::ForwardOnly,
-        _ if tag(tags, "junction") == Some("roundabout") => EdgeDirection::ForwardOnly,
-        _ => EdgeDirection::Both,
-    }
-}
-
-pub(crate) fn classify_directional_access(
-    tags: &Tags,
-    highway: HighwayClass,
-    road_class: RoadClass,
-    base_access: AccessMask,
-) -> DirectionalAccess {
-    let generic_direction = classify_direction(tags, road_class);
-    let mut directional = DirectionalAccess {
-        forward_access: AccessMask::new(0),
-        reverse_access: AccessMask::new(0),
-        forward_flags: 0,
-        reverse_flags: 0,
-    };
-
-    for bit in [AccessMask::CAR, AccessMask::TRANSIT, AccessMask::HGV] {
-        if base_access.contains(bit) {
-            add_directional_bit(&mut directional, bit, generic_direction);
-        }
-    }
-
-    if base_access.contains(AccessMask::FOOT) {
-        let explicit_direction =
-            explicit_oneway_direction(tags, &["oneway:foot", "oneway:pedestrian"])
-                .or_else(|| access_forward_backward_direction(tags, "foot"));
-        if let Some(foot_direction) = explicit_direction {
-            add_directional_bit(&mut directional, AccessMask::FOOT, foot_direction);
-        } else {
-            add_bidirectional_bit_with_inferred_counterflow(
-                &mut directional,
-                AccessMask::FOOT,
-                generic_direction,
-                EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY,
-            );
-        }
-    }
-
-    if base_access.contains(AccessMask::BICYCLE) {
-        let explicit_direction =
-            explicit_oneway_direction(tags, &["oneway:bicycle", "bicycle:oneway"])
-                .or_else(|| access_forward_backward_direction(tags, "bicycle"));
-        if let Some(direction) = explicit_direction {
-            add_directional_bit(&mut directional, AccessMask::BICYCLE, direction);
-        } else if has_bicycle_opposite(tags) {
-            add_directional_bit(&mut directional, AccessMask::BICYCLE, EdgeDirection::Both);
-        } else if highway == HighwayClass::Cycleway {
-            add_directional_bit(&mut directional, AccessMask::BICYCLE, generic_direction);
-        } else if is_ordinary_bicycle_contraflow_road(highway) {
-            add_bidirectional_bit_with_inferred_counterflow(
-                &mut directional,
-                AccessMask::BICYCLE,
-                generic_direction,
-                EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW,
-            );
-        } else {
-            add_directional_bit(&mut directional, AccessMask::BICYCLE, generic_direction);
-        }
-    }
-
-    directional
-}
-
-fn add_directional_bit(directional: &mut DirectionalAccess, bit: u16, direction: EdgeDirection) {
-    match direction {
-        EdgeDirection::Both => {
-            directional.forward_access.0 |= bit;
-            directional.reverse_access.0 |= bit;
-        }
-        EdgeDirection::ForwardOnly => {
-            directional.forward_access.0 |= bit;
-        }
-        EdgeDirection::ReverseOnly => {
-            directional.reverse_access.0 |= bit;
-        }
-    }
-}
-
-fn add_bidirectional_bit_with_inferred_counterflow(
-    directional: &mut DirectionalAccess,
-    bit: u16,
-    generic_direction: EdgeDirection,
-    flag: u32,
-) {
-    directional.forward_access.0 |= bit;
-    directional.reverse_access.0 |= bit;
-    match generic_direction {
-        EdgeDirection::Both => {}
-        EdgeDirection::ForwardOnly => directional.reverse_flags |= flag,
-        EdgeDirection::ReverseOnly => directional.forward_flags |= flag,
-    }
-}
-
-fn explicit_oneway_direction(tags: &Tags, keys: &[&str]) -> Option<EdgeDirection> {
-    keys.iter()
-        .find_map(|key| tag(tags, key).and_then(parse_oneway_direction))
-}
-
-fn parse_oneway_direction(value: &str) -> Option<EdgeDirection> {
-    match value {
-        "-1" | "reverse" => Some(EdgeDirection::ReverseOnly),
-        "yes" | "true" | "1" => Some(EdgeDirection::ForwardOnly),
-        "no" | "false" | "0" => Some(EdgeDirection::Both),
-        _ => None,
-    }
-}
-
-fn access_forward_backward_direction(tags: &Tags, prefix: &str) -> Option<EdgeDirection> {
-    let forward_key = format!("{prefix}:forward");
-    let backward_key = format!("{prefix}:backward");
-    let forward_allowed = tag(tags, &forward_key).map(|value| !is_access_no(value));
-    let backward_allowed = tag(tags, &backward_key).map(|value| !is_access_no(value));
-    match (forward_allowed, backward_allowed) {
-        (Some(true), Some(true)) => Some(EdgeDirection::Both),
-        (Some(true), Some(false)) | (Some(true), None) | (None, Some(false)) => {
-            Some(EdgeDirection::ForwardOnly)
-        }
-        (Some(false), Some(true)) | (Some(false), None) | (None, Some(true)) => {
-            Some(EdgeDirection::ReverseOnly)
-        }
-        (Some(false), Some(false)) => Some(EdgeDirection::Both),
-        (None, None) => None,
-    }
-}
-
-fn is_access_no(value: &str) -> bool {
-    matches!(value, "no" | "private")
-}
-
-fn has_bicycle_opposite(tags: &Tags) -> bool {
-    matches!(
-        tag(tags, "cycleway"),
-        Some("opposite" | "opposite_lane" | "opposite_track" | "opposite_share_busway")
-    ) || matches!(
-        tag(tags, "cycleway:left"),
-        Some("opposite" | "opposite_lane" | "opposite_track" | "opposite_share_busway")
-    ) || matches!(
-        tag(tags, "cycleway:right"),
-        Some("opposite" | "opposite_lane" | "opposite_track" | "opposite_share_busway")
-    )
-}
-
-fn is_ordinary_bicycle_contraflow_road(highway: HighwayClass) -> bool {
-    matches!(
-        highway,
-        HighwayClass::Primary
-            | HighwayClass::PrimaryLink
-            | HighwayClass::Secondary
-            | HighwayClass::SecondaryLink
-            | HighwayClass::Tertiary
-            | HighwayClass::TertiaryLink
-            | HighwayClass::Residential
-            | HighwayClass::Unclassified
-            | HighwayClass::LivingStreet
-            | HighwayClass::Service
-            | HighwayClass::Track
-    )
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -439,6 +161,49 @@ pub(crate) fn parse_maxspeed_kph(value: &str) -> Option<f32> {
     // Non-numeric values ("none", "signals", "walk", zone refs) carry no
     // usable posted limit.
     value.parse::<f32>().ok().and_then(positive_speed)
+}
+
+/// Posted-speed rules from `maxspeed:conditional` and its `:forward` /
+/// `:backward` forms, per direction. Only single time-conditional entries
+/// import: several entries could overlap, and overlapping speed rules
+/// would compound.
+pub(crate) fn conditional_speed_rules(
+    tags: &Tags,
+) -> (Vec<TemporalRule>, Vec<TemporalRule>, ConditionalCounts) {
+    let mut counts = ConditionalCounts::default();
+    let mut parse = |key: &str| {
+        let raw = tag(tags, key)?;
+        let rules = maxspeed_rules(raw);
+        if rules.is_some() {
+            counts.imported += 1;
+        } else {
+            counts.skipped += 1;
+        }
+        Some(rules.unwrap_or_default())
+    };
+    let shared = parse("maxspeed:conditional");
+    let forward = parse("maxspeed:forward:conditional").or_else(|| shared.clone());
+    let backward = parse("maxspeed:backward:conditional").or(shared);
+    (
+        forward.unwrap_or_default(),
+        backward.unwrap_or_default(),
+        counts,
+    )
+}
+
+fn maxspeed_rules(raw: &str) -> Option<Vec<TemporalRule>> {
+    let entries = parse_conditional(raw)?;
+    let [entry] = entries.as_slice() else {
+        return None;
+    };
+    let kph = parse_maxspeed_kph(entry.value)?;
+    match &entry.condition {
+        condition @ Condition::Time(_) => condition.time_rules(
+            TemporalEffect::MaxSpeed(kph),
+            netweevil_core::AccessMask::MOTOR_VEHICLES,
+        ),
+        _ => None,
+    }
 }
 
 fn positive_speed(kph: f32) -> Option<f32> {

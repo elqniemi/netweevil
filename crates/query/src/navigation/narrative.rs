@@ -29,7 +29,12 @@ fn timing(mode: TravelMode) -> VerbalTiming {
             then_within_m: 40,
             min_pre_alert_m: 80,
         },
-        TravelMode::Car | TravelMode::Hgv | TravelMode::Transit => VerbalTiming {
+        TravelMode::Car
+        | TravelMode::Hgv
+        | TravelMode::Bus
+        | TravelMode::Taxi
+        | TravelMode::Motorcycle
+        | TravelMode::Moped => VerbalTiming {
             then_within_m: 60,
             min_pre_alert_m: 150,
         },
@@ -41,7 +46,12 @@ fn pre_alert_lead_m(mode: TravelMode, approach: Option<HighwayClass>) -> u64 {
     match mode {
         TravelMode::Foot => 50,
         TravelMode::Bicycle => 150,
-        TravelMode::Car | TravelMode::Hgv | TravelMode::Transit => match approach {
+        TravelMode::Car
+        | TravelMode::Hgv
+        | TravelMode::Bus
+        | TravelMode::Taxi
+        | TravelMode::Motorcycle
+        | TravelMode::Moped => match approach {
             Some(
                 HighwayClass::Motorway
                 | HighwayClass::MotorwayLink

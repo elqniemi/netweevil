@@ -10,8 +10,9 @@ use anyhow::Result;
 use netweevil_core::{
     COMPILED_ACCELERATION_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId,
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
-    CompiledTemporalProfile, CompiledTurnCostConfig, DatasetAccelerationBundle,
-    EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, NO_FEATURE_ROW, RoadClass, TopologyBundle,
+    CompiledTemporalProfile, CompiledTemporalRules, CompiledTurnCostConfig,
+    DatasetAccelerationBundle, EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, NO_FEATURE_ROW,
+    RoadClass, TemporalEffect, TemporalRule, TemporalRuleSet, TopologyBundle,
 };
 
 use crate::components::{ParsedCostComponent, parse_component_expression};
@@ -23,7 +24,7 @@ use crate::progress::{
     PercentReporter, ProfileCompileProgress, ProfileCompileStage, emit_compile_progress,
 };
 use crate::schema::ProfileDocument;
-use crate::turns::transition_turn_penalty_cost;
+use crate::turns::{destination_only_entry_cost, transition_turn_penalty_cost};
 
 pub fn compile_profile_bundle(
     profile: &ProfileDocument,
@@ -159,6 +160,9 @@ where
         })
         .collect::<Vec<_>>();
     let mut edge_reporter = PercentReporter::starting_at_zero();
+    let vehicle_excluded = vehicle_excluded_edges(profile, topology, mode_bit);
+    let mut vehicle_excluded_cursor = vehicle_excluded.iter().peekable();
+    let mut temporal_rules = TemporalRuleResolver::default();
 
     emit_compile_progress(
         &mut progress,
@@ -186,7 +190,12 @@ where
         let facility = profile.facilities.classes.iter().find_map(|(class, cost)| {
             attribute_matches(&profile.facilities.attribute, class).then_some(cost)
         });
-        let metric = if !edge.access_mask.contains(mode_bit)
+        let vehicle_excluded = vehicle_excluded_cursor
+            .next_if(|&&edge| edge as usize == edge_index)
+            .is_some();
+        let metric = if !(edge.access_mask.contains(mode_bit)
+            || edge_profile.conditional_access.contains(mode_bit))
+            || vehicle_excluded
             || (edge.road_class == RoadClass::Ferry && !profile.ferry.allow)
             || is_directionally_excluded(profile, &edge)
             || is_excluded(profile, &edge, edge_profile.highway, &attribute_matches)
@@ -255,6 +264,30 @@ where
                     .map_or(1.0, ParsedCostComponent::default_overlay_multiplier);
                 cost += component.compiled.weight * value * overlay_multiplier;
             }
+            if let Some(rule_set) = routing_edge
+                .temporal_rule_id
+                .and_then(|id| topology.temporal_rule_sets.get(id as usize))
+            {
+                temporal_rules.resolve(edge_index, rule_set, mode_bit, |max_speed_kph| {
+                    // Travel time with the conditional limit in place of the
+                    // static one, through the same speed rules and policy.
+                    let limited = netweevil_core::DirectedEdge {
+                        max_speed_kph: Some(max_speed_kph),
+                        ..edge
+                    };
+                    edge_traversal_cost(
+                        profile,
+                        &limited,
+                        length_m,
+                        edge_profile.highway,
+                        routing_edge.ascent_m,
+                        routing_edge.descent_m,
+                        facility,
+                        &attribute_matches,
+                    )
+                    .map(|limited| traversal.travel_time_s / limited.travel_time_s)
+                });
+            }
             CompiledEdgeMetric {
                 edge_id: edge.edge_id,
                 travel_time_s: Some(traversal.travel_time_s),
@@ -306,6 +339,7 @@ where
         traffic_signal_penalty_s: profile.turns.traffic_signal_penalty_s,
         roundabout_entry_penalty_s: profile.turns.roundabout_entry_penalty_s,
         cost_time_weight: profile.cost.time_weight,
+        destination_only_penalty_s: profile.preferences.destination_only_penalty_s,
     };
     let compiled_acceleration = acceleration.map(|(bundle, bundle_id)| {
         if customize {
@@ -358,11 +392,97 @@ where
         temporal: CompiledTemporalProfile {
             allow_wait: profile.temporal.allow_wait,
             max_wait_s: profile.temporal.max_wait_s,
+            rules: temporal_rules.finish(),
         },
         source_topology_bundle_id,
         acceleration: compiled_acceleration,
         edge_metrics,
     })
+}
+
+/// Sorted edges whose physical restrictions the profile's vehicle
+/// violates.
+fn vehicle_excluded_edges(
+    profile: &ProfileDocument,
+    topology: &TopologyBundle,
+    mode_bit: u16,
+) -> Vec<u32> {
+    let Some(vehicle) = &profile.vehicle else {
+        return Vec::new();
+    };
+    let table = &topology.edge_layers.vehicle_restrictions;
+    table.excluded_edges(&table.excluded_restrictions(vehicle, mode_bit))
+}
+
+/// Resolves dataset edge schedules that carry posted-speed rules for one
+/// profile: rules of other modes are dropped, posted-speed rules become
+/// this profile's speed factors, and identical resolved sets are shared.
+/// Edges without posted-speed rules keep using the dataset rule set, which
+/// time-dependent searches filter by mode themselves.
+#[derive(Default)]
+struct TemporalRuleResolver {
+    rules: CompiledTemporalRules,
+    ids: HashMap<String, u32>,
+}
+
+impl TemporalRuleResolver {
+    /// `limited_speed_factor(kph)` is the speed factor of the edge under a
+    /// posted limit of `kph`, or `None` when the edge is impassable then.
+    fn resolve(
+        &mut self,
+        edge_index: usize,
+        rule_set: &TemporalRuleSet,
+        mode_bit: u16,
+        mut limited_speed_factor: impl FnMut(f32) -> Option<f64>,
+    ) {
+        let has_posted_speed = rule_set.rules.iter().any(|rule| {
+            rule.applies_to_mode(mode_bit) && matches!(rule.effect, TemporalEffect::MaxSpeed(_))
+        });
+        if !has_posted_speed {
+            return;
+        }
+        let mut resolved = Vec::with_capacity(rule_set.rules.len());
+        for rule in rule_set
+            .rules
+            .iter()
+            .filter(|rule| rule.applies_to_mode(mode_bit))
+        {
+            let effect = match rule.effect {
+                TemporalEffect::MaxSpeed(kph) => match limited_speed_factor(kph) {
+                    Some(factor) if factor.is_finite() && factor > 0.0 => {
+                        let factor = factor as f32;
+                        // A limit that does not change this profile's speed
+                        // is not a time-varying regime.
+                        if factor == 1.0 {
+                            continue;
+                        }
+                        TemporalEffect::SpeedFactor(factor)
+                    }
+                    _ => continue,
+                },
+                effect => effect,
+            };
+            resolved.push(TemporalRule {
+                effect,
+                modes: 0,
+                ..rule.clone()
+            });
+        }
+        let set = TemporalRuleSet { rules: resolved };
+        // Debug output is exact for the rules' integers and floats.
+        let key = format!("{set:?}");
+        let next_id = self.rules.rule_sets.len() as u32;
+        let id = *self.ids.entry(key).or_insert_with(|| {
+            self.rules.rule_sets.push(set);
+            next_id
+        });
+        self.rules.edges.push(edge_index as u32);
+        self.rules.edge_rule_sets.push(id);
+    }
+
+    fn finish(self) -> CompiledTemporalRules {
+        self.rules
+    }
 }
 
 struct ComponentWork {
@@ -567,6 +687,7 @@ fn cost_base_weight<'a>(
     topology: &'a TopologyBundle,
     edge_metrics: &'a [CompiledEdgeMetric],
     turns: &'a CompiledTurnCostConfig,
+    mode_bit: u16,
 ) -> impl Fn(usize, usize) -> f64 + Sync + 'a {
     move |edge_index, next_index| {
         edge_metrics[next_index]
@@ -578,7 +699,7 @@ fn cost_base_weight<'a>(
                     edge_index,
                     next_index,
                     turns.cost_time_weight,
-                )
+                ) + destination_only_entry_cost(topology, turns, mode_bit, edge_index, next_index)
             })
     }
 }
@@ -667,8 +788,7 @@ fn transition_arcs(
     let pairwise_forbidden_turns = build_pairwise_forbidden_turn_table(topology, mode_bit);
     let usable = |edge_index: usize| {
         edge_metrics[edge_index].generalized_cost.is_some()
-            && topology.routing_edge(edge_index).flags & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION
-                == 0
+            && is_statically_usable(topology, edge_index, mode_bit)
     };
     // Base arcs mirror the exact engine's transition construction: both
     // endpoint edges traversable and static, the pairwise turn allowed.
@@ -1093,7 +1213,7 @@ fn compile_acceleration_with_progress(
         });
         let cost = context.customize(
             topology,
-            cost_base_weight(topology, edge_metrics, turns),
+            cost_base_weight(topology, edge_metrics, turns, mode_bit),
             |done| {
                 reporter.emit_if_needed(
                     done as u64,
@@ -1147,11 +1267,9 @@ fn traversal_length_m(topology: &TopologyBundle, edge: &netweevil_core::Directed
 
 fn build_pairwise_forbidden_turn_table(topology: &TopologyBundle, mode_bit: u16) -> Vec<Vec<u32>> {
     let mut forbidden = vec![Vec::new(); topology.edge_count()];
-    for restriction in topology
-        .turn_restrictions
-        .iter()
-        .filter(|restriction| restriction.mode_mask.contains(mode_bit))
-    {
+    for restriction in topology.turn_restrictions.iter().filter(|restriction| {
+        restriction.mode_mask.contains(mode_bit) && restriction.applies_statically()
+    }) {
         if restriction.edge_path.len() != 2 {
             continue;
         }
@@ -1164,6 +1282,17 @@ fn build_pairwise_forbidden_turn_table(topology: &TopologyBundle, mode_bit: u16)
         blocked.dedup();
     }
     forbidden
+}
+
+/// Static routing and the hierarchy skip edges that exist only for
+/// time-dependent searches: scenario-materialized directions and edges whose
+/// access for the mode comes from a time condition alone.
+pub fn is_statically_usable(topology: &TopologyBundle, edge_index: usize, mode_bit: u16) -> bool {
+    topology.routing_edge(edge_index).flags & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION == 0
+        && topology
+            .edge_profile(edge_index)
+            .access_mask
+            .contains(mode_bit)
 }
 
 #[cfg(test)]

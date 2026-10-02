@@ -139,6 +139,7 @@ fn restricted_astar_matches_restricted_dijkstra_on_random_graphs() {
                     EdgeId(third as u32),
                 ],
                 mode_mask: AccessMask::new(AccessMask::CAR),
+                condition: None,
             });
             if restrictions.len() == 5 {
                 break;

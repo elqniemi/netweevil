@@ -331,13 +331,7 @@ pub(crate) fn enum_label<T: Serialize>(value: &T) -> Value {
 }
 
 pub(crate) fn mode_bit(profile: &LoadedProfile) -> u16 {
-    match profile.document.profile.mode {
-        netweevil_core::TravelMode::Car => AccessMask::CAR,
-        netweevil_core::TravelMode::Bicycle => AccessMask::BICYCLE,
-        netweevil_core::TravelMode::Foot => AccessMask::FOOT,
-        netweevil_core::TravelMode::Transit => AccessMask::TRANSIT,
-        netweevil_core::TravelMode::Hgv => AccessMask::HGV,
-    }
+    profile.document.profile.mode.access_bit()
 }
 
 pub(crate) struct ProfileValues {

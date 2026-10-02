@@ -366,4 +366,141 @@ fn compiles_acceleration_weights_from_dataset_bundle() {
     assert_eq!(compiled.upward_weight[0], CCH_WEIGHT_INFINITY);
     assert_eq!(compiled.time_upward_weight[0], CCH_WEIGHT_INFINITY);
     assert_eq!(compiled.distance_upward_weight[0], CCH_WEIGHT_INFINITY);
+
+    // So is an edge the mode may use only under a time condition.
+    topology.edge_layers.routing[1].flags = 0;
+    topology.edge_layers.profile[1].access_mask = AccessMask::new(AccessMask::FOOT);
+    topology.edge_layers.profile[1].conditional_access = AccessMask::new(AccessMask::CAR);
+    let compiled = compile_with_acceleration(&topology);
+    assert!(compiled.edge_metrics[1].generalized_cost.is_some());
+    assert_eq!(
+        compiled.acceleration.expect("acceleration").upward_weight[0],
+        CCH_WEIGHT_INFINITY
+    );
+
+    // Entering a destination-only edge from an ordinary one costs the
+    // profile's penalty on top of the transition.
+    topology.edge_layers.profile[1].access_mask = AccessMask::new(AccessMask::CAR);
+    topology.edge_layers.profile[1].conditional_access = AccessMask::default();
+    let open = compile_with_acceleration(&topology);
+    topology.edge_layers.profile[1].destination_only = AccessMask::new(AccessMask::CAR);
+    let destination_only = compile_with_acceleration(&topology);
+    let weight = |bundle: &CompiledProfileBundle| {
+        netweevil_core::decode_cch_weight(bundle.acceleration.as_ref().unwrap().upward_weight[0])
+    };
+    let penalty = weight(&destination_only) - weight(&open);
+    assert!((penalty - 600.0).abs() < 1e-2, "penalty {penalty}");
+    // Edge metrics themselves are unchanged.
+    assert_eq!(
+        open.edge_metrics[1].generalized_cost,
+        destination_only.edge_metrics[1].generalized_cost
+    );
+}
+
+#[test]
+fn excludes_edges_whose_restrictions_the_profile_vehicle_violates() {
+    use netweevil_core::{
+        VehicleRestriction, VehicleRestrictionKind as Kind, VehicleRestrictionTable,
+    };
+    let mut topology = topology(&[
+        edge(0, RoadClass::Residential, AccessMask::CAR | AccessMask::HGV),
+        edge(1, RoadClass::Residential, AccessMask::CAR | AccessMask::HGV),
+        edge(2, RoadClass::Residential, AccessMask::CAR | AccessMask::HGV),
+    ]);
+    topology.edge_layers.vehicle_restrictions = VehicleRestrictionTable {
+        restrictions: vec![
+            VehicleRestriction {
+                modes: AccessMask::new(AccessMask::VEHICLES),
+                kind: Kind::MaxHeightCm(350),
+            },
+            VehicleRestriction {
+                modes: AccessMask::new(AccessMask::HGV),
+                kind: Kind::MaxWeightKg(7_500),
+            },
+        ],
+        edges: vec![0, 2],
+        edge_restrictions: vec![0, 1],
+    };
+    // (mode, vehicle YAML, traversable edges)
+    for (mode, vehicle, expected) in [
+        ("hgv", "", [true, true, true]),
+        ("hgv", "vehicle: {height_m: 4.0}", [false, true, true]),
+        (
+            "hgv",
+            "vehicle: {height_m: 3.5, weight_t: 18}",
+            [true, true, false],
+        ),
+        (
+            "car",
+            "vehicle: {height_m: 2.0, weight_t: 18}",
+            [true, true, true],
+        ),
+        ("car", "vehicle: {height_m: 3.6}", [false, true, true]),
+    ] {
+        let compiled = compile(&profile(mode, vehicle), &topology);
+        let traversable = compiled
+            .edge_metrics
+            .iter()
+            .map(|metric| metric.travel_time_s.is_some())
+            .collect::<Vec<_>>();
+        assert_eq!(traversable, expected, "{mode} {vehicle}");
+    }
+}
+
+#[test]
+fn resolves_posted_speed_rules_into_profile_speed_factors() {
+    use netweevil_core::{EVERY_DAY, TemporalEffect, TemporalRule, TemporalRuleSet};
+    let mut topology = topology(&[
+        DirectedEdge {
+            max_speed_kph: Some(100.0),
+            temporal_rule_id: Some(0),
+            ..edge(0, RoadClass::Motorway, AccessMask::CAR | AccessMask::HGV)
+        },
+        DirectedEdge {
+            temporal_rule_id: Some(1),
+            ..edge(1, RoadClass::Residential, AccessMask::CAR | AccessMask::HGV)
+        },
+    ]);
+    let night = |effect, modes| TemporalRule {
+        modes,
+        ..TemporalRule::new(EVERY_DAY, Vec::new(), effect)
+    };
+    topology.temporal_rule_sets = vec![
+        TemporalRuleSet {
+            rules: vec![night(
+                TemporalEffect::MaxSpeed(130.0),
+                AccessMask::MOTOR_VEHICLES,
+            )],
+        },
+        TemporalRuleSet {
+            rules: vec![night(TemporalEffect::Closed, AccessMask::HGV)],
+        },
+    ];
+    // Motorway profile speed 110 km/h capped at the posted 100: the night
+    // limit of 130 lifts the cap to 110, a factor of 1.1. A truck at 80 km/h
+    // is unaffected, so its edge keeps the dataset rule set.
+    let car = compile(&profile("car", ""), &topology);
+    let rules = &car.temporal.rules;
+    assert_eq!(rules.edges, vec![0]);
+    let resolved = rules.for_edge(0).expect("resolved");
+    match resolved.rules[..] {
+        [
+            TemporalRule {
+                effect: TemporalEffect::SpeedFactor(factor),
+                modes: 0,
+                ..
+            },
+        ] => assert!((factor - 1.1).abs() < 1e-5, "factor {factor}"),
+        ref other => panic!("unexpected resolution {other:?}"),
+    }
+    let truck = compile(
+        &profile(
+            "hgv",
+            "speed_rules: [{match: {highway: motorway}, speed_kph: 80}]",
+        ),
+        &topology,
+    );
+    assert_eq!(truck.temporal.rules.edges, vec![0]);
+    assert!(truck.temporal.rules.for_edge(0).unwrap().rules.is_empty());
+    assert!(truck.temporal.rules.for_edge(1).is_none());
 }

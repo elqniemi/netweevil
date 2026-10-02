@@ -26,11 +26,11 @@ fn pbf_scan_retains_every_object_of_the_extract() {
         ObjectCounts {
             nodes: 68,
             ways: 17,
-            relations: 2,
+            relations: 3,
         }
     );
     assert_eq!(scanned.ways.len(), 16);
-    assert_eq!(scanned.restrictions.len(), 1);
+    assert_eq!(scanned.restrictions.len(), 2);
     assert_eq!(scanned.traffic_signals.len(), 2);
 }
 
@@ -46,7 +46,7 @@ fn applying_a_change_file_equals_scanning_the_edited_extract() {
         summary,
         ChangeSummary {
             nodes: 6,
-            ways: 9,
+            ways: 11,
             relations: 2,
         }
     );

@@ -47,6 +47,7 @@ fn topology() -> TopologyBundle {
                 },
                 EdgePresentation::default(),
             ],
+            vehicle_restrictions: VehicleRestrictionTable::default(),
         },
         turn_restrictions: Vec::new(),
         names: Vec::new(),

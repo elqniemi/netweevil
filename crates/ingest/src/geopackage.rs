@@ -327,6 +327,10 @@ pub(crate) fn scan_geopackages(
                     smoothness: SmoothnessClass::Unknown,
                     forward_access_mask,
                     reverse_access_mask,
+                    forward_destination_only: AccessMask::default(),
+                    reverse_destination_only: AccessMask::default(),
+                    forward_conditional_access: AccessMask::default(),
+                    reverse_conditional_access: AccessMask::default(),
                     is_toll: false,
                     is_roundabout: false,
                     forward_extra_flags,
@@ -338,7 +342,9 @@ pub(crate) fn scan_geopackages(
                     name: name.clone(),
                     guidance: None,
                     feature_row,
-                    temporal_rule_id,
+                    forward_temporal_rule_id: temporal_rule_id,
+                    reverse_temporal_rule_id: temporal_rule_id,
+                    vehicle_restrictions: Vec::new(),
                 });
             }
 
@@ -899,8 +905,11 @@ fn access_mask(values: &[String]) -> Result<AccessMask> {
             "car" => AccessMask::CAR,
             "bicycle" | "bike" => AccessMask::BICYCLE,
             "foot" | "pedestrian" | "walk" => AccessMask::FOOT,
-            "transit" => AccessMask::TRANSIT,
-            "hgv" => AccessMask::HGV,
+            "bus" | "transit" => AccessMask::BUS,
+            "hgv" | "truck" => AccessMask::HGV,
+            "taxi" => AccessMask::TAXI,
+            "motorcycle" => AccessMask::MOTORCYCLE,
+            "moped" | "motor_scooter" => AccessMask::MOPED,
             other => bail!("unsupported layer default access mode '{other}'"),
         };
     }

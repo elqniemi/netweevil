@@ -238,6 +238,16 @@ fn incremental_update_matches_a_full_import_of_the_edited_extract() {
             "{value}"
         );
     }
+    // Conditional rules were renumbered after the first conditional way lost
+    // its condition; the comparison above covers their ids.
+    let rebuilt = topology(&updated);
+    assert!(!rebuilt.temporal_rule_sets.is_empty());
+    assert!(
+        rebuilt
+            .turn_restrictions
+            .iter()
+            .any(|restriction| restriction.condition.is_some())
+    );
     // The retained objects match the full import's, so the next update
     // starts from the same source state.
     let snapshot = |manifest: &DatasetManifest| -> OsmSourceSnapshot {
@@ -261,7 +271,7 @@ fn incremental_update_matches_a_full_import_of_the_edited_extract() {
         report.changed_objects,
         Some(ChangedObjects {
             nodes: 6,
-            ways: 9,
+            ways: 11,
             relations: 2,
         })
     );

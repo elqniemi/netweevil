@@ -1048,7 +1048,14 @@ fn walking_routes_get_no_ramps_or_lanes() {
         .collect::<Vec<_>>();
     let mut walking = metrics(&costs);
     walking.mode = netweevil_core::TravelMode::Foot;
-    let result = exact_engine(net.topology(), walking)
+    // Snapping only considers edges the profile's mode may use.
+    let mut topology = net.topology();
+    for profile in &mut topology.edge_layers.profile {
+        profile.access_mask = netweevil_core::AccessMask::new(
+            netweevil_core::AccessMask::CAR | netweevil_core::AccessMask::FOOT,
+        );
+    }
+    let result = exact_engine(topology, walking)
         .execute_directions(
             &net.request([0.0, -200.0], [80.0, 200.0]),
             DirectionsContext::new(&names),

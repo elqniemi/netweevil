@@ -316,7 +316,8 @@ impl<'a> ArcSummaryCache<'a> {
                     });
                     ArcSummary {
                         cost: metric.generalized_cost.unwrap_or_default()
-                            + turn_s * context.metrics.turn_costs.cost_time_weight,
+                            + turn_s * context.metrics.turn_costs.cost_time_weight
+                            + transition_access_cost(context.topology, context.metrics, tail, head),
                         time_s: metric.travel_time_s.unwrap_or_default() + turn_s,
                         distance_m: u64::from(context.topology.routing_edge(head).length_m),
                         edges: 1,

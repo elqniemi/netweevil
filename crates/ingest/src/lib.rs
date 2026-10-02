@@ -4,8 +4,10 @@
 //! and preprocesses the CCH acceleration bundle used by the query engine.
 
 mod acceleration;
+mod access;
 mod audit;
 mod classify;
+mod conditional;
 mod geopackage;
 mod guidance;
 mod import;
@@ -18,6 +20,7 @@ mod scan;
 mod source;
 mod topology;
 mod update;
+mod vehicle_tags;
 mod wkb;
 
 pub use audit::{

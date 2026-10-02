@@ -1,16 +1,9 @@
 use super::{
-    EdgeDirection, classify_access, classify_direction, classify_directional_access,
-    classify_highway, classify_speed_and_lanes, parse_duration_seconds, parse_maxspeed_kph,
+    classify_highway, classify_speed_and_lanes, conditional_speed_rules, parse_duration_seconds,
+    parse_maxspeed_kph,
 };
-use netweevil_core::{
-    AccessMask, EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW, EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY,
-    HighwayClass, RoadClass,
-};
-use osmpbfreader::Tags;
-
-fn tags(pairs: &[(&str, &str)]) -> Tags {
-    Tags::from_iter(pairs.iter().map(|&(key, value)| (key.into(), value.into())))
-}
+use crate::test_util::tags;
+use netweevil_core::{AccessMask, HighwayClass, MinuteInterval, RoadClass, TemporalEffect};
 
 #[test]
 fn classifies_major_highways() {
@@ -18,72 +11,11 @@ fn classifies_major_highways() {
         ("motorway", Some(HighwayClass::Motorway)),
         ("primary_link", Some(HighwayClass::PrimaryLink)),
         ("footway", Some(HighwayClass::Footway)),
+        ("busway", Some(HighwayClass::Busway)),
         ("construction", None),
     ] {
         assert_eq!(classify_highway(value), expected, "highway={value}");
     }
-}
-
-#[test]
-fn classifies_access_from_defaults_and_mode_overrides() {
-    let access =
-        |pairs: &[(&str, &str)], highway, route| classify_access(&tags(pairs), highway, route).0;
-    use AccessMask as A;
-    assert_eq!(access(&[], "motorway", None), A::CAR | A::HGV);
-    assert_eq!(access(&[], "cycleway", None), A::BICYCLE | A::FOOT);
-    let foot_only = [("access", "no"), ("foot", "yes")];
-    assert_eq!(access(&foot_only, "residential", None), A::FOOT);
-    assert_eq!(access(&[("bicycle", "no")], "cycleway", None), A::FOOT);
-    let ferry = [
-        ("route", "ferry"),
-        ("motor_vehicle", "no"),
-        ("bicycle", "no"),
-    ];
-    assert_eq!(access(&ferry, "", Some("ferry")), A::FOOT);
-}
-
-#[test]
-fn infers_oneway_behavior() {
-    let direction =
-        |pairs: &[(&str, &str)]| classify_direction(&tags(pairs), RoadClass::Residential);
-    assert_eq!(direction(&[("oneway", "-1")]), EdgeDirection::ReverseOnly);
-    assert_eq!(
-        direction(&[("junction", "roundabout")]),
-        EdgeDirection::ForwardOnly
-    );
-    assert_eq!(direction(&[]), EdgeDirection::Both);
-}
-
-#[test]
-fn builds_mode_specific_oneway_access() {
-    let access = classify_directional_access(
-        &tags(&[("highway", "residential"), ("oneway", "yes")]),
-        HighwayClass::Residential,
-        RoadClass::Residential,
-        AccessMask::new(AccessMask::CAR | AccessMask::BICYCLE | AccessMask::FOOT),
-    );
-    assert!(access.forward_access.contains(AccessMask::CAR));
-    assert!(!access.reverse_access.contains(AccessMask::CAR));
-    assert!(access.reverse_access.contains(AccessMask::FOOT));
-    assert!(access.reverse_access.contains(AccessMask::BICYCLE));
-    assert_ne!(
-        access.reverse_flags & EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY,
-        0
-    );
-    assert_ne!(
-        access.reverse_flags & EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW,
-        0
-    );
-
-    let access = classify_directional_access(
-        &tags(&[("highway", "cycleway"), ("oneway", "yes")]),
-        HighwayClass::Cycleway,
-        RoadClass::Path,
-        AccessMask::new(AccessMask::BICYCLE | AccessMask::FOOT),
-    );
-    assert!(access.forward_access.contains(AccessMask::BICYCLE));
-    assert!(!access.reverse_access.contains(AccessMask::BICYCLE));
-    assert!(access.reverse_access.contains(AccessMask::FOOT));
 }
 
 #[test]
@@ -138,4 +70,60 @@ fn parses_common_duration_formats() {
     ] {
         assert_eq!(parse_duration_seconds(value), Some(expected), "{value}");
     }
+}
+
+#[test]
+fn imports_single_time_conditional_speed_limits_per_direction() {
+    // (tags, forward kph, backward kph)
+    let cases: Vec<(Vec<(&str, &str)>, Option<f32>, Option<f32>)> = vec![
+        (
+            vec![
+                ("maxspeed", "100"),
+                ("maxspeed:conditional", "130 @ (19:00-06:00)"),
+            ],
+            Some(130.0),
+            Some(130.0),
+        ),
+        (
+            vec![("maxspeed:forward:conditional", "60 @ (Mo-Fr 07:00-09:00)")],
+            Some(60.0),
+            None,
+        ),
+        (vec![("maxspeed:conditional", "60 @ wet")], None, None),
+        (
+            vec![("maxspeed:conditional", "80 @ (weight>3.5)")],
+            None,
+            None,
+        ),
+        (
+            vec![(
+                "maxspeed:conditional",
+                "30 @ (07:00-09:00); 50 @ (09:00-17:00)",
+            )],
+            None,
+            None,
+        ),
+    ];
+    for (pairs, forward, backward) in cases {
+        let (forward_rules, backward_rules, _) = conditional_speed_rules(&tags(&pairs));
+        let speed = |rules: &[netweevil_core::TemporalRule]| {
+            rules.first().map(|rule| match rule.effect {
+                TemporalEffect::MaxSpeed(kph) => kph,
+                other => panic!("unexpected effect {other:?}"),
+            })
+        };
+        assert_eq!(speed(&forward_rules), forward, "{pairs:?}");
+        assert_eq!(speed(&backward_rules), backward, "{pairs:?}");
+    }
+    let (rules, _, counts) =
+        conditional_speed_rules(&tags(&[("maxspeed:conditional", "130 @ (19:00-06:00)")]));
+    assert_eq!(rules[0].modes, AccessMask::MOTOR_VEHICLES);
+    assert_eq!(
+        rules[0].intervals,
+        vec![MinuteInterval {
+            start_minute: 19 * 60,
+            end_minute: 6 * 60
+        }]
+    );
+    assert_eq!((counts.imported, counts.skipped), (1, 0));
 }

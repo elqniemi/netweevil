@@ -7,8 +7,8 @@ use anyhow::{Context, Result, bail};
 use arrow_json::ArrayWriter;
 use netweevil_core::{
     CompiledProfileBundle, EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, EVERY_DAY, FRIDAY, MONDAY,
-    PUBLIC_HOLIDAY, SATURDAY, SUNDAY, THURSDAY, TUESDAY, TemporalEffect, TemporalRule,
-    TemporalRuleSet, TopologyBundle, WEDNESDAY,
+    SATURDAY, SUNDAY, THURSDAY, TUESDAY, TemporalEffect, TemporalRule, TemporalRuleSet,
+    TopologyBundle, WEDNESDAY,
 };
 use netweevil_profile::ReturnGeometry;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
@@ -20,7 +20,8 @@ use crate::{
     AlternativeRouteOptions, AnalysisOutcome, ConnectivityPolicy, FallbackPolicy, HopSelectionInfo,
     RouteResult, RouteSegment, RouteSummary, RoutingGraph, SearchStateKey, SnapOptions,
     SnappedPoint, build_breakdowns, build_route_geometry, hop_info_for_pair, no_route_failure,
-    request_returns_detailed_path, snap_candidates_with_options, turn_penalty_seconds,
+    request_returns_detailed_path, snap_candidates_with_options, transition_access_cost,
+    turn_penalty_seconds,
 };
 
 /// Runtime scenario overlay keyed by source feature id. Requests carry it
@@ -379,15 +380,15 @@ pub(crate) fn evaluate_edge_at(
         return None;
     }
 
-    let rule_set = routing_edge
-        .temporal_rule_id
-        .and_then(|rule_id| topology.temporal_rule_sets.get(rule_id as usize));
-    let rules_vary_over_time = has_time_varying_rules(rule_set, scenario);
-    let speed_factor_varies = has_time_varying_speed_factor(rule_set, scenario);
+    let rule_set = imported_rule_set(topology, metrics, edge_index);
+    let mode_bit = metrics.mode.access_bit();
+    let rules_vary_over_time = has_time_varying_rules(rule_set, scenario, mode_bit);
+    let speed_factor_varies = has_time_varying_speed_factor(rule_set, scenario, mode_bit);
     let rules = |timestamp| {
         evaluate_rules(
             rule_set,
             scenario,
+            mode_bit,
             routing_edge.source_direction,
             timestamp,
             &context.holidays,
@@ -471,12 +472,23 @@ fn best_available_entry(
     if best.is_some() && !speed_factor_varies {
         return best.map(|(entry, speed_factor, _)| (entry, speed_factor));
     }
-    if !allow_wait || !rules_vary_over_time || !max_wait_s.is_finite() || max_wait_s <= 0.0 {
-        return best.map(|(entry, speed_factor, _)| (entry, speed_factor));
-    }
+    let deadline =
+        if allow_wait && rules_vary_over_time && max_wait_s.is_finite() && max_wait_s > 0.0 {
+            requested_entry + Duration::seconds_f64(max_wait_s)
+        } else if let Some((_, _, immediate_exit)) = best.filter(|_| speed_factor_varies) {
+            // Without a waiting policy, entering an open edge later is still
+            // possible by approaching it more slowly. Admitting later entries
+            // that exit no later than the immediate traversal keeps the edge
+            // FIFO (the lower envelope of exit times), which exact label-setting
+            // requires across faster SpeedFactor regimes. Closed edges are never
+            // waited for.
+            immediate_exit
+        } else {
+            return best.map(|(entry, speed_factor, _)| (entry, speed_factor));
+        };
 
     // Rule effects have minute resolution. Evaluating every future minute
-    // boundary within the wait cap is therefore exhaustive, including
+    // boundary up to the deadline is therefore exhaustive, including
     // voluntary waiting for a faster SpeedFactor regime while the edge is
     // already open.
     let seconds_to_next_minute =
@@ -485,7 +497,6 @@ fn best_available_entry(
         } else {
             60 - i64::from(requested_entry.second())
         };
-    let deadline = requested_entry + Duration::seconds_f64(max_wait_s);
     let mut candidate = requested_entry + Duration::seconds(seconds_to_next_minute);
     while candidate <= deadline {
         if let RuleEvaluation::Available { speed_factor } = rules(candidate) {
@@ -502,37 +513,60 @@ fn best_available_entry(
     best.map(|(entry, speed_factor, _)| (entry, speed_factor))
 }
 
-fn has_time_varying_rules(
-    imported: Option<&TemporalRuleSet>,
-    scenario: Option<&ScenarioFeatureOverride>,
-) -> bool {
-    if scenario.is_some_and(|scenario| scenario.force_open) {
-        return false;
-    }
+/// The edge's dataset schedule as seen by this profile: the compiled
+/// replacement when posted-speed rules were resolved, otherwise the
+/// topology's rule set.
+pub(crate) fn imported_rule_set<'a>(
+    topology: &'a TopologyBundle,
+    metrics: &'a CompiledProfileBundle,
+    edge_index: usize,
+) -> Option<&'a TemporalRuleSet> {
+    metrics.temporal.rules.for_edge(edge_index).or_else(|| {
+        topology
+            .routing_edge(edge_index)
+            .temporal_rule_id
+            .and_then(|rule_id| topology.temporal_rule_sets.get(rule_id as usize))
+    })
+}
+
+/// Imported and scenario rules that bind `mode_bit`. Unresolved posted-speed
+/// rules (a profile compiled without them) carry no effect.
+fn effective_rules<'a>(
+    imported: Option<&'a TemporalRuleSet>,
+    scenario: Option<&'a ScenarioFeatureOverride>,
+    mode_bit: u16,
+) -> impl Iterator<Item = &'a TemporalRule> {
     imported
         .filter(|_| !scenario.is_some_and(|scenario| scenario.replace_rules))
         .into_iter()
         .flat_map(|rules| &rules.rules)
         .chain(scenario.into_iter().flat_map(|scenario| &scenario.rules))
-        .any(|rule| !rule.intervals.is_empty() || rule.day_mask != EVERY_DAY)
+        .filter(move |rule| {
+            rule.applies_to_mode(mode_bit) && !matches!(rule.effect, TemporalEffect::MaxSpeed(_))
+        })
+}
+
+fn has_time_varying_rules(
+    imported: Option<&TemporalRuleSet>,
+    scenario: Option<&ScenarioFeatureOverride>,
+    mode_bit: u16,
+) -> bool {
+    if scenario.is_some_and(|scenario| scenario.force_open) {
+        return false;
+    }
+    effective_rules(imported, scenario, mode_bit).any(TemporalRule::is_time_varying)
 }
 
 fn has_time_varying_speed_factor(
     imported: Option<&TemporalRuleSet>,
     scenario: Option<&ScenarioFeatureOverride>,
+    mode_bit: u16,
 ) -> bool {
     if scenario.is_some_and(|scenario| scenario.force_open) {
         return false;
     }
-    imported
-        .filter(|_| !scenario.is_some_and(|scenario| scenario.replace_rules))
-        .into_iter()
-        .flat_map(|rules| &rules.rules)
-        .chain(scenario.into_iter().flat_map(|scenario| &scenario.rules))
-        .any(|rule| {
-            matches!(rule.effect, TemporalEffect::SpeedFactor(_))
-                && (!rule.intervals.is_empty() || rule.day_mask != EVERY_DAY)
-        })
+    effective_rules(imported, scenario, mode_bit)
+        .any(|rule| matches!(rule.effect, TemporalEffect::SpeedFactor(_)) && rule.is_time_varying())
 }
 
 fn scenario_enables_materialized_direction(scenario: &ScenarioFeatureOverride) -> bool {
@@ -554,6 +588,7 @@ enum RuleEvaluation {
 fn evaluate_rules(
     imported: Option<&TemporalRuleSet>,
     scenario: Option<&ScenarioFeatureOverride>,
+    mode_bit: u16,
     source_direction: i8,
     timestamp: OffsetDateTime,
     holidays: &HashSet<Date>,
@@ -563,12 +598,7 @@ fn evaluate_rules(
             speed_factor: scenario.and_then(|value| value.speed_factor).unwrap_or(1.0),
         };
     }
-    let imported_rules = imported
-        .filter(|_| !scenario.is_some_and(|scenario| scenario.replace_rules))
-        .into_iter()
-        .flat_map(|rules| &rules.rules);
-    let scenario_rules = scenario.into_iter().flat_map(|scenario| &scenario.rules);
-    let rules = imported_rules.chain(scenario_rules).collect::<Vec<_>>();
+    let rules = effective_rules(imported, scenario, mode_bit).collect::<Vec<_>>();
     let has_open_only = rules
         .iter()
         .any(|rule| matches!(rule.effect, TemporalEffect::OpenOnly));
@@ -596,15 +626,18 @@ fn evaluate_rules(
     }
 }
 
-fn rule_active(rule: &TemporalRule, timestamp: OffsetDateTime, holidays: &HashSet<Date>) -> bool {
+pub(crate) fn rule_active(
+    rule: &TemporalRule,
+    timestamp: OffsetDateTime,
+    holidays: &HashSet<Date>,
+) -> bool {
     let minute = timestamp.hour() as u16 * 60 + timestamp.minute() as u16;
     if rule.intervals.is_empty() {
-        return day_matches(rule.day_mask, timestamp.date(), holidays);
+        return day_matches(rule, timestamp.date(), holidays);
     }
     rule.intervals.iter().any(|interval| {
         if interval.start_minute <= interval.end_minute {
-            return day_matches(rule.day_mask, timestamp.date(), holidays)
-                && interval.contains(minute);
+            return day_matches(rule, timestamp.date(), holidays) && interval.contains(minute);
         }
 
         // A wrapping interval belongs to the day on which it starts. Thus a
@@ -612,26 +645,23 @@ fn rule_active(rule: &TemporalRule, timestamp: OffsetDateTime, holidays: &HashSe
         // early on Saturday; checking Saturday's mask after midnight would
         // shift the rule to the wrong day.
         if minute >= interval.start_minute {
-            day_matches(rule.day_mask, timestamp.date(), holidays)
+            day_matches(rule, timestamp.date(), holidays)
         } else if minute < interval.end_minute {
-            day_matches(
-                rule.day_mask,
-                (timestamp - Duration::days(1)).date(),
-                holidays,
-            )
+            day_matches(rule, (timestamp - Duration::days(1)).date(), holidays)
         } else {
             false
         }
     })
 }
 
-fn day_matches(day_mask: u8, date: Date, holidays: &HashSet<Date>) -> bool {
-    let day_bit = if holidays.contains(&date) {
-        PUBLIC_HOLIDAY
-    } else {
-        weekday_bit(date.weekday())
-    };
-    day_mask & day_bit != 0
+fn day_matches(rule: &TemporalRule, date: Date, holidays: &HashSet<Date>) -> bool {
+    rule.matches_day(
+        weekday_bit(date.weekday()),
+        holidays.contains(&date),
+        date.year(),
+        u8::from(date.month()),
+        date.day(),
+    )
 }
 
 pub fn parse_datetime(value: &str) -> Result<OffsetDateTime> {
@@ -695,13 +725,16 @@ pub(crate) fn validate_speed_factor_wait_policy(
     metrics: &CompiledProfileBundle,
     context: &TemporalContext,
 ) -> Result<()> {
+    let mode_bit = metrics.mode.access_bit();
     let rule_has_varying_speed = |rule: &TemporalRule| {
         matches!(rule.effect, TemporalEffect::SpeedFactor(_))
-            && (!rule.intervals.is_empty() || rule.day_mask != EVERY_DAY)
+            && rule.applies_to_mode(mode_bit)
+            && rule.is_time_varying()
     };
     if !topology
         .temporal_rule_sets
         .iter()
+        .chain(&metrics.temporal.rules.rule_sets)
         .flat_map(|rules| &rules.rules)
         .any(rule_has_varying_speed)
         && !context
@@ -724,21 +757,14 @@ pub(crate) fn validate_speed_factor_wait_policy(
         }
         let edge = topology.routing_edge(edge_index);
         let scenario = context.scenario_features.get(&edge.source_way_id);
-        let imported = edge
-            .temporal_rule_id
-            .and_then(|rule_id| topology.temporal_rule_sets.get(rule_id as usize));
-        if has_time_varying_speed_factor(imported, scenario) {
+        let imported = imported_rule_set(topology, metrics, edge_index);
+        if has_time_varying_speed_factor(imported, scenario, mode_bit) {
             speed_factor_edges.push((edge_index, edge.source_way_id));
         }
     }
     let Some(&(_, first_feature)) = speed_factor_edges.first() else {
         return Ok(());
     };
-    if !metrics.temporal.allow_wait || metrics.temporal.max_wait_s <= 0.0 {
-        bail!(
-            "temporal SpeedFactor rules on source feature {first_feature} require temporal.allow_wait=true and temporal.max_wait_s > 0 so faster future regimes can be traversed with FIFO voluntary waiting"
-        );
-    }
     for component in &metrics.components {
         let has_active_overlay_values = component.overlay_name.as_deref().is_some_and(|name| {
             speed_factor_edges.iter().any(|(edge_index, feature_id)| {
@@ -1639,8 +1665,11 @@ fn replay_temporal_edge_path(
             requested_entry,
             fraction,
         )?;
+        let access_cost = previous.map_or(0.0, |previous_edge| {
+            transition_access_cost(topology, metrics, previous_edge, edge_index)
+        });
         generalized_cost +=
-            turn_time_s * metrics.turn_costs.cost_time_weight + cost.generalized_cost;
+            turn_time_s * metrics.turn_costs.cost_time_weight + access_cost + cost.generalized_cost;
         arrival = cost.exit_time;
         traversals.push(TemporalTraversal {
             edge_index,
@@ -1757,12 +1786,11 @@ fn build_edge_arrival_segments(
         return Vec::new();
     };
     let scenario = context.scenario_features.get(&edge.source_way_id);
-    let imported = edge
-        .temporal_rule_id
-        .and_then(|rule_id| topology.temporal_rule_sets.get(rule_id as usize));
-    if !has_time_varying_rules(imported, scenario) {
+    let imported = imported_rule_set(topology, metrics, edge_index);
+    let mode_bit = metrics.mode.access_bit();
+    if !has_time_varying_rules(imported, scenario, mode_bit) {
         let RuleEvaluation::Available { speed_factor } =
-            edge_rule_evaluation(topology, context, edge_index, range.start)
+            edge_rule_evaluation(topology, metrics, context, edge_index, range.start)
         else {
             return Vec::new();
         };
@@ -1790,20 +1818,20 @@ fn build_edge_arrival_segments(
             end: next_minute - Duration::nanoseconds(1),
         };
         if let Some(entries) = raw_window.intersect(range) {
-            let available = match edge_rule_evaluation(topology, context, edge_index, bucket_start)
-            {
-                RuleEvaluation::Available { speed_factor } => Some((
-                    bucket_start,
-                    Duration::seconds_f64(base_time_s * fraction / f64::from(speed_factor)),
-                )),
-                RuleEvaluation::Unavailable => None,
-            };
+            let available =
+                match edge_rule_evaluation(topology, metrics, context, edge_index, bucket_start) {
+                    RuleEvaluation::Available { speed_factor } => Some((
+                        bucket_start,
+                        Duration::seconds_f64(base_time_s * fraction / f64::from(speed_factor)),
+                    )),
+                    RuleEvaluation::Unavailable => None,
+                };
             buckets.push(MinuteBucket { entries, available });
         }
         bucket_start = next_minute;
     }
 
-    if !has_time_varying_speed_factor(imported, scenario) {
+    if !has_time_varying_speed_factor(imported, scenario, mode_bit) {
         let mut segments = Vec::new();
         let mut next_available = None::<(OffsetDateTime, Duration)>;
         for bucket in buckets.into_iter().rev() {
@@ -1854,12 +1882,20 @@ fn build_edge_arrival_segments(
     let mut segments = Vec::new();
 
     for bucket in buckets {
-        let wait_options = if allow_wait {
+        // Mirrors `best_available_entry`: with a wait policy any open later
+        // minute within the cap competes; without one, only later entries
+        // reachable by approaching an open edge more slowly do.
+        let horizon = if allow_wait {
+            Some(max_wait)
+        } else {
+            bucket.available.map(|(_, duration)| duration)
+        };
+        let wait_options = if let Some(horizon) = horizon {
             available_starts
                 .iter()
                 .filter_map(|&(actual_entry, duration)| {
                     let eligible = TimeWindow {
-                        start: (actual_entry - max_wait).max(bucket.entries.start),
+                        start: (actual_entry - horizon).max(bucket.entries.start),
                         end: actual_entry.min(bucket.entries.end),
                     };
                     (eligible.start <= eligible.end).then_some(WaitOption {
@@ -1945,6 +1981,7 @@ fn build_edge_arrival_segments(
 
 fn edge_rule_evaluation(
     topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
     context: &TemporalContext,
     edge_index: usize,
     timestamp: OffsetDateTime,
@@ -1957,12 +1994,10 @@ fn edge_rule_evaluation(
     {
         return RuleEvaluation::Unavailable;
     }
-    let imported = edge
-        .temporal_rule_id
-        .and_then(|rule_id| topology.temporal_rule_sets.get(rule_id as usize));
     evaluate_rules(
-        imported,
+        imported_rule_set(topology, metrics, edge_index),
         scenario,
+        metrics.mode.access_bit(),
         edge.source_direction,
         timestamp,
         &context.holidays,
@@ -2211,6 +2246,12 @@ fn earliest_arrival_route_for_pair(
                 arrival: cost.exit_time,
                 generalized_cost: current_generalized_cost
                     + turn_time_s * metrics.turn_costs.cost_time_weight
+                    + transition_access_cost(
+                        topology,
+                        metrics,
+                        current_state.edge_index,
+                        next_edge,
+                    )
                     + cost.generalized_cost,
                 previous: Some(entry.label_id),
                 traversal: TemporalTraversal {
@@ -2414,6 +2455,7 @@ fn temporal_route_for_pair(
             };
             let generalized_cost = labels[entry.label_id].generalized_cost
                 + turn_time_s * metrics.turn_costs.cost_time_weight
+                + transition_access_cost(topology, metrics, current_state.edge_index, next_edge)
                 + cost.generalized_cost;
             if generalized_cost >= best_cost {
                 continue;

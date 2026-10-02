@@ -658,6 +658,7 @@ fn temporal_component_paths_for_pair(
             }
             let generalized_cost = labels[entry.label_id].generalized_cost
                 + turn_time_s * metrics.turn_costs.cost_time_weight
+                + crate::transition_access_cost(topology, metrics, current.edge_index, next_edge)
                 + cost.generalized_cost;
             let label_id = labels.len();
             labels.push(TemporalComponentLabel {
@@ -855,8 +856,8 @@ fn component_paths_for_pair(
             if !within_constraints(&component_values, constraints) {
                 continue;
             }
-            let turn_cost = turn_penalty_seconds(topology, metrics, current.edge_index, next_edge)
-                * metrics.turn_costs.cost_time_weight;
+            let turn_cost =
+                crate::turn_penalty_cost(metrics, topology, current.edge_index, next_edge);
             let generalized_cost = labels[entry.label_id].generalized_cost
                 + routing_graph.edge_costs[next_edge] * fraction
                 + turn_cost;

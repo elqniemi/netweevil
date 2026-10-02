@@ -33,7 +33,9 @@ fn grid_position(row: i64, col: i64) -> (i32, i32) {
 
 /// An 8 by 8 street grid in OSM object form, sorted like a PBF extract:
 /// residential row ways `100 + row` and column ways `200 + col`, traffic
-/// signals at two crossings, a no-left-turn restriction (relation 500), a
+/// signals at two crossings, conditional access, a weight limit and a
+/// destination-only street, a no-left-turn restriction (relation 500) and a
+/// conditional one (502), a
 /// building (way 900 over nodes 1000 to 1003) and an unrelated relation.
 pub(crate) fn osm_grid() -> Vec<OsmObj> {
     let mut objects = Vec::new();
@@ -82,6 +84,12 @@ pub(crate) fn osm_grid() -> Vec<OsmObj> {
                 ("destination", "Centrum"),
                 ("turn:lanes", "left|through"),
             ],
+            1 => &[
+                ("highway", "residential"),
+                ("motor_vehicle:conditional", "no @ (Mo-Fr 07:00-09:00)"),
+            ],
+            2 => &[("highway", "residential"), ("maxweight", "7.5")],
+            4 => &[("highway", "residential"), ("access", "destination")],
             _ => &[("highway", "residential")],
         };
         objects.push(osm_way(200 + col, &nodes, tags));
@@ -98,6 +106,17 @@ pub(crate) fn osm_grid() -> Vec<OsmObj> {
         grid_node(2, 3),
         203,
     ));
+    let mut conditional = osm_turn_restriction(502, "no_left_turn", 104, grid_node(4, 2), 202);
+    if let OsmObj::Relation(relation) = &mut conditional {
+        relation.tags = osm_tags(&[
+            ("type", "restriction"),
+            (
+                "restriction:conditional",
+                "no_left_turn @ (Mo-Fr 07:00-19:00)",
+            ),
+        ]);
+    }
+    objects.push(conditional);
     objects.push(OsmObj::Relation(osmpbfreader::Relation {
         id: osmpbfreader::RelationId(600),
         tags: osm_tags(&[("type", "route"), ("route", "bus")]),
@@ -137,6 +156,32 @@ pub(crate) fn osm_grid_edits() -> Vec<OsmEdit> {
             ),
         ),
         (Delete, osm_way(205, &[], &[])),
+        // The first conditional way loses its condition, so every rule set
+        // after it is renumbered; another way gains a conditional speed.
+        (
+            Modify,
+            osm_way(
+                201,
+                &(0..GRID_SIDE)
+                    .map(|row| grid_node(row, 1))
+                    .collect::<Vec<_>>(),
+                &[("highway", "residential")],
+            ),
+        ),
+        (
+            Modify,
+            osm_way(
+                202,
+                &(0..GRID_SIDE)
+                    .map(|row| grid_node(row, 2))
+                    .collect::<Vec<_>>(),
+                &[
+                    ("highway", "residential"),
+                    ("maxweight", "3.5"),
+                    ("maxspeed:conditional", "15 @ (22:00-06:00)"),
+                ],
+            ),
+        ),
         (Create, osm_node(5001, 65_015_000, 532_015_000, &[])),
         (Create, osm_node(5002, 65_025_000, 532_025_000, &[])),
         (
@@ -302,6 +347,10 @@ pub(crate) fn pending_way(osm_way_id: i64, node_ids: &[i64]) -> PendingWay {
         smoothness: Default::default(),
         forward_access_mask: AccessMask::new(AccessMask::CAR),
         reverse_access_mask: AccessMask::new(AccessMask::CAR),
+        forward_destination_only: AccessMask::default(),
+        reverse_destination_only: AccessMask::default(),
+        forward_conditional_access: AccessMask::default(),
+        reverse_conditional_access: AccessMask::default(),
         is_toll: false,
         is_roundabout: false,
         forward_extra_flags: 0,
@@ -313,8 +362,15 @@ pub(crate) fn pending_way(osm_way_id: i64, node_ids: &[i64]) -> PendingWay {
         name: None,
         guidance: None,
         feature_row: NO_FEATURE_ROW,
-        temporal_rule_id: None,
+        forward_temporal_rule_id: None,
+        reverse_temporal_rule_id: None,
+        vehicle_restrictions: Vec::new(),
     }
+}
+
+/// OSM tags from `(key, value)` pairs.
+pub(crate) fn tags(pairs: &[(&str, &str)]) -> osmpbfreader::Tags {
+    osmpbfreader::Tags::from_iter(pairs.iter().map(|&(key, value)| (key.into(), value.into())))
 }
 
 pub(crate) fn edge(edge_id: u32, from: u32, to: u32, source_way_id: i64) -> DirectedEdge {

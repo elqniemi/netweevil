@@ -304,11 +304,11 @@ fn default_decel() -> f64 {
 
 pub fn default_pcu_for_mode(mode: TravelMode) -> f64 {
     match mode {
-        TravelMode::Car => 1.0,
-        TravelMode::Hgv => 2.0,
-        TravelMode::Bicycle => 0.3,
+        TravelMode::Car | TravelMode::Taxi => 1.0,
+        TravelMode::Hgv | TravelMode::Bus => 2.0,
+        TravelMode::Motorcycle => 0.5,
+        TravelMode::Moped | TravelMode::Bicycle => 0.3,
         TravelMode::Foot => 0.1,
-        TravelMode::Transit => 2.0,
     }
 }
 

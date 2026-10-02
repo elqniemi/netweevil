@@ -49,12 +49,9 @@ const SEGMENT_COLUMNS: &[&str] = &[
     "lanes",
 ];
 
-const ALL_MODES: u16 = AccessMask::CAR
-    | AccessMask::BICYCLE
-    | AccessMask::FOOT
-    | AccessMask::TRANSIT
-    | AccessMask::HGV;
-const MOTOR_MODES: u16 = AccessMask::CAR | AccessMask::TRANSIT | AccessMask::HGV;
+const ALL_MODES: u16 =
+    AccessMask::CAR | AccessMask::BICYCLE | AccessMask::FOOT | AccessMask::BUS | AccessMask::HGV;
+const MOTOR_MODES: u16 = AccessMask::CAR | AccessMask::BUS | AccessMask::HGV;
 
 pub(crate) fn scan_overture(
     source_path: &Path,
@@ -569,6 +566,10 @@ fn ingest_segment(row: SegmentRow, line: &[(f64, f64)], state: &mut OvertureStat
             smoothness: SmoothnessClass::Unknown,
             forward_access_mask: forward_access,
             reverse_access_mask: reverse_access,
+            forward_destination_only: AccessMask::default(),
+            reverse_destination_only: AccessMask::default(),
+            forward_conditional_access: AccessMask::default(),
+            reverse_conditional_access: AccessMask::default(),
             is_toll: false,
             is_roundabout: false,
             forward_extra_flags: 0,
@@ -580,7 +581,9 @@ fn ingest_segment(row: SegmentRow, line: &[(f64, f64)], state: &mut OvertureStat
             name: name.clone(),
             guidance: None,
             feature_row: netweevil_core::NO_FEATURE_ROW,
-            temporal_rule_id: None,
+            forward_temporal_rule_id: None,
+            reverse_temporal_rule_id: None,
+            vehicle_restrictions: Vec::new(),
         });
     }
 
@@ -687,11 +690,11 @@ fn base_access_for_class(class: Option<&str>) -> u16 {
 
 fn travel_mode_bits(mode: &str) -> u16 {
     match mode {
-        "vehicle" => AccessMask::CAR | AccessMask::BICYCLE | AccessMask::HGV | AccessMask::TRANSIT,
+        "vehicle" => AccessMask::CAR | AccessMask::BICYCLE | AccessMask::HGV | AccessMask::BUS,
         "motor_vehicle" => MOTOR_MODES,
         "car" | "motorcycle" => AccessMask::CAR,
         "truck" | "hgv" => AccessMask::HGV,
-        "bus" => AccessMask::TRANSIT,
+        "bus" => AccessMask::BUS,
         "foot" => AccessMask::FOOT,
         "bicycle" => AccessMask::BICYCLE,
         _ => 0,
@@ -891,7 +894,7 @@ fn raw_transition(segment_id: &str, transition: TransitionRule) -> Option<RawTra
         Some(modes) if !modes.is_empty() => modes
             .iter()
             .fold(0, |bits, mode| bits | travel_mode_bits(mode)),
-        _ => AccessMask::CAR | AccessMask::HGV | AccessMask::TRANSIT,
+        _ => AccessMask::CAR | AccessMask::HGV | AccessMask::BUS,
     };
     if mode_bits == 0 {
         return None;
@@ -989,6 +992,7 @@ impl OvertureState {
                 to_way_id,
                 kind: RestrictionKind::NoTurn,
                 mode_mask: transition.mode_mask,
+                condition: None,
             });
         }
     }

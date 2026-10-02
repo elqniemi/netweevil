@@ -905,7 +905,8 @@ pub(crate) fn analyze_route_path(
                 edge_index,
             );
             network_travel_time_s += turn_penalty_s;
-            network_generalized_cost += turn_penalty_s * metrics.turn_costs.cost_time_weight;
+            network_generalized_cost += turn_penalty_s * metrics.turn_costs.cost_time_weight
+                + transition_access_cost(topology, metrics, previous_edge_index, edge_index);
             if let Some(sequence_len) = routing_graph
                 .automaton
                 .prohibited_sequence_len(automaton_state, edge_index)

@@ -57,14 +57,14 @@ fn pareto(component: &str, max_labels_per_state: usize) -> ParetoRouteOptions {
 }
 
 fn open_only(start_minute: u16, end_minute: u16) -> TemporalRule {
-    TemporalRule {
-        day_mask: netweevil_core::EVERY_DAY,
-        intervals: vec![MinuteInterval {
+    TemporalRule::new(
+        netweevil_core::EVERY_DAY,
+        vec![MinuteInterval {
             start_minute,
             end_minute,
         }],
-        effect: TemporalEffect::OpenOnly,
-    }
+        TemporalEffect::OpenOnly,
+    )
 }
 
 fn weighted_point(id: &str, lon: f64, lat: f64, weight: f64) -> WeightedPoint {
@@ -174,11 +174,11 @@ fn component_search_errors_instead_of_pruning_a_nondominated_label() {
 fn temporal_reachability_prepass_returns_unreachable_before_tradeoff_overflow() {
     let (mut topology, mut metrics) = component_label_overflow_fixture();
     topology.temporal_rule_sets = vec![TemporalRuleSet {
-        rules: vec![TemporalRule {
-            day_mask: netweevil_core::EVERY_DAY,
-            intervals: Vec::new(),
-            effect: TemporalEffect::Closed,
-        }],
+        rules: vec![TemporalRule::new(
+            netweevil_core::EVERY_DAY,
+            Vec::new(),
+            TemporalEffect::Closed,
+        )],
     }];
     topology.edge_layers.routing[5].temporal_rule_id = Some(0);
     for (index, (travel_time_s, generalized_cost)) in [
@@ -1080,6 +1080,38 @@ fn accelerated_engine_matches_exact_engine_on_small_topology() {
         assert_eq!(accelerated.geometry, exact.geometry);
         assert_eq!(accelerated.edge_path, exact.edge_path);
     }
+}
+
+#[test]
+fn destination_only_entry_penalty_diverts_through_routes_in_every_engine() {
+    // b -> c is destination-only for cars; entering it costs 600 s of
+    // generalized cost, so a -> c takes the slow direct service road.
+    let mut topology = test_topology();
+    topology.edge_layers.profile[1].destination_only = AccessMask::new(AccessMask::CAR);
+    let mut metrics = test_metrics();
+    metrics.turn_costs.cost_time_weight = 1.0;
+    metrics.turn_costs.destination_only_penalty_s = 600.0;
+    let exact = exact_engine(topology.clone(), metrics.clone());
+    let accelerated = cch_engine(topology.clone(), &metrics);
+    let through = RouteRequest {
+        returns: full_geometry(),
+        ..a_to_c("through")
+    };
+    let exact_route = exact.execute_route(&through).expect("exact route");
+    let accelerated_route = accelerated.execute_route(&through).expect("cch route");
+    assert_eq!(exact_route.edge_path, vec![2]);
+    assert_eq!(accelerated_route.edge_path, exact_route.edge_path);
+    assert_eq!(
+        accelerated_route.summary.total_generalized_cost,
+        exact_route.summary.total_generalized_cost
+    );
+
+    // Without the penalty the shorter path through b wins again.
+    metrics.turn_costs.destination_only_penalty_s = 0.0;
+    let open = exact_engine(topology, metrics)
+        .execute_route(&through)
+        .expect("route");
+    assert_eq!(open.edge_path, vec![0, 1]);
 }
 
 #[test]
