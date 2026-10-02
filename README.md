@@ -714,7 +714,8 @@ plus optional `directions_options`:
 `fi` and `zh-Hant` (also `zh-HK`, `zh-TW`, `zh`). Subtags are dropped until a
 table matches (`nl-BE` uses `nl`). Unknown languages fall back to English and
 add a warning. `units` is `metric` or `imperial`. `driving_side` overrides the
-dataset; without it, right-hand traffic is assumed. `facility_attribute` names
+dataset. Without it, the traffic side of the country at the origin is used
+when the dataset has admin areas, and right-hand traffic otherwise. `facility_attribute` names
 the attribute that marks stairs, escalators, lifts and moving walkways. It
 defaults to the profile's `facilities.attribute`. `GET /v1/service` lists the
 languages under `capabilities.directions_languages`.
