@@ -699,6 +699,7 @@ mod unpack_tests {
             reverse_downward_edge: vec![1],
             reverse_downward_arc: vec![0],
             unpack: UnpackTable::new(2, 1),
+            ranked: Default::default(),
         }
     }
 

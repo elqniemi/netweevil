@@ -81,6 +81,7 @@ pub(crate) struct AccelerationGraph {
     pub(crate) reverse_downward_edge: Vec<u32>,
     pub(crate) reverse_downward_arc: Vec<u32>,
     pub(crate) unpack: UnpackTable,
+    pub(crate) ranked: RankedCchCell,
 }
 
 impl AccelerationGraph {
@@ -670,5 +671,6 @@ pub(crate) fn build_acceleration_graph(
         reverse_downward_edge,
         reverse_downward_arc,
         unpack: UnpackTable::new(upward_len, downward_len),
+        ranked: RankedCchCell::default(),
     }))
 }
