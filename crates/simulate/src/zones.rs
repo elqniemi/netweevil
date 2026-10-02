@@ -141,31 +141,17 @@ pub fn effects_at(zones: &[PreparedZone], lon: f64, lat: f64) -> EdgeZoneEffects
 mod tests {
     use super::*;
 
-    fn square() -> PreparedPolygon {
-        PreparedPolygon::new(vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]])
-    }
-
     #[test]
-    fn contains_inside_point() {
-        assert!(square().contains(0.5, 0.5));
-    }
-
-    #[test]
-    fn excludes_outside_point() {
-        assert!(!square().contains(1.5, 0.5));
-        assert!(!square().contains(0.5, -0.1));
-    }
-
-    #[test]
-    fn handles_closed_ring() {
-        let poly = PreparedPolygon::new(vec![
-            [0.0, 0.0],
-            [1.0, 0.0],
-            [1.0, 1.0],
-            [0.0, 1.0],
-            [0.0, 0.0],
-        ]);
-        assert!(poly.contains(0.5, 0.5));
+    fn polygon_contains_inside_points_for_open_and_closed_rings() {
+        let open = vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let mut closed = open.clone();
+        closed.push([0.0, 0.0]);
+        for ring in [open, closed] {
+            let polygon = PreparedPolygon::new(ring);
+            assert!(polygon.contains(0.5, 0.5));
+            assert!(!polygon.contains(1.5, 0.5));
+            assert!(!polygon.contains(0.5, -0.1));
+        }
     }
 
     #[test]
