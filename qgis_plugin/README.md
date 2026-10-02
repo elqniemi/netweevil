@@ -16,10 +16,10 @@ It runs on QGIS 3.28+ (Qt 5) and QGIS 4 (Qt 6). The `supportsQt6` metadata flag 
 - reads the loaded dataset and available profiles from `/v1/service`
 - lets you pick route start and end points directly from the QGIS map canvas
 - can pull route points from a selected point feature in the active layer
-- submits route, OD, matrix, and service-area requests to the API
+- submits route, OD, matrix, service-area, and trip-optimization requests to the API
 - submits scheduled transit route requests when the API has preloaded GTFS feeds
 - runs multi-mode agent-based traffic simulations with mid-run control, animated playback, congestion and busy-segment layers
-- loads route, transit, OD, matrix, and service-area geometries into QGIS as grouped layers
+- loads route, transit, OD, matrix, service-area, and trip geometries into QGIS as grouped layers
 - reloads completed JSON/GeoJSON runs and succeeded run manifests without rerunning the API request
 - can build matrix origins and destinations from loaded QGIS point layers
 - can build service-area origins from map picks, selected point features, or the current route endpoints
@@ -36,6 +36,7 @@ The dock has a persistent connection bar at the top (API URL, Connect button, st
 | Transit | Pedestrian access + scheduled GTFS transit route |
 | Service Area | Reachable network/polygon areas around one or more origins |
 | OD / Matrix | Batch origin-destination pairs and full travel matrices |
+| Trip | Optimized multi-stop tour with service times and time windows |
 | Simulation | Agent-based traffic simulation with live playback |
 | Runs | Reload previously saved outputs without re-running |
 | Settings | Workspace root, timeout, saved-file format, dataset info |
@@ -102,7 +103,7 @@ dist/netweevil_qgis-<version>.zip
 2. Optionally use `From Selected Feature` if you have a point selected in the active point layer.
 3. Press `Run Route`.
 
-The plugin loads the route into a grouped set of QGIS layers and tables: main route, segment rows, hop segments, violations, and road-type/surface breakdowns when the API returns them. The route id auto-advances after each run so results are never overwritten. The `Returned Route Detail` and `Connectivity + Fallback` sections hold the advanced request flags.
+The plugin loads the route into a grouped set of QGIS layers and tables: main route, segment rows, hop segments, violations, and road-type/surface breakdowns when the API returns them. Ticking `Countries/states, border crossings, and timezones` (`returns.admin_areas`) or `Elevation profile, ascent, and descent` (`returns.elevation`) adds those values as route-layer attributes and in the log, plus a `regions` line layer per country/state stretch and an `elevation_profile` table. The route id auto-advances after each run so results are never overwritten. The `Returned Route Detail` and `Connectivity + Fallback` sections hold the advanced request flags.
 
 ### Transit
 
@@ -122,7 +123,17 @@ The plugin saves the raw JSON response and loads a grouped route summary plus pe
 3. Choose road-network options (output/band/boundary/multi-origin modes) or switch `Mode` to `Transit feed` — the tab shows only the controls the selected mode actually sends.
 4. Press `Run Service Area`.
 
+`Direction` switches between outbound areas (travel times from the origins) and inbound areas (travel times to the origins; static only). Under `Polygon generation`, `Denoise (0-1)`, `Min part area m2`, `Min hole area m2`, and `Cell size m` drop small parts, fill small holes, and set the tracing grid; empty fields are not sent.
+
 Outputs load as grouped sublayers by threshold and geometry type.
+
+### Trip
+
+1. In the `Trip` tab, add 2 to 2000 stops: `Pick On Map` (keeps adding one stop per click until pressed again), `Add Selected Features`, `Use Route Start + End`, or switch `Source` to a loaded point layer. Stop lines are `id,lon,lat[,service_s[,earliest_s[,latest_s]]]`; layer fields named `service_s`, `earliest_s`, and `latest_s` are picked up automatically.
+2. Choose a mode (round trip, fixed start/end, fixed endpoints, open), a departure time (seconds on your clock or `H:MM[:SS]`), a default service time, and whether late arrivals are allowed.
+3. Press `Run Trip`.
+
+The plugin posts to `/v1/trip` and loads a `visits` point layer labelled in visit order (arrival, departure, wait, lateness; late stops in red), a `legs` line layer (from/to stop, distance, time), and a one-row `trip_summary` table. The log shows the visit order, totals, time-window status, and the optimizer method, proof flags, cost against the request order, and timings.
 
 ### OD / Matrix
 
