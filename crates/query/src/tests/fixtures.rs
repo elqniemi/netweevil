@@ -18,7 +18,7 @@ use crate::{
 
 // Topology building blocks.
 
-pub(super) fn node(id: u32, lon: f64, lat: f64) -> TopologyNode {
+pub(crate) fn node(id: u32, lon: f64, lat: f64) -> TopologyNode {
     TopologyNode {
         node_id: NodeId(id),
         lon,
@@ -28,7 +28,7 @@ pub(super) fn node(id: u32, lon: f64, lat: f64) -> TopologyNode {
 }
 
 /// A car-accessible residential asphalt edge without geometry, name or flags.
-pub(super) fn edge(id: u32, from: u32, to: u32, source_way_id: i64, length_m: u32) -> DirectedEdge {
+pub(crate) fn edge(id: u32, from: u32, to: u32, source_way_id: i64, length_m: u32) -> DirectedEdge {
     DirectedEdge {
         edge_id: EdgeId(id),
         from: NodeId(from),
@@ -65,7 +65,7 @@ fn service_edge(id: u32, from: u32, to: u32, source_way_id: i64, length_m: u32) 
 
 /// Builds a car topology with node ids in `nodes` order, a single spatial
 /// index cell covering every node, edge-based transitions and weak components.
-pub(super) fn topology(
+pub(crate) fn topology(
     source_path: &str,
     nodes: &[(f64, f64)],
     edges: &[DirectedEdge],
@@ -101,7 +101,7 @@ pub(super) fn topology(
 
 /// Adds a car `no_*` restriction over `edge_path`. Restrictions do not change
 /// the topological edge-based graph, so no rebuild is needed.
-pub(super) fn with_no_turn(
+pub(crate) fn with_no_turn(
     mut topology: TopologyBundle,
     relation_id: i64,
     edge_path: &[u32],
@@ -118,7 +118,7 @@ pub(super) fn with_no_turn(
 // Topology fixtures.
 
 /// a -> b -> c along a residential way, plus a slow direct service road a -> c.
-pub(super) fn test_topology() -> TopologyBundle {
+pub(crate) fn test_topology() -> TopologyBundle {
     topology(
         "test",
         &[(6.0, 53.0), (6.001, 53.0), (6.002, 53.0)],
@@ -130,7 +130,7 @@ pub(super) fn test_topology() -> TopologyBundle {
     )
 }
 
-pub(super) fn service_area_linear_topology() -> TopologyBundle {
+pub(crate) fn service_area_linear_topology() -> TopologyBundle {
     topology(
         "service-area-linear",
         &[(6.0, 53.0), (6.001, 53.0), (6.002, 53.0)],
@@ -140,7 +140,7 @@ pub(super) fn service_area_linear_topology() -> TopologyBundle {
 
 /// A straight a-b-c-d line with service-road bypasses a -> c and c -> d, and
 /// the turn 1 -> 2 forbidden.
-pub(super) fn restricted_topology() -> TopologyBundle {
+pub(crate) fn restricted_topology() -> TopologyBundle {
     let topology = topology(
         "test",
         &[(6.0, 53.0), (6.001, 53.0), (6.002, 53.0), (6.003, 53.0)],
@@ -156,13 +156,13 @@ pub(super) fn restricted_topology() -> TopologyBundle {
 }
 
 /// `restricted_topology` with the pairwise ban replaced by the sequence 0, 1, 2.
-pub(super) fn multi_edge_restricted_topology() -> TopologyBundle {
+pub(crate) fn multi_edge_restricted_topology() -> TopologyBundle {
     with_no_turn(restricted_topology(), 100, &[0, 1, 2])
 }
 
 /// A left-then-right zigzag 0, 1, 2 and a service-road detour 3, 4 with a
 /// single right turn.
-pub(super) fn turn_penalty_topology() -> TopologyBundle {
+pub(crate) fn turn_penalty_topology() -> TopologyBundle {
     topology(
         "test",
         &[
@@ -182,14 +182,14 @@ pub(super) fn turn_penalty_topology() -> TopologyBundle {
     )
 }
 
-pub(super) fn traffic_signal_penalty_topology() -> TopologyBundle {
+pub(crate) fn traffic_signal_penalty_topology() -> TopologyBundle {
     let mut topology = turn_penalty_topology();
     topology.set_edge_flags(1, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL);
     topology
 }
 
 /// A fast route entering a roundabout on edge 1 and a slower plain detour.
-pub(super) fn roundabout_entry_penalty_topology() -> TopologyBundle {
+pub(crate) fn roundabout_entry_penalty_topology() -> TopologyBundle {
     topology(
         "test",
         &[(6.0, 53.0), (6.001, 53.0), (6.002, 53.001), (6.0, 53.001)],
@@ -207,7 +207,7 @@ pub(super) fn roundabout_entry_penalty_topology() -> TopologyBundle {
 
 /// Ten nodes 0.0001 degrees apart joined by nine 10 m edges, without a
 /// spatial index.
-pub(super) fn snap_test_topology() -> TopologyBundle {
+pub(crate) fn snap_test_topology() -> TopologyBundle {
     let nodes = (0..10)
         .map(|index| (6.0 + f64::from(index) * 0.0001, 53.0))
         .collect::<Vec<_>>();
@@ -219,7 +219,7 @@ pub(super) fn snap_test_topology() -> TopologyBundle {
     topology
 }
 
-pub(super) fn one_way_dead_end_topology() -> TopologyBundle {
+pub(crate) fn one_way_dead_end_topology() -> TopologyBundle {
     topology(
         "oneway-dead-end",
         &[(6.0, 53.0), (6.001, 53.0), (6.002, 53.0)],
@@ -228,12 +228,12 @@ pub(super) fn one_way_dead_end_topology() -> TopologyBundle {
 }
 
 /// The only route from node 0 to node 2 is the forbidden turn 0 -> 1.
-pub(super) fn illegal_turn_only_topology() -> TopologyBundle {
+pub(crate) fn illegal_turn_only_topology() -> TopologyBundle {
     with_no_turn(one_way_dead_end_topology(), 200, &[0, 1])
 }
 
 /// Node 0 is the nearest node to the origin but has no incident edge.
-pub(super) fn dead_node_snap_topology() -> TopologyBundle {
+pub(crate) fn dead_node_snap_topology() -> TopologyBundle {
     topology(
         "dead-node-snap",
         &[(6.0, 53.0), (6.0001, 53.0), (6.0002, 53.0)],
@@ -242,7 +242,7 @@ pub(super) fn dead_node_snap_topology() -> TopologyBundle {
 }
 
 /// The only route from node 0 to node 3 is the forbidden sequence 0, 1, 2.
-pub(super) fn ignored_restriction_only_topology() -> TopologyBundle {
+pub(crate) fn ignored_restriction_only_topology() -> TopologyBundle {
     let topology = topology(
         "ignored-restriction",
         &[(6.0, 53.0), (6.001, 53.0), (6.002, 53.0), (6.003, 53.0)],
@@ -256,7 +256,7 @@ pub(super) fn ignored_restriction_only_topology() -> TopologyBundle {
 }
 
 /// Reaching node 2 from edge 0 requires the forbidden u-turn 0 -> 1.
-pub(super) fn forbidden_uturn_topology() -> TopologyBundle {
+pub(crate) fn forbidden_uturn_topology() -> TopologyBundle {
     let topology = topology(
         "forbidden-uturn",
         &[(6.0, 53.0), (6.001, 53.0), (6.0, 53.001)],
@@ -270,7 +270,7 @@ pub(super) fn forbidden_uturn_topology() -> TopologyBundle {
 }
 
 /// One-way edge 0 -> 1 with a two-edge legal detour 1 -> 2 -> 0 (20 s).
-pub(super) fn oneway_with_detour_topology() -> TopologyBundle {
+pub(crate) fn oneway_with_detour_topology() -> TopologyBundle {
     topology(
         "oneway-detour",
         &[(6.0, 53.0), (6.001, 53.0), (6.0005, 53.0005)],
@@ -283,7 +283,7 @@ pub(super) fn oneway_with_detour_topology() -> TopologyBundle {
 }
 
 /// A ferry-only component next to a separate street component.
-pub(super) fn ferry_only_subnetwork_topology() -> TopologyBundle {
+pub(crate) fn ferry_only_subnetwork_topology() -> TopologyBundle {
     let ferry = DirectedEdge {
         duration_s: Some(60.0),
         road_class: RoadClass::Ferry,
@@ -299,7 +299,7 @@ pub(super) fn ferry_only_subnetwork_topology() -> TopologyBundle {
 }
 
 /// Two one-edge components about 600 m apart.
-pub(super) fn disconnected_topology() -> TopologyBundle {
+pub(crate) fn disconnected_topology() -> TopologyBundle {
     topology(
         "disconnected",
         &[(6.0, 53.0), (6.001, 53.0), (6.01, 53.0), (6.011, 53.0)],
@@ -308,7 +308,7 @@ pub(super) fn disconnected_topology() -> TopologyBundle {
 }
 
 /// Two one-edge components separated by a hop of about 33 m.
-pub(super) fn hop_disconnected_topology() -> TopologyBundle {
+pub(crate) fn hop_disconnected_topology() -> TopologyBundle {
     topology(
         "hop-disconnected",
         &[(6.0, 53.0), (6.0005, 53.0), (6.0010, 53.0), (6.0015, 53.0)],
@@ -320,7 +320,7 @@ pub(super) fn hop_disconnected_topology() -> TopologyBundle {
 
 /// Car metrics whose per-edge travel time equals the generalized cost. Turn
 /// penalties do not contribute to the cost (`cost_time_weight = 0`).
-pub(super) fn metrics(costs: &[f64]) -> CompiledProfileBundle {
+pub(crate) fn metrics(costs: &[f64]) -> CompiledProfileBundle {
     CompiledProfileBundle {
         schema_version: 3,
         profile_id: "test".to_string(),
@@ -344,24 +344,24 @@ pub(super) fn metrics(costs: &[f64]) -> CompiledProfileBundle {
 }
 
 /// Like [`metrics`], but turn penalties are charged to the generalized cost.
-pub(super) fn turn_weighted_metrics(costs: &[f64]) -> CompiledProfileBundle {
+pub(crate) fn turn_weighted_metrics(costs: &[f64]) -> CompiledProfileBundle {
     let mut metrics = metrics(costs);
     metrics.turn_costs.cost_time_weight = 1.0;
     metrics
 }
 
-pub(super) fn uniform_metrics(edge_count: usize, travel_time_s: f64) -> CompiledProfileBundle {
+pub(crate) fn uniform_metrics(edge_count: usize, travel_time_s: f64) -> CompiledProfileBundle {
     turn_weighted_metrics(&vec![travel_time_s; edge_count])
 }
 
 /// Sets both travel time and generalized cost; `None` prunes the edge.
-pub(super) fn set_edge_cost(metrics: &mut CompiledProfileBundle, edge: usize, cost: Option<f64>) {
+pub(crate) fn set_edge_cost(metrics: &mut CompiledProfileBundle, edge: usize, cost: Option<f64>) {
     metrics.edge_metrics[edge].travel_time_s = cost;
     metrics.edge_metrics[edge].generalized_cost = cost;
 }
 
 /// A zero-weight accounting component without a temporal overlay.
-pub(super) fn cost_component(name: &str, edge_values: &[f32]) -> CompiledCostComponent {
+pub(crate) fn cost_component(name: &str, edge_values: &[f32]) -> CompiledCostComponent {
     CompiledCostComponent {
         name: name.to_string(),
         weight: 0.0,
@@ -373,35 +373,35 @@ pub(super) fn cost_component(name: &str, edge_values: &[f32]) -> CompiledCostCom
 }
 
 /// a -> b -> c costs 30, the direct a -> c service road costs 100.
-pub(super) fn test_metrics() -> CompiledProfileBundle {
+pub(crate) fn test_metrics() -> CompiledProfileBundle {
     metrics(&[10.0, 20.0, 100.0])
 }
 
-pub(super) fn service_area_linear_metrics() -> CompiledProfileBundle {
+pub(crate) fn service_area_linear_metrics() -> CompiledProfileBundle {
     metrics(&[10.0, 20.0])
 }
 
-pub(super) fn restricted_metrics() -> CompiledProfileBundle {
+pub(crate) fn restricted_metrics() -> CompiledProfileBundle {
     metrics(&[10.0, 10.0, 10.0, 20.0, 20.0])
 }
 
 /// The zigzag costs 15 and the detour 20 before turn penalties.
-pub(super) fn turn_penalty_metrics() -> CompiledProfileBundle {
+pub(crate) fn turn_penalty_metrics() -> CompiledProfileBundle {
     turn_weighted_metrics(&[5.0, 5.0, 5.0, 10.0, 10.0])
 }
 
 /// The roundabout route costs 10 and the detour 12 before entry penalties.
-pub(super) fn roundabout_entry_penalty_metrics() -> CompiledProfileBundle {
+pub(crate) fn roundabout_entry_penalty_metrics() -> CompiledProfileBundle {
     turn_weighted_metrics(&[5.0, 5.0, 6.0, 6.0])
 }
 
-pub(super) fn disconnected_metrics() -> CompiledProfileBundle {
+pub(crate) fn disconnected_metrics() -> CompiledProfileBundle {
     metrics(&[5.0, 5.0])
 }
 
 // Request builders.
 
-pub(super) fn point(id: &str, lon: f64, lat: f64) -> LabeledPoint {
+pub(crate) fn point(id: &str, lon: f64, lat: f64) -> LabeledPoint {
     LabeledPoint {
         id: id.to_string(),
         lon,
@@ -410,14 +410,14 @@ pub(super) fn point(id: &str, lon: f64, lat: f64) -> LabeledPoint {
     }
 }
 
-pub(super) fn snap_within(max_distance_m: f64) -> SnapOptions {
+pub(crate) fn snap_within(max_distance_m: f64) -> SnapOptions {
     SnapOptions {
         max_distance_m,
         ..Default::default()
     }
 }
 
-pub(super) fn full_geometry() -> ReturnConfig {
+pub(crate) fn full_geometry() -> ReturnConfig {
     ReturnConfig {
         geometry: ReturnGeometry::Full,
         ..Default::default()
@@ -425,7 +425,7 @@ pub(super) fn full_geometry() -> ReturnConfig {
 }
 
 /// A static route request with default options (500 m snap, summary only).
-pub(super) fn route_request(
+pub(crate) fn route_request(
     route_id: &str,
     origin: LabeledPoint,
     destination: LabeledPoint,
@@ -443,7 +443,7 @@ pub(super) fn route_request(
     }
 }
 
-pub(super) fn point_set(points: Vec<LabeledPoint>) -> PointSetDocument {
+pub(crate) fn point_set(points: Vec<LabeledPoint>) -> PointSetDocument {
     PointSetDocument {
         points,
         snap: Default::default(),
@@ -455,7 +455,7 @@ pub(super) fn point_set(points: Vec<LabeledPoint>) -> PointSetDocument {
     }
 }
 
-pub(super) fn od_pair(pair_id: &str, origin: LabeledPoint, destination: LabeledPoint) -> OdPair {
+pub(crate) fn od_pair(pair_id: &str, origin: LabeledPoint, destination: LabeledPoint) -> OdPair {
     OdPair {
         pair_id: pair_id.to_string(),
         origin,
@@ -463,7 +463,7 @@ pub(super) fn od_pair(pair_id: &str, origin: LabeledPoint, destination: LabeledP
     }
 }
 
-pub(super) fn od_pairs(pairs: Vec<OdPair>) -> OdPairsDocument {
+pub(crate) fn od_pairs(pairs: Vec<OdPair>) -> OdPairsDocument {
     OdPairsDocument {
         pairs,
         snap: Default::default(),
@@ -475,7 +475,7 @@ pub(super) fn od_pairs(pairs: Vec<OdPair>) -> OdPairsDocument {
     }
 }
 
-pub(super) fn exact_engine(
+pub(crate) fn exact_engine(
     topology: TopologyBundle,
     metrics: CompiledProfileBundle,
 ) -> PreparedRoutingEngine {
@@ -484,7 +484,7 @@ pub(super) fn exact_engine(
 }
 
 /// A prepared engine accelerated by the independent [`build_test_cch`].
-pub(super) fn cch_engine(
+pub(crate) fn cch_engine(
     topology: TopologyBundle,
     metrics: &CompiledProfileBundle,
 ) -> PreparedRoutingEngine {
@@ -493,7 +493,7 @@ pub(super) fn cch_engine(
         .expect("accelerated engine builds")
 }
 
-pub(super) fn write_temp_file(name: &str, contents: &str) -> PathBuf {
+pub(crate) fn write_temp_file(name: &str, contents: &str) -> PathBuf {
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("time works")
@@ -505,7 +505,7 @@ pub(super) fn write_temp_file(name: &str, contents: &str) -> PathBuf {
 
 // Derived topology state.
 
-pub(super) fn with_edge_based_topology(mut topology: TopologyBundle) -> TopologyBundle {
+pub(crate) fn with_edge_based_topology(mut topology: TopologyBundle) -> TopologyBundle {
     topology.edge_based_topology = crate::build_edge_based_topology_fallback(&topology);
     if topology.node_component_ids.len() != topology.nodes.len()
         || topology.edge_component_ids.len() != topology.edge_count()
@@ -593,7 +593,7 @@ fn spatial_index_for_all_nodes(
 /// graph's own transition costs. Returns the dataset bundle plus the metrics
 /// with the customized weights attached, ready for
 /// `PreparedRoutingEngine::new(.., Some(bundle))`.
-pub(super) fn build_test_cch(
+pub(crate) fn build_test_cch(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
 ) -> (

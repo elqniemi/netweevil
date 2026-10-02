@@ -65,6 +65,7 @@ fn service_area(
         band_mode: ServiceAreaBandMode::Cumulative,
         boundary_mode: ServiceAreaBoundaryMode::CutAtBoundary,
         multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+        direction: Default::default(),
         polygon: Default::default(),
         returns: Default::default(),
         temporal: Default::default(),

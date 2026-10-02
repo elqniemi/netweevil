@@ -199,6 +199,7 @@ pub(crate) fn execute_seeded_service_area_with_graph(
         band_mode: ServiceAreaBandMode::Cumulative,
         boundary_mode: ServiceAreaBoundaryMode::CutAtBoundary,
         multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+        direction: Default::default(),
         polygon: Default::default(),
         returns: returns.clone(),
         temporal: Default::default(),

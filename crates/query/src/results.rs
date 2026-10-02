@@ -149,6 +149,8 @@ pub struct ServiceAreaResult {
     pub boundary_mode: ServiceAreaBoundaryMode,
     #[serde(default)]
     pub multi_origin_mode: ServiceAreaMultiOriginMode,
+    #[serde(default)]
+    pub direction: ServiceAreaDirection,
     pub origin_count: usize,
     #[serde(default)]
     pub processed_origin_count: usize,

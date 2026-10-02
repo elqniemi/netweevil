@@ -1,4 +1,4 @@
-mod fixtures;
+pub(crate) mod fixtures;
 mod many_to_many;
 mod navigation;
 mod policies;

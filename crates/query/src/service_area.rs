@@ -6,6 +6,7 @@ use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 use crate::*;
 use rayon::prelude::*;
 
+mod inbound;
 mod labels;
 mod seeded;
 use labels::{EdgeLabelBuilder, SparseEdgeValues};
@@ -65,6 +66,9 @@ pub(crate) struct ServiceAreaOriginExpansion {
     pub(crate) representative_origin: SnappedPoint,
     pub(crate) fallback_used: bool,
     pub(crate) origin_hop_distance_m: Option<f64>,
+    /// Labels measure the cost to reach the point instead of from it; see
+    /// `inbound` for their mirrored meaning.
+    pub(crate) inbound: bool,
     pub(crate) edge_before_costs: SparseEdgeValues,
     pub(crate) edge_end_costs: SparseEdgeValues,
     pub(crate) edge_start_fractions: SparseEdgeValues,
@@ -107,6 +111,10 @@ pub(crate) fn execute_service_area_with_graph(
     routing_graph: &RoutingGraph,
     request: &ServiceAreaRequest,
 ) -> Result<ServiceAreaResult> {
+    let inbound = matches!(request.direction, ServiceAreaDirection::Inbound);
+    if inbound && request.temporal.is_temporal() {
+        bail!("inbound service areas are static; remove departure_time/arrive_by");
+    }
     let temporal_runtime = if request.temporal.is_temporal() {
         if request.temporal.arrive_by.is_some() {
             bail!("time-dependent service areas support departure_time, not arrive_by");
@@ -162,7 +170,7 @@ pub(crate) fn execute_service_area_with_graph(
                 routing_graph,
                 origin,
                 &search_snap,
-                true,
+                !inbound,
             )
         })
         .collect::<Vec<_>>();
@@ -206,6 +214,18 @@ pub(crate) fn execute_service_area_with_graph(
                     *departure,
                     max_threshold,
                     context,
+                )
+            } else if inbound {
+                inbound::build_inbound_service_area_expansion(
+                    topology,
+                    metrics,
+                    routing_graph,
+                    origin,
+                    &unique_origin_candidates[origin_set_id],
+                    request.snap.max_distance_m,
+                    &request.connectivity,
+                    metric_kind,
+                    max_threshold,
                 )
             } else {
                 build_service_area_expansion(
@@ -466,6 +486,7 @@ pub(crate) fn execute_service_area_with_graph(
         band_mode: request.band_mode,
         boundary_mode: request.boundary_mode,
         multi_origin_mode: request.multi_origin_mode,
+        direction: request.direction,
         origin_count: request.origins.len(),
         processed_origin_count,
         skipped_origin_count,
@@ -847,6 +868,7 @@ pub(crate) fn build_temporal_service_area_expansion(
         representative_origin: resolution.representative_origin,
         fallback_used: resolution.fallback_used,
         origin_hop_distance_m: resolution.origin_hop_distance_m,
+        inbound: false,
         edge_before_costs,
         edge_end_costs,
         edge_start_fractions,
@@ -1230,6 +1252,7 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
         representative_origin: resolution.representative_origin,
         fallback_used: resolution.fallback_used,
         origin_hop_distance_m: resolution.origin_hop_distance_m,
+        inbound: false,
         edge_before_costs,
         edge_end_costs,
         edge_start_fractions,
@@ -1638,6 +1661,16 @@ fn service_area_intervals_for_threshold(
     threshold_limit: f64,
     boundary_mode: ServiceAreaBoundaryMode,
 ) -> Vec<ReachableEdgeInterval> {
+    if expansion.inbound {
+        return inbound_intervals_for_threshold(
+            topology,
+            metrics,
+            expansion,
+            metric_kind,
+            threshold_limit,
+            boundary_mode,
+        );
+    }
     let mut segments = Vec::new();
     for (position, &edge_index) in expansion.reached_edges.iter().enumerate() {
         let edge_index = edge_index as usize;
@@ -1715,41 +1748,115 @@ fn service_area_intervals_for_threshold(
     normalize_service_area_segments(segments)
 }
 
+/// Inbound spans end at the anchor-side fraction `limit` with cost `near`
+/// and grow toward fraction 0, where the cost is `far`.
+fn inbound_intervals_for_threshold(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    expansion: &ServiceAreaOriginExpansion,
+    metric_kind: ServiceAreaMetricKind,
+    threshold_limit: f64,
+    boundary_mode: ServiceAreaBoundaryMode,
+) -> Vec<ReachableEdgeInterval> {
+    let mut segments = Vec::new();
+    for (position, &edge_index) in expansion.reached_edges.iter().enumerate() {
+        let edge_index = edge_index as usize;
+        let near = expansion.edge_before_costs.at(position);
+        let far = expansion.edge_end_costs.at(position);
+        let limit = expansion.edge_start_fractions.at(position);
+        if !near.is_finite() || !far.is_finite() || threshold_limit <= near {
+            continue;
+        }
+        let full_edge_cost =
+            service_area_edge_cost(topology, metrics, edge_index, metric_kind).unwrap_or_default();
+        let cost_at = |fraction: f64| near + full_edge_cost * (limit - fraction);
+        let mut start_fraction = 0.0_f64;
+        if matches!(boundary_mode, ServiceAreaBoundaryMode::CutAtBoundary)
+            && threshold_limit + f64::EPSILON < far
+        {
+            if full_edge_cost <= f64::EPSILON {
+                continue;
+            }
+            start_fraction = (limit - (threshold_limit - near) / full_edge_cost).clamp(0.0, limit);
+        }
+        if limit <= start_fraction + f64::EPSILON {
+            continue;
+        }
+        segments.push(ReachableEdgeInterval {
+            edge_index,
+            start_fraction,
+            end_fraction: limit,
+            start_cost: cost_at(start_fraction),
+            end_cost: near,
+            midpoint_cost: cost_at((start_fraction + limit) / 2.0),
+            start_components: BTreeMap::new(),
+            end_components: BTreeMap::new(),
+        });
+    }
+    normalize_service_area_segments(segments)
+}
+
+/// Removes the spans of `previous` from `current` edge by edge. Costs and
+/// component vectors of cut ends are interpolated linearly along the span,
+/// which holds for both outbound and inbound labels.
 fn difference_service_area_intervals(
     current: Vec<ReachableEdgeInterval>,
     previous: Vec<ReachableEdgeInterval>,
 ) -> Vec<ReachableEdgeInterval> {
-    let mut previous_by_edge = BTreeMap::<usize, Vec<ReachableEdgeInterval>>::new();
+    let mut previous_by_edge = BTreeMap::<usize, Vec<(f64, f64)>>::new();
     for interval in previous {
         previous_by_edge
             .entry(interval.edge_index)
             .or_default()
-            .push(interval);
+            .push((interval.start_fraction, interval.end_fraction));
     }
 
     let mut ring = Vec::new();
     for interval in current {
-        let mut start = interval.start_fraction;
-        let mut start_cost = interval.start_cost;
-        let mut start_components = interval.start_components.clone();
-        if let Some(previous_intervals) = previous_by_edge.get(&interval.edge_index) {
-            for previous in previous_intervals {
-                if previous.end_fraction <= start + f64::EPSILON {
-                    continue;
-                }
-                if previous.end_fraction > start {
-                    start = previous.end_fraction;
-                    start_cost = previous.end_cost;
-                    start_components = previous.end_components.clone();
-                }
+        let mut pieces = vec![(interval.start_fraction, interval.end_fraction)];
+        if let Some(cuts) = previous_by_edge.get(&interval.edge_index) {
+            for &(cut_start, cut_end) in cuts {
+                pieces = pieces
+                    .into_iter()
+                    .flat_map(|(start, end)| {
+                        [(start, end.min(cut_start)), (start.max(cut_end), end)]
+                    })
+                    .filter(|(start, end)| end > &(start + f64::EPSILON))
+                    .collect();
             }
         }
-        if interval.end_fraction > start + f64::EPSILON {
+        let span = interval.end_fraction - interval.start_fraction;
+        let at = |fraction: f64| {
+            if span <= f64::EPSILON {
+                0.0
+            } else {
+                ((fraction - interval.start_fraction) / span).clamp(0.0, 1.0)
+            }
+        };
+        let cost_at = |fraction: f64| {
+            interval.start_cost + (interval.end_cost - interval.start_cost) * at(fraction)
+        };
+        let components_at = |fraction: f64| {
+            let progress = at(fraction);
+            interval
+                .start_components
+                .iter()
+                .map(|(name, &start)| {
+                    let end = interval.end_components.get(name).copied().unwrap_or(start);
+                    (name.clone(), start + (end - start) * progress)
+                })
+                .collect::<BTreeMap<_, _>>()
+        };
+        for (start, end) in pieces {
             ring.push(ReachableEdgeInterval {
+                edge_index: interval.edge_index,
                 start_fraction: start,
-                start_cost,
-                start_components,
-                ..interval
+                end_fraction: end,
+                start_cost: cost_at(start),
+                end_cost: cost_at(end),
+                midpoint_cost: cost_at((start + end) / 2.0),
+                start_components: components_at(start),
+                end_components: components_at(end),
             });
         }
     }

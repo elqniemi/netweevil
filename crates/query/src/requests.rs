@@ -386,6 +386,16 @@ pub enum ServiceAreaMultiOriginMode {
     Cut,
 }
 
+/// `outbound` covers what the origins reach; `inbound` covers every position
+/// that reaches the origins (used as destinations) within the thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaDirection {
+    #[default]
+    Outbound,
+    Inbound,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceAreaPolygonOptions {
     #[serde(default = "default_hull_aggressiveness")]
@@ -485,6 +495,8 @@ pub struct ServiceAreaRequest {
     pub boundary_mode: ServiceAreaBoundaryMode,
     #[serde(default)]
     pub multi_origin_mode: ServiceAreaMultiOriginMode,
+    #[serde(default)]
+    pub direction: ServiceAreaDirection,
     #[serde(default)]
     pub polygon: ServiceAreaPolygonOptions,
     #[serde(default)]
