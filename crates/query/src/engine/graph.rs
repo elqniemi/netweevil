@@ -691,7 +691,7 @@ pub(crate) fn build_routing_graph_with_weights(
     // Profiles that agree on the traversable edges share these arrays and
     // the spatial index with each other (see `shared_structure`).
     let edge_order = U32_ARRAYS.intern(edge_order);
-    let edge_spatial_index = shared_spatial_index(topology, &edge_order, || {
+    let edge_spatial_index = shared_spatial_index(topology, &edge_order, &edge_costs, || {
         crate::edge_spatial_index::EdgeSpatialIndex::build(topology, &edge_costs)
     });
     Ok(RoutingGraph {

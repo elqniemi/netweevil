@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use netweevil_core::TopologyBundle;
 
-use crate::edge_spatial_index::EdgeSpatialIndex;
+use crate::edge_spatial_index::{EdgeSpatialIndex, routable_edge_set};
 
 /// Live interned arrays of one element type.
 pub(crate) struct ArrayInterner<T: 'static> {
@@ -88,13 +88,17 @@ impl<K, V> DerivedCache<K, V> {
 /// object as the registered one, so its derived structures can be reused.
 static TOPOLOGIES: Mutex<Vec<Weak<TopologyBundle>>> = Mutex::new(Vec::new());
 
-/// Spatial indexes by topology and interned `edge_order` (the routable
-/// edges in node order, which fix the indexed edge set).
+/// Spatial indexes built over registered topologies, with the edges each
+/// tree holds.
 static SPATIAL_INDEXES: Mutex<Vec<SpatialIndexEntry>> = Mutex::new(Vec::new());
 
 struct SpatialIndexEntry {
     topology: Weak<TopologyBundle>,
+    /// Interned `edge_order` of the graph the index was built for.
     edge_order: Weak<[u32]>,
+    /// The tree's edges as a bitset.
+    indexed: Arc<[u64]>,
+    indexed_count: u32,
     index: Weak<EdgeSpatialIndex>,
 }
 
@@ -119,37 +123,63 @@ fn registered(topology: &TopologyBundle) -> Option<Arc<TopologyBundle>> {
         .find(|known| std::ptr::eq(known.as_ref(), topology))
 }
 
-/// The spatial index of the routable edges `edge_order` lists, shared with
-/// earlier graphs over the same registered topology; `build` makes it when
-/// none is live.
+/// The spatial index of the routable edges (those with a finite
+/// `edge_costs` entry, which `edge_order` lists) over `topology`. Graphs over
+/// one registered topology share an index when they route on the same
+/// edges, and a graph whose edges are a subset of an indexed set shares that
+/// tree with a mask (the smallest such tree); `build` makes a new tree
+/// otherwise.
 pub(crate) fn shared_spatial_index(
     topology: &TopologyBundle,
     edge_order: &Arc<[u32]>,
+    edge_costs: &[f64],
     build: impl FnOnce() -> EdgeSpatialIndex,
 ) -> Arc<EdgeSpatialIndex> {
     let Some(owner) = registered(topology) else {
         return Arc::new(build());
     };
-    let lookup = || {
+    let routable: Arc<[u64]> = routable_edge_set(edge_costs).into();
+    let routable_count = routable.iter().map(|word| word.count_ones()).sum::<u32>();
+    let shared = {
         let mut entries = SPATIAL_INDEXES
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         entries.retain(|entry| entry.index.strong_count() > 0);
-        entries.iter().find_map(|entry| {
-            let same_topology = entry
+        let candidates = entries.iter().filter(|entry| {
+            entry
                 .topology
                 .upgrade()
-                .is_some_and(|known| Arc::ptr_eq(&known, &owner));
-            let same_edges = entry
+                .is_some_and(|known| Arc::ptr_eq(&known, &owner))
+        });
+        let mut best: Option<(&SpatialIndexEntry, Arc<EdgeSpatialIndex>)> = None;
+        for entry in candidates {
+            let Some(index) = entry.index.upgrade() else {
+                continue;
+            };
+            if entry
                 .edge_order
                 .upgrade()
-                .is_some_and(|known| Arc::ptr_eq(&known, edge_order));
-            (same_topology && same_edges)
-                .then(|| entry.index.upgrade())
-                .flatten()
-        })
+                .is_some_and(|known| Arc::ptr_eq(&known, edge_order))
+            {
+                return index;
+            }
+            let covers = entry.indexed.len() == routable.len()
+                && entry
+                    .indexed
+                    .iter()
+                    .zip(routable.iter())
+                    .all(|(indexed, needed)| needed & !indexed == 0);
+            if covers
+                && best
+                    .as_ref()
+                    .is_none_or(|(known, _)| entry.indexed_count < known.indexed_count)
+            {
+                best = Some((entry, index));
+            }
+        }
+        best.map(|(_, index)| Arc::new(index.restricted_to(routable.clone())))
     };
-    if let Some(index) = lookup() {
+    if let Some(index) = shared {
         return index;
     }
     let index = Arc::new(build());
@@ -159,6 +189,8 @@ pub(crate) fn shared_spatial_index(
         .push(SpatialIndexEntry {
             topology: Arc::downgrade(&owner),
             edge_order: Arc::downgrade(edge_order),
+            indexed: routable,
+            indexed_count: routable_count,
             index: Arc::downgrade(&index),
         });
     index
