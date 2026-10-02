@@ -101,6 +101,20 @@ impl ProfileDocument {
         if !self.temporal.max_wait_s.is_finite() || self.temporal.max_wait_s < 0.0 {
             bail!("temporal.max_wait_s must be finite and non-negative");
         }
+        for (name, value) in [
+            (
+                "border_crossing_penalty_s",
+                self.preferences.border_crossing_penalty_s,
+            ),
+            (
+                "border_crossing_time_s",
+                self.preferences.border_crossing_time_s,
+            ),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                bail!("preferences.{name} must be finite and non-negative");
+            }
+        }
         Ok(())
     }
 
@@ -580,6 +594,17 @@ pub struct PreferencesConfig {
     pub use_tracks: f64,
     #[serde(default)]
     pub service_penalty_s: f64,
+    /// Exclude edges between two different countries. Needs a dataset
+    /// imported with admin boundaries; elsewhere no edge crosses a border.
+    #[serde(default)]
+    pub avoid_border_crossings: bool,
+    /// Generalized cost added to each edge that crosses a country border.
+    #[serde(default)]
+    pub border_crossing_penalty_s: f64,
+    /// Travel time added to each border crossing (for example a border
+    /// control stop).
+    #[serde(default)]
+    pub border_crossing_time_s: f64,
 }
 
 fn default_pref() -> f64 {

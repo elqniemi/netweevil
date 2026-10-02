@@ -61,3 +61,29 @@ pub(crate) fn topology(edges: &[DirectedEdge]) -> TopologyBundle {
         elevation: Default::default(),
     }
 }
+
+/// Places node `i` of `topology` in the country (and optional state) at
+/// `areas[i]`; an empty code leaves the node outside every area.
+pub(crate) fn with_admin_areas(
+    mut topology: TopologyBundle,
+    areas: &[(&str, Option<&str>)],
+) -> TopologyBundle {
+    let regions = &mut topology.regions;
+    for (country, state) in areas {
+        let area = netweevil_core::AdminArea {
+            country_code: country.to_string(),
+            state_code: state.map(str::to_string),
+            ..Default::default()
+        };
+        let index = match regions.admin_areas.iter().position(|known| *known == area) {
+            _ if country.is_empty() => netweevil_core::NO_ADMIN_AREA,
+            Some(index) => index as u32,
+            None => {
+                regions.admin_areas.push(area);
+                (regions.admin_areas.len() - 1) as u32
+            }
+        };
+        regions.node_admin_area.push(index);
+    }
+    topology
+}
