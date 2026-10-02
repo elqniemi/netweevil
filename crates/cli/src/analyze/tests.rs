@@ -201,3 +201,207 @@ fn example_requests_inline_their_referenced_files() {
     .expect("scenario batch example loads");
     assert_eq!(batch.scenarios.len(), 2);
 }
+
+#[test]
+fn directions_flags_override_the_api_shaped_request_file() {
+    let AnalyzeCommand::Directions(args) = parse_analyze(&[
+        "directions",
+        "--dataset",
+        "north-nl",
+        "--profile",
+        "car.yml",
+        "--request",
+        "directions.json",
+        "--units",
+        "imperial",
+        "--driving-side",
+        "left",
+        "--facility-attribute",
+        "indoor_kind",
+    ]) else {
+        panic!("expected analyze directions command");
+    };
+    let mut document =
+        load_directions_request(&repository().join("examples/api/north_nl_directions.json"))
+            .expect("API directions payload loads");
+    assert_eq!(document.request.route_id, "groningen_directions");
+    args.apply_to(&mut document.directions_options);
+
+    // The file's language stays; the flags replace units, side and attribute.
+    let options = document.directions_options;
+    assert_eq!(options.language.as_deref(), Some("nl"));
+    assert_eq!(options.units, DistanceUnits::Imperial);
+    assert_eq!(options.driving_side, Some(DrivingSide::Left));
+    assert_eq!(options.facility_attribute.as_deref(), Some("indoor_kind"));
+
+    // A bare route request reads as a directions request with default options.
+    let bare = load_directions_request(&repository().join("examples/requests/route.json"))
+        .expect("bare route request loads");
+    assert_eq!(bare.directions_options, DirectionsOptions::default());
+}
+
+#[test]
+fn directions_run_writes_the_api_result_and_a_run_manifest() {
+    let root = std::env::temp_dir().join(format!(
+        "netweevil-cli-directions-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let paths = WorkspacePaths::discover(&root).expect("workspace");
+    publish_street_dataset(&paths, "street");
+    let profile_path = repository().join("examples/profiles/car_research_v1.yml");
+    crate::profile::profile_compile(&paths, "street", &profile_path).expect("profile compiles");
+    let request_path = root.join("directions.json");
+    std::fs::write(
+        &request_path,
+        serde_json::json!({
+            "request": {
+                "route_id": "cli-directions",
+                "origin": {"id": "a", "lon": 6.5, "lat": 53.2},
+                "destination": {"id": "b", "lon": 6.503, "lat": 53.2},
+                "snap": {"max_distance_m": 50.0}
+            },
+            "directions_options": {"language": "fi", "units": "imperial"}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let AnalyzeCommand::Directions(args) = parse_analyze(&[
+        "directions",
+        "--dataset",
+        "street",
+        "--profile",
+        profile_path.to_str().unwrap(),
+        "--request",
+        request_path.to_str().unwrap(),
+        "--language",
+        "nl",
+        "--driving-side",
+        "left",
+    ]) else {
+        panic!("expected analyze directions command");
+    };
+    let profile = load_profile(&profile_path).unwrap();
+    let read_json = |path: &Path| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let outcome = run_directions_analysis(&paths, &profile, &args).map(|(_, stored)| {
+        (
+            read_json(&stored.result_path),
+            read_json(&stored.manifest_path),
+        )
+    });
+    let _ = std::fs::remove_dir_all(&root);
+    let (result, manifest) = outcome.expect("directions run succeeds");
+
+    // The result has the `/v1/directions` result shape.
+    assert_eq!(result["language"], "nl");
+    assert_eq!(result["units"], "imperial");
+    assert_eq!(result["driving_side"], "left");
+    assert_eq!(result["driving_side_origin"], "request");
+    assert_eq!(result["route"]["route_id"], "cli-directions");
+    let maneuvers = result["maneuvers"].as_array().unwrap();
+    assert_eq!(maneuvers.first().unwrap()["kind"], "depart");
+    assert_eq!(maneuvers.last().unwrap()["kind"], "arrive");
+
+    assert_eq!(manifest["run_kind"], "directions");
+    assert_eq!(manifest["dataset_id"], "street");
+    assert_eq!(
+        manifest["effective_request"]["directions_options"]["language"],
+        "nl"
+    );
+}
+
+/// Writes a two-way, 300 m "Hoofdstraat" over four nodes as dataset `id`.
+fn publish_street_dataset(paths: &WorkspacePaths, id: &str) {
+    use netweevil_core::{
+        AccessMask, CacheBundleId, DirectedEdge, EdgeBasedTopology, EdgeId, NO_FEATURE_ROW, NodeId,
+        NodeSpatialIndex, RoadClass, SurfaceClass, TOPOLOGY_BUNDLE_SCHEMA_VERSION,
+        TopologyEdgeLayers, TopologyNode,
+    };
+    use netweevil_manifest::{BundleRef, DatasetManifest};
+
+    let nodes = (0..4)
+        .map(|node| TopologyNode {
+            node_id: NodeId(node),
+            lon: 6.5 + f64::from(node) * 0.0015,
+            lat: 53.2,
+            z: 0.0,
+        })
+        .collect::<Vec<_>>();
+    let edges = (0..3)
+        .flat_map(|node| [(node, node + 1), (node + 1, node)])
+        .enumerate()
+        .map(|(index, (from, to))| DirectedEdge {
+            edge_id: EdgeId(index as u32),
+            from: NodeId(from),
+            to: NodeId(to),
+            source_way_id: 1,
+            length_m: 100,
+            ascent_m: 0.0,
+            descent_m: 0.0,
+            feature_row: NO_FEATURE_ROW,
+            source_direction: if from < to { 1 } else { -1 },
+            temporal_rule_id: None,
+            duration_s: None,
+            road_class: RoadClass::Residential,
+            surface: SurfaceClass::Asphalt,
+            smoothness: Default::default(),
+            access_mask: AccessMask::new(AccessMask::CAR),
+            is_toll: false,
+            max_speed_kph: None,
+            lanes: None,
+            name_index: Some(0),
+            geometry_offset: 0,
+            geometry_len: 0,
+            flags: 0,
+        })
+        .collect::<Vec<_>>();
+    let topology = TopologyBundle {
+        schema_version: TOPOLOGY_BUNDLE_SCHEMA_VERSION,
+        source_path: "street".into(),
+        source_sha256: "street".into(),
+        edge_based_topology: EdgeBasedTopology::build(nodes.len(), edges.len(), |index| {
+            (edges[index].from.0, edges[index].to.0)
+        }),
+        spatial_index: NodeSpatialIndex::build(&nodes),
+        node_component_ids: vec![0; nodes.len()],
+        edge_component_ids: vec![0; edges.len()],
+        nodes,
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&edges),
+        turn_restrictions: Vec::new(),
+        names: Vec::new(),
+        feature_attributes: Default::default(),
+        temporal_rule_sets: Vec::new(),
+        elevation: Default::default(),
+        regions: Default::default(),
+    };
+    let bundle_ref = |dir: &Path, name: String| BundleRef {
+        path: dir.join(format!("{name}.bin")).display().to_string(),
+        bundle_id: CacheBundleId::new(name),
+    };
+    let topology_ref = bundle_ref(&paths.topology_bundles_dir, format!("topology-{id}"));
+    netweevil_persist::write_topology_bundle(&topology_ref.path, &topology).unwrap();
+    let names_ref = bundle_ref(&paths.edge_name_bundles_dir, format!("names-{id}"));
+    netweevil_persist::write_edge_name_bundle(
+        &names_ref.path,
+        &EdgeNameBundle::from_names(vec!["Hoofdstraat".into()]),
+    )
+    .unwrap();
+    let mut manifest: DatasetManifest = serde_json::from_value(serde_json::json!({
+        "dataset_id": id,
+        "label": id,
+        "source_path": "street.osm.pbf",
+        "source_sha256": "street",
+        "source_size_bytes": 0,
+        "imported_at": "2026-10-01T00:00:00Z",
+        "build_stage": "topology_ready",
+    }))
+    .unwrap();
+    manifest.topology_bundle = Some(topology_ref);
+    manifest.edge_name_bundle = Some(names_ref);
+    netweevil_persist::write_dataset_manifest(paths, &manifest).unwrap();
+}

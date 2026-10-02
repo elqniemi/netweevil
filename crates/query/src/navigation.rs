@@ -16,7 +16,7 @@ mod transit_steps;
 
 use anyhow::{Result, ensure};
 use netweevil_core::{EdgeNameBundle, TravelMode};
-use netweevil_profile::ReturnGeometry;
+use netweevil_profile::{ProfileDocument, ReturnGeometry};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -113,6 +113,16 @@ pub struct DirectionsOptions {
     /// moving walkways. Defaults to [`DEFAULT_FACILITY_ATTRIBUTE`].
     #[serde(default)]
     pub facility_attribute: Option<String>,
+}
+
+impl DirectionsOptions {
+    /// Reads pedestrian facilities from the profile's `facilities.attribute`
+    /// unless the request names an attribute of its own.
+    pub fn use_profile_facility_attribute(&mut self, profile: &ProfileDocument) {
+        if self.facility_attribute.is_none() {
+            self.facility_attribute = Some(profile.facilities.attribute.clone());
+        }
+    }
 }
 
 /// Dataset hook that knows which side of the road traffic keeps to at a

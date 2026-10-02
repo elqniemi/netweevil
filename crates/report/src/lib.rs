@@ -10,8 +10,9 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 use netweevil_query::{
-    AccessibilityResult, AnalysisOutcome, MatrixResult, OdResult, RouteBatchResult, RouteResult,
-    ServiceAreaBandMode, ServiceAreaMultiOriginMode, ServiceAreaOutputMode, ServiceAreaResult,
+    AccessibilityResult, AnalysisOutcome, DirectionsResult, MatrixResult, OdResult,
+    RouteBatchResult, RouteResult, ServiceAreaBandMode, ServiceAreaMultiOriginMode,
+    ServiceAreaOutputMode, ServiceAreaResult,
 };
 use serde::Serialize;
 
@@ -93,19 +94,12 @@ pub fn load_run_result_summary(manifest: &RunManifest) -> Result<Option<RunResul
         RunKind::Route => {
             let route: RouteResult =
                 serde_json::from_str(&raw).context("parsing route result JSON")?;
-            RunResultSummary::Route(RouteSummary {
-                route_id: route.route_id,
-                outcome: route.outcome,
-                total_distance_m: route.summary.total_distance_m,
-                total_travel_time_s: route.summary.total_travel_time_s,
-                total_generalized_cost: route.summary.total_generalized_cost,
-                illegal_movement_penalty_s: route.summary.illegal_movement_penalty_s,
-                illegal_movement_penalty_cost: route.summary.illegal_movement_penalty_cost,
-                violation_count: route.summary.violation_count,
-                segment_count: route.summary.segment_count,
-                diagnostics_count: route.diagnostics.len(),
-                warnings: route.warnings,
-            })
+            RunResultSummary::Route(route_summary(route, Vec::new()))
+        }
+        RunKind::Directions => {
+            let directions: DirectionsResult =
+                serde_json::from_str(&raw).context("parsing directions result JSON")?;
+            RunResultSummary::Route(route_summary(directions.route, directions.warnings))
         }
         RunKind::RouteBatch => {
             let batch: RouteBatchResult =
@@ -223,6 +217,24 @@ pub fn load_run_result_summary(manifest: &RunManifest) -> Result<Option<RunResul
         | RunKind::Trip => return Ok(None),
     };
     Ok(Some(summary))
+}
+
+/// `extra_warnings` come first, ahead of the route's own warnings.
+fn route_summary(route: RouteResult, mut extra_warnings: Vec<String>) -> RouteSummary {
+    extra_warnings.extend(route.warnings);
+    RouteSummary {
+        route_id: route.route_id,
+        outcome: route.outcome,
+        total_distance_m: route.summary.total_distance_m,
+        total_travel_time_s: route.summary.total_travel_time_s,
+        total_generalized_cost: route.summary.total_generalized_cost,
+        illegal_movement_penalty_s: route.summary.illegal_movement_penalty_s,
+        illegal_movement_penalty_cost: route.summary.illegal_movement_penalty_cost,
+        violation_count: route.summary.violation_count,
+        segment_count: route.summary.segment_count,
+        diagnostics_count: route.diagnostics.len(),
+        warnings: extra_warnings,
+    }
 }
 
 pub fn render_run_markdown(

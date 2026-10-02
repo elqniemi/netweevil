@@ -391,9 +391,7 @@ fn walking_maneuvers(
         temporal: Default::default(),
     };
     let mut options = options.clone();
-    if options.facility_attribute.is_none() {
-        options.facility_attribute = Some(profile.document.facilities.attribute.clone());
-    }
+    options.use_profile_facility_attribute(&profile.document);
     // Reuse the street instruction engine only if it reproduces the exact
     // routed edge sequence. Otherwise give no turns rather than attach turns
     // from a different walk to the scheduled journey. Stairs, escalators and
