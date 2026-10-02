@@ -6,7 +6,10 @@ use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 use crate::*;
 use rayon::prelude::*;
 
+mod labels;
 mod seeded;
+use labels::{EdgeLabelBuilder, SparseEdgeValues};
+use rustc_hash::FxHashMap;
 pub use seeded::ServiceAreaSeed;
 pub(crate) use seeded::execute_seeded_service_area_with_graph;
 
@@ -62,9 +65,9 @@ pub(crate) struct ServiceAreaOriginExpansion {
     pub(crate) representative_origin: SnappedPoint,
     pub(crate) fallback_used: bool,
     pub(crate) origin_hop_distance_m: Option<f64>,
-    pub(crate) edge_before_costs: Vec<f64>,
-    pub(crate) edge_end_costs: Vec<f64>,
-    pub(crate) edge_start_fractions: Vec<f64>,
+    pub(crate) edge_before_costs: SparseEdgeValues,
+    pub(crate) edge_end_costs: SparseEdgeValues,
+    pub(crate) edge_start_fractions: SparseEdgeValues,
     /// Sparse component labels for reached edges. The vectors are aligned
     /// with `CompiledProfileBundle::components`.
     edge_component_ranges: HashMap<usize, ServiceAreaEdgeComponentRange>,
@@ -679,12 +682,7 @@ pub(crate) fn build_temporal_service_area_expansion(
 ) -> Result<ServiceAreaOriginExpansion> {
     let resolution =
         resolve_service_area_origin(point, candidates, snap_max_distance_m, connectivity)?;
-    let edge_count = topology.edge_count();
-    let mut edge_before_costs = vec![f64::INFINITY; edge_count];
-    let mut edge_end_costs = vec![f64::INFINITY; edge_count];
-    let mut edge_start_fractions = vec![0.0_f64; edge_count];
-    let mut edge_component_ranges = HashMap::new();
-    let mut reached_edges = Vec::new();
+    let mut labels = EdgeLabelBuilder::new(topology.edge_count());
     let mut dist = HashMap::<SearchStateKey, f64>::new();
     let mut state_components = HashMap::<SearchStateKey, Vec<f64>>::new();
     let track_components = !metrics.components.is_empty();
@@ -727,12 +725,7 @@ pub(crate) fn build_temporal_service_area_expansion(
             if track_components {
                 state_components.insert(key, end_components.clone());
             }
-            update_service_area_edge_best(
-                &mut edge_before_costs,
-                &mut edge_end_costs,
-                &mut edge_start_fractions,
-                &mut edge_component_ranges,
-                &mut reached_edges,
+            labels.update(
                 edge_index,
                 before,
                 end,
@@ -818,12 +811,7 @@ pub(crate) fn build_temporal_service_area_expansion(
             if track_components {
                 state_components.insert(next_key, end_components.clone());
             }
-            update_service_area_edge_best(
-                &mut edge_before_costs,
-                &mut edge_end_costs,
-                &mut edge_start_fractions,
-                &mut edge_component_ranges,
-                &mut reached_edges,
+            labels.update(
                 next_edge,
                 before,
                 end,
@@ -847,6 +835,13 @@ pub(crate) fn build_temporal_service_area_expansion(
         "Time-dependent service-area expansion used exact FIFO Dijkstra; static PHAST/CCH acceleration was intentionally bypassed."
             .to_string(),
     );
+    let (
+        reached_edges,
+        edge_before_costs,
+        edge_end_costs,
+        edge_start_fractions,
+        edge_component_ranges,
+    ) = labels.finish();
     Ok(ServiceAreaOriginExpansion {
         origin_id: point.id.clone(),
         representative_origin: resolution.representative_origin,
@@ -885,153 +880,199 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
     let resolution =
         resolve_service_area_origin(point, candidates, snap_max_distance_m, connectivity)?;
     let edge_count = topology.edge_count();
-    let mut edge_before_costs = vec![f64::INFINITY; edge_count];
-    let mut edge_end_costs = vec![f64::INFINITY; edge_count];
-    let mut edge_start_fractions = vec![0.0_f64; edge_count];
-    let mut edge_component_ranges = HashMap::new();
-    let mut reached_edges = Vec::new();
+    let mut labels = EdgeLabelBuilder::new(edge_count);
     let track_components = !metrics.components.is_empty();
+    let turn_seconds = match metric_kind {
+        ServiceAreaMetricKind::TravelTimeS => {
+            routing_graph.transition_turn_seconds(topology, metrics)
+        }
+        ServiceAreaMetricKind::DistanceM => None,
+    };
+    let turn_cost = |transition_index: usize, edge_index: usize, next_edge: usize| match (
+        metric_kind,
+        turn_seconds,
+    ) {
+        (ServiceAreaMetricKind::DistanceM, _) => 0.0,
+        (_, Some(table)) => table.get(transition_index),
+        (_, None) => service_area_turn_cost(topology, metrics, edge_index, next_edge, metric_kind),
+    };
 
     if routing_graph.has_restriction_sequences() {
-        let mut dist = HashMap::<SearchStateKey, f64>::new();
-        let mut state_components = HashMap::<SearchStateKey, Vec<f64>>::new();
-        let mut heap = BinaryHeap::new();
-        for candidate in &resolution.seed_candidates {
-            for seed in
-                service_area_seed_specs(routing_graph, topology, metrics, candidate, metric_kind)
-            {
-                let automaton_state = routing_graph.automaton.transition(0, seed.edge_index);
-                let key = SearchStateKey {
-                    edge_index: seed.edge_index,
-                    automaton_state,
-                };
-                if seed.before_cost > max_cost {
-                    continue;
+        // Product-graph Dijkstra: automaton state zero (almost every state)
+        // uses the dense thread-local label array; states inside a
+        // restriction prefix use a small hash map.
+        SINGLE_SOURCE_SEARCH_SCRATCH.with(|scratch| {
+            let mut scratch = scratch.borrow_mut();
+            scratch.prepare(edge_count);
+            let mut heap = take_radix_heap();
+            let mut restricted_dist = FxHashMap::<(u32, u32), f64>::default();
+            let mut state_components = HashMap::<SearchStateKey, Vec<f64>>::new();
+            let known = |scratch: &SingleSourceEdgeSearchScratch,
+                         restricted_dist: &FxHashMap<(u32, u32), f64>,
+                         edge_index: usize,
+                         automaton_state: usize| {
+                if automaton_state == 0 {
+                    scratch.dist[edge_index]
+                } else {
+                    restricted_dist
+                        .get(&(edge_index as u32, automaton_state as u32))
+                        .copied()
+                        .unwrap_or(f64::INFINITY)
                 }
-                let previous = dist.get(&key).copied().unwrap_or(f64::INFINITY);
-                if seed.end_cost + f64::EPSILON >= previous {
-                    continue;
-                }
-                dist.insert(key, seed.end_cost);
-                let before_components = zero_component_vector(metrics);
-                let end_components =
-                    static_component_vector(metrics, seed.edge_index, 1.0 - seed.start_fraction);
-                if track_components {
-                    state_components.insert(key, end_components.clone());
-                }
-                update_service_area_edge_best(
-                    &mut edge_before_costs,
-                    &mut edge_end_costs,
-                    &mut edge_start_fractions,
-                    &mut edge_component_ranges,
-                    &mut reached_edges,
-                    seed.edge_index,
-                    seed.before_cost,
-                    seed.end_cost,
-                    seed.start_fraction,
-                    before_components,
-                    end_components,
-                );
-                if seed.end_cost <= max_cost {
-                    heap.push(State {
-                        edge_index: seed.edge_index,
-                        automaton_state,
-                        cost: seed.end_cost,
-                        score: seed.end_cost,
-                    });
-                }
-            }
-        }
-
-        while let Some(State {
-            edge_index,
-            automaton_state,
-            cost,
-            score: _,
-        }) = heap.pop()
-        {
-            let key = SearchStateKey {
-                edge_index,
-                automaton_state,
             };
-            if cost > dist.get(&key).copied().unwrap_or(f64::INFINITY) {
-                continue;
-            }
-            if cost > max_cost {
-                continue;
-            }
-            let path_components = if track_components {
-                let Some(components) = state_components.get(&key).cloned() else {
-                    continue;
-                };
-                components
-            } else {
-                Vec::new()
+            let improve = |scratch: &mut SingleSourceEdgeSearchScratch,
+                           restricted_dist: &mut FxHashMap<(u32, u32), f64>,
+                           edge_index: usize,
+                           automaton_state: usize,
+                           cost: f64| {
+                if automaton_state == 0 {
+                    scratch.update(edge_index, cost, NO_PREVIOUS_EDGE)
+                } else {
+                    let slot = restricted_dist
+                        .entry((edge_index as u32, automaton_state as u32))
+                        .or_insert(f64::INFINITY);
+                    if cost + f64::EPSILON >= *slot {
+                        return false;
+                    }
+                    *slot = cost;
+                    true
+                }
             };
+            for candidate in &resolution.seed_candidates {
+                for seed in service_area_seed_specs(
+                    routing_graph,
+                    topology,
+                    metrics,
+                    candidate,
+                    metric_kind,
+                ) {
+                    let automaton_state = routing_graph.automaton.transition(0, seed.edge_index);
+                    if seed.before_cost > max_cost
+                        || !improve(
+                            &mut scratch,
+                            &mut restricted_dist,
+                            seed.edge_index,
+                            automaton_state,
+                            seed.end_cost,
+                        )
+                    {
+                        continue;
+                    }
+                    let end_components = static_component_vector(
+                        metrics,
+                        seed.edge_index,
+                        1.0 - seed.start_fraction,
+                    );
+                    if track_components {
+                        state_components.insert(
+                            SearchStateKey {
+                                edge_index: seed.edge_index,
+                                automaton_state,
+                            },
+                            end_components.clone(),
+                        );
+                    }
+                    labels.update(
+                        seed.edge_index,
+                        seed.before_cost,
+                        seed.end_cost,
+                        seed.start_fraction,
+                        zero_component_vector(metrics),
+                        end_components,
+                    );
+                    if seed.end_cost <= max_cost {
+                        heap.push(
+                            seed.end_cost,
+                            heap_payload(seed.edge_index, automaton_state),
+                        );
+                    }
+                }
+            }
 
-            for transition_index in routing_graph.transition_range(edge_index) {
-                let next_edge = routing_graph.transition_edges[transition_index] as usize;
-                if !routing_graph
-                    .automaton
-                    .is_transition_allowed(automaton_state, next_edge)
+            while let Some((cost, payload)) = heap.pop() {
+                let (edge_index, automaton_state) = heap_state(payload);
+                if cost > known(&scratch, &restricted_dist, edge_index, automaton_state)
+                    || cost > max_cost
                 {
                     continue;
                 }
-                let Some(edge_cost) =
-                    service_area_edge_cost(topology, metrics, next_edge, metric_kind)
-                else {
-                    continue;
+                let path_components = if track_components {
+                    let Some(components) = state_components
+                        .get(&SearchStateKey {
+                            edge_index,
+                            automaton_state,
+                        })
+                        .cloned()
+                    else {
+                        continue;
+                    };
+                    components
+                } else {
+                    Vec::new()
                 };
-                let next_before = cost
-                    + service_area_turn_cost(topology, metrics, edge_index, next_edge, metric_kind);
-                if next_before > max_cost {
-                    continue;
-                }
-                let next_end = next_before + edge_cost;
-                let next_state = routing_graph
-                    .automaton
-                    .transition(automaton_state, next_edge);
-                let next_key = SearchStateKey {
-                    edge_index: next_edge,
-                    automaton_state: next_state,
-                };
-                let previous = dist.get(&next_key).copied().unwrap_or(f64::INFINITY);
-                if next_end + f64::EPSILON >= previous {
-                    continue;
-                }
-                dist.insert(next_key, next_end);
-                let before_components = path_components.clone();
-                let mut end_components = before_components.clone();
-                add_component_vector(
-                    &mut end_components,
-                    &static_component_vector(metrics, next_edge, 1.0),
-                );
-                if track_components {
-                    state_components.insert(next_key, end_components.clone());
-                }
-                update_service_area_edge_best(
-                    &mut edge_before_costs,
-                    &mut edge_end_costs,
-                    &mut edge_start_fractions,
-                    &mut edge_component_ranges,
-                    &mut reached_edges,
-                    next_edge,
-                    next_before,
-                    next_end,
-                    0.0,
-                    before_components,
-                    end_components,
-                );
-                if next_end <= max_cost {
-                    heap.push(State {
-                        edge_index: next_edge,
-                        automaton_state: next_state,
-                        cost: next_end,
-                        score: next_end,
-                    });
+
+                for transition_index in routing_graph.transition_range(edge_index) {
+                    let next_edge = routing_graph.transition_edges[transition_index] as usize;
+                    if !routing_graph
+                        .automaton
+                        .is_transition_allowed(automaton_state, next_edge)
+                    {
+                        continue;
+                    }
+                    let Some(edge_cost) =
+                        service_area_edge_cost(topology, metrics, next_edge, metric_kind)
+                    else {
+                        continue;
+                    };
+                    let next_before = cost + turn_cost(transition_index, edge_index, next_edge);
+                    if next_before > max_cost {
+                        continue;
+                    }
+                    let next_end = next_before + edge_cost;
+                    let next_state = routing_graph
+                        .automaton
+                        .transition(automaton_state, next_edge);
+                    if !improve(
+                        &mut scratch,
+                        &mut restricted_dist,
+                        next_edge,
+                        next_state,
+                        next_end,
+                    ) {
+                        continue;
+                    }
+                    let (before_components, end_components) = if track_components {
+                        let mut end_components = path_components.clone();
+                        add_component_vector(
+                            &mut end_components,
+                            &static_component_vector(metrics, next_edge, 1.0),
+                        );
+                        state_components.insert(
+                            SearchStateKey {
+                                edge_index: next_edge,
+                                automaton_state: next_state,
+                            },
+                            end_components.clone(),
+                        );
+                        (path_components.clone(), end_components)
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                    labels.update(
+                        next_edge,
+                        next_before,
+                        next_end,
+                        0.0,
+                        before_components,
+                        end_components,
+                    );
+                    if next_end <= max_cost {
+                        heap.push(next_end, heap_payload(next_edge, next_state));
+                    }
                 }
             }
-        }
+            return_radix_heap(heap);
+        });
     } else {
         let phast_ready = routing_graph
             .acceleration
@@ -1049,6 +1090,7 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
         let aborted = SINGLE_SOURCE_SEARCH_SCRATCH.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
             scratch.prepare(edge_count);
+            let mut heap = take_radix_heap();
             let mut path_components = HashMap::<usize, Vec<f64>>::new();
             let mut settled = 0_usize;
             for candidate in &resolution.seed_candidates {
@@ -1065,7 +1107,6 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
                     if !scratch.update(seed.edge_index, seed.end_cost, NO_PREVIOUS_EDGE) {
                         continue;
                     }
-                    let before_components = zero_component_vector(metrics);
                     let end_components = static_component_vector(
                         metrics,
                         seed.edge_index,
@@ -1074,37 +1115,22 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
                     if track_components {
                         path_components.insert(seed.edge_index, end_components.clone());
                     }
-                    update_service_area_edge_best(
-                        &mut edge_before_costs,
-                        &mut edge_end_costs,
-                        &mut edge_start_fractions,
-                        &mut edge_component_ranges,
-                        &mut reached_edges,
+                    labels.update(
                         seed.edge_index,
                         seed.before_cost,
                         seed.end_cost,
                         seed.start_fraction,
-                        before_components,
+                        zero_component_vector(metrics),
                         end_components,
                     );
                     if seed.end_cost <= max_cost {
-                        scratch.heap.push(State {
-                            edge_index: seed.edge_index,
-                            automaton_state: 0,
-                            cost: seed.end_cost,
-                            score: seed.end_cost,
-                        });
+                        heap.push(seed.end_cost, heap_payload(seed.edge_index, 0));
                     }
                 }
             }
 
-            while let Some(State {
-                edge_index,
-                automaton_state: _,
-                cost,
-                score: _,
-            }) = scratch.heap.pop()
-            {
+            while let Some((cost, payload)) = heap.pop() {
+                let (edge_index, _) = heap_state(payload);
                 if cost > scratch.dist[edge_index] {
                     continue;
                 }
@@ -1113,12 +1139,17 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
                 }
                 settled += 1;
                 if settled > settle_limit {
+                    return_radix_heap(heap);
                     return true;
                 }
-                let current_components = path_components
-                    .get(&edge_index)
-                    .cloned()
-                    .unwrap_or_else(|| zero_component_vector(metrics));
+                let current_components = if track_components {
+                    path_components
+                        .get(&edge_index)
+                        .cloned()
+                        .unwrap_or_else(|| zero_component_vector(metrics))
+                } else {
+                    Vec::new()
+                };
 
                 for transition_index in routing_graph.transition_range(edge_index) {
                     let next_edge = routing_graph.transition_edges[transition_index] as usize;
@@ -1127,14 +1158,7 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
                     else {
                         continue;
                     };
-                    let next_before = cost
-                        + service_area_turn_cost(
-                            topology,
-                            metrics,
-                            edge_index,
-                            next_edge,
-                            metric_kind,
-                        );
+                    let next_before = cost + turn_cost(transition_index, edge_index, next_edge);
                     if next_before > max_cost {
                         continue;
                     }
@@ -1142,21 +1166,18 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
                     if !scratch.update(next_edge, next_end, edge_index as u32) {
                         continue;
                     }
-                    let before_components = current_components.clone();
-                    let mut end_components = before_components.clone();
-                    add_component_vector(
-                        &mut end_components,
-                        &static_component_vector(metrics, next_edge, 1.0),
-                    );
-                    if track_components {
+                    let (before_components, end_components) = if track_components {
+                        let mut end_components = current_components.clone();
+                        add_component_vector(
+                            &mut end_components,
+                            &static_component_vector(metrics, next_edge, 1.0),
+                        );
                         path_components.insert(next_edge, end_components.clone());
-                    }
-                    update_service_area_edge_best(
-                        &mut edge_before_costs,
-                        &mut edge_end_costs,
-                        &mut edge_start_fractions,
-                        &mut edge_component_ranges,
-                        &mut reached_edges,
+                        (current_components.clone(), end_components)
+                    } else {
+                        (Vec::new(), Vec::new())
+                    };
+                    labels.update(
                         next_edge,
                         next_before,
                         next_end,
@@ -1165,15 +1186,11 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
                         end_components,
                     );
                     if next_end <= max_cost {
-                        scratch.heap.push(State {
-                            edge_index: next_edge,
-                            automaton_state: 0,
-                            cost: next_end,
-                            score: next_end,
-                        });
+                        heap.push(next_end, heap_payload(next_edge, 0));
                     }
                 }
             }
+            return_radix_heap(heap);
             false
         });
 
@@ -1181,13 +1198,7 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
             // The reachable ball outgrew the Dijkstra sweet spot: reset the
             // partial recording and redo the expansion with the exact
             // hierarchy sweep instead.
-            for &edge_index in &reached_edges {
-                edge_before_costs[edge_index as usize] = f64::INFINITY;
-                edge_end_costs[edge_index as usize] = f64::INFINITY;
-                edge_start_fractions[edge_index as usize] = 0.0;
-                edge_component_ranges.remove(&(edge_index as usize));
-            }
-            reached_edges.clear();
+            labels.clear();
             phast_service_area_expansion(
                 topology,
                 metrics,
@@ -1195,11 +1206,7 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
                 &resolution.seed_candidates,
                 metric_kind,
                 max_cost,
-                &mut edge_before_costs,
-                &mut edge_end_costs,
-                &mut edge_start_fractions,
-                &mut edge_component_ranges,
-                &mut reached_edges,
+                &mut labels,
             );
         }
     }
@@ -1211,6 +1218,8 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
                 .to_string(),
         );
     }
+    let (reached_edges, edge_before_costs, edge_end_costs, edge_start_fractions, ranges) =
+        labels.finish();
     Ok(ServiceAreaOriginExpansion {
         origin_id: point.id.clone(),
         representative_origin: resolution.representative_origin,
@@ -1219,11 +1228,37 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
         edge_before_costs,
         edge_end_costs,
         edge_start_fractions,
-        edge_component_ranges,
+        edge_component_ranges: ranges,
         reached_edges,
         diagnostics: resolution.diagnostics,
         warnings,
     })
+}
+
+thread_local! {
+    static SERVICE_AREA_HEAP: std::cell::RefCell<RadixHeap> =
+        std::cell::RefCell::new(RadixHeap::default());
+}
+
+fn take_radix_heap() -> RadixHeap {
+    let mut heap = SERVICE_AREA_HEAP.with(|heap| std::mem::take(&mut *heap.borrow_mut()));
+    heap.clear();
+    heap
+}
+
+fn return_radix_heap(heap: RadixHeap) {
+    SERVICE_AREA_HEAP.with(|slot| *slot.borrow_mut() = heap);
+}
+
+fn heap_payload(edge_index: usize, automaton_state: usize) -> u64 {
+    ((automaton_state as u64) << 32) | edge_index as u64
+}
+
+fn heap_state(payload: u64) -> (usize, usize) {
+    (
+        (payload & u64::from(u32::MAX)) as usize,
+        (payload >> 32) as usize,
+    )
 }
 
 /// Bounded one-to-all search over the quantized service-area metric.
@@ -1239,11 +1274,7 @@ fn phast_service_area_expansion(
     seed_candidates: &[SnappedPoint],
     metric_kind: ServiceAreaMetricKind,
     max_cost: f64,
-    edge_before_costs: &mut [f64],
-    edge_end_costs: &mut [f64],
-    edge_start_fractions: &mut [f64],
-    edge_component_ranges: &mut HashMap<usize, ServiceAreaEdgeComponentRange>,
-    reached_edges: &mut Vec<u32>,
+    labels: &mut EdgeLabelBuilder,
 ) {
     let acceleration = routing_graph
         .acceleration
@@ -1263,12 +1294,7 @@ fn phast_service_area_expansion(
             if seed.before_cost > max_cost {
                 continue;
             }
-            update_service_area_edge_best(
-                edge_before_costs,
-                edge_end_costs,
-                edge_start_fractions,
-                edge_component_ranges,
-                reached_edges,
+            labels.update(
                 seed.edge_index,
                 seed.before_cost,
                 seed.end_cost,
@@ -1350,12 +1376,7 @@ fn phast_service_area_expansion(
         if before_cost > max_cost {
             continue;
         }
-        update_service_area_edge_best(
-            edge_before_costs,
-            edge_end_costs,
-            edge_start_fractions,
-            edge_component_ranges,
-            reached_edges,
+        labels.update(
             edge_index,
             before_cost,
             end_cost,
@@ -1416,38 +1437,6 @@ fn service_area_seed_specs(
             })
         })
         .collect()
-}
-
-fn update_service_area_edge_best(
-    edge_before_costs: &mut [f64],
-    edge_end_costs: &mut [f64],
-    edge_start_fractions: &mut [f64],
-    edge_component_ranges: &mut HashMap<usize, ServiceAreaEdgeComponentRange>,
-    reached_edges: &mut Vec<u32>,
-    edge_index: usize,
-    before_cost: f64,
-    end_cost: f64,
-    start_fraction: f64,
-    before_components: Vec<f64>,
-    end_components: Vec<f64>,
-) {
-    if end_cost + f64::EPSILON < edge_end_costs[edge_index] {
-        if !edge_end_costs[edge_index].is_finite() {
-            reached_edges.push(edge_index as u32);
-        }
-        edge_before_costs[edge_index] = before_cost;
-        edge_end_costs[edge_index] = end_cost;
-        edge_start_fractions[edge_index] = start_fraction;
-        if !before_components.is_empty() || !end_components.is_empty() {
-            edge_component_ranges.insert(
-                edge_index,
-                ServiceAreaEdgeComponentRange {
-                    before: before_components,
-                    end: end_components,
-                },
-            );
-        }
-    }
 }
 
 fn zero_component_vector(metrics: &CompiledProfileBundle) -> Vec<f64> {
@@ -1645,14 +1634,14 @@ fn service_area_intervals_for_threshold(
     boundary_mode: ServiceAreaBoundaryMode,
 ) -> Vec<ReachableEdgeInterval> {
     let mut segments = Vec::new();
-    for &edge_index in &expansion.reached_edges {
+    for (position, &edge_index) in expansion.reached_edges.iter().enumerate() {
         let edge_index = edge_index as usize;
-        let before_cost = expansion.edge_before_costs[edge_index];
-        let end_cost = expansion.edge_end_costs[edge_index];
+        let before_cost = expansion.edge_before_costs.at(position);
+        let end_cost = expansion.edge_end_costs.at(position);
         if !before_cost.is_finite() || !end_cost.is_finite() || threshold_limit <= before_cost {
             continue;
         }
-        let start_fraction = expansion.edge_start_fractions[edge_index];
+        let start_fraction = expansion.edge_start_fractions.at(position);
         let mut end_fraction = 1.0_f64;
         if matches!(boundary_mode, ServiceAreaBoundaryMode::CutAtBoundary)
             && threshold_limit + f64::EPSILON < end_cost

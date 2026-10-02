@@ -1,8 +1,11 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 #[derive(Default)]
 pub(crate) struct RestrictionAutomaton {
     states: Vec<AutomatonState>,
+    /// Bitset of edges that leave the root state. Every other edge maps the
+    /// root to itself, which is by far the most common transition.
+    root_edges: Vec<u64>,
 }
 
 #[derive(Default)]
@@ -17,6 +20,7 @@ impl RestrictionAutomaton {
     pub(crate) fn build(sequences: &[Vec<usize>]) -> Self {
         let mut automaton = Self {
             states: vec![AutomatonState::default()],
+            root_edges: Vec::new(),
         };
 
         for sequence in sequences {
@@ -101,6 +105,12 @@ impl RestrictionAutomaton {
             }
         }
 
+        for &edge in automaton.states[0].transitions.keys() {
+            if automaton.root_edges.len() <= edge / 64 {
+                automaton.root_edges.resize(edge / 64 + 1, 0);
+            }
+            automaton.root_edges[edge / 64] |= 1 << (edge % 64);
+        }
         automaton
     }
 
@@ -137,6 +147,14 @@ impl RestrictionAutomaton {
     }
 
     pub(crate) fn transition(&self, state_index: usize, edge_index: usize) -> usize {
+        if state_index == 0
+            && self
+                .root_edges
+                .get(edge_index / 64)
+                .is_none_or(|word| word & (1 << (edge_index % 64)) == 0)
+        {
+            return 0;
+        }
         let mut cursor = state_index;
         loop {
             if let Some(&next_state) = self.states[cursor].transitions.get(&edge_index) {
