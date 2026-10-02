@@ -680,21 +680,25 @@ pub(crate) fn build_routing_graph_with_weights(
         .map(|sequence| sequence.iter().rev().copied().collect::<Vec<_>>())
         .collect::<Vec<_>>();
 
-    let edge_spatial_index =
-        crate::edge_spatial_index::EdgeSpatialIndex::build(topology, &edge_costs);
+    // Profiles that agree on the traversable edges share these arrays and
+    // the spatial index with each other (see `shared_structure`).
+    let edge_order = U32_ARRAYS.intern(edge_order);
+    let edge_spatial_index = shared_spatial_index(topology, &edge_order, || {
+        crate::edge_spatial_index::EdgeSpatialIndex::build(topology, &edge_costs)
+    });
     Ok(RoutingGraph {
-        edge_spatial_index: Arc::new(edge_spatial_index),
-        first_out: first_out.into(),
-        edge_order: edge_order.into(),
-        incoming_first_out: incoming_first_out.into(),
-        incoming_edge_order: incoming_edge_order.into(),
-        edge_costs: edge_costs.into(),
-        transition_first_out: transition_first_out.into(),
-        transition_edges: transition_edges.into(),
-        transition_costs: transition_costs.into(),
-        reverse_transition_first_out: reverse_transition_first_out.into(),
-        reverse_transition_edges: reverse_transition_edges.into(),
-        reverse_transition_costs: reverse_transition_costs.into(),
+        edge_spatial_index,
+        first_out: U32_ARRAYS.intern(first_out),
+        edge_order,
+        incoming_first_out: U32_ARRAYS.intern(incoming_first_out),
+        incoming_edge_order: U32_ARRAYS.intern(incoming_edge_order),
+        edge_costs: F64_ARRAYS.intern(edge_costs),
+        transition_first_out: U32_ARRAYS.intern(transition_first_out),
+        transition_edges: U32_ARRAYS.intern(transition_edges),
+        transition_costs: F64_ARRAYS.intern(transition_costs),
+        reverse_transition_first_out: U32_ARRAYS.intern(reverse_transition_first_out),
+        reverse_transition_edges: U32_ARRAYS.intern(reverse_transition_edges),
+        reverse_transition_costs: F64_ARRAYS.intern(reverse_transition_costs),
         // Temporal-inclusive graphs intentionally run exact searches: their
         // scenario-only directions are absent from the static CCH weights.
         // Do not invoke the acceleration loader here, because a missing

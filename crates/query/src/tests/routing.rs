@@ -720,6 +720,73 @@ fn accelerated_query_returns_an_unpacked_path() {
     assert_eq!(path.total_generalized_cost, 30.0);
 }
 
+/// Profiles over one topology and dataset hierarchy that route on the same
+/// edges share the adjacency arrays, the snapping index and the ranked
+/// hierarchy topology, while keeping their own costs and weights.
+#[test]
+fn engines_over_one_topology_share_identical_structures() {
+    let topology = Arc::new(test_topology());
+    let (bundle, fast) = build_test_cch(&topology, &test_metrics());
+    let (_, slow) = build_test_cch(&topology, &metrics(&[10.0, 40.0, 100.0]));
+    let (_, closed) = build_test_cch(&topology, &{
+        let mut metrics = test_metrics();
+        set_edge_cost(&mut metrics, 2, None);
+        metrics
+    });
+    let engine = |metrics| {
+        PreparedRoutingEngine::new(topology.clone(), Arc::new(metrics), Some(bundle.clone()))
+            .expect("engine prepares")
+    };
+    let (fast, slow, closed) = (engine(fast), engine(slow), engine(closed));
+    let graph = |engine: &PreparedRoutingEngine| {
+        let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
+        graph.clone()
+    };
+    let (fast_graph, slow_graph, closed_graph) = (graph(&fast), graph(&slow), graph(&closed));
+
+    assert!(Arc::ptr_eq(
+        &fast_graph.transition_edges,
+        &slow_graph.transition_edges
+    ));
+    assert!(Arc::ptr_eq(
+        &fast_graph.edge_spatial_index,
+        &slow_graph.edge_spatial_index
+    ));
+    assert!(!Arc::ptr_eq(&fast_graph.edge_costs, &slow_graph.edge_costs));
+    assert!(!Arc::ptr_eq(
+        &fast_graph.edge_spatial_index,
+        &closed_graph.edge_spatial_index
+    ));
+    let (fast_cch, slow_cch) = (
+        fast_graph.acceleration.as_ref().expect("accelerated"),
+        slow_graph.acceleration.as_ref().expect("accelerated"),
+    );
+    assert!(fast_cch.ranked.shares_topology(&slow_cch.ranked));
+    assert_ne!(
+        fast_cch.ranked.slot_weights(&fast_cch.source),
+        slow_cch.ranked.slot_weights(&slow_cch.source)
+    );
+
+    let request = a_to_c("shared");
+    for (engine, costs) in [
+        (&slow, [10.0, 40.0, 100.0]),
+        (&closed, [10.0, 20.0, f64::INFINITY]),
+    ] {
+        let mut metrics = metrics(&costs);
+        if costs[2].is_infinite() {
+            set_edge_cost(&mut metrics, 2, None);
+        }
+        let alone = exact_engine(test_topology(), metrics);
+        let shared = engine.execute_route(&request).expect("shared route");
+        let reference = alone.execute_route(&request).expect("reference route");
+        assert_eq!(shared.edge_path, reference.edge_path);
+        assert_eq!(
+            shared.summary.total_generalized_cost,
+            reference.summary.total_generalized_cost
+        );
+    }
+}
+
 /// Traffic bucket engines re-cost the base engine's hierarchy: they share
 /// its ranked topology, carry only their own weights and route like an
 /// engine prepared from scratch.

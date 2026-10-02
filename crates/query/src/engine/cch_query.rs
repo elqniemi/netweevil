@@ -103,14 +103,17 @@ pub(crate) struct RankedCch {
 }
 
 impl RankedCch {
-    /// Ranked rows of `source` carrying the slot-ordered arc weights.
+    /// Ranked rows of `source` carrying the slot-ordered arc weights. Every
+    /// metric customized on the same live `source` shares one topology.
     pub(crate) fn build(
-        source: &DatasetAccelerationBundle,
+        source: &Arc<DatasetAccelerationBundle>,
         upward_weight: &[u32],
         downward_weight: &[u32],
     ) -> Self {
+        static TOPOLOGIES: DerivedCache<DatasetAccelerationBundle, RankedTopology> =
+            DerivedCache::new();
         Self::with_topology(
-            Arc::new(RankedTopology::build(source)),
+            TOPOLOGIES.get_or_build(source, || RankedTopology::build(source)),
             source,
             upward_weight,
             downward_weight,

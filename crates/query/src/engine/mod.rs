@@ -9,6 +9,7 @@ mod many_to_many;
 mod radix_heap;
 mod restricted_astar;
 mod scratch_pool;
+mod shared_structure;
 mod state_heap;
 
 pub(crate) use acceleration::*;
@@ -22,6 +23,7 @@ pub(crate) use many_to_many::*;
 pub(crate) use radix_heap::*;
 pub(crate) use restricted_astar::*;
 pub(crate) use scratch_pool::*;
+pub(crate) use shared_structure::*;
 pub(crate) use state_heap::*;
 
 use std::cmp::Ordering;
@@ -69,6 +71,7 @@ impl PreparedRoutingEngine {
         with_ignore_mode_graph: bool,
     ) -> Result<Self> {
         validate_execution_inputs(topology.as_ref(), metrics.as_ref())?;
+        register_topology(&topology);
         let weights =
             customize_loaded_metrics(topology.as_ref(), metrics.as_ref(), acceleration.as_deref());
         let customized_at_load = weights.is_some();
