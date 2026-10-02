@@ -17,6 +17,7 @@ use crate::classify::{
     classify_directional_access, classify_smoothness, classify_speed_and_lanes, classify_surface,
     classify_toll, classify_way, is_traffic_signal_node, parse_duration_from_tags, tag,
 };
+use crate::guidance::{JunctionNodeTags, WayGuidanceTags, junction_node_tags, way_guidance_tags};
 use crate::import::{
     CountingReader, DatasetImportProgress, DatasetImportStage, PercentReporter, emit_progress,
 };
@@ -42,6 +43,8 @@ pub(crate) struct PendingWay {
     pub(crate) forward_lanes: Option<u8>,
     pub(crate) reverse_lanes: Option<u8>,
     pub(crate) name: Option<String>,
+    /// Route number, lane and signpost tags; `None` for most ways.
+    pub(crate) guidance: Option<Box<WayGuidanceTags>>,
     pub(crate) feature_row: u32,
     pub(crate) temporal_rule_id: Option<u32>,
 }
@@ -58,6 +61,8 @@ pub(crate) struct ScanOutput {
     /// that need to represent an unknown source value.
     pub(crate) node_coords: FxHashMap<i64, (f64, f64, f64)>,
     pub(crate) traffic_signal_nodes: FxHashSet<i64>,
+    /// `highway=motorway_junction` nodes with exit numbers or names.
+    pub(crate) junction_nodes: FxHashMap<i64, JunctionNodeTags>,
     pub(crate) counts: ObjectCounts,
     pub(crate) feature_attributes: FeatureAttributeTable,
     pub(crate) temporal_rule_sets: Vec<TemporalRuleSet>,
@@ -79,6 +84,7 @@ pub(crate) fn scan_routable_objects(
     Vec<TurnRestrictionCandidate>,
     FxHashSet<i64>,
     FxHashSet<i64>,
+    FxHashMap<i64, JunctionNodeTags>,
     ObjectCounts,
 )> {
     let file = File::open(source_path)
@@ -90,6 +96,7 @@ pub(crate) fn scan_routable_objects(
     let mut restriction_candidates = Vec::new();
     let mut node_ids = FxHashSet::default();
     let mut traffic_signal_nodes = FxHashSet::default();
+    let mut junction_nodes = FxHashMap::default();
     let mut counts = ObjectCounts::default();
     let mut reporter = PercentReporter::starting_at_zero();
 
@@ -107,6 +114,9 @@ pub(crate) fn scan_routable_objects(
                 if is_traffic_signal_node(&node.tags) {
                     traffic_signal_nodes.insert(node.id.0);
                 }
+                if let Some(junction) = junction_node_tags(&node.tags) {
+                    junction_nodes.insert(node.id.0, junction);
+                }
             }
             OsmObj::Way(way) => {
                 counts.ways += 1;
@@ -119,6 +129,10 @@ pub(crate) fn scan_routable_objects(
                 let directional_access =
                     classify_directional_access(&way.tags, highway, road_class, access_mask);
                 let speed_lanes = classify_speed_and_lanes(&way.tags, road_class);
+                let (forward_oneway, backward_oneway) = oneway_directions(
+                    directional_access.forward_access,
+                    directional_access.reverse_access,
+                );
 
                 let pending = PendingWay {
                     osm_way_id: way.id.0,
@@ -139,6 +153,7 @@ pub(crate) fn scan_routable_objects(
                     forward_lanes: speed_lanes.forward_lanes,
                     reverse_lanes: speed_lanes.reverse_lanes,
                     name: way.tags.get("name").map(ToString::to_string),
+                    guidance: way_guidance_tags(&way.tags, forward_oneway, backward_oneway),
                     feature_row: NO_FEATURE_ROW,
                     temporal_rule_id: None,
                 };
@@ -191,8 +206,24 @@ pub(crate) fn scan_routable_objects(
         restriction_candidates,
         node_ids,
         traffic_signal_nodes,
+        junction_nodes,
         counts,
     ))
+}
+
+/// Whether the way is one-way forward / backward for the most capable mode
+/// that may use it at all (car, then bicycle, then foot), so foot or
+/// contraflow cycling on a one-way street does not make it two-way.
+fn oneway_directions(forward: AccessMask, reverse: AccessMask) -> (bool, bool) {
+    [AccessMask::CAR, AccessMask::BICYCLE, AccessMask::FOOT]
+        .into_iter()
+        .find(|&mode| forward.contains(mode) || reverse.contains(mode))
+        .map_or((false, false), |mode| {
+            (
+                forward.contains(mode) && !reverse.contains(mode),
+                reverse.contains(mode) && !forward.contains(mode),
+            )
+        })
 }
 
 pub(crate) fn load_node_coords(
@@ -264,14 +295,22 @@ pub(crate) fn scan_osm(
     source_size_bytes: u64,
     progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<ScanOutput> {
-    let (pending_ways, restriction_candidates, needed_nodes, traffic_signal_nodes, counts) =
-        scan_routable_objects(source_path, source_size_bytes, progress)?;
+    let (
+        pending_ways,
+        restriction_candidates,
+        needed_nodes,
+        traffic_signal_nodes,
+        mut junction_nodes,
+        counts,
+    ) = scan_routable_objects(source_path, source_size_bytes, progress)?;
+    junction_nodes.retain(|node_id, _| needed_nodes.contains(node_id));
     let node_coords = load_node_coords(source_path, source_size_bytes, &needed_nodes, progress)?;
     Ok(ScanOutput {
         pending_ways,
         restriction_candidates,
         node_coords,
         traffic_signal_nodes,
+        junction_nodes,
         counts,
         feature_attributes: Default::default(),
         temporal_rule_sets: Vec::new(),

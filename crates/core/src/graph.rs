@@ -399,11 +399,6 @@ pub struct NodeSpatialIndex {
     pub node_ids: Vec<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct EdgeNameBundle {
-    pub names: Vec<String>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct EdgeBasedTopology {
     pub node_first_out: Vec<u32>,

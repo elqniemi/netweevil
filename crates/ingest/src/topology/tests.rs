@@ -14,6 +14,7 @@ fn builds_directional_three_dimensional_edge_quantities() {
         restriction_candidates: Vec::new(),
         node_coords: FxHashMap::from_iter([(100, (114.1, 22.3, 10.0)), (200, (114.1, 22.3, 22.0))]),
         traffic_signal_nodes: FxHashSet::default(),
+        junction_nodes: Default::default(),
         counts: ObjectCounts {
             nodes: 2,
             ways: 1,

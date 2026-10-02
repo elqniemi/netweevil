@@ -11,6 +11,7 @@ pub mod attributes;
 pub mod dataset;
 pub mod geo;
 pub mod graph;
+pub mod guidance;
 pub mod metrics;
 pub mod temporal;
 
@@ -28,12 +29,13 @@ pub use graph::{
     AccessMask, ConnectedComponentKind, ConnectedComponentsMeta, DirectedEdge,
     EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW, EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY,
     EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL,
-    EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, EdgeBasedTopology, EdgeId, EdgeNameBundle,
-    EdgePresentation, EdgeProfileAttributes, HighwayClass, NodeId, NodeSpatialIndex, RoadClass,
-    RoutingEdge, SmoothnessClass, SpatialIndexCell, SurfaceClass, TOPOLOGY_BUNDLE_SCHEMA_VERSION,
+    EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, EdgeBasedTopology, EdgeId, EdgePresentation,
+    EdgeProfileAttributes, HighwayClass, NodeId, NodeSpatialIndex, RoadClass, RoutingEdge,
+    SmoothnessClass, SpatialIndexCell, SurfaceClass, TOPOLOGY_BUNDLE_SCHEMA_VERSION,
     TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyEdgeLayers, TopologyNode,
     TurnRestriction, TurnRestrictionKind,
 };
+pub use guidance::{EDGE_NAME_BUNDLE_SCHEMA_VERSION, EdgeGuidance, EdgeNameBundle};
 pub use metrics::{
     CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, CCH_WEIGHT_SCALE,
     COMPILED_ACCELERATION_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,

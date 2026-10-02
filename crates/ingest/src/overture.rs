@@ -103,6 +103,7 @@ pub(crate) fn scan_overture(
         restriction_candidates,
         node_coords: state.node_coords,
         traffic_signal_nodes: Default::default(),
+        junction_nodes: Default::default(),
         counts: state.counts,
         feature_attributes: Default::default(),
         temporal_rule_sets: Vec::new(),
@@ -577,6 +578,7 @@ fn ingest_segment(row: SegmentRow, line: &[(f64, f64)], state: &mut OvertureStat
             forward_lanes,
             reverse_lanes,
             name: name.clone(),
+            guidance: None,
             feature_row: netweevil_core::NO_FEATURE_ROW,
             temporal_rule_id: None,
         });

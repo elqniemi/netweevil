@@ -1,18 +1,18 @@
 use super::{
-    read_acceleration_bundle, read_compiled_profile_bundle, read_edge_name_bundle,
-    read_topology_bundle, write_acceleration_bundle, write_compiled_profile_bundle,
-    write_edge_name_bundle, write_topology_bundle,
+    is_current_bundle_format, read_acceleration_bundle, read_compiled_profile_bundle,
+    read_edge_name_bundle, read_topology_bundle, write_acceleration_bundle,
+    write_compiled_profile_bundle, write_edge_name_bundle, write_topology_bundle,
 };
 use netweevil_core::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, AccessMask, CCH_ALGORITHM, CCH_WEIGHT_INFINITY,
     CCH_WEIGHT_OVERFLOW, COMPILED_ACCELERATION_SCHEMA_VERSION,
     COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId, CompiledAcceleration,
     CompiledEdgeMetric, CompiledProfileBundle, CompiledTurnCostConfig, DatasetAccelerationBundle,
-    DirectedEdge, EdgeId, EdgeNameBundle, FeatureAttributeColumn, FeatureAttributeColumnData,
-    FeatureAttributeDefinition, FeatureAttributeTable, FeatureAttributeType, MinuteInterval,
-    NodeId, RoadClass, SmoothnessClass, SurfaceClass, TOPOLOGY_BUNDLE_SCHEMA_VERSION,
-    TemporalEffect, TemporalRule, TemporalRuleSet, TopologyBundle, TopologyEdgeLayers,
-    TopologyNode, TravelMode, TurnRestriction, TurnRestrictionKind,
+    DirectedEdge, EdgeGuidance, EdgeId, EdgeNameBundle, FeatureAttributeColumn,
+    FeatureAttributeColumnData, FeatureAttributeDefinition, FeatureAttributeTable,
+    FeatureAttributeType, MinuteInterval, NodeId, RoadClass, SmoothnessClass, SurfaceClass,
+    TOPOLOGY_BUNDLE_SCHEMA_VERSION, TemporalEffect, TemporalRule, TemporalRuleSet, TopologyBundle,
+    TopologyEdgeLayers, TopologyNode, TravelMode, TurnRestriction, TurnRestrictionKind,
 };
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -186,14 +186,44 @@ fn round_trips_topology_bundle_binary() {
 }
 
 #[test]
-fn round_trips_edge_name_bundle_binary() {
+fn round_trips_edge_name_bundle_with_guidance_records() {
     let bundle = EdgeNameBundle {
-        names: vec!["main street".to_string(), "harbor road".to_string()],
+        names: vec!["harbor road".to_string(), "main street".to_string()],
+        strings: vec!["A7".into(), "Groningen;Assen".into(), "left|through".into()],
+        guidance_records: vec![
+            EdgeGuidance::default(),
+            EdgeGuidance {
+                reference: Some(0),
+                turn_lanes: Some(2),
+                destination: Some(1),
+                ..EdgeGuidance::default()
+            },
+        ],
+        edge_guidance: vec![0, 1, 0, 1],
     };
     let file = TempFile::new("edge-names");
     write_edge_name_bundle(file.path(), &bundle).expect("bundle should serialize");
+    assert!(is_current_bundle_format(file.path()));
     let read = read_edge_name_bundle(file.path()).expect("edge-name bundle should deserialize");
     assert_eq!(read.names, bundle.names);
+    assert_eq!(read.strings, bundle.strings);
+    assert_eq!(read.guidance_records, bundle.guidance_records);
+    assert_eq!(read.edge_guidance, bundle.edge_guidance);
+    assert_eq!(
+        read.string(read.guidance(3).destination),
+        Some("Groningen;Assen")
+    );
+}
+
+#[test]
+fn edge_name_bundle_rejects_out_of_range_guidance_indexes() {
+    let bundle = EdgeNameBundle {
+        guidance_records: vec![EdgeGuidance::default()],
+        edge_guidance: vec![0, 3],
+        ..EdgeNameBundle::default()
+    };
+    let file = TempFile::new("edge-names-invalid");
+    assert!(write_edge_name_bundle(file.path(), &bundle).is_err());
 }
 
 #[test]

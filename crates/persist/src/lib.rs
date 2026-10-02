@@ -9,11 +9,10 @@ mod sectioned;
 
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use memmap2::Mmap;
 use netweevil_core::{
     CompiledProfileBundle, DatasetAccelerationBundle, EdgeNameBundle, TopologyBundle,
 };
@@ -232,7 +231,7 @@ pub fn write_topology_bundle(path: impl AsRef<Path>, bundle: &TopologyBundle) ->
 }
 
 pub fn write_edge_name_bundle(path: impl AsRef<Path>, bundle: &EdgeNameBundle) -> Result<()> {
-    write_binary(path, bundle)
+    sectioned::write_edge_names_sectioned(path.as_ref(), bundle)
 }
 
 pub fn write_acceleration_bundle(
@@ -250,7 +249,10 @@ pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
 }
 
 pub fn read_edge_name_bundle(path: impl AsRef<Path>) -> Result<EdgeNameBundle> {
-    read_binary_mmap(path)
+    let path = path.as_ref();
+    let mmap = sectioned::map_file(path)?;
+    sectioned::read_edge_names_sectioned(&mmap, path)
+        .with_context(|| format!("parsing edge-name bundle {}", path.display()))
 }
 
 pub fn read_acceleration_bundle(path: impl AsRef<Path>) -> Result<DatasetAccelerationBundle> {
@@ -272,29 +274,6 @@ pub fn read_compiled_profile_bundle(path: impl AsRef<Path>) -> Result<CompiledPr
     let mmap = sectioned::map_file(path)?;
     sectioned::read_compiled_profile_sectioned(&mmap, path)
         .with_context(|| format!("parsing compiled profile bundle {}", path.display()))
-}
-
-fn write_binary<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Result<()> {
-    let path = path.as_ref();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating directory {}", parent.display()))?;
-    }
-    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
-    bincode::serialize_into(&mut writer, value)
-        .with_context(|| format!("serializing binary {}", path.display()))?;
-    writer
-        .flush()
-        .with_context(|| format!("flushing binary {}", path.display()))
-}
-
-fn read_binary_mmap<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
-    let path = path.as_ref();
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mmap = unsafe { Mmap::map(&file) }
-        .with_context(|| format!("memory-mapping {}", path.display()))?;
-    bincode::deserialize(&mmap).with_context(|| format!("parsing binary bundle {}", path.display()))
 }
 
 pub fn write_dataset_manifest(

@@ -28,6 +28,7 @@ pub(crate) fn pending_way(osm_way_id: i64, node_ids: &[i64]) -> PendingWay {
         forward_lanes: None,
         reverse_lanes: None,
         name: None,
+        guidance: None,
         feature_row: NO_FEATURE_ROW,
         temporal_rule_id: None,
     }
