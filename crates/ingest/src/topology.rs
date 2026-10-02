@@ -4,7 +4,7 @@ use anyhow::Result;
 use netweevil_core::{
     ConnectedComponentKind, ConnectedComponentsMeta, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
     EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId, EdgeNameBundle, NodeId,
-    SpatialIndexCell, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBounds, TopologyBundle,
+    TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle,
     TopologyBundleMeta, TopologyNode,
 };
 use std::collections::BTreeMap;
@@ -283,52 +283,9 @@ pub(crate) fn build_edge_based_topology(
     node_count: usize,
     edges: &[DirectedEdge],
 ) -> EdgeBasedTopology {
-    let mut out_degree = vec![0_u32; node_count];
-    let mut head = vec![0_u32; edges.len()];
-    for (edge_index, edge) in edges.iter().enumerate() {
-        out_degree[edge.from.0 as usize] += 1;
-        head[edge_index] = edge.to.0;
-    }
-
-    let mut node_first_out = vec![0_u32; node_count + 1];
-    for (node_index, degree) in out_degree.iter().enumerate() {
-        node_first_out[node_index + 1] = node_first_out[node_index] + degree;
-    }
-
-    let mut node_edge_order = vec![0_u32; edges.len()];
-    let mut write_positions = node_first_out[..node_count].to_vec();
-    for (edge_index, edge) in edges.iter().enumerate() {
-        let write_index = &mut write_positions[edge.from.0 as usize];
-        node_edge_order[*write_index as usize] = edge_index as u32;
-        *write_index += 1;
-    }
-
-    let mut edge_transition_first_out = vec![0_u32; edges.len() + 1];
-    for edge_index in 0..edges.len() {
-        let head_node = head[edge_index] as usize;
-        edge_transition_first_out[edge_index + 1] = edge_transition_first_out[edge_index]
-            + (node_first_out[head_node + 1] - node_first_out[head_node]);
-    }
-
-    let mut edge_transition_edges = vec![0_u32; edge_transition_first_out[edges.len()] as usize];
-    let mut transition_write_positions = edge_transition_first_out[..edges.len()].to_vec();
-    for edge_index in 0..edges.len() {
-        let head_node = head[edge_index] as usize;
-        for &next_edge in &node_edge_order
-            [node_first_out[head_node] as usize..node_first_out[head_node + 1] as usize]
-        {
-            let write_index = &mut transition_write_positions[edge_index];
-            edge_transition_edges[*write_index as usize] = next_edge;
-            *write_index += 1;
-        }
-    }
-
-    EdgeBasedTopology {
-        node_first_out,
-        node_edge_order,
-        edge_transition_first_out,
-        edge_transition_edges,
-    }
+    EdgeBasedTopology::build(node_count, edges.len(), |edge_index| {
+        (edges[edge_index].from.0, edges[edge_index].to.0)
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -469,99 +426,7 @@ fn build_name_lookup(ways: &[PendingWay]) -> BTreeMap<String, u32> {
 }
 
 fn build_spatial_index(nodes: &[TopologyNode]) -> Option<netweevil_core::NodeSpatialIndex> {
-    const TARGET_CELL_SPAN_M: f64 = 750.0;
-    const METERS_PER_DEGREE_LAT: f64 = 111_320.0;
-
-    let first = nodes.first()?;
-    let mut bounds = TopologyBounds {
-        min_lon: first.lon,
-        min_lat: first.lat,
-        max_lon: first.lon,
-        max_lat: first.lat,
-    };
-    for node in nodes.iter().skip(1) {
-        bounds.min_lon = bounds.min_lon.min(node.lon);
-        bounds.min_lat = bounds.min_lat.min(node.lat);
-        bounds.max_lon = bounds.max_lon.max(node.lon);
-        bounds.max_lat = bounds.max_lat.max(node.lat);
-    }
-
-    let mid_lat = ((bounds.min_lat + bounds.max_lat) / 2.0).to_radians();
-    let cos_lat = mid_lat.cos().abs().max(0.2);
-    let cell_height_deg = (TARGET_CELL_SPAN_M / METERS_PER_DEGREE_LAT).max(f64::EPSILON);
-    let cell_width_deg = (TARGET_CELL_SPAN_M / (METERS_PER_DEGREE_LAT * cos_lat)).max(f64::EPSILON);
-    let columns =
-        (((bounds.max_lon - bounds.min_lon) / cell_width_deg).floor() as u32).saturating_add(1);
-    let rows =
-        (((bounds.max_lat - bounds.min_lat) / cell_height_deg).floor() as u32).saturating_add(1);
-    let cell_count = columns as usize * rows as usize;
-    let mut counts = vec![0_u32; cell_count];
-
-    for node in nodes {
-        counts[spatial_cell_index(
-            &bounds,
-            columns,
-            rows,
-            cell_width_deg,
-            cell_height_deg,
-            node.lon,
-            node.lat,
-        )] += 1;
-    }
-
-    let mut cells = vec![SpatialIndexCell::default(); cell_count];
-    let mut next_offset = 0_u32;
-    for (cell, count) in cells.iter_mut().zip(&counts) {
-        cell.node_start = next_offset;
-        cell.node_len = *count;
-        next_offset += *count;
-    }
-
-    let mut write_positions = cells
-        .iter()
-        .map(|cell| cell.node_start as usize)
-        .collect::<Vec<_>>();
-    let mut node_ids = vec![0_u32; nodes.len()];
-    for node in nodes {
-        let cell_index = spatial_cell_index(
-            &bounds,
-            columns,
-            rows,
-            cell_width_deg,
-            cell_height_deg,
-            node.lon,
-            node.lat,
-        );
-        let write_index = write_positions[cell_index];
-        node_ids[write_index] = node.node_id.0;
-        write_positions[cell_index] += 1;
-    }
-
-    Some(netweevil_core::NodeSpatialIndex {
-        bounds,
-        columns,
-        rows,
-        cell_width_deg,
-        cell_height_deg,
-        cells,
-        node_ids,
-    })
-}
-
-fn spatial_cell_index(
-    bounds: &TopologyBounds,
-    columns: u32,
-    rows: u32,
-    cell_width_deg: f64,
-    cell_height_deg: f64,
-    lon: f64,
-    lat: f64,
-) -> usize {
-    let column = (((lon - bounds.min_lon) / cell_width_deg).floor() as i64)
-        .clamp(0, columns.saturating_sub(1) as i64) as usize;
-    let row = (((lat - bounds.min_lat) / cell_height_deg).floor() as i64)
-        .clamp(0, rows.saturating_sub(1) as i64) as usize;
-    row * columns as usize + column
+    netweevil_core::NodeSpatialIndex::build(nodes)
 }
 
 fn apportioned_duration_s(

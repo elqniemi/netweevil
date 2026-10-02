@@ -4,6 +4,7 @@
 //! Large bundles use one sectioned fast-load format whose big primitive
 //! arrays load with a single memcpy per array from the mapped file.
 
+mod codec;
 mod sectioned;
 
 use std::ffi::OsStr;

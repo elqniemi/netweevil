@@ -357,7 +357,7 @@ pub struct ConnectedComponentsMeta {
     pub largest_component_edge_count: u64,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub struct TopologyBounds {
     pub min_lon: f64,
     pub min_lat: f64,
@@ -382,13 +382,13 @@ impl TopologyNode {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpatialIndexCell {
     pub node_start: u32,
     pub node_len: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeSpatialIndex {
     pub bounds: TopologyBounds,
     pub columns: u32,
@@ -404,12 +404,141 @@ pub struct EdgeNameBundle {
     pub names: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct EdgeBasedTopology {
     pub node_first_out: Vec<u32>,
     pub node_edge_order: Vec<u32>,
     pub edge_transition_first_out: Vec<u32>,
     pub edge_transition_edges: Vec<u32>,
+}
+
+impl EdgeBasedTopology {
+    /// Builds the node-outgoing CSR (edges in index order per node) and
+    /// the complete edge-to-edge transition CSR: every edge continues into
+    /// every outgoing edge of its head node, u-turns included.
+    /// `endpoints(edge_index)` returns `(from, to)` node indexes.
+    pub fn build(
+        node_count: usize,
+        edge_count: usize,
+        endpoints: impl Fn(usize) -> (u32, u32),
+    ) -> Self {
+        let mut node_first_out = vec![0_u32; node_count + 1];
+        let mut head = vec![0_u32; edge_count];
+        for (edge_index, head_slot) in head.iter_mut().enumerate() {
+            let (from, to) = endpoints(edge_index);
+            node_first_out[from as usize + 1] += 1;
+            *head_slot = to;
+        }
+        for node_index in 0..node_count {
+            node_first_out[node_index + 1] += node_first_out[node_index];
+        }
+
+        let mut node_edge_order = vec![0_u32; edge_count];
+        let mut write_positions = node_first_out[..node_count].to_vec();
+        for edge_index in 0..edge_count {
+            let (from, _) = endpoints(edge_index);
+            let write_index = &mut write_positions[from as usize];
+            node_edge_order[*write_index as usize] = edge_index as u32;
+            *write_index += 1;
+        }
+
+        let mut edge_transition_first_out = vec![0_u32; edge_count + 1];
+        for edge_index in 0..edge_count {
+            let head_node = head[edge_index] as usize;
+            edge_transition_first_out[edge_index + 1] = edge_transition_first_out[edge_index]
+                + (node_first_out[head_node + 1] - node_first_out[head_node]);
+        }
+
+        let mut edge_transition_edges =
+            Vec::with_capacity(edge_transition_first_out[edge_count] as usize);
+        for &head_node in &head {
+            let head_node = head_node as usize;
+            edge_transition_edges.extend_from_slice(
+                &node_edge_order
+                    [node_first_out[head_node] as usize..node_first_out[head_node + 1] as usize],
+            );
+        }
+
+        Self {
+            node_first_out,
+            node_edge_order,
+            edge_transition_first_out,
+            edge_transition_edges,
+        }
+    }
+}
+
+impl NodeSpatialIndex {
+    /// Uniform grid of roughly 750 m cells over the node bounds; each cell
+    /// lists its node ids in node order.
+    pub fn build(nodes: &[TopologyNode]) -> Option<Self> {
+        const TARGET_CELL_SPAN_M: f64 = 750.0;
+        const METERS_PER_DEGREE_LAT: f64 = 111_320.0;
+
+        let first = nodes.first()?;
+        let mut bounds = TopologyBounds {
+            min_lon: first.lon,
+            min_lat: first.lat,
+            max_lon: first.lon,
+            max_lat: first.lat,
+        };
+        for node in nodes.iter().skip(1) {
+            bounds.min_lon = bounds.min_lon.min(node.lon);
+            bounds.min_lat = bounds.min_lat.min(node.lat);
+            bounds.max_lon = bounds.max_lon.max(node.lon);
+            bounds.max_lat = bounds.max_lat.max(node.lat);
+        }
+
+        let mid_lat = ((bounds.min_lat + bounds.max_lat) / 2.0).to_radians();
+        let cos_lat = mid_lat.cos().abs().max(0.2);
+        let cell_height_deg = (TARGET_CELL_SPAN_M / METERS_PER_DEGREE_LAT).max(f64::EPSILON);
+        let cell_width_deg =
+            (TARGET_CELL_SPAN_M / (METERS_PER_DEGREE_LAT * cos_lat)).max(f64::EPSILON);
+        let columns =
+            (((bounds.max_lon - bounds.min_lon) / cell_width_deg).floor() as u32).saturating_add(1);
+        let rows = (((bounds.max_lat - bounds.min_lat) / cell_height_deg).floor() as u32)
+            .saturating_add(1);
+        let cell_count = columns as usize * rows as usize;
+        let cell_of = |node: &TopologyNode| {
+            let column = (((node.lon - bounds.min_lon) / cell_width_deg).floor() as i64)
+                .clamp(0, columns.saturating_sub(1) as i64) as usize;
+            let row = (((node.lat - bounds.min_lat) / cell_height_deg).floor() as i64)
+                .clamp(0, rows.saturating_sub(1) as i64) as usize;
+            row * columns as usize + column
+        };
+
+        let mut counts = vec![0_u32; cell_count];
+        for node in nodes {
+            counts[cell_of(node)] += 1;
+        }
+        let mut cells = vec![SpatialIndexCell::default(); cell_count];
+        let mut next_offset = 0_u32;
+        for (cell, count) in cells.iter_mut().zip(&counts) {
+            cell.node_start = next_offset;
+            cell.node_len = *count;
+            next_offset += *count;
+        }
+        let mut write_positions = cells
+            .iter()
+            .map(|cell| cell.node_start as usize)
+            .collect::<Vec<_>>();
+        let mut node_ids = vec![0_u32; nodes.len()];
+        for node in nodes {
+            let cell_index = cell_of(node);
+            node_ids[write_positions[cell_index]] = node.node_id.0;
+            write_positions[cell_index] += 1;
+        }
+
+        Some(Self {
+            bounds,
+            columns,
+            rows,
+            cell_width_deg,
+            cell_height_deg,
+            cells,
+            node_ids,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
