@@ -33,8 +33,8 @@ use crate::geojson::{
     service_area_sequence_result_geojson, wants_geojson,
 };
 use crate::state::{
-    ApiState, LoadedProfile, ServiceRuntime, execute_on_routing_worker, load_edge_names,
-    resolve_profile,
+    ApiState, LoadedProfile, ServiceRuntime, execute_inline_on_routing_worker,
+    execute_on_routing_worker, load_edge_names, resolve_profile,
 };
 
 pub(crate) async fn healthz() -> Json<HealthResponse> {
@@ -79,17 +79,40 @@ where
     T: Send + 'static,
 {
     let runtime = state.runtime()?;
-    execute_on_routing_worker(runtime.as_ref(), job)
-        .await
-        .map_err(|error| {
-            warn!(
-                endpoint,
-                analysis_id = analysis_id.unwrap_or("-"),
-                %error,
-                "request failed"
-            );
-            ApiError::from_execution_error(error)
-        })
+    let result = execute_on_routing_worker(runtime.as_ref(), job).await;
+    analysis_result(endpoint, analysis_id, result)
+}
+
+/// [`run_analysis`] for single-route work, executed on the request's own
+/// thread (see [`execute_inline_on_routing_worker`]).
+async fn run_inline_analysis<T>(
+    state: &ApiState,
+    endpoint: &'static str,
+    analysis_id: Option<&str>,
+    job: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T, ApiError>
+where
+    T: Send + 'static,
+{
+    let runtime = state.runtime()?;
+    let result = execute_inline_on_routing_worker(runtime.as_ref(), job).await;
+    analysis_result(endpoint, analysis_id, result)
+}
+
+fn analysis_result<T>(
+    endpoint: &'static str,
+    analysis_id: Option<&str>,
+    result: Result<T>,
+) -> Result<T, ApiError> {
+    result.map_err(|error| {
+        warn!(
+            endpoint,
+            analysis_id = analysis_id.unwrap_or("-"),
+            %error,
+            "request failed"
+        );
+        ApiError::from_execution_error(error)
+    })
 }
 
 /// Renders an analysis result as the `{service, result}` JSON envelope, or as
@@ -175,7 +198,7 @@ async fn execute_route_response(
     } else {
         None
     };
-    let (result, maneuvers) = run_analysis(&state, "route", Some(&route_id), move || {
+    let (result, maneuvers) = run_inline_analysis(&state, "route", Some(&route_id), move || {
         if directions {
             let result = engine.execute_directions(
                 &request,

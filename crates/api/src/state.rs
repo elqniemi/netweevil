@@ -556,6 +556,36 @@ where
     .map_err(|error| anyhow::anyhow!("routing worker panicked: {error}"))?
 }
 
+/// Like [`execute_on_routing_worker`], but runs the job on the thread that
+/// is already handling the request. Meant for sub-millisecond analyses
+/// (single routes, directions, waypoint routes), where the two thread
+/// hand-offs of `spawn_blocking` cost as much as the search itself.
+/// `block_in_place` first hands this worker's other tasks to another thread,
+/// so a slow request still cannot stall the runtime. Current-thread runtimes
+/// (tests) cannot do that and fall back to the blocking pool.
+pub(crate) async fn execute_inline_on_routing_worker<T, F>(
+    service: &ServiceRuntime,
+    job: F,
+) -> Result<T, anyhow::Error>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T> + Send + 'static,
+{
+    if tokio::runtime::Handle::current().runtime_flavor()
+        != tokio::runtime::RuntimeFlavor::MultiThread
+    {
+        return execute_on_routing_worker(service, job).await;
+    }
+    let _permit = service
+        .routing_workers
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|error| anyhow::anyhow!("routing worker pool closed: {error}"))?;
+    tokio::task::block_in_place(|| std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)))
+        .map_err(|_| anyhow::anyhow!("routing worker panicked"))?
+}
+
 pub(crate) fn load_edge_names(service: &ServiceRuntime) -> Result<Arc<[String]>, ApiError> {
     if let Some(edge_names) = service.edge_names.get() {
         return Ok(edge_names.clone());
