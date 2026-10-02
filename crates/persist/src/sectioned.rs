@@ -362,7 +362,6 @@ fn raw_to_option(value: f64) -> Option<f64> {
     (!value.is_nan()).then_some(value)
 }
 
-
 #[derive(Serialize, Deserialize)]
 struct CompiledProfileHeader {
     schema_version: u32,
@@ -589,7 +588,10 @@ struct FeatureTableHeader {
 }
 
 fn present_flags<T>(values: &[Option<T>]) -> Vec<u32> {
-    values.iter().map(|value| u32::from(value.is_some())).collect()
+    values
+        .iter()
+        .map(|value| u32::from(value.is_some()))
+        .collect()
 }
 
 fn write_feature_attributes<W: Write>(
@@ -631,8 +633,12 @@ fn write_feature_attributes<W: Write>(
                 writer.write_u32s(&present_flags(values))?;
                 writer.write_f64s(&values.iter().flatten().copied().collect::<Vec<_>>())?;
             }
-            FeatureAttributeColumnData::String(values) | FeatureAttributeColumnData::Json(values) => {
-                let coded: Vec<i64> = values.iter().map(|value| option_u32_to_i64(*value)).collect();
+            FeatureAttributeColumnData::String(values)
+            | FeatureAttributeColumnData::Json(values) => {
+                let coded: Vec<i64> = values
+                    .iter()
+                    .map(|value| option_u32_to_i64(*value))
+                    .collect();
                 writer.write_i64s(&coded)?;
             }
         }
@@ -740,7 +746,11 @@ fn encode_topology<W: Write>(writer: &mut SectionWriter<W>, bundle: &TopologyBun
     let layers = &bundle.edge_layers;
     let edge_count = layers.routing.len();
     ensure_len("edge profile layer", layers.profile.len(), edge_count)?;
-    ensure_len("edge presentation layer", layers.presentation.len(), edge_count)?;
+    ensure_len(
+        "edge presentation layer",
+        layers.presentation.len(),
+        edge_count,
+    )?;
     writer.write_bincode(&"topology")?;
     writer.write_bincode(&TopologyHeader {
         schema_version: bundle.schema_version,
@@ -755,7 +765,13 @@ fn encode_topology<W: Write>(writer: &mut SectionWriter<W>, bundle: &TopologyBun
     // Nodes: ids are normally their index, coordinates OSM decimicro
     // degrees, elevation absent; the codecs collapse all three.
     let column = |f: fn(&TopologyNode) -> f64| bundle.nodes.iter().map(f).collect::<Vec<_>>();
-    writer.write_u32s(&bundle.nodes.iter().map(|node| node.node_id.0).collect::<Vec<_>>())?;
+    writer.write_u32s(
+        &bundle
+            .nodes
+            .iter()
+            .map(|node| node.node_id.0)
+            .collect::<Vec<_>>(),
+    )?;
     writer.write_f64s(&column(|node| node.lon))?;
     writer.write_f64s(&column(|node| node.lat))?;
     writer.write_f64s(&column(|node| node.z))?;
@@ -779,7 +795,12 @@ fn encode_topology<W: Write>(writer: &mut SectionWriter<W>, bundle: &TopologyBun
     writer.write_i64s(&i64s(|edge| edge.source_way_id))?;
     writer.write_u32s(&u32s(|edge| edge.length_m))?;
     writer.write_f32s(&routing.iter().map(|edge| edge.ascent_m).collect::<Vec<_>>())?;
-    writer.write_f32s(&routing.iter().map(|edge| edge.descent_m).collect::<Vec<_>>())?;
+    writer.write_f32s(
+        &routing
+            .iter()
+            .map(|edge| edge.descent_m)
+            .collect::<Vec<_>>(),
+    )?;
     writer.write_u32s(&u32s(|edge| edge.flags))?;
     writer.write_u32s(&u32s(|edge| edge.feature_row))?;
     writer.write_i64s(&i64s(|edge| i64::from(edge.source_direction)))?;
@@ -869,9 +890,9 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
         .collect();
     drop((node_ids, lons, lats, elevations));
     let spatial_index = match reader.read_bincode::<Stored<Option<NodeSpatialIndex>>>()? {
-        Stored::Derived => Some(
-            NodeSpatialIndex::build(&nodes).context("derived spatial index needs nodes")?,
-        ),
+        Stored::Derived => {
+            Some(NodeSpatialIndex::build(&nodes).context("derived spatial index needs nodes")?)
+        }
         Stored::Explicit(index) => index,
     };
 
@@ -945,10 +966,8 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
             let node_first_out = reader.read_u32s()?;
             let node_edge_order = reader.read_u32s()?;
             let edge_transition_first_out = reader.read_u32s()?;
-            let edge_transition_edges = codec::decode_sorted_rows(
-                &edge_transition_first_out,
-                reader.next_section()?,
-            )?;
+            let edge_transition_edges =
+                codec::decode_sorted_rows(&edge_transition_first_out, reader.next_section()?)?;
             EdgeBasedTopology {
                 node_first_out,
                 node_edge_order,
@@ -1096,12 +1115,18 @@ mod tests {
         bytes[..8].copy_from_slice(b"INVALID!");
         let error = read_topology_sectioned(&bytes, Path::new("topology.bin"))
             .expect_err("an unrecognized magic is rejected");
-        assert!(error.to_string().contains("re-import the dataset"), "{error}");
+        assert!(
+            error.to_string().contains("re-import the dataset"),
+            "{error}"
+        );
 
         let mut stale = topology();
         stale.schema_version -= 1;
         let error = read_topology_sectioned(&topology_bytes(&stale), Path::new("topology.bin"))
             .expect_err("a mismatched schema version is rejected");
-        assert!(error.to_string().contains("re-import the dataset"), "{error}");
+        assert!(
+            error.to_string().contains("re-import the dataset"),
+            "{error}"
+        );
     }
 }

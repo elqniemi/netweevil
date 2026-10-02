@@ -4,8 +4,7 @@ use anyhow::Result;
 use netweevil_core::{
     ConnectedComponentKind, ConnectedComponentsMeta, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
     EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId, EdgeNameBundle, NodeId,
-    TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle,
-    TopologyBundleMeta, TopologyNode,
+    TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle, TopologyBundleMeta, TopologyNode,
 };
 use std::collections::BTreeMap;
 

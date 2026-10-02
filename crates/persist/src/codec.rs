@@ -504,7 +504,9 @@ mod tests {
             (0..100).collect(),
             vec![5, 4, 3, u32::MAX, 0, 9],
             (0..1000).map(|value| value * 3 + 1_000_000).collect(),
-            (0_u32..64).map(|value| value.wrapping_mul(2_654_435_761)).collect(),
+            (0_u32..64)
+                .map(|value| value.wrapping_mul(2_654_435_761))
+                .collect(),
         ];
         for values in cases {
             assert_eq!(decode_u32s(&encode_u32s(&values)).unwrap(), values);
