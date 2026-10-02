@@ -29,7 +29,9 @@ pub(crate) struct RoutingGraph {
     pub(crate) transition_costs: Arc<[f64]>,
     reverse_transition_first_out: Arc<[u32]>,
     pub(crate) reverse_transition_edges: Arc<[u32]>,
-    pub(crate) reverse_transition_costs: Arc<[f64]>,
+    /// Forward transition of each reverse transition, so reverse searches
+    /// read the forward costs instead of a permuted copy.
+    reverse_transition_forward: Arc<[u32]>,
     pub(crate) acceleration: Option<Arc<AccelerationGraph>>,
     /// True when the attached acceleration weights were customized with the
     /// request's failure-mode penalties baked in (degraded graphs only);
@@ -152,6 +154,12 @@ impl RoutingGraph {
     pub(crate) fn transition_range(&self, edge_index: usize) -> std::ops::Range<usize> {
         self.transition_first_out[edge_index] as usize
             ..self.transition_first_out[edge_index + 1] as usize
+    }
+
+    /// Cost of the reverse transition at `reverse_index`: the cost of its
+    /// forward transition.
+    pub(crate) fn reverse_transition_cost(&self, reverse_index: usize) -> f64 {
+        self.transition_costs[self.reverse_transition_forward[reverse_index] as usize]
     }
 
     pub(crate) fn reverse_transition_range(&self, edge_index: usize) -> std::ops::Range<usize> {
@@ -660,7 +668,7 @@ pub(crate) fn build_routing_graph_with_weights(
         reverse_transition_first_out[edge_index + 1] += reverse_transition_first_out[edge_index];
     }
     let mut reverse_transition_edges = vec![0_u32; transition_count];
-    let mut reverse_transition_costs = vec![0.0_f64; transition_count];
+    let mut reverse_transition_forward = vec![0_u32; transition_count];
     let mut reverse_write_positions = reverse_transition_first_out[..edge_count].to_vec();
     for edge_index in 0..edge_count {
         for transition_index in
@@ -670,7 +678,7 @@ pub(crate) fn build_routing_graph_with_weights(
             let write_index = &mut reverse_write_positions[next_edge];
             let slot = *write_index as usize;
             reverse_transition_edges[slot] = edge_index as u32;
-            reverse_transition_costs[slot] = transition_costs[transition_index];
+            reverse_transition_forward[slot] = transition_index as u32;
             *write_index += 1;
         }
     }
@@ -698,7 +706,7 @@ pub(crate) fn build_routing_graph_with_weights(
         transition_costs: F64_ARRAYS.intern(transition_costs),
         reverse_transition_first_out: U32_ARRAYS.intern(reverse_transition_first_out),
         reverse_transition_edges: U32_ARRAYS.intern(reverse_transition_edges),
-        reverse_transition_costs: F64_ARRAYS.intern(reverse_transition_costs),
+        reverse_transition_forward: U32_ARRAYS.intern(reverse_transition_forward),
         // Temporal-inclusive graphs intentionally run exact searches: their
         // scenario-only directions are absent from the static CCH weights.
         // Do not invoke the acceleration loader here, because a missing
@@ -737,7 +745,7 @@ impl RoutingGraph {
             transition_costs: self.transition_costs.clone(),
             reverse_transition_first_out: self.reverse_transition_first_out.clone(),
             reverse_transition_edges: self.reverse_transition_edges.clone(),
-            reverse_transition_costs: self.reverse_transition_costs.clone(),
+            reverse_transition_forward: self.reverse_transition_forward.clone(),
             acceleration: self.acceleration.clone(),
             acceleration_includes_failure_penalties: self.acceleration_includes_failure_penalties,
             automaton: Arc::new(RestrictionAutomaton::build(&[])),
@@ -818,17 +826,6 @@ impl RoutingGraph {
                         + transition_access_cost(topology, base_metrics, edge_index, next_edge));
             }
         }
-        let mut reverse_transition_costs = vec![0.0_f64; transition_costs.len()];
-        let mut reverse_write_positions =
-            self.reverse_transition_first_out[..edge_costs.len()].to_vec();
-        for edge_index in 0..edge_costs.len() {
-            for transition_index in self.transition_range(edge_index) {
-                let next_edge = self.transition_edges[transition_index] as usize;
-                let slot = &mut reverse_write_positions[next_edge];
-                reverse_transition_costs[*slot as usize] = transition_costs[transition_index];
-                *slot += 1;
-            }
-        }
         let acceleration = match &self.acceleration {
             Some(base) => Some(Arc::new(base.with_metrics(metrics, weights)?)),
             None => None,
@@ -845,7 +842,7 @@ impl RoutingGraph {
             transition_costs: transition_costs.into(),
             reverse_transition_first_out: self.reverse_transition_first_out.clone(),
             reverse_transition_edges: self.reverse_transition_edges.clone(),
-            reverse_transition_costs: reverse_transition_costs.into(),
+            reverse_transition_forward: self.reverse_transition_forward.clone(),
             acceleration,
             acceleration_includes_failure_penalties: false,
             automaton: self.automaton.clone(),

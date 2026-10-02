@@ -1264,10 +1264,12 @@ fn recosted_graphs_keep_destination_only_entry_costs_bit_identical() {
         bits(&recosted.transition_costs),
         bits(&fresh.transition_costs)
     );
-    assert_eq!(
-        bits(&recosted.reverse_transition_costs),
-        bits(&fresh.reverse_transition_costs)
-    );
+    let reverse_bits = |graph: &RoutingGraph| {
+        (0..graph.reverse_transition_edges.len())
+            .map(|index| graph.reverse_transition_cost(index).to_bits())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(reverse_bits(&recosted), reverse_bits(&fresh));
     assert!(fresh.transition_costs.iter().any(|cost| *cost >= 600.0));
 
     // A different entry penalty changes the transitions: no reuse.
@@ -1424,6 +1426,33 @@ fn engines_with_restriction_sequences_customize_lower_bounds_in_the_background()
     assert!(crate::lower_bound_weights(graph).is_some());
 }
 
+/// Each reverse transition `previous -> edge` costs exactly what the forward
+/// transition `previous -> edge` costs.
+#[test]
+fn reverse_transitions_read_their_forward_costs() {
+    let topology = turn_penalty_topology();
+    let mut metrics = turn_penalty_metrics();
+    metrics.turn_costs.left_penalty_s = 10.0;
+    metrics.turn_costs.right_penalty_s = 5.0;
+    let graph = build_routing_graph(&topology, &metrics).expect("graph builds");
+    let mut checked = 0;
+    for edge in 0..topology.edge_count() {
+        for reverse in graph.reverse_transition_range(edge) {
+            let previous = graph.reverse_transition_edges[reverse] as usize;
+            let forward = graph
+                .transition_range(previous)
+                .find(|&index| graph.transition_edges[index] as usize == edge)
+                .expect("forward transition exists");
+            assert_eq!(
+                graph.reverse_transition_cost(reverse).to_bits(),
+                graph.transition_costs[forward].to_bits()
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, graph.transition_edges.len());
+}
+
 #[test]
 fn graph_without_restriction_sequences_matches_an_ignoring_build() {
     let topology = multi_edge_restricted_topology();
@@ -1464,7 +1493,7 @@ fn graph_without_restriction_sequences_matches_an_ignoring_build() {
                     .map(|index| {
                         (
                             graph.reverse_transition_edges[index],
-                            graph.reverse_transition_costs[index].to_bits(),
+                            graph.reverse_transition_cost(index).to_bits(),
                         )
                     })
                     .collect::<Vec<_>>();
