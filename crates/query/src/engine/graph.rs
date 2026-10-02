@@ -474,7 +474,7 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
 pub(crate) fn build_routing_graph_with_weights(
     topology: &TopologyBundle,
     metrics: Arc<CompiledProfileBundle>,
-    weights: Option<CchArcWeights>,
+    weights: Option<CchWeights>,
     acceleration: Option<Arc<DatasetAccelerationBundle>>,
     options: RoutingGraphBuildOptions,
 ) -> Result<RoutingGraph> {
@@ -905,6 +905,24 @@ impl AccelerationGraph {
 /// hierarchy, as customization emits them.
 pub(crate) type CchArcWeights = (Vec<u32>, Vec<u32>);
 
+/// Generalized-cost weights for a new acceleration graph.
+pub(crate) enum CchWeights {
+    /// Slot-ordered weights from customization.
+    Slots(CchArcWeights),
+    /// A ranked hierarchy already carrying the weights (re-customized from
+    /// another graph over the same dataset hierarchy).
+    Ranked(RankedCch),
+}
+
+impl CchWeights {
+    pub(crate) fn as_slots(&self) -> Option<&CchArcWeights> {
+        match self {
+            Self::Slots(weights) => Some(weights),
+            Self::Ranked(_) => None,
+        }
+    }
+}
+
 /// Compiled profile bundles persist per-edge metrics only. When `metrics`
 /// carries an acceleration header for `dataset_acceleration` but no arc
 /// weights yet, customize the generalized-cost weights now and return them
@@ -917,7 +935,7 @@ pub(crate) fn customize_loaded_metrics(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     dataset_acceleration: Option<&DatasetAccelerationBundle>,
-) -> Option<CchArcWeights> {
+) -> Option<CchWeights> {
     let (Some(source), Some(compiled)) = (dataset_acceleration, metrics.acceleration.as_ref())
     else {
         return None;
@@ -939,7 +957,10 @@ pub(crate) fn customize_loaded_metrics(
         source,
         compiled.source_acceleration_bundle_id.clone(),
     );
-    Some((weights.upward_weight, weights.downward_weight))
+    Some(CchWeights::Slots((
+        weights.upward_weight,
+        weights.downward_weight,
+    )))
 }
 
 /// The ranked hierarchy of `metrics` over `dataset_acceleration`. The cost
@@ -947,7 +968,7 @@ pub(crate) fn customize_loaded_metrics(
 /// bundle's acceleration otherwise.
 pub(crate) fn build_acceleration_graph(
     metrics: Arc<CompiledProfileBundle>,
-    weights: Option<CchArcWeights>,
+    weights: Option<CchWeights>,
     dataset_acceleration: Option<Arc<DatasetAccelerationBundle>>,
     edge_count: usize,
 ) -> Result<Option<AccelerationGraph>> {
@@ -963,7 +984,8 @@ pub(crate) fn build_acceleration_graph(
         return Ok(None);
     };
     let (upward_weight, downward_weight) = match &weights {
-        Some((upward, downward)) => (upward.as_slice(), downward.as_slice()),
+        Some(CchWeights::Slots((upward, downward))) => (upward.as_slice(), downward.as_slice()),
+        Some(CchWeights::Ranked(ranked)) => ranked.ranked_weights(),
         None => (
             acceleration.upward_weight.as_slice(),
             acceleration.downward_weight.as_slice(),
@@ -1049,8 +1071,10 @@ pub(crate) fn build_acceleration_graph(
         }
     }
 
-    let ranked = RankedCch::build(&topology_source, upward_weight, downward_weight);
-    drop(weights);
+    let ranked = match weights {
+        Some(CchWeights::Ranked(ranked)) => ranked,
+        _ => RankedCch::build(&topology_source, upward_weight, downward_weight),
+    };
     Ok(Some(AccelerationGraph {
         source: topology_source,
         metrics,

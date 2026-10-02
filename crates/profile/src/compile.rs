@@ -624,6 +624,81 @@ pub fn customize_acceleration(
     )
 }
 
+/// The base arc weights of generalized-cost customization (its first
+/// phase), one arc at a time: re-customizing after a few edges change only
+/// needs the base weights of arcs whose transitions touch those edges.
+pub struct CostBaseArcs<'a> {
+    topology: &'a TopologyBundle,
+    metrics: &'a CompiledProfileBundle,
+    mode_bit: u16,
+    /// Statically forbidden `(from, to)` turns, sorted.
+    forbidden: Vec<(u32, u32)>,
+}
+
+impl<'a> CostBaseArcs<'a> {
+    pub fn new(topology: &'a TopologyBundle, metrics: &'a CompiledProfileBundle) -> Self {
+        let mode_bit = metrics.mode.access_bit();
+        let mut forbidden = topology
+            .turn_restrictions
+            .iter()
+            .filter(|restriction| {
+                restriction.mode_mask.contains(mode_bit)
+                    && restriction.applies_statically()
+                    && restriction.edge_path.len() == 2
+            })
+            .map(|restriction| (restriction.edge_path[0].0, restriction.edge_path[1].0))
+            .collect::<Vec<_>>();
+        forbidden.sort_unstable();
+        forbidden.dedup();
+        Self {
+            topology,
+            metrics,
+            mode_bit,
+            forbidden,
+        }
+    }
+
+    fn usable(&self, edge_index: usize) -> bool {
+        self.metrics.edge_metrics[edge_index]
+            .generalized_cost
+            .is_some()
+            && is_statically_usable(self.topology, edge_index, self.mode_bit)
+    }
+
+    /// The encoded base weight [`customize_acceleration`] gives the
+    /// hierarchy arc `tail -> head`: the minimum over the transitions from
+    /// `tail` to `head` it maps onto that arc, or `CCH_WEIGHT_INFINITY`.
+    pub fn base_weight(&self, tail: usize, head: usize) -> u32 {
+        let edge_count = self.topology.edge_count();
+        if tail == head || head >= edge_count || !self.usable(tail) || !self.usable(head) {
+            return CCH_WEIGHT_INFINITY;
+        }
+        if self
+            .forbidden
+            .binary_search(&(tail as u32, head as u32))
+            .is_ok()
+        {
+            return CCH_WEIGHT_INFINITY;
+        }
+        let transitions = &self.topology.edge_based_topology;
+        let cost = cost_base_weight(
+            self.topology,
+            &self.metrics.edge_metrics,
+            &self.metrics.turn_costs,
+            self.mode_bit,
+        );
+        transitions.edge_transition_edges[transitions.edge_transition_first_out[tail] as usize
+            ..transitions.edge_transition_first_out[tail + 1] as usize]
+            .iter()
+            .filter(|&&next| next as usize == head)
+            .map(|_| cost(tail, head))
+            .filter(|weight| weight.is_finite())
+            .map(encode_cch_weight)
+            .min()
+            .unwrap_or(CCH_WEIGHT_INFINITY)
+    }
+}
+
 /// Service-area metric whose CCH weights can be customized on demand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServiceAreaMetric {

@@ -26,6 +26,11 @@ type AvoidEngineKey = (Vec<(u32, u64)>, bool);
 
 const AVOID_ENGINE_CACHE_CAPACITY: usize = 4;
 
+/// Avoid sets of at most one edge in this many re-customize the base
+/// engine's hierarchy; larger ones touch enough of it that a full
+/// customization (parallel) is faster.
+const RECUSTOMIZE_SHARE: usize = 200;
+
 impl PreparedRoutingEngine {
     /// The engine that serves requests carrying `avoid`, or `None` when the
     /// set does not change the problem (empty, matching no routable edge, or
@@ -121,14 +126,32 @@ impl PreparedRoutingEngine {
             return Ok(engine.clone());
         }
         let started = std::time::Instant::now();
+        let metrics = Arc::new(resolved.apply(self.metrics.as_ref()));
+        // Avoiding only raises or removes the costs of the avoided edges, so
+        // a small avoid set re-customizes this engine's hierarchy instead of
+        // customizing it from scratch.
+        let customized = (resolved.edges.len() <= self.topology.edge_count() / RECUSTOMIZE_SHARE)
+            .then(|| {
+                let changed = resolved
+                    .edges
+                    .iter()
+                    .map(|&(edge, _)| edge)
+                    .collect::<Vec<_>>();
+                recustomize_changed_edges(
+                    self.topology.as_ref(),
+                    metrics.as_ref(),
+                    &self.default_routing_graph,
+                    &changed,
+                )
+            })
+            .flatten()
+            .map(CchWeights::Ranked);
         let mut engine = PreparedRoutingEngine::build(
             self.topology.clone(),
-            Arc::new(resolved.apply(self.metrics.as_ref())),
-            self.default_routing_graph
-                .acceleration
-                .as_ref()
-                .map(|acceleration| acceleration.source.clone()),
+            metrics,
+            self.dataset_acceleration(),
             with_ignore_mode_graph,
+            customized,
         )?;
         engine.avoid_applied = true;
         tracing::debug!(

@@ -281,7 +281,7 @@ pub(crate) fn cached_failure_mode_bundle(
     {
         routing_graph.acceleration = build_acceleration_graph(
             degraded_metrics.clone(),
-            failure_weights,
+            failure_weights.map(CchWeights::Slots),
             Some(base_acceleration.source.clone()),
             degraded_topology.edge_count(),
         )?

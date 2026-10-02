@@ -7,6 +7,7 @@ mod fallback;
 mod graph;
 mod many_to_many;
 mod radix_heap;
+mod recustomize;
 mod restricted_astar;
 mod scratch_pool;
 mod shared_structure;
@@ -21,6 +22,7 @@ pub(crate) use fallback::*;
 pub(crate) use graph::*;
 pub(crate) use many_to_many::*;
 pub(crate) use radix_heap::*;
+pub(crate) use recustomize::*;
 pub(crate) use restricted_astar::*;
 pub(crate) use scratch_pool::*;
 pub(crate) use shared_structure::*;
@@ -56,24 +58,28 @@ impl PreparedRoutingEngine {
         metrics: Arc<CompiledProfileBundle>,
         acceleration: Option<Arc<DatasetAccelerationBundle>>,
     ) -> Result<Self> {
-        let engine = Self::build(topology, metrics, acceleration, true)?;
+        let engine = Self::build(topology, metrics, acceleration, true, None)?;
         prepare_lower_bounds_in_background(&engine.default_routing_graph);
         Ok(engine)
     }
 
     /// `with_ignore_mode_graph = false` skips the graph that serves
     /// [`EngineMode::IgnoreMultiEdgeRestrictions`]; such an engine must only
-    /// be asked for [`EngineMode::Auto`] work.
+    /// be asked for [`EngineMode::Auto`] work. `customized` supplies the
+    /// generalized-cost weights of `metrics` when the caller already has
+    /// them; otherwise they are customized here.
     fn build(
         topology: Arc<TopologyBundle>,
         metrics: Arc<CompiledProfileBundle>,
         acceleration: Option<Arc<DatasetAccelerationBundle>>,
         with_ignore_mode_graph: bool,
+        customized: Option<CchWeights>,
     ) -> Result<Self> {
         validate_execution_inputs(topology.as_ref(), metrics.as_ref())?;
         register_topology(&topology);
-        let weights =
-            customize_loaded_metrics(topology.as_ref(), metrics.as_ref(), acceleration.as_deref());
+        let weights = customized.or_else(|| {
+            customize_loaded_metrics(topology.as_ref(), metrics.as_ref(), acceleration.as_deref())
+        });
         let customized_at_load = weights.is_some();
         let mut default_routing_graph = build_routing_graph_with_weights(
             topology.as_ref(),
@@ -126,7 +132,7 @@ impl PreparedRoutingEngine {
             self.topology.as_ref(),
             self.metrics.as_ref(),
             metrics.clone(),
-            weights.as_ref(),
+            weights.as_ref().and_then(CchWeights::as_slots),
         );
         let mut default_routing_graph = match shared {
             Some(graph) => graph,
