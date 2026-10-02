@@ -14,9 +14,10 @@
 #[cfg(target_endian = "big")]
 compile_error!("the sectioned bundle format stores raw little-endian arrays");
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::{self, File};
-use std::io::{BufWriter, Write};
+use std::io::{BufWriter, Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -30,6 +31,7 @@ use netweevil_core::{
     NodeSpatialIndex, RoutingEdge, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle,
     TopologyEdgeLayers, TopologyNode, TravelMode,
 };
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::codec;
@@ -47,44 +49,49 @@ pub(crate) fn unsupported_format_error(path: &Path) -> anyhow::Error {
     )
 }
 
-struct SectionWriter<W: Write> {
-    writer: W,
+/// Section length flag marking a deflate-compressed payload: a `u64`
+/// little-endian inflated length followed by a raw deflate stream.
+const DEFLATED: u64 = 1 << 63;
+/// Sections smaller than this are never compressed.
+const DEFLATE_MIN_BYTES: usize = 64 * 1024;
+
+/// Collects encoded sections and writes them, deflating large sections in
+/// parallel when that saves at least a tenth of their size.
+struct SectionWriter {
+    sections: Vec<Vec<u8>>,
 }
 
-impl<W: Write> SectionWriter<W> {
-    fn new(mut writer: W) -> Result<Self> {
-        writer
-            .write_all(CURRENT_MAGIC)
-            .context("writing bundle magic")?;
-        Ok(Self { writer })
+impl SectionWriter {
+    fn new() -> Self {
+        Self {
+            sections: Vec::new(),
+        }
     }
 
-    fn write_section(&mut self, bytes: &[u8]) -> Result<()> {
-        self.writer
-            .write_all(&(bytes.len() as u64).to_le_bytes())
-            .context("writing section length")?;
-        self.writer.write_all(bytes).context("writing section")
+    fn write_section(&mut self, bytes: Vec<u8>) -> Result<()> {
+        self.sections.push(bytes);
+        Ok(())
     }
 
     fn write_bincode<T: Serialize>(&mut self, value: &T) -> Result<()> {
         let bytes = bincode::serialize(value).context("serializing bundle header section")?;
-        self.write_section(&bytes)
+        self.write_section(bytes)
     }
 
     fn write_u32s(&mut self, values: &[u32]) -> Result<()> {
-        self.write_section(&codec::encode_u32s(values))
+        self.write_section(codec::encode_u32s(values))
     }
 
     fn write_i64s(&mut self, values: &[i64]) -> Result<()> {
-        self.write_section(&codec::encode_i64s(values))
+        self.write_section(codec::encode_i64s(values))
     }
 
     fn write_f64s(&mut self, values: &[f64]) -> Result<()> {
-        self.write_section(&codec::encode_f64s(values))
+        self.write_section(codec::encode_f64s(values))
     }
 
     fn write_f32s(&mut self, values: &[f32]) -> Result<()> {
-        self.write_section(&codec::encode_f32s(values))
+        self.write_section(codec::encode_f32s(values))
     }
 
     /// Writes `values` as a bincode table of distinct records plus a
@@ -114,18 +121,57 @@ impl<W: Write> SectionWriter<W> {
         let mut table = Vec::with_capacity(table_bytes.len() + 8);
         table.extend_from_slice(&table_len.to_le_bytes());
         table.extend_from_slice(&table_bytes);
-        self.write_section(&table)?;
+        self.write_section(table)?;
         self.write_u32s(&indexes)
     }
 
-    fn finish(mut self) -> Result<()> {
-        self.writer.flush().context("flushing bundle")
+    fn finish_into(self, writer: &mut impl Write) -> Result<()> {
+        let framed: Vec<(u64, Vec<u8>)> = self
+            .sections
+            .into_par_iter()
+            .map(|section| {
+                if section.len() >= DEFLATE_MIN_BYTES {
+                    let mut encoder = flate2::write::DeflateEncoder::new(
+                        Vec::with_capacity(section.len() / 2 + 16),
+                        flate2::Compression::default(),
+                    );
+                    encoder.write_all(&(section.len() as u64).to_le_bytes())?;
+                    encoder.write_all(&section)?;
+                    let compressed = encoder.finish()?;
+                    if compressed.len() * 10 <= section.len() * 9 {
+                        return Ok((compressed.len() as u64 | DEFLATED, compressed));
+                    }
+                }
+                Ok((section.len() as u64, section))
+            })
+            .collect::<std::io::Result<_>>()
+            .context("compressing bundle sections")?;
+        writer
+            .write_all(CURRENT_MAGIC)
+            .context("writing bundle magic")?;
+        for (header, payload) in framed {
+            writer
+                .write_all(&header.to_le_bytes())
+                .context("writing section length")?;
+            writer.write_all(&payload).context("writing section")?;
+        }
+        writer.flush().context("flushing bundle")
+    }
+
+    fn finish(self, path: &Path) -> Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
+        let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
+        self.finish_into(&mut BufWriter::new(file))
     }
 }
 
+/// Reads sections in order. Deflated sections are all inflated up front,
+/// in parallel, and each buffer is released once its section is consumed.
 struct SectionReader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
+    sections: std::vec::IntoIter<Cow<'a, [u8]>>,
 }
 
 impl<'a> SectionReader<'a> {
@@ -133,47 +179,77 @@ impl<'a> SectionReader<'a> {
         if bytes.len() < MAGIC_LEN || &bytes[..MAGIC_LEN] != CURRENT_MAGIC {
             return Err(unsupported_format_error(path));
         }
+        let mut framed = Vec::new();
+        let mut offset = MAGIC_LEN;
+        while offset < bytes.len() {
+            let header_end = offset + 8;
+            if header_end > bytes.len() {
+                bail!("truncated bundle: missing section length");
+            }
+            let header = u64::from_le_bytes(bytes[offset..header_end].try_into().unwrap());
+            let end = usize::try_from(header & !DEFLATED)
+                .ok()
+                .and_then(|len| header_end.checked_add(len))
+                .filter(|end| *end <= bytes.len());
+            let Some(end) = end else {
+                bail!("truncated bundle: section extends past end of file");
+            };
+            framed.push((header & DEFLATED != 0, &bytes[header_end..end]));
+            offset = end;
+        }
+        let sections = framed
+            .into_par_iter()
+            .map(|(deflated, payload)| {
+                if !deflated {
+                    return Ok(Cow::Borrowed(payload));
+                }
+                let mut decoder = flate2::read::DeflateDecoder::new(payload);
+                let mut length = [0_u8; 8];
+                decoder
+                    .read_exact(&mut length)
+                    .context("reading compressed section length")?;
+                let length = usize::try_from(u64::from_le_bytes(length))
+                    .context("compressed section too large")?;
+                // Cap the preallocation; a corrupt length must not abort.
+                let mut inflated = Vec::with_capacity(length.min(1 << 30));
+                decoder
+                    .read_to_end(&mut inflated)
+                    .context("inflating bundle section")?;
+                if inflated.len() != length {
+                    bail!("compressed bundle section has the wrong length");
+                }
+                Ok(Cow::Owned(inflated))
+            })
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
-            bytes,
-            offset: MAGIC_LEN,
+            sections: sections.into_iter(),
         })
     }
 
-    fn next_section(&mut self) -> Result<&'a [u8]> {
-        let header_end = self.offset + 8;
-        if header_end > self.bytes.len() {
-            bail!("truncated bundle: missing section length");
-        }
-        let len = u64::from_le_bytes(self.bytes[self.offset..header_end].try_into().unwrap());
-        let end = usize::try_from(len)
-            .ok()
-            .and_then(|len| header_end.checked_add(len))
-            .filter(|end| *end <= self.bytes.len());
-        let Some(end) = end else {
-            bail!("truncated bundle: section extends past end of file");
-        };
-        self.offset = end;
-        Ok(&self.bytes[header_end..end])
+    fn next_section(&mut self) -> Result<Cow<'a, [u8]>> {
+        self.sections
+            .next()
+            .context("truncated bundle: missing section")
     }
 
     fn read_bincode<T: DeserializeOwned>(&mut self) -> Result<T> {
-        bincode::deserialize(self.next_section()?).context("parsing bundle header section")
+        bincode::deserialize(&self.next_section()?).context("parsing bundle header section")
     }
 
     fn read_u32s(&mut self) -> Result<Vec<u32>> {
-        codec::decode_u32s(self.next_section()?)
+        codec::decode_u32s(&self.next_section()?)
     }
 
     fn read_i64s(&mut self) -> Result<Vec<i64>> {
-        codec::decode_i64s(self.next_section()?)
+        codec::decode_i64s(&self.next_section()?)
     }
 
     fn read_f64s(&mut self) -> Result<Vec<f64>> {
-        codec::decode_f64s(self.next_section()?)
+        codec::decode_f64s(&self.next_section()?)
     }
 
     fn read_f32s(&mut self) -> Result<Vec<f32>> {
-        codec::decode_f32s(self.next_section()?)
+        codec::decode_f32s(&self.next_section()?)
     }
 
     fn read_interned<T: DeserializeOwned + Clone>(&mut self) -> Result<Vec<T>> {
@@ -191,17 +267,7 @@ impl<'a> SectionReader<'a> {
     }
 }
 
-fn create_writer(path: &Path) -> Result<SectionWriter<BufWriter<File>>> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating directory {}", parent.display()))?;
-    }
-    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    SectionWriter::new(BufWriter::new(file))
-}
-
 pub(crate) fn has_current_magic(path: &Path) -> bool {
-    use std::io::Read;
     let mut magic = [0_u8; MAGIC_LEN];
     File::open(path)
         .and_then(|mut file| file.read_exact(&mut magic))
@@ -271,13 +337,13 @@ pub(crate) fn write_acceleration_sectioned(
     path: &Path,
     bundle: &DatasetAccelerationBundle,
 ) -> Result<()> {
-    let mut writer = create_writer(path)?;
+    let mut writer = SectionWriter::new();
     encode_acceleration(&mut writer, bundle)?;
-    writer.finish()
+    writer.finish(path)
 }
 
-fn encode_acceleration<W: Write>(
-    writer: &mut SectionWriter<W>,
+fn encode_acceleration(
+    writer: &mut SectionWriter,
     bundle: &DatasetAccelerationBundle,
 ) -> Result<()> {
     writer.write_bincode(&"acceleration")?;
@@ -295,12 +361,12 @@ fn encode_acceleration<W: Write>(
         writer.write_u32s(&bundle.edge_rank)?;
     }
     writer.write_u32s(&bundle.upward_first_out)?;
-    writer.write_section(&codec::encode_sorted_rows(
+    writer.write_section(codec::encode_sorted_rows(
         &bundle.upward_first_out,
         &bundle.upward_head,
     ))?;
     writer.write_u32s(&bundle.downward_first_out)?;
-    writer.write_section(&codec::encode_sorted_rows(
+    writer.write_section(codec::encode_sorted_rows(
         &bundle.downward_first_out,
         &bundle.downward_head,
     ))
@@ -327,9 +393,9 @@ pub(crate) fn read_acceleration_sectioned(
         Stored::Explicit(()) => reader.read_u32s()?,
     };
     let upward_first_out = reader.read_u32s()?;
-    let upward_head = codec::decode_sorted_rows(&upward_first_out, reader.next_section()?)?;
+    let upward_head = codec::decode_sorted_rows(&upward_first_out, &reader.next_section()?)?;
     let downward_first_out = reader.read_u32s()?;
-    let downward_head = codec::decode_sorted_rows(&downward_first_out, reader.next_section()?)?;
+    let downward_head = codec::decode_sorted_rows(&downward_first_out, &reader.next_section()?)?;
     Ok(DatasetAccelerationBundle {
         schema_version: header.schema_version,
         source_topology_bundle_id: header.source_topology_bundle_id,
@@ -385,13 +451,13 @@ pub(crate) fn write_compiled_profile_sectioned(
     path: &Path,
     bundle: &CompiledProfileBundle,
 ) -> Result<()> {
-    let mut writer = create_writer(path)?;
+    let mut writer = SectionWriter::new();
     encode_compiled_profile(&mut writer, bundle)?;
-    writer.finish()
+    writer.finish(path)
 }
 
-fn encode_compiled_profile<W: Write>(
-    writer: &mut SectionWriter<W>,
+fn encode_compiled_profile(
+    writer: &mut SectionWriter,
     bundle: &CompiledProfileBundle,
 ) -> Result<()> {
     writer.write_bincode(&"compiled_profile")?;
@@ -561,8 +627,8 @@ fn present_flags<T>(values: &[Option<T>]) -> Vec<u32> {
         .collect()
 }
 
-fn write_feature_attributes<W: Write>(
-    writer: &mut SectionWriter<W>,
+fn write_feature_attributes(
+    writer: &mut SectionWriter,
     table: &FeatureAttributeTable,
 ) -> Result<()> {
     writer.write_bincode(&FeatureTableHeader {
@@ -704,12 +770,12 @@ fn derived_edge_component_ids(
 }
 
 pub(crate) fn write_topology_sectioned(path: &Path, bundle: &TopologyBundle) -> Result<()> {
-    let mut writer = create_writer(path)?;
+    let mut writer = SectionWriter::new();
     encode_topology(&mut writer, bundle)?;
-    writer.finish()
+    writer.finish(path)
 }
 
-fn encode_topology<W: Write>(writer: &mut SectionWriter<W>, bundle: &TopologyBundle) -> Result<()> {
+fn encode_topology(writer: &mut SectionWriter, bundle: &TopologyBundle) -> Result<()> {
     let layers = &bundle.edge_layers;
     let edge_count = layers.routing.len();
     ensure_len("edge profile layer", layers.profile.len(), edge_count)?;
@@ -804,7 +870,7 @@ fn encode_topology<W: Write>(writer: &mut SectionWriter<W>, bundle: &TopologyBun
         writer.write_u32s(&ebt.node_first_out)?;
         writer.write_u32s(&ebt.node_edge_order)?;
         writer.write_u32s(&ebt.edge_transition_first_out)?;
-        writer.write_section(&codec::encode_sorted_rows(
+        writer.write_section(codec::encode_sorted_rows(
             &ebt.edge_transition_first_out,
             &ebt.edge_transition_edges,
         ))?;
@@ -934,7 +1000,7 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
             let node_edge_order = reader.read_u32s()?;
             let edge_transition_first_out = reader.read_u32s()?;
             let edge_transition_edges =
-                codec::decode_sorted_rows(&edge_transition_first_out, reader.next_section()?)?;
+                codec::decode_sorted_rows(&edge_transition_first_out, &reader.next_section()?)?;
             EdgeBasedTopology {
                 node_first_out,
                 node_edge_order,
@@ -1043,9 +1109,11 @@ mod tests {
     }
 
     fn topology_bytes(bundle: &TopologyBundle) -> Vec<u8> {
-        let mut writer = SectionWriter::new(Vec::new()).unwrap();
+        let mut writer = SectionWriter::new();
         encode_topology(&mut writer, bundle).unwrap();
-        writer.writer
+        let mut bytes = Vec::new();
+        writer.finish_into(&mut bytes).unwrap();
+        bytes
     }
 
     #[test]
@@ -1074,6 +1142,31 @@ mod tests {
         assert_eq!(read.edge_based_topology, edited.edge_based_topology);
         assert_eq!(read.edge_component_ids, vec![5, 6]);
         assert_eq!(read.spatial_index, edited.spatial_index);
+    }
+
+    #[test]
+    fn large_sections_deflate_and_round_trip() {
+        let compressible: Vec<u8> = (0..200_000_u32).map(|value| (value % 7) as u8).collect();
+        let small = vec![1_u8, 2, 3];
+        let mut writer = SectionWriter::new();
+        writer.write_section(compressible.clone()).unwrap();
+        writer.write_section(small.clone()).unwrap();
+        let mut bytes = Vec::new();
+        writer.finish_into(&mut bytes).unwrap();
+        assert!(
+            bytes.len() < compressible.len() / 4,
+            "large section is deflated"
+        );
+        let mut reader = SectionReader::new(&bytes, Path::new("b.bin")).unwrap();
+        assert_eq!(&*reader.next_section().unwrap(), compressible.as_slice());
+        assert_eq!(&*reader.next_section().unwrap(), small.as_slice());
+        assert!(reader.next_section().is_err());
+
+        let header = MAGIC_LEN;
+        bytes.truncate(bytes.len() - 4);
+        assert!(SectionReader::new(&bytes, Path::new("b.bin")).is_err());
+        bytes[header + 9] ^= 0xff;
+        assert!(SectionReader::new(&bytes[..header + 40], Path::new("b.bin")).is_err());
     }
 
     #[test]
