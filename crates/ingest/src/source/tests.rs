@@ -45,8 +45,8 @@ fn applying_a_change_file_equals_scanning_the_edited_extract() {
     assert_eq!(
         summary,
         ChangeSummary {
-            nodes: 5,
-            ways: 8,
+            nodes: 6,
+            ways: 9,
             relations: 2,
         }
     );

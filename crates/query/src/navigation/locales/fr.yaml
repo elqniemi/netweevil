@@ -1,0 +1,101 @@
+# French guidance phrases. French uses the singular below 2 ("1,5
+# kilomètre") and feminine ordinals because "sortie" is feminine.
+# See en.yaml for the format.
+locale: fr
+name: Français
+aliases: [fr-FR, fr-BE, fr-CA, fr-CH]
+plural: zero_or_one
+ordinal: one_exactly
+decimal_separator: ","
+list_separator: ", "
+sentence: "{text}."
+
+units:
+  meters: {one: "{n} mètre", other: "{n} mètres"}
+  kilometers: {one: "{n} kilomètre", other: "{n} kilomètres"}
+  feet: {one: "{n} pied", other: "{n} pieds"}
+  miles: {one: "{n} mile", other: "{n} miles"}
+
+ordinals: {one: "{n}re", other: "{n}e"}
+
+directions:
+  slight_left: légèrement à gauche
+  left: à gauche
+  sharp_left: fortement à gauche
+  slight_right: légèrement à droite
+  right: à droite
+  sharp_right: fortement à droite
+
+sides:
+  left: à gauche
+  right: à droite
+
+cardinals:
+  north: vers le nord
+  northeast: vers le nord-est
+  east: vers l'est
+  southeast: vers le sud-est
+  south: vers le sud
+  southwest: vers le sud-ouest
+  west: vers l'ouest
+  northwest: vers le nord-ouest
+
+phrases:
+  depart: "dirigez-vous {cardinal}"
+  depart_street: "dirigez-vous {cardinal} sur {street}"
+  continue: "continuez tout droit"
+  continue_street: "continuez sur {street}"
+  turn: "tournez {direction}"
+  turn_street: "tournez {direction} sur {street}"
+  turn_toward: "tournez {direction} en direction de {toward}"
+  uturn: "faites demi-tour"
+  uturn_street: "faites demi-tour sur {street}"
+  ramp: "prenez la bretelle {side}"
+  ramp_toward: "prenez la bretelle {side} en direction de {toward}"
+  ramp_straight: "prenez la bretelle tout droit"
+  ramp_straight_toward: "prenez la bretelle tout droit en direction de {toward}"
+  exit: "prenez la sortie {side}"
+  exit_toward: "prenez la sortie {side} en direction de {toward}"
+  exit_number: "prenez la sortie {exit} {side}"
+  exit_number_toward: "prenez la sortie {exit} {side} en direction de {toward}"
+  keep: "serrez {side} à l'embranchement"
+  keep_street: "serrez {side} sur {street}"
+  keep_toward: "serrez {side} en direction de {toward}"
+  keep_straight: "continuez tout droit à l'embranchement"
+  keep_straight_street: "continuez tout droit sur {street}"
+  keep_straight_toward: "continuez tout droit en direction de {toward}"
+  merge: "insérez-vous dans la circulation"
+  merge_street: "insérez-vous sur {street}"
+  roundabout_enter: "entrez dans le rond-point"
+  roundabout_enter_exit: "au rond-point, prenez la {ordinal} sortie"
+  roundabout_enter_exit_street: "au rond-point, prenez la {ordinal} sortie sur {street}"
+  roundabout_exit: "sortez du rond-point"
+  roundabout_exit_street: "sortez du rond-point sur {street}"
+  ferry_enter: "prenez le ferry"
+  ferry_enter_street: "prenez le ferry {street}"
+  ferry_exit: "quittez le ferry"
+  stairs: "prenez l'escalier"
+  stairs_up: "montez l'escalier"
+  stairs_down: "descendez l'escalier"
+  escalator: "prenez l'escalator"
+  escalator_up: "prenez l'escalator pour monter"
+  escalator_down: "prenez l'escalator pour descendre"
+  elevator: "prenez l'ascenseur"
+  elevator_up: "prenez l'ascenseur pour monter"
+  elevator_down: "prenez l'ascenseur pour descendre"
+  travelator: "prenez le tapis roulant"
+  arrive: "vous êtes arrivé à destination"
+  arrive_side: "votre destination se trouve {side}"
+  arrive_pre_alert: "dans {distance}, vous arriverez à destination"
+  verbal_pre_alert: "dans {distance}, {instruction}"
+  verbal_then: "{instruction}, puis {next}"
+  verbal_post_transition: "continuez sur {distance}"
+  transit_wait: "attendez à {stop}"
+  transit_wait_line: "attendez {line} à {stop}"
+  transit_board: "montez dans {line} à {stop}"
+  transit_board_toward: "montez dans {line} en direction de {headsign} à {stop}"
+  transit_ride: "prenez {line} de {from} à {to}"
+  transit_alight: "descendez à {stop}"
+  street_leg_walk: "marchez de {from} à {to}"
+  street_leg_bicycle: "allez à vélo de {from} à {to}"
+  street_leg_car: "roulez de {from} à {to}"

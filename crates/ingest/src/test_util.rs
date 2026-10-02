@@ -40,12 +40,12 @@ pub(crate) fn osm_grid() -> Vec<OsmObj> {
     for row in 0..GRID_SIDE {
         for col in 0..GRID_SIDE {
             let (lon, lat) = grid_position(row, col);
-            let signal: &[(&str, &str)] = if (row, col) == (2, 2) || (row, col) == (5, 4) {
-                &[("highway", "traffic_signals")]
-            } else {
-                &[]
+            let tags: &[(&str, &str)] = match (row, col) {
+                (2, 2) | (5, 4) => &[("highway", "traffic_signals")],
+                (0, 6) => &[("highway", "motorway_junction"), ("ref", "12")],
+                _ => &[],
             };
-            objects.push(osm_node(grid_node(row, col), lon, lat, signal));
+            objects.push(osm_node(grid_node(row, col), lon, lat, tags));
         }
     }
     for (offset, (lon, lat)) in [(0, 0), (0, 5_000), (5_000, 5_000), (5_000, 0)]
@@ -74,8 +74,17 @@ pub(crate) fn osm_grid() -> Vec<OsmObj> {
         let nodes = (0..GRID_SIDE)
             .map(|row| grid_node(row, col))
             .collect::<Vec<_>>();
-        let highway = if col == 3 { "secondary" } else { "residential" };
-        objects.push(osm_way(200 + col, &nodes, &[("highway", highway)]));
+        let tags: &[(&str, &str)] = match col {
+            3 => &[("highway", "secondary"), ("ref", "N360")],
+            6 => &[
+                ("highway", "primary_link"),
+                ("oneway", "yes"),
+                ("destination", "Centrum"),
+                ("turn:lanes", "left|through"),
+            ],
+            _ => &[("highway", "residential")],
+        };
+        objects.push(osm_way(200 + col, &nodes, tags));
     }
     objects.push(osm_way(
         900,
@@ -110,6 +119,7 @@ pub(crate) fn osm_grid_edits() -> Vec<OsmEdit> {
     let (moved_lon, moved_lat) = grid_position(2, 5);
     let (signal_lon, signal_lat) = grid_position(4, 4);
     let (corner_lon, corner_lat) = grid_position(7, 7);
+    let (junction_lon, junction_lat) = grid_position(0, 6);
     let seventh_column = (0..GRID_SIDE - 1)
         .map(|row| grid_node(row, 7))
         .collect::<Vec<_>>();
@@ -172,6 +182,30 @@ pub(crate) fn osm_grid_edits() -> Vec<OsmEdit> {
         (
             Delete,
             osm_node(grid_node(7, 7), corner_lon, corner_lat, &[]),
+        ),
+        (
+            Modify,
+            osm_way(
+                206,
+                &(0..GRID_SIDE)
+                    .map(|row| grid_node(row, 6))
+                    .collect::<Vec<_>>(),
+                &[
+                    ("highway", "primary_link"),
+                    ("oneway", "yes"),
+                    ("destination", "Centrum;Station"),
+                    ("turn:lanes", "left|left;through"),
+                ],
+            ),
+        ),
+        (
+            Modify,
+            osm_node(
+                grid_node(0, 6),
+                junction_lon,
+                junction_lat,
+                &[("highway", "motorway_junction"), ("ref", "12a")],
+            ),
         ),
         (
             Modify,
@@ -277,6 +311,7 @@ pub(crate) fn pending_way(osm_way_id: i64, node_ids: &[i64]) -> PendingWay {
         forward_lanes: None,
         reverse_lanes: None,
         name: None,
+        guidance: None,
         feature_row: NO_FEATURE_ROW,
         temporal_rule_id: None,
     }

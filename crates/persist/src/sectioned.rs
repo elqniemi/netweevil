@@ -25,11 +25,11 @@ use memmap2::Mmap;
 use netweevil_core::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId,
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
-    CompiledTemporalProfile, CompiledTurnCostConfig, DatasetAccelerationBundle, EdgeBasedTopology,
-    EdgeId, EdgePresentation, EdgeProfileAttributes, FeatureAttributeColumn,
-    FeatureAttributeColumnData, FeatureAttributeDefinition, FeatureAttributeTable, NodeId,
-    NodeSpatialIndex, RoutingEdge, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle,
-    TopologyEdgeLayers, TopologyNode, TravelMode,
+    CompiledTemporalProfile, CompiledTurnCostConfig, DatasetAccelerationBundle,
+    EDGE_NAME_BUNDLE_SCHEMA_VERSION, EdgeBasedTopology, EdgeGuidance, EdgeId, EdgeNameBundle,
+    EdgePresentation, EdgeProfileAttributes, FeatureAttributeColumn, FeatureAttributeColumnData,
+    FeatureAttributeDefinition, FeatureAttributeTable, NodeId, NodeSpatialIndex, RoutingEdge,
+    TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle, TopologyEdgeLayers, TopologyNode, TravelMode,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -485,6 +485,103 @@ pub(crate) fn read_acceleration_sectioned(
     })
 }
 
+// --- Edge-name bundle ----------------------------------------------------
+//
+// Names and guidance strings are front-coded tables; each guidance record
+// field is a column of `string index + 1` (0 for absent), and the per-edge
+// record index is a varint column that deflates to almost nothing on the
+// many edges without guidance tags.
+
+const GUIDANCE_FIELDS: usize = 8;
+
+fn guidance_fields(record: &EdgeGuidance) -> [Option<u32>; GUIDANCE_FIELDS] {
+    [
+        record.reference,
+        record.turn_lanes,
+        record.destination,
+        record.destination_ref,
+        record.destination_street,
+        record.junction_ref,
+        record.junction_name,
+        record.exit_to,
+    ]
+}
+
+pub(crate) fn write_edge_names_sectioned(path: &Path, bundle: &EdgeNameBundle) -> Result<()> {
+    let mut writer = SectionWriter::new();
+    encode_edge_names(&mut writer, bundle)?;
+    writer.finish(path)
+}
+
+fn encode_edge_names(writer: &mut SectionWriter, bundle: &EdgeNameBundle) -> Result<()> {
+    bundle
+        .validate(None)
+        .map_err(|error| anyhow::anyhow!("invalid edge-name bundle: {error}"))?;
+    writer.write_bincode(&"edge_names")?;
+    writer.write_bincode(&EDGE_NAME_BUNDLE_SCHEMA_VERSION)?;
+    writer.write_section(codec::encode_strings(&bundle.names))?;
+    writer.write_section(codec::encode_strings(&bundle.strings))?;
+    for field in 0..GUIDANCE_FIELDS {
+        let column = bundle
+            .guidance_records
+            .iter()
+            .map(|record| guidance_fields(record)[field].map_or(0, |index| index + 1))
+            .collect::<Vec<_>>();
+        writer.write_u32s(&column)?;
+    }
+    writer.write_u32s(&bundle.edge_guidance)
+}
+
+pub(crate) fn read_edge_names_sectioned(bytes: &[u8], path: &Path) -> Result<EdgeNameBundle> {
+    let mut reader = SectionReader::new(bytes, path)?;
+    let tag: String = reader.read_bincode()?;
+    if tag != "edge_names" {
+        bail!("expected an edge-name bundle, found '{tag}'");
+    }
+    if reader.read_bincode::<u32>()? != EDGE_NAME_BUNDLE_SCHEMA_VERSION {
+        return Err(unsupported_format_error(path));
+    }
+    let names = codec::decode_strings(&reader.next_section()?)?;
+    let strings = codec::decode_strings(&reader.next_section()?)?;
+    let columns = (0..GUIDANCE_FIELDS)
+        .map(|_| reader.read_u32s())
+        .collect::<Result<Vec<_>>>()?;
+    let record_count = columns[0].len();
+    let field = |column: &[u32], record: usize| -> Result<Option<u32>> {
+        let value = *column
+            .get(record)
+            .context("guidance record columns differ in length")?;
+        Ok(value.checked_sub(1))
+    };
+    let guidance_records = (0..record_count)
+        .map(|record| {
+            Ok(EdgeGuidance {
+                reference: field(&columns[0], record)?,
+                turn_lanes: field(&columns[1], record)?,
+                destination: field(&columns[2], record)?,
+                destination_ref: field(&columns[3], record)?,
+                destination_street: field(&columns[4], record)?,
+                junction_ref: field(&columns[5], record)?,
+                junction_name: field(&columns[6], record)?,
+                exit_to: field(&columns[7], record)?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    if columns.iter().any(|column| column.len() != record_count) {
+        bail!("guidance record columns differ in length");
+    }
+    let bundle = EdgeNameBundle {
+        names,
+        strings,
+        guidance_records,
+        edge_guidance: reader.read_u32s()?,
+    };
+    bundle
+        .validate(None)
+        .map_err(|error| anyhow::anyhow!("invalid edge-name bundle: {error}"))?;
+    Ok(bundle)
+}
+
 // --- Compiled profile bundle ----------------------------------------------
 //
 // Only per-edge metrics are persisted. Customized CCH weights are a pure
@@ -673,9 +770,9 @@ struct SourceSnapshotHeader {
     names: Vec<String>,
 }
 
-pub(crate) fn write_source_snapshot_sectioned<W: Serialize, R: Serialize>(
+pub(crate) fn write_source_snapshot_sectioned<W: Serialize, R: Serialize, E: Serialize>(
     path: &Path,
-    snapshot: &crate::SourceSnapshot<W, R>,
+    snapshot: &crate::SourceSnapshot<W, R, E>,
 ) -> Result<()> {
     let other_nodes = snapshot.other_node_ids.len();
     ensure_len(
@@ -732,16 +829,18 @@ pub(crate) fn write_source_snapshot_sectioned<W: Serialize, R: Serialize>(
     writer.write_bincode(&snapshot.restrictions)?;
     writer.write_i64s(&snapshot.other_way_ids)?;
     writer.write_i64s(&snapshot.other_relation_ids)?;
+    writer.write_bincode(&snapshot.extras)?;
     writer.finish(path)
 }
 
-pub(crate) fn read_source_snapshot_sectioned<W, R>(
+pub(crate) fn read_source_snapshot_sectioned<W, R, E>(
     bytes: &[u8],
     path: &Path,
-) -> Result<crate::SourceSnapshot<W, R>>
+) -> Result<crate::SourceSnapshot<W, R, E>>
 where
     W: DeserializeOwned + Clone,
     R: DeserializeOwned,
+    E: DeserializeOwned,
 {
     let mut reader = SectionReader::new(bytes, path)?;
     let tag: String = reader.read_bincode()?;
@@ -804,6 +903,7 @@ where
     let restrictions: Vec<R> = reader.read_bincode()?;
     let other_way_ids = reader.read_i64s()?;
     let other_relation_ids = reader.read_i64s()?;
+    let extras: E = reader.read_bincode()?;
     Ok(crate::SourceSnapshot {
         schema_version: header.schema_version,
         source_topology_bundle_id: header.source_topology_bundle_id,
@@ -821,6 +921,7 @@ where
         restrictions,
         other_way_ids,
         other_relation_ids,
+        extras,
     })
 }
 

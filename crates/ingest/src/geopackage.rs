@@ -336,6 +336,7 @@ pub(crate) fn scan_geopackages(
                     forward_lanes: None,
                     reverse_lanes: None,
                     name: name.clone(),
+                    guidance: None,
                     feature_row,
                     temporal_rule_id,
                 });
@@ -376,6 +377,7 @@ pub(crate) fn scan_geopackages(
         restriction_candidates: Vec::new(),
         node_coords,
         traffic_signal_nodes: FxHashSet::default(),
+        junction_nodes: Default::default(),
         counts: ObjectCounts {
             nodes: quantized_nodes.len() as u64,
             ways: feature_ids.len() as u64,

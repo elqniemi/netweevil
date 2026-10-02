@@ -79,12 +79,13 @@ fn assert_same_topology(dir: &TempDir, left: &DatasetManifest, right: &DatasetMa
         std::fs::read(path).expect("topology reads back")
     };
     assert!(encoded(left, "left.bin") == encoded(right, "right.bin"));
+    // Edge names carry the guidance tags too; compare the whole bundle.
     let names = |manifest: &DatasetManifest| {
-        read_edge_name_bundle(&manifest.edge_name_bundle.as_ref().unwrap().path)
-            .expect("edge names read")
-            .names
+        let path = &manifest.edge_name_bundle.as_ref().unwrap().path;
+        assert!(read_edge_name_bundle(path).is_ok(), "edge names read");
+        std::fs::read(path).expect("edge names read")
     };
-    assert_eq!(names(left), names(right));
+    assert!(names(left) == names(right));
     assert_eq!(
         serde_json::to_value(&left.topology_meta).unwrap(),
         serde_json::to_value(&right.topology_meta).unwrap()
@@ -228,6 +229,15 @@ fn incremental_update_matches_a_full_import_of_the_edited_extract() {
     let updated = report.manifest.clone();
 
     assert_same_topology(&dir, &updated, &full);
+    // The changed guidance tags of the link and the junction node arrive.
+    let guidance = read_edge_name_bundle(&updated.edge_name_bundle.as_ref().unwrap().path)
+        .expect("edge names read");
+    for value in ["12a", "left|left;through", "Centrum;Station"] {
+        assert!(
+            guidance.strings.iter().any(|string| string == value),
+            "{value}"
+        );
+    }
     // The retained objects match the full import's, so the next update
     // starts from the same source state.
     let snapshot = |manifest: &DatasetManifest| -> OsmSourceSnapshot {
@@ -250,8 +260,8 @@ fn incremental_update_matches_a_full_import_of_the_edited_extract() {
     assert_eq!(
         report.changed_objects,
         Some(ChangedObjects {
-            nodes: 5,
-            ways: 8,
+            nodes: 6,
+            ways: 9,
             relations: 2,
         })
     );

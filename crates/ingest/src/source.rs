@@ -20,8 +20,10 @@ use netweevil_core::{CacheBundleId, TopologyBundle};
 use netweevil_persist::{SOURCE_SNAPSHOT_SCHEMA_VERSION, SourceSnapshot};
 use osmpbfreader::{OsmObj, OsmPbfReader};
 use rustc_hash::{FxHashMap, FxHashSet};
+use serde::{Deserialize, Serialize};
 
 use crate::classify::is_traffic_signal_node;
+use crate::guidance::{JunctionNodeTags, junction_node_tags};
 use crate::import::{
     CountingReader, DatasetImportProgress, DatasetImportStage, PercentReporter, emit_progress,
 };
@@ -30,7 +32,15 @@ use crate::restrictions::{TurnRestrictionCandidate, ViaSpec, parse_turn_restrict
 use crate::scan::{ObjectCounts, PendingWay, ScanOutput, classify_routable_way};
 
 /// The snapshot record types the ingest persists.
-pub(crate) type OsmSourceSnapshot = SourceSnapshot<PendingWay, TurnRestrictionCandidate>;
+pub(crate) type OsmSourceSnapshot =
+    SourceSnapshot<PendingWay, TurnRestrictionCandidate, SnapshotExtras>;
+
+/// Classified source data the snapshot keeps beside ways and restrictions.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SnapshotExtras {
+    /// Guidance tags of motorway-junction nodes, sorted by node id.
+    junction_nodes: Vec<(i64, JunctionNodeTags)>,
+}
 
 /// One source node in 1e-7 degree units, as PBF files store positions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +62,8 @@ pub(crate) struct OsmSourceState {
     /// Every source node, sorted by id with unique ids.
     nodes: Vec<SourceNode>,
     traffic_signals: FxHashSet<i64>,
+    /// Guidance tags of every motorway-junction node.
+    junction_nodes: FxHashMap<i64, JunctionNodeTags>,
     /// Routable ways by id.
     ways: BTreeMap<i64, PendingWay>,
     /// Turn-restriction relations by id.
@@ -136,9 +148,7 @@ impl OsmSourceState {
     fn insert_scanned(&mut self, object: OsmObj) {
         match object {
             OsmObj::Node(node) => {
-                if is_traffic_signal_node(&node.tags) {
-                    self.traffic_signals.insert(node.id.0);
-                }
+                self.set_node_tags(node.id.0, Some(&node.tags));
                 self.nodes.push(SourceNode {
                     id: node.id.0,
                     lon_e7: node.decimicro_lon,
@@ -147,6 +157,23 @@ impl OsmSourceState {
             }
             OsmObj::Way(way) => self.upsert_way(way),
             OsmObj::Relation(relation) => self.upsert_relation(&relation),
+        }
+    }
+
+    /// Records what node tags classify to; `None` removes the node's entries.
+    fn set_node_tags(&mut self, id: i64, tags: Option<&osmpbfreader::Tags>) {
+        if tags.is_some_and(is_traffic_signal_node) {
+            self.traffic_signals.insert(id);
+        } else {
+            self.traffic_signals.remove(&id);
+        }
+        match tags.and_then(junction_node_tags) {
+            Some(junction) => {
+                self.junction_nodes.insert(id, junction);
+            }
+            None => {
+                self.junction_nodes.remove(&id);
+            }
         }
     }
 
@@ -222,11 +249,7 @@ impl OsmSourceState {
                 OsmObj::Node(node) => {
                     summary.nodes += 1;
                     let id = node.id.0;
-                    if !deleted && is_traffic_signal_node(&node.tags) {
-                        self.traffic_signals.insert(id);
-                    } else {
-                        self.traffic_signals.remove(&id);
-                    }
+                    self.set_node_tags(id, (!deleted).then_some(&node.tags));
                     node_updates.insert(
                         id,
                         (!deleted).then_some(SourceNode {
@@ -293,6 +316,10 @@ impl OsmSourceState {
         }
         needed.sort_unstable();
         needed.dedup();
+        let junction_nodes = needed
+            .iter()
+            .filter_map(|id| Some((*id, self.junction_nodes.get(id)?.clone())))
+            .collect();
         let mut node_coords = FxHashMap::with_capacity_and_hasher(needed.len(), Default::default());
         let mut topology_node_ids = Vec::with_capacity(needed.len());
         for id in needed {
@@ -307,6 +334,7 @@ impl OsmSourceState {
             restriction_candidates: self.restrictions.values().cloned().collect(),
             node_coords,
             traffic_signal_nodes: self.traffic_signals.clone(),
+            junction_nodes,
             counts: self.counts(),
             feature_attributes: Default::default(),
             temporal_rule_sets: Vec::new(),
@@ -376,6 +404,17 @@ impl OsmSourceState {
             restrictions: self.restrictions.values().cloned().collect(),
             other_way_ids: sorted(&self.other_ways),
             other_relation_ids: sorted(&self.other_relations),
+            extras: SnapshotExtras {
+                junction_nodes: {
+                    let mut junctions = self
+                        .junction_nodes
+                        .iter()
+                        .map(|(id, tags)| (*id, tags.clone()))
+                        .collect::<Vec<_>>();
+                    junctions.sort_unstable_by_key(|(id, _)| *id);
+                    junctions
+                },
+            },
         }
     }
 
@@ -449,6 +488,7 @@ impl OsmSourceState {
         Ok(Self {
             nodes,
             traffic_signals: snapshot.traffic_signal_node_ids.into_iter().collect(),
+            junction_nodes: snapshot.extras.junction_nodes.into_iter().collect(),
             ways,
             restrictions: snapshot
                 .restrictions

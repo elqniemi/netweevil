@@ -54,7 +54,7 @@ pub(crate) async fn network_tile_handler(
     let profile = resolve_profile(&runtime, query.profile_id.as_deref())?;
     // Names only decorate results; a dataset without the name bundle still
     // locates and renders.
-    let names = load_edge_names(&runtime).unwrap_or_else(|_| Arc::from(Vec::new()));
+    let names = load_edge_names(&runtime).unwrap_or_default();
     let engine = Arc::clone(&profile.engine);
     let topology = runtime.topology.clone();
     let mode = mode_bit(profile);
@@ -63,7 +63,7 @@ pub(crate) async fn network_tile_handler(
         runtime.dataset_manifest.dataset_id.0, profile.manifest.profile_hash
     );
     let (bytes, truncated) = execute_on_routing_worker(&runtime, move || {
-        network_tile(&topology, &engine, &names, mode, TileId { z, x, y })
+        network_tile(&topology, &engine, &names.names, mode, TileId { z, x, y })
     })
     .await
     .map_err(ApiError::from_execution_error)?;

@@ -128,7 +128,7 @@ pub(crate) async fn locate_handler(
     };
     // Names only decorate results; a dataset without the name bundle still
     // locates and renders.
-    let names = load_edge_names(&runtime).unwrap_or_else(|_| Arc::from(Vec::new()));
+    let names = load_edge_names(&runtime).unwrap_or_default();
     let engine = Arc::clone(&profile.engine);
     let topology = runtime.topology.clone();
     let metrics = engine.metrics_arc();
@@ -154,7 +154,7 @@ pub(crate) async fn locate_handler(
                     .nearest_segments(&point, &request.snap, request.count)?
                     .into_iter()
                     .map(|segment| {
-                        located_segment(&topology, &engine, &metrics, &names, mode, segment)
+                        located_segment(&topology, &engine, &metrics, &names.names, mode, segment)
                     })
                     .collect();
                 Ok(LocatedPoint {

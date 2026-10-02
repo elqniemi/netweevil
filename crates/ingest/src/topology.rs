@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 
 use rustc_hash::FxHashMap;
 
+use crate::guidance::GuidanceInterner;
 use crate::import::{DatasetImportProgress, DatasetImportStage, PercentReporter, emit_progress};
 use crate::restrictions::build_turn_restrictions;
 use crate::scan::{PendingWay, ScanOutput};
@@ -80,6 +81,7 @@ pub(crate) fn build_topology_from_scan(
         restriction_candidates,
         node_coords,
         traffic_signal_nodes,
+        junction_nodes,
         counts,
         feature_attributes,
         temporal_rule_sets,
@@ -101,6 +103,7 @@ pub(crate) fn build_topology_from_scan(
 
     let mut edges = Vec::new();
     let mut edge_highways = Vec::new();
+    let mut guidance = GuidanceInterner::new();
     let mut skipped_way_count = 0_u64;
     let mut build_reporter = PercentReporter::starting_at_zero();
     for (way_index, way) in pending_ways.iter().enumerate() {
@@ -183,6 +186,12 @@ pub(crate) fn build_topology_from_scan(
                     flags: forward_flags | way.forward_extra_flags,
                 });
                 edge_highways.push(way.highway);
+                guidance.push_edge(
+                    way.guidance.as_deref(),
+                    true,
+                    way.highway,
+                    junction_nodes.get(&from_osm_id),
+                );
             }
 
             if way.reverse_access_mask.0 != 0 {
@@ -211,6 +220,12 @@ pub(crate) fn build_topology_from_scan(
                     flags: reverse_flags | way.reverse_extra_flags,
                 });
                 edge_highways.push(way.highway);
+                guidance.push_edge(
+                    way.guidance.as_deref(),
+                    false,
+                    way.highway,
+                    junction_nodes.get(&to_osm_id),
+                );
             }
         }
 
@@ -247,7 +262,7 @@ pub(crate) fn build_topology_from_scan(
         names[index as usize] = name;
     }
 
-    let edge_name_bundle = EdgeNameBundle { names };
+    let edge_name_bundle = guidance.finish(names);
 
     emit_progress(
         progress,

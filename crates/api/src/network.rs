@@ -126,7 +126,7 @@ pub(crate) async fn network_edges_handler(
                 "name".into(),
                 presentation
                     .name_index
-                    .and_then(|index| names.get(index as usize))
+                    .and_then(|index| names.names.get(index as usize))
                     .map_or(Value::Null, |name| json!(name)),
             );
             properties.insert("component".into(), json!(topology.edge_component_id(edge_index as u32)));

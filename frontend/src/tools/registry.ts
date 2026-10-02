@@ -386,6 +386,59 @@ const routeFields: Field[] = [
   { key: "profile_inline", label: "Inline profile document (JSON)", type: "json", group: "Request-defined profile", placeholder: '{"profile": {"id": "...", "mode": "car", ...}}' },
 ];
 
+const guidanceFields: Field[] = [
+  {
+    key: "language",
+    label: "Language",
+    type: "select",
+    default: "en",
+    group: "Guidance",
+    options: [
+      { value: "en", label: "English" },
+      { value: "nl", label: "Nederlands" },
+      { value: "de", label: "Deutsch" },
+      { value: "fr", label: "Français" },
+      { value: "fi", label: "Suomi" },
+      { value: "zh-HK", label: "繁體中文（香港）" },
+    ],
+  },
+  {
+    key: "units",
+    label: "Units",
+    type: "select",
+    default: "metric",
+    group: "Guidance",
+    options: [
+      { value: "metric", label: "metric" },
+      { value: "imperial", label: "imperial" },
+    ],
+  },
+  {
+    key: "driving_side",
+    label: "Driving side",
+    type: "select",
+    default: "",
+    group: "Guidance",
+    options: [
+      { value: "", label: "dataset default" },
+      { value: "right", label: "right-hand traffic" },
+      { value: "left", label: "left-hand traffic" },
+    ],
+  },
+];
+
+/** `directions_options` of /v1/directions. */
+function directionsOptions(form: Record<string, unknown>) {
+  const out: Record<string, unknown> = {};
+  const language = str(form, "language");
+  if (language) out.language = language;
+  const units = str(form, "units");
+  if (units) out.units = units;
+  const side = str(form, "driving_side");
+  if (side) out.driving_side = side;
+  return out;
+}
+
 function buildRoute(ctx: BuildContext, route: RouteInput, index: number, directions: boolean) {
   const form = ctx.form;
   const request: Record<string, unknown> = {
@@ -398,10 +451,10 @@ function buildRoute(ctx: BuildContext, route: RouteInput, index: number, directi
     returns: returns(form),
     ...avoid(form),
   };
+  Object.assign(request, temporal(form));
   if (!directions) {
     const alt = alternatives(form);
     if (alt) request.alternatives = alt;
-    Object.assign(request, temporal(form));
     const constraints = parseJson(form, "component_constraints");
     if (constraints) request.constraints = constraints;
     const pareto = parseJson(form, "pareto");
@@ -412,6 +465,7 @@ function buildRoute(ctx: BuildContext, route: RouteInput, index: number, directi
   if (overrides) body.profile_overrides = overrides;
   const inline = parseJson(form, "profile_inline");
   if (inline) body.profile = inline;
+  if (directions) body.directions_options = directionsOptions(form);
   return body;
 }
 
@@ -441,14 +495,14 @@ const directionsTool: ToolDef = {
   path: "/v1/directions",
   layers: ["line", "point"],
   method: "POST",
-  description: "Turn-by-turn maneuvers with street names for a static route.",
+  description: "Turn-by-turn maneuvers with lanes, signposts and spoken instructions in six languages, for static or time-dependent routes.",
   supportsGeojson: true,
   usesProfile: true,
   input: "routes",
   live: true,
   tableKey: "maneuvers",
   slots: [],
-  fields: [{ key: "route_id", label: "Route id", type: "text", default: "console_directions" }, ...snapFields, ...connectivityFields, ...fallbackFields, ...avoidFields],
+  fields: [{ key: "route_id", label: "Route id", type: "text", default: "console_directions" }, ...guidanceFields, ...snapFields, ...connectivityFields, ...fallbackFields, ...avoidFields, ...temporalFields],
   buildEach: (ctx, route, index) => buildRoute(ctx, route, index, true),
   ready: needRoute,
 };

@@ -504,6 +504,55 @@ pub(crate) fn decode_f32s(bytes: &[u8]) -> Result<Vec<f32>> {
     Ok(values)
 }
 
+// --- String tables --------------------------------------------------------
+
+/// Encodes strings with front coding: each entry stores the byte length of
+/// the prefix it shares with the previous entry (cut back to a character
+/// boundary) and its remaining suffix. Sorted tables such as street names
+/// share long prefixes.
+pub(crate) fn encode_strings(values: &[String]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.iter().map(String::len).sum::<usize>() + 16);
+    put_varint(&mut out, values.len() as u64);
+    let mut previous = "";
+    for value in values {
+        let mut shared = previous
+            .bytes()
+            .zip(value.bytes())
+            .take_while(|(a, b)| a == b)
+            .count();
+        while !value.is_char_boundary(shared) {
+            shared -= 1;
+        }
+        put_varint(&mut out, shared as u64);
+        put_varint(&mut out, (value.len() - shared) as u64);
+        out.extend_from_slice(&value.as_bytes()[shared..]);
+        previous = value;
+    }
+    out
+}
+
+pub(crate) fn decode_strings(bytes: &[u8]) -> Result<Vec<String>> {
+    let mut cursor = Cursor::new(bytes);
+    let count = cursor.count()?;
+    let mut values: Vec<String> = Vec::with_capacity(count.min(bytes.len()));
+    for _ in 0..count {
+        let shared = cursor.varint()? as usize;
+        let suffix_len = cursor.varint()? as usize;
+        let previous = values.last().map_or("", String::as_str);
+        if shared > previous.len() || !previous.is_char_boundary(shared) {
+            bail!("string table prefix is out of range");
+        }
+        let suffix = std::str::from_utf8(cursor.take(suffix_len)?)
+            .map_err(|_| anyhow::anyhow!("string table entry is not UTF-8"))?;
+        let mut value = String::with_capacity(shared + suffix.len());
+        value.push_str(&previous[..shared]);
+        value.push_str(suffix);
+        values.push(value);
+    }
+    cursor.finish()?;
+    Ok(values)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -542,6 +591,28 @@ mod tests {
         let unsorted = vec![9_u32, 3, 0, 1, 2];
         let encoded = encode_sorted_rows(&first_out, &unsorted);
         assert_eq!(decode_sorted_rows(&first_out, &encoded).unwrap(), unsorted);
+    }
+
+    #[test]
+    fn string_tables_round_trip_with_shared_multibyte_prefixes() {
+        let cases: Vec<Vec<String>> = vec![
+            vec![],
+            vec![String::new(), String::new()],
+            ["Hereweg", "Herestraat", "Herestraat", "Zuiderdiep", ""]
+                .map(String::from)
+                .to_vec(),
+            // "é" and "è" share their first UTF-8 byte; the shared prefix
+            // must stop before it.
+            ["Rue é", "Rue è", "彌敦道", "彌敦道北", "A7;A28"]
+                .map(String::from)
+                .to_vec(),
+        ];
+        for values in cases {
+            assert_eq!(decode_strings(&encode_strings(&values)).unwrap(), values);
+        }
+        let mut corrupt = encode_strings(&["ab".into(), "ac".into()]);
+        corrupt[5] = 9; // shared prefix longer than "ab"
+        assert!(decode_strings(&corrupt).is_err());
     }
 
     #[test]

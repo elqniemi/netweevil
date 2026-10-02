@@ -7,6 +7,7 @@ mod acceleration;
 mod audit;
 mod classify;
 mod geopackage;
+mod guidance;
 mod import;
 mod mapping;
 mod opening_hours;

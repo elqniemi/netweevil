@@ -13,7 +13,6 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use memmap2::Mmap;
 use netweevil_core::{
     CacheBundleId, CompiledProfileBundle, DatasetAccelerationBundle, EdgeNameBundle, TopologyBundle,
 };
@@ -257,7 +256,7 @@ pub fn read_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
 }
 
 /// Schema version of [`SourceSnapshot`]. Readers accept this value only.
-pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// The OSM source objects a dataset retains so `dataset update` can apply
 /// change files without the original extract.
@@ -270,9 +269,11 @@ pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
 /// ids of the other ways and relations keep the source's object counts
 /// exact and tell modifications from creations. `W` and
 /// `R` are the ingest's way and turn-restriction records; they are stored as
-/// interned bincode records and a bincode list.
+/// interned bincode records and a bincode list. `E` holds whatever else the
+/// ingest classifies per source (node tags, interned rule sets), as one
+/// bincode section.
 #[derive(Debug, Clone, PartialEq)]
-pub struct SourceSnapshot<W, R> {
+pub struct SourceSnapshot<W, R, E> {
     pub schema_version: u32,
     pub source_topology_bundle_id: CacheBundleId,
     pub topology_node_ids: Vec<i64>,
@@ -291,19 +292,23 @@ pub struct SourceSnapshot<W, R> {
     pub other_way_ids: Vec<i64>,
     /// Relations that are not turn restrictions, sorted.
     pub other_relation_ids: Vec<i64>,
+    pub extras: E,
 }
 
-pub fn write_source_snapshot_bundle<W: Serialize, R: Serialize>(
+pub fn write_source_snapshot_bundle<W: Serialize, R: Serialize, E: Serialize>(
     path: impl AsRef<Path>,
-    snapshot: &SourceSnapshot<W, R>,
+    snapshot: &SourceSnapshot<W, R, E>,
 ) -> Result<()> {
     sectioned::write_source_snapshot_sectioned(path.as_ref(), snapshot)
 }
 
-pub fn read_source_snapshot_bundle<W, R>(path: impl AsRef<Path>) -> Result<SourceSnapshot<W, R>>
+pub fn read_source_snapshot_bundle<W, R, E>(
+    path: impl AsRef<Path>,
+) -> Result<SourceSnapshot<W, R, E>>
 where
     W: DeserializeOwned + Clone,
     R: DeserializeOwned,
+    E: DeserializeOwned,
 {
     let path = path.as_ref();
     let mmap = sectioned::map_file(path)?;
@@ -316,7 +321,7 @@ pub fn write_topology_bundle(path: impl AsRef<Path>, bundle: &TopologyBundle) ->
 }
 
 pub fn write_edge_name_bundle(path: impl AsRef<Path>, bundle: &EdgeNameBundle) -> Result<()> {
-    write_binary(path, bundle)
+    sectioned::write_edge_names_sectioned(path.as_ref(), bundle)
 }
 
 pub fn write_acceleration_bundle(
@@ -334,7 +339,10 @@ pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
 }
 
 pub fn read_edge_name_bundle(path: impl AsRef<Path>) -> Result<EdgeNameBundle> {
-    read_binary_mmap(path)
+    let path = path.as_ref();
+    let mmap = sectioned::map_file(path)?;
+    sectioned::read_edge_names_sectioned(&mmap, path)
+        .with_context(|| format!("parsing edge-name bundle {}", path.display()))
 }
 
 pub fn read_acceleration_bundle(path: impl AsRef<Path>) -> Result<DatasetAccelerationBundle> {
@@ -356,22 +364,6 @@ pub fn read_compiled_profile_bundle(path: impl AsRef<Path>) -> Result<CompiledPr
     let mmap = sectioned::map_file(path)?;
     sectioned::read_compiled_profile_sectioned(&mmap, path)
         .with_context(|| format!("parsing compiled profile bundle {}", path.display()))
-}
-
-fn write_binary<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Result<()> {
-    let path = path.as_ref();
-    write_atomically(path, |writer| {
-        bincode::serialize_into(writer, value)
-            .with_context(|| format!("serializing binary {}", path.display()))
-    })
-}
-
-fn read_binary_mmap<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
-    let path = path.as_ref();
-    let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mmap = unsafe { Mmap::map(&file) }
-        .with_context(|| format!("memory-mapping {}", path.display()))?;
-    bincode::deserialize(&mmap).with_context(|| format!("parsing binary bundle {}", path.display()))
 }
 
 pub fn write_dataset_manifest(

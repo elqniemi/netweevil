@@ -5,8 +5,9 @@
 
 use netweevil_core::{ConnectedComponentsMeta, TopologyBounds};
 use netweevil_query::{
-    AccessibilityRequest, BetweennessRequest, EngineMode, OdPairsDocument, PointSetDocument,
-    RouteRequest, ScenarioBatchRequest, ServiceAreaRequest, ServiceAreaSequenceRequest,
+    AccessibilityRequest, BetweennessRequest, DirectionsOptions, EngineMode, OdPairsDocument,
+    PointSetDocument, RouteRequest, ScenarioBatchRequest, ServiceAreaRequest,
+    ServiceAreaSequenceRequest,
 };
 use netweevil_transit::{
     TransitRouteRequest, TransitRouteResult, TransitServiceAreaRequest, TransitServiceAreaResult,
@@ -108,6 +109,16 @@ pub(crate) struct RouteExecutionRequest {
     pub(crate) engine_mode: EngineMode,
     pub(crate) request: RouteRequest,
 }
+
+/// `/v1/directions`: a route request plus language, units and driving side.
+#[derive(Debug, Deserialize)]
+pub(crate) struct DirectionsExecutionRequest {
+    #[serde(flatten)]
+    pub(crate) route: RouteExecutionRequest,
+    #[serde(default)]
+    pub(crate) directions_options: DirectionsOptions,
+}
+
 pub(crate) type OdExecutionRequest = EngineModeRequest<OdPairsDocument>;
 pub(crate) type MatrixExecutionRequest = EngineModeRequest<MatrixRequest>;
 pub(crate) type AccessibilityExecutionRequest = EngineModeRequest<AccessibilityRequest>;
@@ -130,6 +141,16 @@ pub(crate) struct TransitRouteExecutionRequest {
     #[serde(default)]
     pub(crate) egress_profile_id: Option<String>,
     pub(crate) request: TransitRouteRequest,
+}
+
+/// `/v1/transit-directions`: a transit route request plus the language of
+/// the journey steps and street instructions.
+#[derive(Debug, Deserialize)]
+pub(crate) struct TransitDirectionsExecutionRequest {
+    #[serde(flatten)]
+    pub(crate) route: TransitRouteExecutionRequest,
+    #[serde(default)]
+    pub(crate) directions_options: DirectionsOptions,
 }
 
 #[derive(Debug, Deserialize)]

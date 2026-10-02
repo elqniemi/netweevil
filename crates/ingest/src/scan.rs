@@ -10,6 +10,7 @@ use crate::classify::{
     classify_directional_access, classify_smoothness, classify_speed_and_lanes, classify_surface,
     classify_toll, classify_way, parse_duration_from_tags, tag,
 };
+use crate::guidance::{JunctionNodeTags, WayGuidanceTags, way_guidance_tags};
 use crate::restrictions::TurnRestrictionCandidate;
 
 /// One routable source way after classification. OSM sources persist these
@@ -34,6 +35,8 @@ pub(crate) struct PendingWay {
     pub(crate) forward_lanes: Option<u8>,
     pub(crate) reverse_lanes: Option<u8>,
     pub(crate) name: Option<String>,
+    /// Route number, lane and signpost tags; `None` for most ways.
+    pub(crate) guidance: Option<Box<WayGuidanceTags>>,
     pub(crate) feature_row: u32,
     pub(crate) temporal_rule_id: Option<u32>,
 }
@@ -50,6 +53,8 @@ pub(crate) struct ScanOutput {
     /// that need to represent an unknown source value.
     pub(crate) node_coords: FxHashMap<i64, (f64, f64, f64)>,
     pub(crate) traffic_signal_nodes: FxHashSet<i64>,
+    /// `highway=motorway_junction` nodes with exit numbers or names.
+    pub(crate) junction_nodes: FxHashMap<i64, JunctionNodeTags>,
     pub(crate) counts: ObjectCounts,
     pub(crate) feature_attributes: FeatureAttributeTable,
     pub(crate) temporal_rule_sets: Vec<TemporalRuleSet>,
@@ -72,6 +77,10 @@ pub(crate) fn classify_routable_way(way: Way) -> Option<PendingWay> {
     let directional_access =
         classify_directional_access(&way.tags, highway, road_class, access_mask);
     let speed_lanes = classify_speed_and_lanes(&way.tags, road_class);
+    let (forward_oneway, backward_oneway) = oneway_directions(
+        directional_access.forward_access,
+        directional_access.reverse_access,
+    );
     Some(PendingWay {
         osm_way_id: way.id.0,
         node_ids: way.nodes.into_iter().map(|node| node.0).collect(),
@@ -91,7 +100,23 @@ pub(crate) fn classify_routable_way(way: Way) -> Option<PendingWay> {
         forward_lanes: speed_lanes.forward_lanes,
         reverse_lanes: speed_lanes.reverse_lanes,
         name: way.tags.get("name").map(ToString::to_string),
+        guidance: way_guidance_tags(&way.tags, forward_oneway, backward_oneway),
         feature_row: NO_FEATURE_ROW,
         temporal_rule_id: None,
     })
+}
+
+/// Whether the way is one-way forward / backward for the most capable mode
+/// that may use it at all (car, then bicycle, then foot), so foot or
+/// contraflow cycling on a one-way street does not make it two-way.
+fn oneway_directions(forward: AccessMask, reverse: AccessMask) -> (bool, bool) {
+    [AccessMask::CAR, AccessMask::BICYCLE, AccessMask::FOOT]
+        .into_iter()
+        .find(|&mode| forward.contains(mode) || reverse.contains(mode))
+        .map_or((false, false), |mode| {
+            (
+                forward.contains(mode) && !reverse.contains(mode),
+                reverse.contains(mode) && !forward.contains(mode),
+            )
+        })
 }

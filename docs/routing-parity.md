@@ -17,8 +17,9 @@ See the [OSRM project](https://github.com/Project-OSRM/osrm-backend) and
 Valhalla covers dynamic mode costing, directions, optimized waypoint order,
 matrices, isochrones, map matching, elevation, and network location inspection.
 NetWeevil's existing dynamic profiles, temporal routing, alternatives, matrices,
-and service areas cover part of that workload. Basic English street directions
-and ordered/optimized waypoints are implemented, along with static GPS trace matching.
+and service areas cover part of that workload. Localized street directions with
+lanes and signposts, ordered/optimized waypoints and static GPS trace matching
+are implemented.
 See the [Valhalla service index](https://valhalla.github.io/valhalla/api/).
 
 MOTIS combines street and public transport routing with multiple timetable
@@ -38,7 +39,7 @@ See the [MOTIS project](https://github.com/motis-project/motis).
 | Matrix | Shared CCH search spaces with legal-route validation and a reusable exact frontier per origin | Accelerate restriction-state searches; test large asymmetric matrices |
 | Service areas | Network and polygon output, multiple thresholds/origins, temporal sequences | Match Valhalla contour semantics and measure polygon generation independently |
 | Locate | `POST /v1/locate` returns the same profile-aware candidates as route snapping | Add richer edge metadata where consumers need it |
-| Navigation | Static legal street directions: English turns, road-name changes, legal roundabout exit counts, edge ranges | Lane/signpost guidance, localized text and voice, richer intersection classification, temporal directions |
+| Navigation | Static and time-dependent street directions in six languages: turns, forks, ramps, exits, merges, U-turns, legal roundabout exit counts, ferries, stairs/escalators/lifts, arrival side, lanes from `turn:lanes`, signposts, verbal alerts in metric/imperial | Driving side from admin boundaries, junction-view and guidance-sign geometry, more languages, matched-path directions |
 | Waypoints | Ordered static break/through routing with turn-history continuity; exact directed stop ordering with fixed endpoints and at most 16 intermediate stops | Via/break-through variants, time-dependent stop order, faster large stop sets |
 | Map matching | Gaussian emissions, shortest legal distance transitions and Viterbi search with turn-history continuity; timestamp/speed bounds, gaps and model-fit scores | Calibrated ambiguity, richer edge attributes, matched-path directions and large-trace throughput |
 | Elevation | Z-aware topology and multilayer pedestrian routing | DEM sampling and an elevation-along-path service |
@@ -60,8 +61,11 @@ NetWeevil p50/p95 1.561/3.306 ms versus OSRM 0.750/1.485 ms.
 See [the reproducible setup and common-success analysis](local-osrm-benchmark.md).
 
 `POST /v1/directions` adds primary-route maneuver instructions. It suppresses
-false turns on unbranched bends and counts only legal roundabout exit junctions,
-including multi-edge restriction history. It rejects temporal or degraded
+false turns on unbranched bends and straight-through continuations, and counts
+only legal roundabout exits, including multi-edge restriction history. Lane,
+signpost and route-number tags are kept per directed edge in the edge-name
+bundle; on Groningen the bundle shrank from 162,957 to 81,289 bytes after the
+move to the sectioned format, guidance data included. It rejects degraded
 routes and restriction-bypassing execution. Maneuver ranges cover the route's
 edges; segment travel times exclude turn penalties, which remain in the summary.
 
@@ -170,8 +174,8 @@ than a full multicriteria label set. These need separate correctness work.
    CCH candidates, then represent multi-edge restriction automaton states in
    the accelerated graph. Validate every new path against exact routing before
    judging speed. Removing restrictions or legal u-turns changes the problem.
-3. Extend the static waypoint and English guidance implementation with the
-   remaining waypoint types, signposts, lane guidance and localization.
+3. Extend the static waypoint implementation with the remaining waypoint
+   types; feed the guidance driving side from imported admin boundaries.
    Measure large directed stop sets before choosing an approximate optimizer.
 4. Benchmark trace matching with labeled GPS traces and compare ambiguity
    estimates against correct-road labels. Extend the static matcher with
