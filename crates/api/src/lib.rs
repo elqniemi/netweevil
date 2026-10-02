@@ -33,6 +33,7 @@ mod station_geometry;
 mod terrain;
 mod tiles;
 mod trace_matching;
+mod traffic;
 mod transit;
 mod transit_directions;
 mod trip;
@@ -161,6 +162,11 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
         .route("/v1/matrix", post(handlers::matrix_handler))
         .route("/v1/accessibility", post(handlers::accessibility_handler))
         .route("/v1/service-area", post(handlers::service_area_handler))
+        .route("/v1/traffic", get(traffic::traffic_status))
+        .route(
+            "/v1/traffic/live",
+            post(traffic::post_live_traffic).delete(traffic::delete_live_traffic),
+        )
         .route(
             "/v1/service-area-sequence",
             post(handlers::service_area_sequence_handler),

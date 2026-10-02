@@ -31,6 +31,7 @@ mod service_area_sequence;
 mod snapping;
 mod temporal;
 mod trace_matching;
+mod traffic;
 mod trip;
 mod waypoints;
 
@@ -65,6 +66,11 @@ pub use temporal::{
     load_holiday_calendar, load_scenario_overlay, load_temporal_overlay, parse_datetime,
 };
 pub use trace_matching::*;
+pub use traffic::{
+    HistoricalTraffic, LiveSwapReport, LiveTrafficDirection, LiveTrafficEntry, LiveTrafficSnapshot,
+    LiveTrafficUpdate, TrafficBucketInfo, TrafficProfileStatus, TrafficRouter, TrafficSelection,
+    TrafficService, TrafficSpeedPolicy, TrafficStatus,
+};
 pub use trip::solver as trip_solver;
 pub use trip::{
     MAX_TRIP_STOPS, TripMode, TripOptimization, TripOptimizerOptions, TripRequest, TripResult,

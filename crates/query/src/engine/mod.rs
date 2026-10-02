@@ -104,6 +104,60 @@ impl PreparedRoutingEngine {
         })
     }
 
+    /// An engine over the same topology and dataset hierarchy with replaced
+    /// per-edge metrics (traffic buckets, live updates). The hierarchy is
+    /// customized for `metrics`, so queries stay exact for that metric. No
+    /// multi-edge-restriction-ignoring graph is built: such engines serve
+    /// [`EngineMode::Auto`] requests only.
+    pub fn with_edge_metrics(&self, metrics: Arc<CompiledProfileBundle>) -> Result<Self> {
+        let acceleration = self.dataset_acceleration();
+        validate_execution_inputs(self.topology.as_ref(), metrics.as_ref())?;
+        let (metrics, customized_at_load) =
+            customize_loaded_metrics(self.topology.as_ref(), metrics, acceleration.as_deref());
+        // Speed-only changes keep the adjacency: share it with this engine.
+        let shared = self.default_routing_graph.with_metrics(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            metrics.clone(),
+        );
+        let mut default_routing_graph = match shared {
+            Some(graph) => graph,
+            None => build_routing_graph_from_shared(
+                self.topology.as_ref(),
+                metrics.clone(),
+                acceleration,
+            )?,
+        };
+        if customized_at_load
+            && let Some(acceleration) = default_routing_graph
+                .acceleration
+                .as_mut()
+                .and_then(Arc::get_mut)
+        {
+            acceleration.deferred_metric_weights = Some(Arc::default());
+        }
+        if let Some(acceleration) = default_routing_graph.acceleration.as_ref() {
+            acceleration.ranked.get(acceleration);
+        }
+        Ok(Self {
+            topology: self.topology.clone(),
+            metrics,
+            default_routing_graph,
+            ignore_multi_edge_restrictions_graph: None,
+            avoid_engines: AvoidEngineCache::default(),
+            avoid_applied: false,
+            avoid_index: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// The dataset CCH topology the default graph routes on, if any.
+    pub fn dataset_acceleration(&self) -> Option<Arc<DatasetAccelerationBundle>> {
+        self.default_routing_graph
+            .acceleration
+            .as_ref()
+            .map(|acceleration| acceleration.source.clone())
+    }
+
     pub fn topology(&self) -> &TopologyBundle {
         self.topology.as_ref()
     }
