@@ -1284,7 +1284,6 @@ pub(crate) fn build_single_source_edge_tree(
     let _ = topology;
     let origin_seeds = origin_edge_seeds(routing_graph, origin);
     SINGLE_SOURCE_SEARCH_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
         scratch.prepare(routing_graph.edge_costs.len());
 
         for (edge_index, cost) in origin_seeds {

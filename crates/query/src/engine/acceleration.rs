@@ -356,7 +356,6 @@ pub(crate) fn build_forward_cch_space(
         .expect("validated acceleration weights");
 
     ACCELERATION_SEARCH_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
         scratch.prepare(routing_graph.edge_costs.len());
 
         for &(edge_index, cost) in seeds {
@@ -425,7 +424,6 @@ pub(crate) fn build_backward_cch_space(
         .expect("validated acceleration weights");
 
     ACCELERATION_SEARCH_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
         scratch.prepare(routing_graph.edge_costs.len());
 
         for &(edge_index, cost) in seeds {
@@ -588,7 +586,6 @@ pub(crate) fn seeded_bidirectional_dijkstra_on_edge_transitions(
     let minimum_origin_cost = minimum_seed_cost(origin_seeds);
     let minimum_destination_cost = minimum_seed_cost(destination_seeds);
     EDGE_SEARCH_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
         scratch.prepare(topology.edge_count());
 
         for &(edge_index, cost) in origin_seeds {

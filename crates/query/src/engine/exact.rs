@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use anyhow::Result;
@@ -6,16 +5,14 @@ use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 
 use crate::*;
 
-thread_local! {
-    pub(crate) static EDGE_SEARCH_SCRATCH: RefCell<BidirectionalEdgeSearchScratch> =
-        RefCell::new(BidirectionalEdgeSearchScratch::default());
-    pub(crate) static ACCELERATION_SEARCH_SCRATCH: RefCell<BidirectionalAccelerationScratch> =
-        RefCell::new(BidirectionalAccelerationScratch::default());
-    pub(crate) static RESTRICTED_SEARCH_SCRATCH: RefCell<RestrictedSearchScratch> =
-        RefCell::new(RestrictedSearchScratch::default());
-    pub(crate) static SINGLE_SOURCE_SEARCH_SCRATCH: RefCell<SingleSourceEdgeSearchScratch> =
-        RefCell::new(SingleSourceEdgeSearchScratch::default());
-}
+pub(crate) static EDGE_SEARCH_SCRATCH: ScratchPool<BidirectionalEdgeSearchScratch> =
+    ScratchPool::new();
+pub(crate) static ACCELERATION_SEARCH_SCRATCH: ScratchPool<BidirectionalAccelerationScratch> =
+    ScratchPool::new();
+pub(crate) static RESTRICTED_SEARCH_SCRATCH: ScratchPool<RestrictedSearchScratch> =
+    ScratchPool::new();
+pub(crate) static SINGLE_SOURCE_SEARCH_SCRATCH: ScratchPool<SingleSourceEdgeSearchScratch> =
+    ScratchPool::new();
 
 #[derive(Default)]
 pub(crate) struct BidirectionalEdgeSearchScratch {
@@ -480,7 +477,6 @@ fn seeded_bidirectional_dijkstra_with_banned_edges(
     max_generalized_cost: Option<f64>,
 ) -> Result<Option<RoutePath>> {
     EDGE_SEARCH_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
         scratch.prepare(topology.edge_count());
 
         for &(edge_index, cost) in origin_seeds {
