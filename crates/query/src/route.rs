@@ -375,7 +375,7 @@ fn build_failure_mode_bundle(
         },
     )?;
     routing_graph.acceleration = None;
-    routing_graph.virtual_reverse_of = virtual_reverse_of;
+    routing_graph.virtual_reverse_of = virtual_reverse_of.into();
     Ok((degraded_topology, degraded_metrics, routing_graph))
 }
 

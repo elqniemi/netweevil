@@ -101,8 +101,20 @@ impl PreparedRoutingEngine {
         validate_execution_inputs(self.topology.as_ref(), metrics.as_ref())?;
         let (metrics, customized_at_load) =
             customize_loaded_metrics(self.topology.as_ref(), metrics, acceleration.as_deref());
-        let mut default_routing_graph =
-            build_routing_graph_from_shared(self.topology.as_ref(), metrics.clone(), acceleration)?;
+        // Speed-only changes keep the adjacency: share it with this engine.
+        let shared = self.default_routing_graph.with_metrics(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            metrics.clone(),
+        );
+        let mut default_routing_graph = match shared {
+            Some(graph) => graph,
+            None => build_routing_graph_from_shared(
+                self.topology.as_ref(),
+                metrics.clone(),
+                acceleration,
+            )?,
+        };
         if let Some(acceleration) = default_routing_graph.acceleration.as_ref() {
             acceleration.ranked.get(acceleration);
         }
