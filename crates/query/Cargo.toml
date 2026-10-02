@@ -13,6 +13,8 @@ categories.workspace = true
 anyhow.workspace = true
 bytemuck = { workspace = true, features = ["zeroable_atomics"] }
 arrow-json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
 csv.workspace = true
 netweevil-core = { path = "../core" }
 netweevil-profile = { path = "../profile" }

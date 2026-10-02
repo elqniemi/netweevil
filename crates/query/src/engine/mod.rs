@@ -91,6 +91,42 @@ impl PreparedRoutingEngine {
         })
     }
 
+    /// An engine over the same topology and dataset hierarchy with replaced
+    /// per-edge metrics (traffic buckets, live updates). The hierarchy is
+    /// customized for `metrics`, so queries stay exact for that metric. No
+    /// multi-edge-restriction-ignoring graph is built: such engines serve
+    /// [`EngineMode::Auto`] requests only.
+    pub fn with_edge_metrics(&self, metrics: Arc<CompiledProfileBundle>) -> Result<Self> {
+        let acceleration = self.dataset_acceleration();
+        validate_execution_inputs(self.topology.as_ref(), metrics.as_ref())?;
+        let (metrics, customized_at_load) =
+            customize_loaded_metrics(self.topology.as_ref(), metrics, acceleration.as_deref());
+        let mut default_routing_graph =
+            build_routing_graph_from_shared(self.topology.as_ref(), metrics.clone(), acceleration)?;
+        if let Some(acceleration) = default_routing_graph.acceleration.as_ref() {
+            acceleration.ranked.get(acceleration);
+        }
+        if customized_at_load
+            && let Some(acceleration) = default_routing_graph.acceleration.as_mut()
+        {
+            acceleration.deferred_metric_weights = Some(Arc::new(DeferredMetricWeights::default()));
+        }
+        Ok(Self {
+            topology: self.topology.clone(),
+            metrics,
+            default_routing_graph,
+            ignore_multi_edge_restrictions_graph: None,
+        })
+    }
+
+    /// The dataset CCH topology the default graph routes on, if any.
+    pub fn dataset_acceleration(&self) -> Option<Arc<DatasetAccelerationBundle>> {
+        self.default_routing_graph
+            .acceleration
+            .as_ref()
+            .map(|acceleration| acceleration.source.clone())
+    }
+
     pub fn topology(&self) -> &TopologyBundle {
         self.topology.as_ref()
     }

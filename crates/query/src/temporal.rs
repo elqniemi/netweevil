@@ -253,6 +253,8 @@ pub struct TemporalContext {
     scenario_features: HashMap<i64, ScenarioFeatureOverride>,
     pub holidays: HashSet<Date>,
     pub overlays: Vec<TemporalOverlaySeries>,
+    /// Historical and live traffic speeds integrated along each edge.
+    pub(crate) traffic: Option<crate::traffic::TemporalTraffic>,
 }
 
 impl TemporalContext {
@@ -276,7 +278,13 @@ impl TemporalContext {
             scenario_features,
             holidays,
             overlays,
+            traffic: None,
         }
+    }
+
+    pub(crate) fn with_traffic(mut self, traffic: crate::traffic::TemporalTraffic) -> Self {
+        self.traffic = Some(traffic);
+        self
     }
 
     fn overlay_value(&self, feature_id: i64, timestamp: OffsetDateTime, name: &str) -> Option<f64> {
@@ -322,9 +330,18 @@ pub(crate) fn evaluate_edge_at(
     let rule_set = routing_edge
         .temporal_rule_id
         .and_then(|rule_id| topology.temporal_rule_sets.get(rule_id as usize));
-    let rules_vary_over_time = has_time_varying_rules(rule_set, scenario);
+    let traffic = context
+        .traffic
+        .as_ref()
+        .filter(|traffic| traffic.affects_edge(edge_index));
+    // Live closures behave like rules; their expiries fall on whole minutes.
+    let rules_vary_over_time = has_time_varying_rules(rule_set, scenario)
+        || traffic.is_some_and(|traffic| traffic.has_closure(edge_index));
     let speed_factor_varies = has_time_varying_speed_factor(rule_set, scenario);
     let rules = |timestamp| {
+        if traffic.is_some_and(|traffic| traffic.closed_at(edge_index, timestamp)) {
+            return RuleEvaluation::Unavailable;
+        }
         evaluate_rules(
             rule_set,
             scenario,
@@ -334,24 +351,58 @@ pub(crate) fn evaluate_edge_at(
         )
     };
     let fraction = fraction.clamp(0.0, 1.0);
+    let profile_seconds = base_time_s * fraction;
+    let traverse = |entry: OffsetDateTime, speed_factor: f32| match traffic {
+        Some(traffic) => traffic.traversal_seconds(
+            topology,
+            metric,
+            edge_index,
+            entry,
+            profile_seconds,
+            f64::from(speed_factor),
+        ),
+        None => profile_seconds / f64::from(speed_factor),
+    };
     let (actual_entry, speed_factor) = best_available_entry(
         requested_entry,
         metrics.temporal.allow_wait && !scenario.is_some_and(|value| value.force_closed),
         metrics.temporal.max_wait_s,
-        base_time_s * fraction,
         rules_vary_over_time,
         speed_factor_varies,
         &rules,
+        &traverse,
     )?;
+    let speed_factor_f32 = speed_factor;
     let speed_factor = f64::from(speed_factor);
     if !speed_factor.is_finite() || speed_factor <= 0.0 {
         return None;
     }
     let wait_s = (actual_entry - requested_entry).as_seconds_f64();
-    let travel_time_s = base_time_s * fraction / speed_factor;
-    let mut generalized_cost = base_cost * fraction
-        + (travel_time_s - base_time_s * fraction) * metrics.turn_costs.cost_time_weight
-        + wait_s * metrics.turn_costs.cost_time_weight;
+    let (travel_time_s, time_multiplier) = match traffic {
+        Some(_) => {
+            let travel_time_s = traverse(actual_entry, speed_factor_f32);
+            let multiplier = if profile_seconds > 0.0 {
+                travel_time_s / profile_seconds
+            } else {
+                1.0 / speed_factor
+            };
+            (travel_time_s, multiplier)
+        }
+        None => (base_time_s * fraction / speed_factor, 1.0 / speed_factor),
+    };
+    let traversal_cost = match traffic {
+        Some(_) => crate::traffic::traffic_cost(
+            base_cost * fraction,
+            profile_seconds,
+            travel_time_s,
+            metrics.turn_costs.cost_time_weight,
+        ),
+        None => {
+            base_cost * fraction
+                + (travel_time_s - base_time_s * fraction) * metrics.turn_costs.cost_time_weight
+        }
+    };
+    let mut generalized_cost = traversal_cost + wait_s * metrics.turn_costs.cost_time_weight;
     let mut components = BTreeMap::new();
     for component in &metrics.components {
         let raw_value = f64::from(*component.edge_values.get(edge_index).unwrap_or(&0.0));
@@ -372,7 +423,7 @@ pub(crate) fn evaluate_edge_at(
             }
         });
         let time_multiplier = if component.scales_with_travel_time {
-            1.0 / speed_factor
+            time_multiplier
         } else {
             1.0
         };
@@ -391,20 +442,22 @@ pub(crate) fn evaluate_edge_at(
     })
 }
 
+/// `traverse(entry, speed_factor)` is the traversal time in seconds; it is
+/// FIFO for a fixed rule regime, so regime starts are the only candidates.
 fn best_available_entry(
     requested_entry: OffsetDateTime,
     allow_wait: bool,
     max_wait_s: f64,
-    base_travel_time_s: f64,
     rules_vary_over_time: bool,
     speed_factor_varies: bool,
     rules: &impl Fn(OffsetDateTime) -> RuleEvaluation,
+    traverse: &impl Fn(OffsetDateTime, f32) -> f64,
 ) -> Option<(OffsetDateTime, f32)> {
     let mut best = match rules(requested_entry) {
         RuleEvaluation::Available { speed_factor } => Some((
             requested_entry,
             speed_factor,
-            requested_entry + Duration::seconds_f64(base_travel_time_s / f64::from(speed_factor)),
+            requested_entry + Duration::seconds_f64(traverse(requested_entry, speed_factor)),
         )),
         RuleEvaluation::Unavailable => None,
     };
@@ -429,8 +482,7 @@ fn best_available_entry(
     let mut candidate = requested_entry + Duration::seconds(seconds_to_next_minute);
     while candidate <= deadline {
         if let RuleEvaluation::Available { speed_factor } = rules(candidate) {
-            let exit =
-                candidate + Duration::seconds_f64(base_travel_time_s / f64::from(speed_factor));
+            let exit = candidate + Duration::seconds_f64(traverse(candidate, speed_factor));
             if best.as_ref().is_none_or(|(best_entry, _, best_exit)| {
                 exit < *best_exit || (exit == *best_exit && candidate < *best_entry)
             }) {
@@ -705,11 +757,11 @@ pub(crate) fn validate_speed_factor_wait_policy(
 }
 
 #[derive(Debug, Clone)]
-struct TemporalTraversal {
-    edge_index: usize,
-    fraction: f64,
-    turn_time_s: f64,
-    cost: EdgeTemporalCost,
+pub(crate) struct TemporalTraversal {
+    pub(crate) edge_index: usize,
+    pub(crate) fraction: f64,
+    pub(crate) turn_time_s: f64,
+    pub(crate) cost: EdgeTemporalCost,
 }
 
 #[derive(Debug, Clone)]
@@ -783,15 +835,17 @@ impl Ord for TemporalHeapEntry {
 }
 
 #[derive(Debug, Clone)]
-struct TemporalCandidatePath {
-    origin: SnappedPoint,
-    destination: SnappedPoint,
-    departure: OffsetDateTime,
-    arrival: OffsetDateTime,
-    generalized_cost: f64,
-    traversals: Vec<TemporalTraversal>,
-    hop_info: HopSelectionInfo,
+pub(crate) struct TemporalCandidatePath {
+    pub(crate) origin: SnappedPoint,
+    pub(crate) destination: SnappedPoint,
+    pub(crate) departure: OffsetDateTime,
+    pub(crate) arrival: OffsetDateTime,
+    pub(crate) generalized_cost: f64,
+    pub(crate) traversals: Vec<TemporalTraversal>,
+    pub(crate) hop_info: HopSelectionInfo,
 }
+
+pub(crate) const EXACT_TEMPORAL_ROUTE_WARNING: &str = "Time-dependent route used the exact multi-label edge search; static CCH acceleration was intentionally bypassed.";
 
 pub(crate) fn execute_temporal_route_with_graph(
     topology: &TopologyBundle,
@@ -876,7 +930,15 @@ pub(crate) fn execute_temporal_route_with_graph(
             &destination_candidates,
         ))
     })?;
-    build_temporal_route_result(topology, metrics, request, context, candidate, edge_names)
+    build_temporal_route_result(
+        topology,
+        metrics,
+        request,
+        context,
+        candidate,
+        edge_names,
+        EXACT_TEMPORAL_ROUTE_WARNING,
+    )
 }
 
 fn arrive_by_route_between_candidates(
@@ -1556,7 +1618,7 @@ fn departure_windows_for_path_entry(
     entry_windows
 }
 
-fn replay_temporal_edge_path(
+pub(crate) fn replay_temporal_edge_path(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     context: &TemporalContext,
@@ -2468,13 +2530,14 @@ fn insert_nondominated_label(
     Ok(true)
 }
 
-fn build_temporal_route_result(
+pub(crate) fn build_temporal_route_result(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     request: &crate::RouteRequest,
     context: &TemporalContext,
     candidate: TemporalCandidatePath,
     edge_names: Option<&[String]>,
+    engine_warning: &str,
 ) -> Result<RouteResult> {
     let edge_indexes = candidate
         .traversals
@@ -2565,10 +2628,7 @@ fn build_temporal_route_result(
         None
     };
     let mut warnings = Vec::new();
-    warnings.push(
-        "Time-dependent route used the exact multi-label edge search; static CCH acceleration was intentionally bypassed."
-            .to_string(),
-    );
+    warnings.push(engine_warning.to_string());
     if request.alternatives != AlternativeRouteOptions::default() {
         warnings.push(
             "Alternative route enumeration is not applied to time-dependent requests yet."

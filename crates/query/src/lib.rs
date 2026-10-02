@@ -29,6 +29,7 @@ mod service_area_sequence;
 mod snapping;
 mod temporal;
 mod trace_matching;
+mod traffic;
 mod waypoints;
 
 pub use accessibility::*;
@@ -59,6 +60,11 @@ pub use temporal::{
     load_temporal_overlay, parse_datetime,
 };
 pub use trace_matching::*;
+pub use traffic::{
+    HistoricalTraffic, LiveSwapReport, LiveTrafficDirection, LiveTrafficEntry, LiveTrafficSnapshot,
+    LiveTrafficUpdate, TrafficBucketInfo, TrafficProfileStatus, TrafficRouter, TrafficSelection,
+    TrafficService, TrafficSpeedPolicy, TrafficStatus,
+};
 pub use waypoints::*;
 
 #[cfg(test)]
