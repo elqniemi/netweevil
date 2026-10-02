@@ -74,5 +74,6 @@ pub(crate) fn test_service(
         dynamic_profiles: DynamicProfileCache::from_env().unwrap(),
         transit_feeds: RwLock::new(BTreeMap::new()),
         capabilities: service_capabilities(),
+        elevation: OnceLock::new(),
     })
 }

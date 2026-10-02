@@ -23,6 +23,7 @@ mod error;
 mod geojson;
 mod gtfs_editor;
 mod handlers;
+mod height;
 mod jobs;
 mod locate;
 mod network;
@@ -138,6 +139,7 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
         .route("/v1/directions", post(handlers::directions_handler))
         .route("/v1/match", post(trace_matching::trace_match_handler))
         .route("/v1/locate", post(locate::locate_handler))
+        .route("/v1/height", post(height::height_handler))
         .route("/v1/waypoints", post(waypoints::waypoints_handler))
         .route("/v1/transit-route", post(transit::transit_route_handler))
         .route(
