@@ -747,6 +747,41 @@ pub(crate) const PROFILE_TEMPLATES: &[ProfileTemplate] = &[
         description: "Walking profile at 5 km/h ignoring one-way streets, excluding motorways; also used for transit access and transfers.",
         yaml: include_str!("../templates/pedestrian_default.yml"),
     },
+    ProfileTemplate {
+        template_id: "truck",
+        label: "Truck (HGV, default)",
+        mode: "hgv",
+        description: "40 t articulated truck (4.0 m high, 2.55 m wide, 16.5 m long, one trailer) at truck speeds; edges with lower height, weight or similar limits are excluded, and requests can override the dimensions.",
+        yaml: include_str!("../templates/truck_default.yml"),
+    },
+    ProfileTemplate {
+        template_id: "bus",
+        label: "Bus (default)",
+        mode: "bus",
+        description: "12 m single-deck city bus (3.2 m high, 19 t) using bus-only roads and lanes, with the vehicle's height and weight limits applied.",
+        yaml: include_str!("../templates/bus_default.yml"),
+    },
+    ProfileTemplate {
+        template_id: "taxi",
+        label: "Taxi (default)",
+        mode: "taxi",
+        description: "Car speeds and turn costs with access to roads open to taxis or public service vehicles, such as many bus lanes.",
+        yaml: include_str!("../templates/taxi_default.yml"),
+    },
+    ProfileTemplate {
+        template_id: "motorcycle",
+        label: "Motorcycle (default)",
+        mode: "motorcycle",
+        description: "Fastest-route motorcycle profile with car-like speeds and stronger slow-downs on loose or rough surfaces.",
+        yaml: include_str!("../templates/motorcycle_default.yml"),
+    },
+    ProfileTemplate {
+        template_id: "moped",
+        label: "Moped (default)",
+        mode: "moped",
+        description: "Mopeds and scooters at up to 45 km/h, excluding motorways; cycleway and road access follow the dataset's moped tags.",
+        yaml: include_str!("../templates/moped_default.yml"),
+    },
 ];
 
 pub(crate) async fn profile_templates() -> Json<&'static [ProfileTemplate]> {

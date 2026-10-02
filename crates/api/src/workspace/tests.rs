@@ -207,3 +207,63 @@ fn reload_swaps_in_an_updated_build_and_recompiles_stale_profiles() {
     );
     std::fs::remove_dir_all(root).expect("temporary workspace removed");
 }
+
+/// Every profile template, and the copies of the vehicle templates under
+/// `examples/profiles`, parses, declares the mode it is listed under, and
+/// compiles to a profile that can use a street open to every mode.
+#[test]
+fn profile_templates_and_their_examples_compile() {
+    let mut topology = street(3);
+    for profile in &mut topology.edge_layers.profile {
+        profile.access_mask = AccessMask::new(AccessMask::ALL);
+    }
+    let example_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/profiles");
+    let examples = [
+        ("truck", "truck_hgv_v1.yml"),
+        ("bus", "bus_city_v1.yml"),
+        ("taxi", "taxi_v1.yml"),
+        ("motorcycle", "motorcycle_v1.yml"),
+        ("moped", "moped_v1.yml"),
+    ];
+    let templates = PROFILE_TEMPLATES.iter().map(|template| {
+        (
+            template.template_id,
+            template.mode,
+            template.yaml.to_string(),
+        )
+    });
+    let example_profiles = examples.iter().map(|&(template_id, file)| {
+        let template = PROFILE_TEMPLATES
+            .iter()
+            .find(|template| template.template_id == template_id)
+            .expect("example has a template");
+        let yaml = fs::read_to_string(example_dir.join(file)).expect("example profile reads");
+        (file, template.mode, yaml)
+    });
+    for (name, mode, yaml) in templates.chain(example_profiles) {
+        let profile: ProfileDocument =
+            serde_yaml::from_str(&yaml).unwrap_or_else(|error| panic!("{name} parses: {error}"));
+        profile
+            .validate()
+            .unwrap_or_else(|error| panic!("{name} validates: {error}"));
+        assert_eq!(
+            serde_json::to_value(profile.profile.mode).unwrap(),
+            json!(mode),
+            "{name}"
+        );
+        let compiled = netweevil_profile::compile_profile_bundle(
+            &profile,
+            &topology,
+            CacheBundleId::new("street"),
+        )
+        .unwrap_or_else(|error| panic!("{name} compiles: {error}"));
+        assert!(
+            compiled
+                .edge_metrics
+                .iter()
+                .all(|metric| metric.generalized_cost.is_some()),
+            "{name} cannot use the street"
+        );
+    }
+}

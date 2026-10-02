@@ -1,0 +1,90 @@
+# Default moped profile created by the NetWeevil setup flow.
+# Edit freely: the file is yours. Change `profile.id` to keep several variants.
+# Mopeds and motor scooters (`moped` access) top out at 45 km/h. Whether
+# they may use cycleways or larger roads comes from the dataset's access
+# tags, which differ by country.
+profile:
+  id: moped_default
+  label: "Moped (default)"
+  mode: moped
+  defaults_pack: eu_moped_2026_01
+
+cost:
+  objective: fastest
+  distance_weight: 0.0
+  time_weight: 1.0
+
+speeds:
+  posted_limits: cap
+
+speed_rules:
+  - match:
+      road_class: primary
+    speed_kph: 45
+  - match:
+      road_class: secondary
+    speed_kph: 45
+  - match:
+      road_class: tertiary
+    speed_kph: 40
+  - match:
+      highway: cycleway
+    speed_kph: 30
+  - match:
+      road_class: residential
+    speed_kph: 30
+  - match:
+      road_class: service
+    speed_kph: 15
+  - match:
+      road_class: track
+    speed_kph: 12
+  - match:
+      road_class: trunk
+    speed_kph: 45
+
+exclude_rules:
+  - match:
+      road_class: motorway
+
+factors:
+  - match:
+      surface: cobblestone
+    speed_factor: 0.7
+  - match:
+      surface: gravel
+    speed_factor: 0.5
+  - match:
+      surface: sand
+    speed_factor: 0.3
+  - match:
+      smoothness: bad
+    speed_factor: 0.6
+
+turns:
+  left_penalty_s: 4
+  right_penalty_s: 1
+  uturn_penalty_s: 10
+  traffic_signal_penalty_s: 6
+  roundabout_entry_penalty_s: 2
+
+ferry:
+  allow: true
+  use_ferry: 0.35
+  boarding_cost_s: 300
+  infer_duration_when_missing: true
+  default_speed_kph: 22
+
+preferences:
+  use_highways: 0.3
+  use_tolls: 0.4
+  use_tracks: 0.2
+  service_penalty_s: 10
+
+returns:
+  geometry: full
+  segment_rows: true
+  road_type_breakdown:
+    - time_s
+    - distance_m
+  penalty_breakdown: true
