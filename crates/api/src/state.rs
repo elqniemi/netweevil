@@ -277,6 +277,16 @@ pub(crate) fn load_service_runtime(
 
     let compiled_manifests = read_compiled_profile_manifests(paths).unwrap_or_default();
     let mut default_profile_id = None;
+    // One shared CCH topology for every profile on this dataset.
+    let dataset_acceleration: Option<Arc<DatasetAccelerationBundle>> = dataset_manifest
+        .acceleration_bundle
+        .as_ref()
+        .map(|bundle_ref| {
+            read_acceleration_bundle(&bundle_ref.path)
+                .with_context(|| format!("reading acceleration bundle {}", bundle_ref.path))
+                .map(Arc::new)
+        })
+        .transpose()?;
 
     for profile_path in requested_paths {
         info!(path = %profile_path.display(), "loading profile");
@@ -286,6 +296,7 @@ pub(crate) fn load_service_runtime(
             &dataset_manifest,
             topology_ref.bundle_id.clone(),
             topology.clone(),
+            dataset_acceleration.clone(),
             &compiled_manifests,
             &profile_path,
         )?;
@@ -418,6 +429,7 @@ fn load_or_compile_profile(
     dataset_manifest: &DatasetManifest,
     topology_bundle_id: CacheBundleId,
     topology: Arc<TopologyBundle>,
+    dataset_acceleration: Option<Arc<DatasetAccelerationBundle>>,
     compiled_manifests: &[CompiledProfileManifest],
     profile_path: &Path,
 ) -> Result<LoadedProfile> {
@@ -425,15 +437,6 @@ fn load_or_compile_profile(
         .with_context(|| format!("loading {}", profile_path.display()))?;
     document.validate()?;
     let profile_hash = document.fingerprint()?;
-    let dataset_acceleration: Option<Arc<DatasetAccelerationBundle>> = dataset_manifest
-        .acceleration_bundle
-        .as_ref()
-        .map(|bundle_ref| {
-            read_acceleration_bundle(&bundle_ref.path)
-                .with_context(|| format!("reading acceleration bundle {}", bundle_ref.path))
-                .map(Arc::new)
-        })
-        .transpose()?;
 
     // Reuse a cached compiled bundle only when it still reads cleanly and its
     // acceleration matches the dataset's current CCH bundle; otherwise fall
@@ -449,7 +452,8 @@ fn load_or_compile_profile(
             let acceleration_current = match (dataset_acceleration.as_ref(), &bundle.acceleration) {
                 (Some(_), Some(acceleration)) => {
                     acceleration.algorithm == netweevil_core::CCH_ALGORITHM
-                        && acceleration.schema_version == 3
+                        && acceleration.schema_version
+                            == netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION
                 }
                 (Some(_), None) => false,
                 (None, _) => true,

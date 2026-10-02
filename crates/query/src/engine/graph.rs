@@ -523,6 +523,41 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
     })
 }
 
+/// Compiled profile bundles persist per-edge metrics only. When `metrics`
+/// carries an acceleration header for `dataset_acceleration` but no arc
+/// weights yet, customize them now. Bundles that do not belong together are
+/// returned unchanged so [`build_acceleration_graph`] reports the mismatch.
+pub(crate) fn customize_loaded_metrics(
+    topology: &TopologyBundle,
+    metrics: Arc<CompiledProfileBundle>,
+    dataset_acceleration: Option<&DatasetAccelerationBundle>,
+) -> Arc<CompiledProfileBundle> {
+    let (Some(source), Some(compiled)) = (dataset_acceleration, metrics.acceleration.as_ref())
+    else {
+        return metrics;
+    };
+    let customized = compiled.upward_weight.len() == source.upward_head.len()
+        && compiled.downward_weight.len() == source.downward_head.len();
+    if customized
+        || source.source_topology_bundle_id != metrics.source_topology_bundle_id
+        || !source.is_current_format()
+        || compiled.algorithm != netweevil_core::CCH_ALGORITHM
+        || compiled.schema_version != netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION
+        || metrics.edge_metrics.len() != topology.edge_count()
+    {
+        return metrics;
+    }
+    let weights = netweevil_profile::customize_acceleration(
+        topology,
+        &metrics,
+        source,
+        compiled.source_acceleration_bundle_id.clone(),
+    );
+    let mut owned = Arc::unwrap_or_clone(metrics);
+    owned.acceleration = Some(weights);
+    Arc::new(owned)
+}
+
 #[allow(clippy::needless_range_loop)]
 pub(crate) fn build_acceleration_graph(
     metrics: Arc<CompiledProfileBundle>,

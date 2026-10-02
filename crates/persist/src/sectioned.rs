@@ -20,7 +20,6 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use bytemuck::Pod;
 use memmap2::Mmap;
 use netweevil_core::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId,
@@ -70,10 +69,6 @@ impl<W: Write> SectionWriter<W> {
     fn write_bincode<T: Serialize>(&mut self, value: &T) -> Result<()> {
         let bytes = bincode::serialize(value).context("serializing bundle header section")?;
         self.write_section(&bytes)
-    }
-
-    fn write_raw<T: Pod>(&mut self, values: &[T]) -> Result<()> {
-        self.write_section(bytemuck::cast_slice(values))
     }
 
     fn write_u32s(&mut self, values: &[u32]) -> Result<()> {
@@ -163,15 +158,6 @@ impl<'a> SectionReader<'a> {
 
     fn read_bincode<T: DeserializeOwned>(&mut self) -> Result<T> {
         bincode::deserialize(self.next_section()?).context("parsing bundle header section")
-    }
-
-    fn read_raw<T: Pod>(&mut self) -> Result<Vec<T>> {
-        let bytes = self.next_section()?;
-        if bytes.len() % size_of::<T>() != 0 {
-            bail!("raw section length is not a multiple of the element size");
-        }
-        // Copies (mmap offsets are unaligned): one memcpy per array.
-        Ok(bytemuck::allocation::pod_collect_to_vec(bytes))
     }
 
     fn read_u32s(&mut self) -> Result<Vec<u32>> {
@@ -351,16 +337,12 @@ pub(crate) fn read_acceleration_sectioned(
 }
 
 // --- Compiled profile bundle ----------------------------------------------
-
-/// `Option<f64>` encoded as a raw f64 with a NaN sentinel. Compiled values
-/// are always finite or absent, so the sentinel is unambiguous.
-fn option_to_raw(value: Option<f64>) -> f64 {
-    value.unwrap_or(f64::NAN)
-}
-
-fn raw_to_option(value: f64) -> Option<f64> {
-    (!value.is_nan()).then_some(value)
-}
+//
+// Only per-edge metrics are persisted. Customized CCH weights are a pure
+// function of these metrics, the topology and the dataset hierarchy, and are
+// rebuilt when an engine loads the profile (see
+// `netweevil_profile::customize_acceleration`); the reader returns the
+// acceleration header with empty weight arrays.
 
 #[derive(Serialize, Deserialize)]
 struct CompiledProfileHeader {
@@ -371,6 +353,8 @@ struct CompiledProfileHeader {
     turn_costs: CompiledTurnCostConfig,
     source_topology_bundle_id: CacheBundleId,
     acceleration: Option<CompiledAccelerationHeader>,
+    temporal: CompiledTemporalProfile,
+    components: Vec<CompiledCostComponentHeader>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -394,6 +378,14 @@ pub(crate) fn write_compiled_profile_sectioned(
     bundle: &CompiledProfileBundle,
 ) -> Result<()> {
     let mut writer = create_writer(path)?;
+    encode_compiled_profile(&mut writer, bundle)?;
+    writer.finish()
+}
+
+fn encode_compiled_profile<W: Write>(
+    writer: &mut SectionWriter<W>,
+    bundle: &CompiledProfileBundle,
+) -> Result<()> {
     writer.write_bincode(&"compiled_profile")?;
     writer.write_bincode(&CompiledProfileHeader {
         schema_version: bundle.schema_version,
@@ -410,46 +402,8 @@ pub(crate) fn write_compiled_profile_sectioned(
                 source_acceleration_bundle_id: acceleration.source_acceleration_bundle_id.clone(),
                 algorithm: acceleration.algorithm.clone(),
             }),
-    })?;
-
-    let edge_ids: Vec<u32> = bundle
-        .edge_metrics
-        .iter()
-        .map(|metric| metric.edge_id.0)
-        .collect();
-    let travel_times: Vec<f64> = bundle
-        .edge_metrics
-        .iter()
-        .map(|metric| option_to_raw(metric.travel_time_s))
-        .collect();
-    let costs: Vec<f64> = bundle
-        .edge_metrics
-        .iter()
-        .map(|metric| option_to_raw(metric.generalized_cost))
-        .collect();
-    writer.write_raw(&edge_ids)?;
-    writer.write_raw(&travel_times)?;
-    writer.write_raw(&costs)?;
-
-    static EMPTY_U32: &[u32] = &[];
-    match bundle.acceleration.as_ref() {
-        Some(acceleration) => {
-            writer.write_raw(&acceleration.upward_weight)?;
-            writer.write_raw(&acceleration.downward_weight)?;
-            writer.write_raw(&acceleration.time_upward_weight)?;
-            writer.write_raw(&acceleration.time_downward_weight)?;
-            writer.write_raw(&acceleration.distance_upward_weight)?;
-            writer.write_raw(&acceleration.distance_downward_weight)?;
-        }
-        None => {
-            for _ in 0..6 {
-                writer.write_raw(EMPTY_U32)?;
-            }
-        }
-    }
-    writer.write_bincode(&bundle.temporal)?;
-    writer.write_bincode(
-        &bundle
+        temporal: bundle.temporal,
+        components: bundle
             .components
             .iter()
             .map(|component| CompiledCostComponentHeader {
@@ -459,12 +413,33 @@ pub(crate) fn write_compiled_profile_sectioned(
                 overlay_name: component.overlay_name.clone(),
                 invert_overlay: component.invert_overlay,
             })
+            .collect(),
+    })?;
+    writer.write_u32s(
+        &bundle
+            .edge_metrics
+            .iter()
+            .map(|metric| metric.edge_id.0)
+            .collect::<Vec<_>>(),
+    )?;
+    // Travel times and costs derive from a few speed classes and integer
+    // lengths, so (time, cost) pairs repeat heavily.
+    writer.write_interned(
+        &bundle
+            .edge_metrics
+            .iter()
+            .map(|metric| (metric.travel_time_s, metric.generalized_cost))
             .collect::<Vec<_>>(),
     )?;
     for component in &bundle.components {
-        writer.write_raw(&component.edge_values)?;
+        ensure_len(
+            "compiled profile component",
+            component.edge_values.len(),
+            bundle.edge_metrics.len(),
+        )?;
+        writer.write_interned(&component.edge_values)?;
     }
-    writer.finish()
+    Ok(())
 }
 
 pub(crate) fn read_compiled_profile_sectioned(
@@ -481,57 +456,29 @@ pub(crate) fn read_compiled_profile_sectioned(
         return Err(unsupported_format_error(path));
     }
 
-    let edge_ids: Vec<u32> = reader.read_raw()?;
-    let travel_times: Vec<f64> = reader.read_raw()?;
-    let costs: Vec<f64> = reader.read_raw()?;
-    if edge_ids.len() != travel_times.len() || edge_ids.len() != costs.len() {
-        bail!("compiled profile metric sections have inconsistent lengths");
-    }
+    let edge_ids = reader.read_u32s()?;
+    let metrics: Vec<(Option<f64>, Option<f64>)> = reader.read_interned()?;
+    ensure_len("compiled edge metrics", metrics.len(), edge_ids.len())?;
     let edge_metrics: Vec<CompiledEdgeMetric> = edge_ids
         .into_iter()
-        .zip(travel_times)
-        .zip(costs)
+        .zip(metrics)
         .map(
-            |((edge_id, travel_time_s), generalized_cost)| CompiledEdgeMetric {
+            |(edge_id, (travel_time_s, generalized_cost))| CompiledEdgeMetric {
                 edge_id: EdgeId(edge_id),
-                travel_time_s: raw_to_option(travel_time_s),
-                generalized_cost: raw_to_option(generalized_cost),
+                travel_time_s,
+                generalized_cost,
             },
         )
         .collect();
 
-    let upward_weight: Vec<u32> = reader.read_raw()?;
-    let downward_weight: Vec<u32> = reader.read_raw()?;
-    let time_upward_weight: Vec<u32> = reader.read_raw()?;
-    let time_downward_weight: Vec<u32> = reader.read_raw()?;
-    let distance_upward_weight: Vec<u32> = reader.read_raw()?;
-    let distance_downward_weight: Vec<u32> = reader.read_raw()?;
-    let acceleration = header
-        .acceleration
-        .map(|acceleration| CompiledAcceleration {
-            schema_version: acceleration.schema_version,
-            source_acceleration_bundle_id: acceleration.source_acceleration_bundle_id,
-            algorithm: acceleration.algorithm,
-            upward_weight,
-            downward_weight,
-            time_upward_weight,
-            time_downward_weight,
-            distance_upward_weight,
-            distance_downward_weight,
-        });
-    let temporal: CompiledTemporalProfile = reader.read_bincode()?;
-    let component_headers: Vec<CompiledCostComponentHeader> = reader.read_bincode()?;
-    let mut components = Vec::with_capacity(component_headers.len());
-    for component in component_headers {
-        let edge_values: Vec<f32> = reader.read_raw()?;
-        if edge_values.len() != edge_metrics.len() {
-            bail!(
-                "compiled profile component '{}' has {} values for {} edge metrics",
-                component.name,
-                edge_values.len(),
-                edge_metrics.len()
-            );
-        }
+    let mut components = Vec::with_capacity(header.components.len());
+    for component in header.components {
+        let edge_values: Vec<f32> = reader.read_interned()?;
+        ensure_len(
+            "compiled profile component",
+            edge_values.len(),
+            edge_metrics.len(),
+        )?;
         components.push(CompiledCostComponent {
             name: component.name,
             weight: component.weight,
@@ -549,9 +496,21 @@ pub(crate) fn read_compiled_profile_sectioned(
         mode: header.mode,
         turn_costs: header.turn_costs,
         components,
-        temporal,
+        temporal: header.temporal,
         source_topology_bundle_id: header.source_topology_bundle_id,
-        acceleration,
+        acceleration: header
+            .acceleration
+            .map(|acceleration| CompiledAcceleration {
+                schema_version: acceleration.schema_version,
+                source_acceleration_bundle_id: acceleration.source_acceleration_bundle_id,
+                algorithm: acceleration.algorithm,
+                upward_weight: Vec::new(),
+                downward_weight: Vec::new(),
+                time_upward_weight: Vec::new(),
+                time_downward_weight: Vec::new(),
+                distance_upward_weight: Vec::new(),
+                distance_downward_weight: Vec::new(),
+            }),
         edge_metrics,
     })
 }

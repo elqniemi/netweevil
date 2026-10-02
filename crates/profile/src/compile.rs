@@ -50,6 +50,51 @@ pub fn compile_profile_bundle_with_acceleration_with_progress<F>(
     topology: &TopologyBundle,
     source_topology_bundle_id: CacheBundleId,
     acceleration: Option<(&DatasetAccelerationBundle, CacheBundleId)>,
+    progress: F,
+) -> Result<CompiledProfileBundle>
+where
+    F: FnMut(ProfileCompileProgress),
+{
+    compile_profile(
+        profile,
+        topology,
+        source_topology_bundle_id,
+        acceleration,
+        true,
+        progress,
+    )
+}
+
+/// Compiles the per-edge metrics that a profile bundle persists. With an
+/// acceleration bundle the result carries its acceleration header but no
+/// arc weights: engines customize those when they load the bundle (see
+/// [`customize_acceleration`]), so compiling for storage skips that work.
+pub fn compile_profile_metrics_with_progress<F>(
+    profile: &ProfileDocument,
+    topology: &TopologyBundle,
+    source_topology_bundle_id: CacheBundleId,
+    acceleration: Option<(&DatasetAccelerationBundle, CacheBundleId)>,
+    progress: F,
+) -> Result<CompiledProfileBundle>
+where
+    F: FnMut(ProfileCompileProgress),
+{
+    compile_profile(
+        profile,
+        topology,
+        source_topology_bundle_id,
+        acceleration,
+        false,
+        progress,
+    )
+}
+
+fn compile_profile<F>(
+    profile: &ProfileDocument,
+    topology: &TopologyBundle,
+    source_topology_bundle_id: CacheBundleId,
+    acceleration: Option<(&DatasetAccelerationBundle, CacheBundleId)>,
+    customize: bool,
     mut progress: F,
 ) -> Result<CompiledProfileBundle>
 where
@@ -251,15 +296,38 @@ where
         ),
     );
 
+    let turn_costs = CompiledTurnCostConfig {
+        left_penalty_s: profile.turns.left_penalty_s,
+        right_penalty_s: profile.turns.right_penalty_s,
+        uturn_penalty_s: profile.turns.uturn_penalty_s,
+        traffic_signal_penalty_s: profile.turns.traffic_signal_penalty_s,
+        roundabout_entry_penalty_s: profile.turns.roundabout_entry_penalty_s,
+        cost_time_weight: profile.cost.time_weight,
+    };
     let compiled_acceleration = acceleration.map(|(bundle, bundle_id)| {
-        compile_acceleration_with_progress(
-            bundle,
-            bundle_id,
-            topology,
-            &edge_metrics,
-            profile,
-            &mut progress,
-        )
+        if customize {
+            compile_acceleration_with_progress(
+                bundle,
+                bundle_id,
+                topology,
+                &edge_metrics,
+                &turn_costs,
+                mode_bit,
+                &mut progress,
+            )
+        } else {
+            CompiledAcceleration {
+                schema_version: COMPILED_ACCELERATION_SCHEMA_VERSION,
+                source_acceleration_bundle_id: bundle_id,
+                algorithm: bundle.algorithm.clone(),
+                upward_weight: Vec::new(),
+                downward_weight: Vec::new(),
+                time_upward_weight: Vec::new(),
+                time_downward_weight: Vec::new(),
+                distance_upward_weight: Vec::new(),
+                distance_downward_weight: Vec::new(),
+            }
+        }
     });
 
     emit_compile_progress(
@@ -278,14 +346,7 @@ where
         profile_id: profile.profile.id.clone(),
         profile_hash,
         mode: profile.profile.mode,
-        turn_costs: CompiledTurnCostConfig {
-            left_penalty_s: profile.turns.left_penalty_s,
-            right_penalty_s: profile.turns.right_penalty_s,
-            uturn_penalty_s: profile.turns.uturn_penalty_s,
-            traffic_signal_penalty_s: profile.turns.traffic_signal_penalty_s,
-            roundabout_entry_penalty_s: profile.turns.roundabout_entry_penalty_s,
-            cost_time_weight: profile.cost.time_weight,
-        },
+        turn_costs,
         components: components
             .into_iter()
             .map(|component| component.compiled)
@@ -388,55 +449,285 @@ fn build_attribute_match_cache(
         .collect()
 }
 
-/// CCH basic customization.
+/// Customizes the dataset CCH for an already compiled profile: generalized
+/// cost, travel time and distance weights over every hierarchy arc.
 ///
-/// Initializes arcs that correspond to real edge-to-edge transitions with the
-/// turn-adjusted transition cost, then replays the elimination order: for
-/// every state `v` (in contraction order) and every arc pair `x -> v`,
-/// `v -> y` with higher-ranked endpoints, relaxes `w(x -> y)` through the
-/// lower triangle. Processing states in increasing rank
-/// guarantees child arc weights are final before any triangle uses them.
+/// Compiled profile bundles persist only per-edge metrics, so engines call
+/// this when they load one. Returns weights of the wrong length (which
+/// engine preparation rejects) when the bundles do not belong together.
+pub fn customize_acceleration(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    acceleration: &DatasetAccelerationBundle,
+    source_acceleration_bundle_id: CacheBundleId,
+) -> CompiledAcceleration {
+    compile_acceleration_with_progress(
+        acceleration,
+        source_acceleration_bundle_id,
+        topology,
+        &metrics.edge_metrics,
+        &metrics.turn_costs,
+        metrics.mode.access_bit(),
+        &mut |_| {},
+    )
+}
+
+/// Arc-aligned weights of one customized metric.
+struct MetricWeights {
+    upward: Vec<u32>,
+    downward: Vec<u32>,
+}
+
+/// Sentinel for a transition without a hierarchy arc of its own.
+const NO_ARC: u32 = u32::MAX;
+/// Marks a downward arc slot in [`CustomizationContext::transition_arc`].
+const DOWNWARD_ARC: u32 = 1 << 31;
+
+/// Metric-independent lookup tables shared by every customization run.
+struct CustomizationContext<'a> {
+    bundle: &'a DatasetAccelerationBundle,
+    /// Hierarchy arc of every static, non-forbidden edge transition,
+    /// aligned with `edge_transition_edges`.
+    transition_arc: Vec<u32>,
+    downward_tail: Vec<u32>,
+    reverse_downward_first_out: Vec<u32>,
+    reverse_downward_arc: Vec<u32>,
+}
+
+fn find_arc(first_out: &[u32], heads: &[u32], tail: usize, head: u32) -> Option<usize> {
+    let start = first_out[tail] as usize;
+    let end = first_out[tail + 1] as usize;
+    heads[start..end]
+        .binary_search(&head)
+        .ok()
+        .map(|offset| start + offset)
+}
+
+impl<'a> CustomizationContext<'a> {
+    fn new(
+        bundle: &'a DatasetAccelerationBundle,
+        topology: &TopologyBundle,
+        edge_metrics: &[CompiledEdgeMetric],
+        mode_bit: u16,
+    ) -> Self {
+        let edge_count = topology.edge_count();
+        let transitions = &topology.edge_based_topology;
+        let pairwise_forbidden_turns = build_pairwise_forbidden_turn_table(topology, mode_bit);
+        let usable = |edge_index: usize| {
+            edge_metrics[edge_index].generalized_cost.is_some()
+                && topology.routing_edge(edge_index).flags
+                    & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION
+                    == 0
+        };
+        // Base arcs mirror the exact engine's transition construction: both
+        // endpoint edges traversable and static, the pairwise turn allowed.
+        let mut transition_arc = vec![NO_ARC; transitions.edge_transition_edges.len()];
+        for edge_index in 0..edge_count {
+            if !usable(edge_index) {
+                continue;
+            }
+            let start = transitions.edge_transition_first_out[edge_index] as usize;
+            let end = transitions.edge_transition_first_out[edge_index + 1] as usize;
+            for transition in start..end {
+                let next_edge = transitions.edge_transition_edges[transition];
+                let next_index = next_edge as usize;
+                if next_index == edge_index || next_index >= edge_count || !usable(next_index) {
+                    continue;
+                }
+                if pairwise_forbidden_turns[edge_index]
+                    .binary_search(&next_edge)
+                    .is_ok()
+                {
+                    continue;
+                }
+                let arc = if bundle.edge_rank[edge_index] < bundle.edge_rank[next_index] {
+                    find_arc(
+                        &bundle.upward_first_out,
+                        &bundle.upward_head,
+                        edge_index,
+                        next_edge,
+                    )
+                    .map(|slot| slot as u32)
+                } else {
+                    find_arc(
+                        &bundle.downward_first_out,
+                        &bundle.downward_head,
+                        edge_index,
+                        next_edge,
+                    )
+                    .map(|slot| slot as u32 | DOWNWARD_ARC)
+                };
+                transition_arc[transition] = arc.unwrap_or(NO_ARC);
+            }
+        }
+
+        // Reverse-downward index: downward arcs grouped by head, used to
+        // find all `x -> v` with `rank(x) > rank(v)` when processing `v`.
+        let downward_len = bundle.downward_head.len();
+        let mut downward_tail = vec![0_u32; downward_len];
+        for tail in 0..edge_count {
+            let range = bundle.downward_first_out[tail] as usize
+                ..bundle.downward_first_out[tail + 1] as usize;
+            downward_tail[range].fill(tail as u32);
+        }
+        let mut reverse_downward_first_out = vec![0_u32; edge_count + 1];
+        for &head in &bundle.downward_head {
+            reverse_downward_first_out[head as usize + 1] += 1;
+        }
+        for edge_index in 0..edge_count {
+            reverse_downward_first_out[edge_index + 1] += reverse_downward_first_out[edge_index];
+        }
+        let mut reverse_downward_arc = vec![0_u32; downward_len];
+        let mut write_positions = reverse_downward_first_out[..edge_count].to_vec();
+        for (slot, &head) in bundle.downward_head.iter().enumerate() {
+            let write_index = &mut write_positions[head as usize];
+            reverse_downward_arc[*write_index as usize] = slot as u32;
+            *write_index += 1;
+        }
+        Self {
+            bundle,
+            transition_arc,
+            downward_tail,
+            reverse_downward_first_out,
+            reverse_downward_arc,
+        }
+    }
+
+    /// Basic customization of one metric. Phase 1 gives every base arc the
+    /// minimum `base_weight(edge, next)` of its transitions; phase 2 replays
+    /// the elimination order relaxing lower triangles
+    /// `w(x -> y) = min(w(x -> y), w(x -> v) + w(v -> y))`. Processing
+    /// middles in increasing rank makes both child weights final first.
+    fn customize(
+        &self,
+        topology: &TopologyBundle,
+        base_weight: impl Fn(usize, usize) -> f64,
+        mut on_middle: impl FnMut(usize),
+    ) -> MetricWeights {
+        let bundle = self.bundle;
+        let transitions = &topology.edge_based_topology;
+        let edge_rank = &bundle.edge_rank;
+        let mut upward = vec![CCH_WEIGHT_INFINITY; bundle.upward_head.len()];
+        let mut downward = vec![CCH_WEIGHT_INFINITY; bundle.downward_head.len()];
+
+        for edge_index in 0..topology.edge_count() {
+            let start = transitions.edge_transition_first_out[edge_index] as usize;
+            let end = transitions.edge_transition_first_out[edge_index + 1] as usize;
+            for transition in start..end {
+                let arc = self.transition_arc[transition];
+                if arc == NO_ARC {
+                    continue;
+                }
+                let weight = base_weight(
+                    edge_index,
+                    transitions.edge_transition_edges[transition] as usize,
+                );
+                if !weight.is_finite() {
+                    continue;
+                }
+                let encoded = encode_cch_weight(weight);
+                let slot = if arc & DOWNWARD_ARC != 0 {
+                    &mut downward[(arc & !DOWNWARD_ARC) as usize]
+                } else {
+                    &mut upward[arc as usize]
+                };
+                *slot = (*slot).min(encoded);
+            }
+        }
+
+        for (order_index, &middle) in bundle.edge_order.iter().enumerate() {
+            let middle_index = middle as usize;
+            let incoming_range = self.reverse_downward_first_out[middle_index] as usize
+                ..self.reverse_downward_first_out[middle_index + 1] as usize;
+            let outgoing_range = bundle.upward_first_out[middle_index] as usize
+                ..bundle.upward_first_out[middle_index + 1] as usize;
+            for reverse_slot in incoming_range {
+                let incoming_arc = self.reverse_downward_arc[reverse_slot] as usize;
+                let incoming_weight = downward[incoming_arc];
+                if incoming_weight == CCH_WEIGHT_INFINITY {
+                    continue;
+                }
+                let tail = self.downward_tail[incoming_arc] as usize;
+                for outgoing_arc in outgoing_range.clone() {
+                    let head = bundle.upward_head[outgoing_arc];
+                    if head as usize == tail {
+                        continue;
+                    }
+                    let outgoing_weight = upward[outgoing_arc];
+                    if outgoing_weight == CCH_WEIGHT_INFINITY {
+                        continue;
+                    }
+                    let candidate = add_cch_weights(incoming_weight, outgoing_weight);
+                    if edge_rank[tail] < edge_rank[head as usize] {
+                        if let Some(slot) =
+                            find_arc(&bundle.upward_first_out, &bundle.upward_head, tail, head)
+                            && candidate < upward[slot]
+                        {
+                            upward[slot] = candidate;
+                        }
+                    } else if let Some(slot) = find_arc(
+                        &bundle.downward_first_out,
+                        &bundle.downward_head,
+                        tail,
+                        head,
+                    ) && candidate < downward[slot]
+                    {
+                        downward[slot] = candidate;
+                    }
+                }
+            }
+            on_middle(order_index);
+        }
+        MetricWeights { upward, downward }
+    }
+}
+
+/// CCH basic customization for generalized cost plus the travel-time and
+/// distance weight sets used by fixed-point one-to-all sweeps on time- and
+/// distance-limited isochrones. The three runs are independent and execute
+/// concurrently; only the generalized-cost run reports progress.
 fn compile_acceleration_with_progress(
     bundle: &DatasetAccelerationBundle,
     source_acceleration_bundle_id: CacheBundleId,
     topology: &TopologyBundle,
     edge_metrics: &[CompiledEdgeMetric],
-    profile: &ProfileDocument,
+    turns: &CompiledTurnCostConfig,
+    mode_bit: u16,
     progress: &mut impl FnMut(ProfileCompileProgress),
 ) -> CompiledAcceleration {
     let edge_count = topology.edge_count();
-    let upward_len = bundle.upward_first_out.last().copied().unwrap_or_default() as usize;
-    let downward_len = bundle
-        .downward_first_out
-        .last()
-        .copied()
-        .unwrap_or_default() as usize;
-    let mut upward_weight = vec![CCH_WEIGHT_INFINITY; upward_len];
-    let mut downward_weight = vec![CCH_WEIGHT_INFINITY; downward_len];
-
-    let result_template =
-        |upward_weight: Vec<u32>, downward_weight: Vec<u32>| CompiledAcceleration {
-            schema_version: COMPILED_ACCELERATION_SCHEMA_VERSION,
-            source_acceleration_bundle_id: source_acceleration_bundle_id.clone(),
-            algorithm: bundle.algorithm.clone(),
-            upward_weight,
-            downward_weight,
-            time_upward_weight: Vec::new(),
-            time_downward_weight: Vec::new(),
-            distance_upward_weight: Vec::new(),
-            distance_downward_weight: Vec::new(),
-        };
+    let upward_len = bundle.upward_head.len();
+    let downward_len = bundle.downward_head.len();
+    let result = |upward_weight: Vec<u32>, downward_weight: Vec<u32>| CompiledAcceleration {
+        schema_version: COMPILED_ACCELERATION_SCHEMA_VERSION,
+        source_acceleration_bundle_id: source_acceleration_bundle_id.clone(),
+        algorithm: bundle.algorithm.clone(),
+        upward_weight,
+        downward_weight,
+        time_upward_weight: Vec::new(),
+        time_downward_weight: Vec::new(),
+        distance_upward_weight: Vec::new(),
+        distance_downward_weight: Vec::new(),
+    };
 
     let transition_topology = &topology.edge_based_topology;
     if bundle.upward_first_out.len() != edge_count + 1
         || bundle.downward_first_out.len() != edge_count + 1
+        || bundle.upward_first_out.last().copied().unwrap_or_default() as usize != upward_len
+        || bundle
+            .downward_first_out
+            .last()
+            .copied()
+            .unwrap_or_default() as usize
+            != downward_len
         || bundle.edge_rank.len() != edge_count
         || bundle.edge_order.len() != edge_count
+        || edge_metrics.len() != edge_count
         || transition_topology.edge_transition_first_out.len() != edge_count + 1
     {
         // Shape mismatch: emit empty weights; engine preparation rejects the
         // bundle with a re-import error instead of silently degrading.
-        return result_template(upward_weight, downward_weight);
+        return result(Vec::new(), Vec::new());
     }
 
     emit_compile_progress(
@@ -446,161 +737,73 @@ fn compile_acceleration_with_progress(
         format!("Customizing CCH 0% (upward {upward_len} arcs, downward {downward_len} arcs)"),
     );
 
-    let pairwise_forbidden_turns =
-        build_pairwise_forbidden_turn_table(topology, mode_access_bit(profile.profile.mode));
-    let edge_rank = &bundle.edge_rank;
-
-    let find_arc = |first_out: &[u32], heads: &[u32], tail: usize, head: u32| -> Option<usize> {
-        let start = first_out[tail] as usize;
-        let end = first_out[tail + 1] as usize;
-        heads[start..end]
-            .binary_search(&head)
-            .ok()
-            .map(|offset| start + offset)
+    let context = CustomizationContext::new(bundle, topology, edge_metrics, mode_bit);
+    let turn_penalty = |edge_index: usize, next_index: usize, time_weight: f64| {
+        transition_turn_penalty_cost(
+            topology,
+            edge_index,
+            next_index,
+            turns.left_penalty_s,
+            turns.right_penalty_s,
+            turns.uturn_penalty_s,
+            turns.traffic_signal_penalty_s,
+            turns.roundabout_entry_penalty_s,
+            time_weight,
+        )
+    };
+    let cost_weight = |edge_index: usize, next_index: usize| -> f64 {
+        edge_metrics[next_index]
+            .generalized_cost
+            .map_or(f64::INFINITY, |cost| {
+                cost + turn_penalty(edge_index, next_index, turns.cost_time_weight)
+            })
+    };
+    let time_weight = |edge_index: usize, next_index: usize| -> f64 {
+        edge_metrics[next_index]
+            .travel_time_s
+            .map_or(f64::INFINITY, |time| {
+                time + turn_penalty(edge_index, next_index, 1.0)
+            })
+    };
+    let distance_weight = |_edge_index: usize, next_index: usize| {
+        f64::from(topology.routing_edge(next_index).length_m)
+    };
+    // Per-metric weight sets fall back to Dijkstra when any arc overflows.
+    let representable = |weights: MetricWeights| {
+        if weights.upward.contains(&CCH_WEIGHT_OVERFLOW)
+            || weights.downward.contains(&CCH_WEIGHT_OVERFLOW)
+        {
+            (Vec::new(), Vec::new())
+        } else {
+            (weights.upward, weights.downward)
+        }
     };
 
-    // Phase 1: base transition costs, mirroring the exact engine's
-    // transition construction (both endpoint edges traversable, pairwise
-    // turn not forbidden, turn penalty applied).
-    for edge_index in 0..edge_count {
-        if edge_metrics[edge_index].generalized_cost.is_none()
-            || topology.routing_edge(edge_index).flags & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION
-                != 0
-        {
-            continue;
-        }
-        let start = transition_topology.edge_transition_first_out[edge_index] as usize;
-        let end = transition_topology.edge_transition_first_out[edge_index + 1] as usize;
-        for &next_edge in &transition_topology.edge_transition_edges[start..end] {
-            let next_index = next_edge as usize;
-            if next_index == edge_index || next_index >= edge_count {
-                continue;
-            }
-            if topology.routing_edge(next_index).flags & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION
-                != 0
-            {
-                continue;
-            }
-            let Some(next_cost) = edge_metrics[next_index].generalized_cost else {
-                continue;
-            };
-            if pairwise_forbidden_turns
-                .get(edge_index)
-                .is_some_and(|blocked| blocked.binary_search(&next_edge).is_ok())
-            {
-                continue;
-            }
-            let weight = next_cost
-                + transition_turn_penalty_cost(
-                    topology,
-                    edge_index,
-                    next_index,
-                    profile.turns.left_penalty_s,
-                    profile.turns.right_penalty_s,
-                    profile.turns.uturn_penalty_s,
-                    profile.turns.traffic_signal_penalty_s,
-                    profile.turns.roundabout_entry_penalty_s,
-                    profile.cost.time_weight,
-                );
-            if edge_rank[edge_index] < edge_rank[next_index] {
-                if let Some(slot) = find_arc(
-                    &bundle.upward_first_out,
-                    &bundle.upward_head,
-                    edge_index,
-                    next_edge,
-                ) {
-                    upward_weight[slot] = upward_weight[slot].min(encode_cch_weight(weight));
-                }
-            } else if let Some(slot) = find_arc(
-                &bundle.downward_first_out,
-                &bundle.downward_head,
-                edge_index,
-                next_edge,
-            ) {
-                downward_weight[slot] = downward_weight[slot].min(encode_cch_weight(weight));
-            }
-        }
-    }
-
-    // Reverse-downward index: downward arcs grouped by head, used to find all
-    // `x -> v` with `rank(x) > rank(v)` when processing middle `v`.
-    let mut downward_tail = vec![0_u32; downward_len];
-    for tail in 0..edge_count {
-        let range =
-            bundle.downward_first_out[tail] as usize..bundle.downward_first_out[tail + 1] as usize;
-        downward_tail[range].fill(tail as u32);
-    }
-    let mut reverse_downward_first_out = vec![0_u32; edge_count + 1];
-    for &head in &bundle.downward_head {
-        reverse_downward_first_out[head as usize + 1] += 1;
-    }
-    for edge_index in 0..edge_count {
-        reverse_downward_first_out[edge_index + 1] += reverse_downward_first_out[edge_index];
-    }
-    let mut reverse_downward_arc = vec![0_u32; downward_len];
-    let mut write_positions = reverse_downward_first_out[..edge_count].to_vec();
-    for (slot, &head) in bundle.downward_head.iter().enumerate() {
-        let write_index = &mut write_positions[head as usize];
-        reverse_downward_arc[*write_index as usize] = slot as u32;
-        *write_index += 1;
-    }
-
-    // Phase 2: triangle relaxation in elimination order.
     let mut reporter = PercentReporter::starting_at_zero();
-    for (order_index, &middle) in bundle.edge_order.iter().enumerate() {
-        let middle_index = middle as usize;
-        let incoming_range = reverse_downward_first_out[middle_index] as usize
-            ..reverse_downward_first_out[middle_index + 1] as usize;
-        let outgoing_range = bundle.upward_first_out[middle_index] as usize
-            ..bundle.upward_first_out[middle_index + 1] as usize;
-        for reverse_slot in incoming_range {
-            let incoming_arc = reverse_downward_arc[reverse_slot] as usize;
-            let incoming_weight = downward_weight[incoming_arc];
-            if incoming_weight == CCH_WEIGHT_INFINITY {
-                continue;
-            }
-            let tail = downward_tail[incoming_arc] as usize;
-            for outgoing_arc in outgoing_range.clone() {
-                let head = bundle.upward_head[outgoing_arc];
-                if head as usize == tail {
-                    continue;
-                }
-                let outgoing_weight = upward_weight[outgoing_arc];
-                if outgoing_weight == CCH_WEIGHT_INFINITY {
-                    continue;
-                }
-                let candidate = add_cch_weights(incoming_weight, outgoing_weight);
-                if edge_rank[tail] < edge_rank[head as usize] {
-                    if let Some(slot) =
-                        find_arc(&bundle.upward_first_out, &bundle.upward_head, tail, head)
-                        && candidate < upward_weight[slot]
-                    {
-                        upward_weight[slot] = candidate;
-                    }
-                } else if let Some(slot) = find_arc(
-                    &bundle.downward_first_out,
-                    &bundle.downward_head,
-                    tail,
-                    head,
-                ) && candidate < downward_weight[slot]
-                {
-                    downward_weight[slot] = candidate;
-                }
-            }
-        }
-        reporter.emit_if_needed(
-            (order_index + 1) as u64,
-            edge_count as u64,
-            ProfileCompileStage::CompileAcceleration,
-            progress,
-            |percent| {
-                format!(
-                    "Customizing CCH {percent:.0}% ({}/{edge_count})",
-                    order_index + 1
-                )
-            },
-        );
-    }
+    let (cost, time, distance) = std::thread::scope(|scope| {
+        let time = scope.spawn(|| representable(context.customize(topology, time_weight, |_| {})));
+        let distance =
+            scope.spawn(|| representable(context.customize(topology, distance_weight, |_| {})));
+        let cost = context.customize(topology, cost_weight, |order_index| {
+            reporter.emit_if_needed(
+                (order_index + 1) as u64,
+                edge_count as u64,
+                ProfileCompileStage::CompileAcceleration,
+                progress,
+                |percent| {
+                    format!(
+                        "Customizing CCH {percent:.0}% ({}/{edge_count})",
+                        order_index + 1
+                    )
+                },
+            );
+        });
+        (
+            cost,
+            time.join().expect("time customization panicked"),
+            distance.join().expect("distance customization panicked"),
+        )
+    });
 
     emit_compile_progress(
         progress,
@@ -609,156 +812,12 @@ fn compile_acceleration_with_progress(
         format!("Customizing CCH 100% (upward {upward_len} arcs, downward {downward_len} arcs)"),
     );
 
-    // Per-metric weight sets over the same arcs, for fixed-point one-to-all
-    // sweeps on time- and distance-limited isochrones. Both runs
-    // are independent of the generalized-cost weights, so they customize in
-    // parallel.
-    let customize_metric =
-        |base_weight: &(dyn Fn(usize, usize) -> f64 + Sync)| -> (Vec<u32>, Vec<u32>) {
-            let mut metric_upward = vec![CCH_WEIGHT_INFINITY; upward_len];
-            let mut metric_downward = vec![CCH_WEIGHT_INFINITY; downward_len];
-            for edge_index in 0..edge_count {
-                if edge_metrics[edge_index].generalized_cost.is_none()
-                    || topology.routing_edge(edge_index).flags
-                        & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION
-                        != 0
-                {
-                    continue;
-                }
-                let start = transition_topology.edge_transition_first_out[edge_index] as usize;
-                let end = transition_topology.edge_transition_first_out[edge_index + 1] as usize;
-                for &next_edge in &transition_topology.edge_transition_edges[start..end] {
-                    let next_index = next_edge as usize;
-                    if next_index == edge_index || next_index >= edge_count {
-                        continue;
-                    }
-                    if edge_metrics[next_index].generalized_cost.is_none()
-                        || topology.routing_edge(next_index).flags
-                            & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION
-                            != 0
-                    {
-                        continue;
-                    }
-                    if pairwise_forbidden_turns
-                        .get(edge_index)
-                        .is_some_and(|blocked| blocked.binary_search(&next_edge).is_ok())
-                    {
-                        continue;
-                    }
-                    let weight = base_weight(edge_index, next_index);
-                    if !weight.is_finite() {
-                        continue;
-                    }
-                    if edge_rank[edge_index] < edge_rank[next_index] {
-                        if let Some(slot) = find_arc(
-                            &bundle.upward_first_out,
-                            &bundle.upward_head,
-                            edge_index,
-                            next_edge,
-                        ) {
-                            metric_upward[slot] =
-                                metric_upward[slot].min(encode_cch_weight(weight));
-                        }
-                    } else if let Some(slot) = find_arc(
-                        &bundle.downward_first_out,
-                        &bundle.downward_head,
-                        edge_index,
-                        next_edge,
-                    ) {
-                        metric_downward[slot] =
-                            metric_downward[slot].min(encode_cch_weight(weight));
-                    }
-                }
-            }
-            for &middle in bundle.edge_order.iter() {
-                let middle_index = middle as usize;
-                let incoming_range = reverse_downward_first_out[middle_index] as usize
-                    ..reverse_downward_first_out[middle_index + 1] as usize;
-                let outgoing_range = bundle.upward_first_out[middle_index] as usize
-                    ..bundle.upward_first_out[middle_index + 1] as usize;
-                for reverse_slot in incoming_range {
-                    let incoming_arc = reverse_downward_arc[reverse_slot] as usize;
-                    let incoming_weight = metric_downward[incoming_arc];
-                    if incoming_weight == CCH_WEIGHT_INFINITY {
-                        continue;
-                    }
-                    let tail = downward_tail[incoming_arc] as usize;
-                    for outgoing_arc in outgoing_range.clone() {
-                        let head = bundle.upward_head[outgoing_arc];
-                        if head as usize == tail {
-                            continue;
-                        }
-                        let outgoing_weight = metric_upward[outgoing_arc];
-                        if outgoing_weight == CCH_WEIGHT_INFINITY {
-                            continue;
-                        }
-                        let candidate = add_cch_weights(incoming_weight, outgoing_weight);
-                        if edge_rank[tail] < edge_rank[head as usize] {
-                            if let Some(slot) =
-                                find_arc(&bundle.upward_first_out, &bundle.upward_head, tail, head)
-                                && candidate < metric_upward[slot]
-                            {
-                                metric_upward[slot] = candidate;
-                            }
-                        } else if let Some(slot) = find_arc(
-                            &bundle.downward_first_out,
-                            &bundle.downward_head,
-                            tail,
-                            head,
-                        ) && candidate < metric_downward[slot]
-                        {
-                            metric_downward[slot] = candidate;
-                        }
-                    }
-                }
-            }
-            if metric_upward.contains(&CCH_WEIGHT_OVERFLOW)
-                || metric_downward.contains(&CCH_WEIGHT_OVERFLOW)
-            {
-                (Vec::new(), Vec::new())
-            } else {
-                (metric_upward, metric_downward)
-            }
-        };
-
-    let time_weight = |edge_index: usize, next_index: usize| -> f64 {
-        let Some(travel_time_s) = edge_metrics[next_index].travel_time_s else {
-            return f64::INFINITY;
-        };
-        travel_time_s
-            + transition_turn_penalty_cost(
-                topology,
-                edge_index,
-                next_index,
-                profile.turns.left_penalty_s,
-                profile.turns.right_penalty_s,
-                profile.turns.uturn_penalty_s,
-                profile.turns.traffic_signal_penalty_s,
-                profile.turns.roundabout_entry_penalty_s,
-                1.0,
-            )
-    };
-    let distance_weight = |_edge_index: usize, next_index: usize| -> f64 {
-        topology.routing_edge(next_index).length_m as f64
-    };
-    let (
-        (time_upward_weight, time_downward_weight),
-        (distance_upward_weight, distance_downward_weight),
-    ) = rayon::join(
-        || customize_metric(&time_weight),
-        || customize_metric(&distance_weight),
-    );
-
     CompiledAcceleration {
-        schema_version: COMPILED_ACCELERATION_SCHEMA_VERSION,
-        source_acceleration_bundle_id,
-        algorithm: bundle.algorithm.clone(),
-        upward_weight,
-        downward_weight,
-        time_upward_weight,
-        time_downward_weight,
-        distance_upward_weight,
-        distance_downward_weight,
+        time_upward_weight: time.0,
+        time_downward_weight: time.1,
+        distance_upward_weight: distance.0,
+        distance_downward_weight: distance.1,
+        ..result(cost.upward, cost.downward)
     }
 }
 
@@ -1401,6 +1460,37 @@ temporal:
         );
         assert!(compiled_acceleration.time_downward_weight.is_empty());
         assert!(compiled_acceleration.distance_downward_weight.is_empty());
+
+        // Storage compiles skip customization; load-time customization of
+        // the stored metrics reproduces the compile-time weights exactly.
+        let stored = super::compile_profile_metrics_with_progress(
+            &profile,
+            &topology,
+            CacheBundleId::new("topology-test"),
+            Some((&acceleration, CacheBundleId::new("accel-test"))),
+            |_| {},
+        )
+        .expect("metric compile succeeds");
+        let header = stored.acceleration.as_ref().expect("acceleration header");
+        assert!(header.upward_weight.is_empty() && header.time_upward_weight.is_empty());
+        let customized = super::customize_acceleration(
+            &topology,
+            &stored,
+            &acceleration,
+            header.source_acceleration_bundle_id.clone(),
+        );
+        assert_eq!(
+            customized.upward_weight,
+            compiled_acceleration.upward_weight
+        );
+        assert_eq!(
+            customized.time_upward_weight,
+            compiled_acceleration.time_upward_weight
+        );
+        assert_eq!(
+            customized.distance_upward_weight,
+            compiled_acceleration.distance_upward_weight
+        );
 
         topology.edge_layers.routing[1].flags =
             netweevil_core::EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION;

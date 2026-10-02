@@ -36,6 +36,7 @@ impl PreparedRoutingEngine {
         acceleration: Option<Arc<DatasetAccelerationBundle>>,
     ) -> Result<Self> {
         validate_execution_inputs(topology.as_ref(), metrics.as_ref())?;
+        let metrics = customize_loaded_metrics(topology.as_ref(), metrics, acceleration.as_deref());
         let default_routing_graph = build_routing_graph_from_shared(
             topology.as_ref(),
             metrics.clone(),

@@ -1250,6 +1250,37 @@ fn accelerated_query_returns_an_unpacked_path() {
     assert_eq!(path.total_generalized_cost, 30.0);
 }
 
+/// Stored profile bundles carry no arc weights; engine preparation
+/// customizes them and must match the independent fixture customization.
+#[test]
+fn engine_customizes_stored_metrics_like_the_reference_cch() {
+    let topology = test_topology();
+    let (bundle, reference) = build_test_cch(&topology, &test_metrics());
+    let mut stored = reference.clone();
+    let header = stored.acceleration.as_mut().expect("fixture header");
+    for weights in [
+        &mut header.upward_weight,
+        &mut header.downward_weight,
+        &mut header.time_upward_weight,
+        &mut header.time_downward_weight,
+        &mut header.distance_upward_weight,
+        &mut header.distance_downward_weight,
+    ] {
+        weights.clear();
+    }
+    let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(stored), Some(bundle))
+        .expect("engine prepares");
+    let customized = engine.metrics().acceleration.as_ref().expect("customized");
+    let reference = reference.acceleration.expect("reference weights");
+    assert_eq!(customized.upward_weight, reference.upward_weight);
+    assert_eq!(customized.downward_weight, reference.downward_weight);
+    assert_eq!(customized.time_upward_weight, reference.time_upward_weight);
+    assert_eq!(
+        customized.distance_downward_weight,
+        reference.distance_downward_weight
+    );
+}
+
 #[test]
 fn pure_summary_routes_omit_path_payloads() {
     let request = RouteRequest {

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use crate::{CacheBundleId, EdgeId, TravelMode};
 
 /// Schema version of [`CompiledProfileBundle`]. Readers accept this value only.
-pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 6;
+pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 7;
 
 /// Schema version of [`CompiledAcceleration`] customization data.
 pub const COMPILED_ACCELERATION_SCHEMA_VERSION: u32 = 4;

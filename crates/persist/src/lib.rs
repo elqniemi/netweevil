@@ -656,7 +656,12 @@ mod tests {
         });
         write_compiled_profile_bundle(&path, &bundle).expect("fixed-point bundle serializes");
         let round_tripped = read_compiled_profile_bundle(&path).expect("fixed-point bundle reads");
+        // Customized weights are rebuilt at engine load, never persisted.
         let acceleration = round_tripped.acceleration.expect("acceleration retained");
+        assert_eq!(
+            acceleration.source_acceleration_bundle_id.0,
+            "acceleration-test"
+        );
         for actual in [
             &acceleration.upward_weight,
             &acceleration.downward_weight,
@@ -665,8 +670,10 @@ mod tests {
             &acceleration.distance_upward_weight,
             &acceleration.distance_downward_weight,
         ] {
-            assert_eq!(actual, &weights);
+            assert!(actual.is_empty());
         }
+        assert_eq!(round_tripped.edge_metrics[0].travel_time_s, Some(12.0));
+        assert_eq!(round_tripped.edge_metrics[0].generalized_cost, Some(18.0));
         fs::remove_file(path).expect("temporary bundle should be removed");
     }
 }
