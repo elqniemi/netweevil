@@ -360,7 +360,7 @@ Top-level commands:
 - `dataset import|update|audit|list`
 - `transit import|bindings apply|transfers build|list`
 - `profile validate|compile`
-- `analyze route|route-batch|od|matrix|accessibility|service-area|service-area-sequence|betweenness|scenario-batch|transit-route|transit-batch|trip`
+- `analyze route|directions|route-batch|od|matrix|accessibility|service-area|service-area-sequence|betweenness|scenario-batch|transit-route|transit-batch|trip`
 - `experiment run`
 - `simulate validate|run`
 - `report render`
@@ -752,6 +752,22 @@ steps and walking instructions.
 curl -X POST http://127.0.0.1:8080/v1/directions \
   -H 'content-type: application/json' \
   --data @examples/api/north_nl_directions.json
+```
+
+`netweevil analyze directions` runs the same directions engine locally. It
+reads a bare route request or the `/v1/directions` body above. `--language`,
+`--units`, `--driving-side` and `--facility-attribute` replace the matching
+`directions_options` from the file. The command writes the `result` object
+as JSON (`--out` must be a `.json` path; without it, the result goes to
+`.netweevil/runs/`) and records a `directions` run manifest:
+
+```bash
+cargo run -p netweevil-cli -- analyze directions \
+  --dataset north_nl_2026_05_10 \
+  --profile examples/profiles/car_north_nl_2026_05.yml \
+  --request examples/api/north_nl_directions.json \
+  --language de --units imperial \
+  --out .netweevil/runs/example-directions.json
 ```
 
 Route request shape:

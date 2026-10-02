@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `netweevil analyze directions` returns turn-by-turn directions from the
+  CLI. It reads a route request or a `/v1/directions` body, takes
+  `--language`, `--units`, `--driving-side` and `--facility-attribute`, and
+  writes the API `result` JSON with a `directions` run manifest.
 - Route failure modes pick the cheapest orientation of the snapped
   attachment on cost plus illegal-movement penalties. Before, the first
   routable orientation won, so a penalized forbidden U-turn could replace a

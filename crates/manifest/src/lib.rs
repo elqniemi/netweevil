@@ -165,6 +165,8 @@ pub struct RunManifest {
 #[serde(rename_all = "snake_case")]
 pub enum RunKind {
     Route,
+    /// A route with turn-by-turn maneuvers (`analyze directions`).
+    Directions,
     RouteBatch,
     Od,
     Matrix,

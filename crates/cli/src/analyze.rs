@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use clap::{Args, Subcommand};
-use netweevil_core::{CompiledProfileBundle, DatasetAccelerationBundle, TopologyBundle};
+use clap::{Args, Subcommand, ValueEnum};
+use netweevil_core::{
+    CompiledProfileBundle, DatasetAccelerationBundle, DrivingSide, EdgeNameBundle, TopologyBundle,
+};
 use netweevil_manifest::{CompiledProfileManifest, RunKind, RunStatus, new_run_manifest};
 use netweevil_persist::{
     WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
@@ -14,12 +16,13 @@ use netweevil_persist::{
 use netweevil_profile::{ProfileDocument, ReturnGeometry, load_profile};
 use netweevil_query::{
     AccessibilityCategoryRequest, AccessibilityRequest, AccessibilityResult, BetweennessRequest,
-    MatrixResult, OdResult, PreparedRoutingEngine, RouteBatchResult, RouteResult,
+    DirectionsContext, DirectionsOptions, DirectionsResult, DistanceUnits, EngineMode,
+    MatrixResult, OdResult, PreparedRoutingEngine, RouteBatchResult, RouteRequest, RouteResult,
     ScenarioBatchRequest, ScenarioBatchResult, ServiceAreaResult, ServiceAreaSequenceRequest,
     ServiceAreaSequenceResult, TemporalRequestOptions, TripResult, analysis_failure,
     execute_scenario_batch, load_betweenness_request, load_od_pairs, load_point_set,
     load_route_batch, load_route_request, load_scenario_batch_request, load_service_area_request,
-    load_service_area_sequence_request, load_trip_request,
+    load_service_area_sequence_request, load_trip_request, read_request_document,
 };
 use netweevil_report::{
     write_betweenness_result, write_matrix_result, write_od_result, write_route_batch_result,
@@ -55,6 +58,9 @@ struct EngineDescription {
 #[derive(Subcommand, Debug)]
 pub(crate) enum AnalyzeCommand {
     Route(RouteArgs),
+    /// Route a request and describe it with turn-by-turn maneuvers, like
+    /// `POST /v1/directions`.
+    Directions(DirectionsArgs),
     RouteBatch(RouteBatchArgs),
     Od(OdArgs),
     Matrix(MatrixArgs),
@@ -95,6 +101,104 @@ pub(crate) struct RouteArgs {
     temporal: TemporalOverrideArgs,
     #[arg(long)]
     out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct DirectionsArgs {
+    #[arg(long)]
+    dataset: String,
+    #[arg(long)]
+    profile: PathBuf,
+    /// Route request (.json, .yml or .yaml): a bare route request, or a
+    /// `/v1/directions` body with `request` and `directions_options`.
+    #[arg(long)]
+    request: PathBuf,
+    /// Instruction language as a BCP 47 tag (`nl`, `de-CH`, `zh-HK`).
+    /// Tags without a phrase table fall back to English with a warning.
+    #[arg(long)]
+    language: Option<String>,
+    #[arg(long, value_enum)]
+    units: Option<DirectionsUnits>,
+    /// Side of the road traffic keeps to; defaults to the dataset's side
+    /// at the origin, or right-hand traffic.
+    #[arg(long, value_enum)]
+    driving_side: Option<DirectionsDrivingSide>,
+    /// Feature attribute that classifies stairs, escalators, lifts and
+    /// moving walkways; defaults to the profile's `facilities.attribute`.
+    #[arg(long)]
+    facility_attribute: Option<String>,
+    #[command(flatten)]
+    temporal: TemporalOverrideArgs,
+    /// Directions result (.json); defaults to the runs directory.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum DirectionsUnits {
+    Metric,
+    Imperial,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum DirectionsDrivingSide {
+    Left,
+    Right,
+}
+
+impl DirectionsArgs {
+    /// Command-line options replace the matching request-file options.
+    fn apply_to(&self, options: &mut DirectionsOptions) {
+        if let Some(language) = &self.language {
+            options.language = Some(language.clone());
+        }
+        if let Some(units) = self.units {
+            options.units = match units {
+                DirectionsUnits::Metric => DistanceUnits::Metric,
+                DirectionsUnits::Imperial => DistanceUnits::Imperial,
+            };
+        }
+        if let Some(side) = self.driving_side {
+            options.driving_side = Some(match side {
+                DirectionsDrivingSide::Left => DrivingSide::Left,
+                DirectionsDrivingSide::Right => DrivingSide::Right,
+            });
+        }
+        if let Some(attribute) = &self.facility_attribute {
+            options.facility_attribute = Some(attribute.clone());
+        }
+    }
+}
+
+/// `analyze directions` request file: the `/v1/directions` body. A bare
+/// route request is read as `{"request": ...}` with default options.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectionsDocument {
+    /// The API's profile selector. The CLI takes the profile from
+    /// `--profile`, so a different id is an error rather than ignored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    profile_id: Option<String>,
+    #[serde(default)]
+    engine_mode: EngineMode,
+    request: RouteRequest,
+    #[serde(default)]
+    directions_options: DirectionsOptions,
+}
+
+fn load_directions_request(path: &Path) -> Result<DirectionsDocument> {
+    let value: serde_json::Value = read_request_document(path, "directions request")?;
+    if value.get("request").is_none() {
+        return Ok(DirectionsDocument {
+            profile_id: None,
+            engine_mode: EngineMode::Auto,
+            request: serde_json::from_value(value)
+                .with_context(|| format!("parsing route request {}", path.display()))?,
+            directions_options: DirectionsOptions::default(),
+        });
+    }
+    serde_json::from_value(value)
+        .with_context(|| format!("parsing directions request {}", path.display()))
 }
 
 #[derive(Args, Debug)]
@@ -378,6 +482,35 @@ pub(crate) fn analyze_route(paths: &WorkspacePaths, args: RouteArgs) -> Result<(
         }
     };
     println!("route result written to {}", stored.result_path.display());
+    println!("run manifest written to {}", stored.manifest_path.display());
+    Ok(())
+}
+
+pub(crate) fn analyze_directions(paths: &WorkspacePaths, args: DirectionsArgs) -> Result<()> {
+    let profile = load_profile(&args.profile)?;
+    profile.validate()?;
+    let (result, stored) = match run_directions_analysis(paths, &profile, &args) {
+        Ok(run) => run,
+        Err(error) => {
+            emit_structured_failure_diagnostics(&error);
+            return Err(error);
+        }
+    };
+    for warning in &result.warnings {
+        eprintln!("warning: {warning}");
+    }
+    println!(
+        "directions '{}': {} maneuvers in '{}', {} m, {:.0} s",
+        result.route.route_id,
+        result.maneuvers.len(),
+        result.language,
+        result.route.summary.total_distance_m,
+        result.route.summary.total_travel_time_s,
+    );
+    println!(
+        "directions result written to {}",
+        stored.result_path.display()
+    );
     println!("run manifest written to {}", stored.manifest_path.display());
     Ok(())
 }
@@ -1595,6 +1728,112 @@ fn store_route_run(
     })
 }
 
+/// Routes the request file of `args` with `profile` and describes it with
+/// the directions engine behind `/v1/directions`, then stores the result
+/// and its run manifest.
+fn run_directions_analysis(
+    paths: &WorkspacePaths,
+    profile: &ProfileDocument,
+    args: &DirectionsArgs,
+) -> Result<(DirectionsResult, StoredRun)> {
+    if let Some(out) = &args.out
+        && !out
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+    {
+        anyhow::bail!(
+            "directions results are written as JSON; use a .json --out path instead of {}",
+            out.display()
+        );
+    }
+    let mut document = load_directions_request(&args.request)?;
+    if let Some(profile_id) = &document.profile_id
+        && *profile_id != profile.profile.id
+    {
+        anyhow::bail!(
+            "the request names profile_id '{profile_id}' but --profile loads '{}'",
+            profile.profile.id
+        );
+    }
+    args.temporal.apply_to(&mut document.request.temporal)?;
+    args.apply_to(&mut document.directions_options);
+    document
+        .directions_options
+        .use_profile_facility_attribute(profile);
+
+    let (topology, acceleration, compiled_manifest, compiled_bundle) =
+        load_route_execution_inputs(paths, &args.dataset, profile)?;
+    let prepared = PreparedRoutingEngine::new(
+        Arc::new(topology),
+        Arc::new(compiled_bundle),
+        acceleration.map(Arc::new),
+    )
+    .context("preparing routing engine")?;
+    let engine = engine_description_for_route(&prepared, &document.request);
+    let names = load_edge_name_bundle(paths, &args.dataset)?;
+    let result = prepared
+        .execute_directions(
+            &document.request,
+            DirectionsContext::new(&names),
+            &document.directions_options,
+            document.engine_mode,
+        )
+        .with_context(|| format!("executing directions '{}'", document.request.route_id))?;
+
+    let route = &result.route;
+    let mut manifest = new_run_manifest(
+        RunKind::Directions,
+        args.dataset.clone(),
+        profile,
+        args.request.display().to_string(),
+        RunStatus::Succeeded,
+        format!(
+            "Directions '{}' describe {} edges from node {} to node {} with {} maneuvers in '{}'.",
+            route.route_id,
+            route.summary.segment_count,
+            route.origin.snapped_node_id,
+            route.destination.snapped_node_id,
+            result.maneuvers.len(),
+            result.language,
+        ),
+        software_info(),
+        Some(compiled_manifest.bundle.bundle_id.0.clone()),
+        algorithm_info(engine.route_engine, engine.acceleration),
+        format!(
+            "{} Maneuvers are detected along the routed edge sequence from the edge-based graph, street names and guidance tags, and rendered with the '{}' phrase table.",
+            engine.route_summary, result.language
+        ),
+    )?;
+    record_effective_request(&mut manifest, &document)?;
+    manifest.connectivity_policy = Some(document.request.connectivity.clone());
+    manifest.fallback_policy = Some(document.request.fallback.clone());
+    let result_path = args.out.clone().unwrap_or_else(|| {
+        paths
+            .runs_dir
+            .join(format!("{}-result.json", manifest.run_id))
+    });
+    write_json(&result_path, &result)?;
+    manifest.result_path = Some(result_path.display().to_string());
+    let manifest_path = write_run_manifest(paths, &manifest)?;
+    let summary = serde_json::json!({
+        "route_id": route.route_id,
+        "maneuver_count": result.maneuvers.len(),
+        "language": result.language,
+        "total_distance_m": route.summary.total_distance_m,
+        "total_travel_time_s": route.summary.total_travel_time_s,
+        "total_generalized_cost": route.summary.total_generalized_cost,
+        "segment_count": route.summary.segment_count,
+    });
+    Ok((
+        result,
+        StoredRun {
+            result_path,
+            manifest_path,
+            summary: Some(summary),
+        },
+    ))
+}
+
 fn store_route_batch_run(
     paths: &WorkspacePaths,
     dataset_id: &str,
@@ -1985,12 +2224,16 @@ pub(crate) fn load_route_execution_inputs(
 }
 
 fn load_edge_names(paths: &WorkspacePaths, dataset_id: &str) -> Result<Option<Vec<String>>> {
+    Ok(Some(load_edge_name_bundle(paths, dataset_id)?.names))
+}
+
+/// Street names and guidance tags of the dataset's edges.
+fn load_edge_name_bundle(paths: &WorkspacePaths, dataset_id: &str) -> Result<EdgeNameBundle> {
     let dataset_manifest = read_dataset_manifest(paths, dataset_id)
         .with_context(|| format!("reading dataset manifest for '{dataset_id}'"))?;
     if let Some(bundle_ref) = dataset_manifest.edge_name_bundle.as_ref() {
-        let bundle = read_edge_name_bundle(&bundle_ref.path)
-            .with_context(|| format!("reading edge-name bundle {}", bundle_ref.path))?;
-        return Ok(Some(bundle.names));
+        return read_edge_name_bundle(&bundle_ref.path)
+            .with_context(|| format!("reading edge-name bundle {}", bundle_ref.path));
     }
     anyhow::bail!(
         "dataset '{}' is missing the edge-name bundle required by the current format; remove the old cached dataset and re-import it",
