@@ -33,6 +33,7 @@ mod terrain;
 mod trace_matching;
 mod transit;
 mod transit_directions;
+mod trip;
 mod waypoints;
 mod workspace;
 
@@ -139,6 +140,7 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
         .route("/v1/match", post(trace_matching::trace_match_handler))
         .route("/v1/locate", post(locate::locate_handler))
         .route("/v1/waypoints", post(waypoints::waypoints_handler))
+        .route("/v1/trip", post(trip::trip_handler))
         .route("/v1/transit-route", post(transit::transit_route_handler))
         .route(
             "/v1/transit-directions",

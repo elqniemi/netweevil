@@ -23,6 +23,22 @@ pub fn load_route_request(path: impl AsRef<Path>) -> Result<RouteRequest> {
     }
 }
 
+pub fn load_trip_request(path: impl AsRef<Path>) -> Result<TripRequest> {
+    let path = path.as_ref();
+    let raw = fs::read_to_string(path)
+        .with_context(|| format!("reading trip request {}", path.display()))?;
+    match path.extension().and_then(|ext| ext.to_str()) {
+        Some("json") => serde_json::from_str(&raw).context("parsing JSON trip request"),
+        Some("yaml") | Some("yml") => {
+            serde_yaml::from_str(&raw).context("parsing YAML trip request")
+        }
+        other => bail!(
+            "unsupported trip request extension {:?}; use .json, .yml, or .yaml",
+            other
+        ),
+    }
+}
+
 pub fn load_route_batch(path: impl AsRef<Path>) -> Result<RouteBatchDocument> {
     let path = path.as_ref();
     let raw = fs::read_to_string(path)

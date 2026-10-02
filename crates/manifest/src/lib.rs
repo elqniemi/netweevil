@@ -108,6 +108,7 @@ pub enum RunKind {
     ScenarioBatch,
     Experiment,
     Simulation,
+    Trip,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

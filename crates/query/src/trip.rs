@@ -110,6 +110,7 @@ pub struct TripVisit {
     pub arrival_s: f64,
     pub wait_s: f64,
     pub service_start_s: f64,
+    pub service_s: f64,
     pub departure_s: f64,
     pub lateness_s: f64,
 }
@@ -209,10 +210,7 @@ pub(crate) fn execute_trip_with_graph(
         total_distance_m: legs.iter().map(|leg| leg.summary.total_distance_m).sum(),
         total_travel_time_s: legs.iter().map(|leg| leg.summary.total_travel_time_s).sum(),
         total_generalized_cost,
-        total_service_s: visits
-            .iter()
-            .map(|visit| visit.departure_s - visit.service_start_s)
-            .sum(),
+        total_service_s: visits.iter().map(|visit| visit.service_s).sum(),
         total_wait_s: visits.iter().map(|visit| visit.wait_s).sum(),
         start_s: visits.first().map_or(0.0, |visit| visit.arrival_s),
         end_s: visits.last().map_or(0.0, |visit| visit.departure_s),
@@ -355,6 +353,9 @@ fn trip_stop_matrix(
 }
 
 /// Departure and arrival candidates of a stop, as route requests snap them.
+/// A role that cannot snap (say, arriving where a one-way street starts) is
+/// left empty, so the stop can still open or close the trip; the stop is
+/// rejected only when no role it may take snaps.
 fn snap_stop(
     topology: &TopologyBundle,
     graph: &RoutingGraph,
@@ -364,14 +365,19 @@ fn snap_stop(
     departs: bool,
     arrives: bool,
 ) -> Result<(Vec<SnappedPoint>, Vec<SnappedPoint>)> {
-    let snap = |wanted: bool, is_origin: bool| -> Result<Vec<SnappedPoint>> {
-        if !wanted {
-            return Ok(Vec::new());
-        }
-        snap_candidates_with_options(topology, graph, point, options, is_origin)
-            .map_err(|error| anyhow::anyhow!("stop {index}: {error:#}"))
+    let snap = |wanted: bool, is_origin: bool| {
+        wanted.then(|| snap_candidates_with_options(topology, graph, point, options, is_origin))
     };
-    Ok((snap(departs, true)?, snap(arrives, false)?))
+    let (origins, destinations) = (snap(departs, true), snap(arrives, false));
+    let roles = || origins.iter().chain(&destinations);
+    if roles().all(Result::is_err)
+        && let Some(Err(error)) = roles().next()
+    {
+        bail!("stop {index}: {error:#}");
+    }
+    let candidates =
+        |role: Option<Result<Vec<SnappedPoint>>>| role.and_then(Result::ok).unwrap_or_default();
+    Ok((candidates(origins), candidates(destinations)))
 }
 
 /// Directed costs and travel times between stops; `INFINITY` where no route
@@ -653,6 +659,7 @@ fn trip_visits(
             arrival_s: arrival,
             wait_s: service_start - arrival,
             service_start_s: service_start,
+            service_s: service,
             departure_s: clock,
             lateness_s: (arrival - window.latest_s).max(0.0),
         });

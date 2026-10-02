@@ -219,7 +219,8 @@ pub fn load_run_result_summary(manifest: &RunManifest) -> Result<Option<RunResul
         | RunKind::ServiceAreaSequence
         | RunKind::ScenarioBatch
         | RunKind::Experiment
-        | RunKind::Simulation => return Ok(None),
+        | RunKind::Simulation
+        | RunKind::Trip => return Ok(None),
     };
     Ok(Some(summary))
 }
