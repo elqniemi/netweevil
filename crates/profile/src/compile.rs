@@ -213,6 +213,7 @@ where
             || edge_profile.conditional_access.contains(mode_bit))
             || (edge.road_class == RoadClass::Ferry && !profile.ferry.allow)
             || (crosses_border && profile.preferences.avoid_border_crossings)
+            || too_steep(profile, topology, edge_index)
             || is_directionally_excluded(profile, &edge)
             || is_excluded(profile, &edge, edge_profile.highway, &attribute_matches)
         {
@@ -489,6 +490,22 @@ impl VehicleExclusionBuilder {
             generalized_cost: self.generalized_cost,
             component_values,
         }
+    }
+}
+
+/// Whether `preferences.max_grade` excludes the edge. Edges without a
+/// sampled grade (datasets imported without a DEM) are never excluded.
+fn too_steep(profile: &ProfileDocument, topology: &TopologyBundle, edge_index: usize) -> bool {
+    let Some(max_grade) = profile.preferences.max_grade else {
+        return false;
+    };
+    let elevation = &topology.elevation;
+    match (
+        elevation.edge_max_uphill_permille.get(edge_index),
+        elevation.edge_max_downhill_permille.get(edge_index),
+    ) {
+        (Some(&uphill), Some(&downhill)) => max_grade.excludes_permille(uphill, downhill),
+        _ => false,
     }
 }
 

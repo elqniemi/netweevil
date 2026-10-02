@@ -20,6 +20,8 @@ class MapPointsMixin:
             return self.pick_status_label
         if target in [PickTarget.TRANSIT_ORIGIN, PickTarget.TRANSIT_DESTINATION]:
             return self.transit_pick_status_label
+        if target == PickTarget.TRIP_STOP:
+            return self.trip_pick_status_label
         return self.service_area_pick_status_label
 
     def begin_point_pick(self, target):
@@ -51,6 +53,11 @@ class MapPointsMixin:
         elif target == PickTarget.TRANSIT_DESTINATION:
             self.transit_pick_status_label.setText(
                 "Click the transit destination on the map. Press Pick On Map again to cancel."
+            )
+        elif target == PickTarget.TRIP_STOP:
+            self.trip_pick_status_label.setText(
+                "Click the map to append trip stops; each click adds one stop. "
+                "Press Pick On Map again to stop."
             )
         else:
             self.service_area_pick_status_label.setText(
@@ -87,6 +94,18 @@ class MapPointsMixin:
             self.service_area_pick_status_label.setText(
                 "Added one service-area origin from the map canvas."
             )
+        elif self.pick_target == PickTarget.TRIP_STOP:
+            self.append_trip_stop(
+                self.default_point_id(self.pick_target),
+                wgs84_point.x(),
+                wgs84_point.y(),
+            )
+            self.trip_pick_status_label.setText(
+                "Added stop {} from the map canvas. Click again to add more; press "
+                "Pick On Map to stop.".format(self.trip_stop_line_count())
+            )
+            # Stay in picking mode so a whole tour can be clicked in one go.
+            return
         elif self.pick_target in [
             PickTarget.TRANSIT_ORIGIN,
             PickTarget.TRANSIT_DESTINATION,
@@ -208,6 +227,8 @@ class MapPointsMixin:
                 ]
             )
             return "origin_{:03d}".format(count + 1)
+        if target == PickTarget.TRIP_STOP:
+            return "stop_{:03d}".format(self.trip_stop_line_count() + 1)
         if target == PickTarget.TRANSIT_ORIGIN:
             existing = self.transit_origin_id_edit.text().strip()
             return existing or "origin"

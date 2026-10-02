@@ -49,7 +49,7 @@ Admin areas are used in four places:
     - match: {country: NL, highway: trunk}    # e.g. no bicycles on Dutch trunk roads
   ```
 - **Border crossings.** `preferences.avoid_border_crossings: true` excludes crossing edges. `border_crossing_penalty_s` adds generalized cost per crossing, and `border_crossing_time_s` adds travel time, for example for a border check. These are edge metrics, so CCH routes stay exact. Requests set them through `profile_overrides`, for example `{"preferences": {"avoid_border_crossings": true}}`.
-- **Responses.** `returns.admin_areas: true` adds `regions` to a route: country/state spans along the route with their driving side and distances, the border-crossing count, and the timezones entered.
+- **Responses.** `returns.admin_areas: true` adds `regions` to a route: country/state spans along the route with their driving side and distances, the border-crossing count, and the timezones entered. Each waypoint leg and each alternative route gets its own `regions`.
 
 ## Elevation
 
@@ -65,7 +65,16 @@ Bridges and tunnels (OSM `bridge=*` or `tunnel=*` other than `building_passage`,
 
 The existing `slope_model` (Tobler or piecewise) uses the stored ascent and descent, so bicycle and walking profiles on OSM data respond to terrain. Example: [`examples/profiles/pedestrian_hilly_osm.yml`](../examples/profiles/pedestrian_hilly_osm.yml).
 
-`returns.elevation: true` adds `elevation` to a route:
+`preferences.max_grade` excludes edges that are too steep. The limit is rise/run (`0.08` is 8 %). It is compared with each edge's steepest grade in the travel direction, as stored in the grade columns. A single number limits uphill and downhill grades. `{uphill: 0.08, downhill: 0.12}` sets each direction separately; leave one out to keep that direction unlimited.
+
+```yaml
+preferences:
+  max_grade: {uphill: 0.08, downhill: 0.12}
+```
+
+Grades are stored in whole permille, and a grade equal to the limit is allowed. A two-way street that climbs 10 % is excluded uphill only when just `uphill` is limited. Limiting `downhill` excludes the other direction as well. The grades come from the DEM, so datasets imported without `--dem`, including GeoPackage imports with surveyed heights, exclude nothing. The exclusion is a per-edge metric like `avoid_border_crossings`, so CCH routes stay exact. Requests can set it with `profile_overrides`, for example `{"preferences": {"max_grade": 0.06}}`. Example: [`examples/profiles/bicycle_max_grade_osm.yml`](../examples/profiles/bicycle_max_grade_osm.yml).
+
+`returns.elevation: true` adds `elevation` to a route, to each waypoint leg and to each alternative:
 
 - `points`: `[distance_m, height]` per vertex, with `null` heights where unknown;
 - `ascent_m` and `descent_m` from the densified edges;

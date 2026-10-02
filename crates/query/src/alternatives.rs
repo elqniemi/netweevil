@@ -63,7 +63,9 @@ pub(crate) fn build_route_alternatives(
         {
             continue;
         }
-        let analysis = analyze_route_path(
+        // An alternative beyond the fallback's illegal-movement limits is
+        // not offered; it does not fail the request.
+        let Ok(analysis) = analyze_route_path(
             topology,
             metrics,
             routing_graph,
@@ -71,7 +73,9 @@ pub(crate) fn build_route_alternatives(
             &path,
             &origin,
             &destination,
-        )?;
+        ) else {
+            continue;
+        };
         if !alternative_within_limits(&analysis.summary, best_summary, alternatives)
             || !alternative_is_diverse(
                 &path.edge_indexes,
@@ -128,8 +132,9 @@ pub(crate) fn build_route_alternatives(
                 &path,
                 &origin,
                 &destination,
-            )?;
-            if !duplicate
+            );
+            if let Ok(analysis) = analysis
+                && !duplicate
                 && alternative_within_limits(&analysis.summary, best_summary, alternatives)
                 && alternative_is_diverse(
                     &path.edge_indexes,
@@ -290,6 +295,8 @@ fn materialize_route_alternative(
         violations: analysis.violations,
         diagnostics,
         warnings,
+        regions: None,
+        elevation: None,
     })
 }
 

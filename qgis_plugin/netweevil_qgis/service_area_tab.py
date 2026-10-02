@@ -178,7 +178,16 @@ class ServiceAreaTabMixin:
             "How areas from multiple origins combine: merged into one area, "
             "kept as overlapping per-origin areas, or cut against each other."
         )
+        self.service_area_direction_combo = QComboBox()
+        self.service_area_direction_combo.addItem("Outbound (from origins)", "outbound")
+        self.service_area_direction_combo.addItem("Inbound (to origins)", "inbound")
+        self.service_area_direction_combo.setToolTip(
+            "Outbound: travel times from the origins. Inbound: travel times to "
+            "the origins, treating them as destinations (static only; no "
+            "departure time)."
+        )
         road_form.addRow("Snap distance m", self.service_area_snap_distance_edit)
+        road_form.addRow("Direction", self.service_area_direction_combo)
         road_form.addRow("Output mode", self.service_area_output_mode_combo)
         road_form.addRow("Band mode", self.service_area_band_mode_combo)
         road_form.addRow("", self.service_area_segments_check)
@@ -203,11 +212,43 @@ class ServiceAreaTabMixin:
             "smoother, more generous hulls."
         )
         self.service_area_simplification_edit = QLineEdit("20")
+        self.service_area_simplification_edit.setToolTip(
+            "Douglas-Peucker tolerance applied to every polygon ring, in metres. "
+            "Leave empty to keep the traced outline."
+        )
+        self.service_area_cell_size_edit = QLineEdit("")
+        self.service_area_cell_size_edit.setPlaceholderText("auto")
+        self.service_area_cell_size_edit.setToolTip(
+            "Grid cell size in metres used to trace the polygon boundary. "
+            "Leave empty for 25 m x hull aggressiveness (minimum 10 m)."
+        )
+        self.service_area_denoise_edit = QLineEdit("")
+        self.service_area_denoise_edit.setPlaceholderText("keep all parts")
+        self.service_area_denoise_edit.setToolTip(
+            "0..1: drop polygon parts smaller than this fraction of the band's "
+            "largest part (1 keeps only the largest part). Leave empty to keep "
+            "every part."
+        )
+        self.service_area_min_part_area_edit = QLineEdit("")
+        self.service_area_min_part_area_edit.setPlaceholderText("keep all parts")
+        self.service_area_min_part_area_edit.setToolTip(
+            "Drop polygon parts whose exterior area is below this many m2. "
+            "Leave empty to keep every part."
+        )
+        self.service_area_min_hole_area_edit = QLineEdit("")
+        self.service_area_min_hole_area_edit.setPlaceholderText("keep all holes")
+        self.service_area_min_hole_area_edit.setToolTip(
+            "Fill holes smaller than this many m2. Leave empty to keep every hole."
+        )
         polygon_form.addRow("Hull preset", self.service_area_hull_preset_combo)
         polygon_form.addRow("Hull aggressiveness", self.service_area_hull_aggressiveness_edit)
         polygon_form.addRow(
             "Simplification tolerance m", self.service_area_simplification_edit
         )
+        polygon_form.addRow("Cell size m", self.service_area_cell_size_edit)
+        polygon_form.addRow("Denoise (0-1)", self.service_area_denoise_edit)
+        polygon_form.addRow("Min part area m2", self.service_area_min_part_area_edit)
+        polygon_form.addRow("Min hole area m2", self.service_area_min_hole_area_edit)
         self.service_area_hull_preset_combo.currentIndexChanged.connect(
             self.sync_service_area_hull_preset
         )
@@ -680,6 +721,7 @@ class ServiceAreaTabMixin:
             "boundary_mode": self.service_area_boundary_mode_combo.currentData() or "overlap",
             "multi_origin_mode": self.service_area_multi_origin_mode_combo.currentData()
             or "merge",
+            "direction": self.service_area_direction_combo.currentData() or "outbound",
             "polygon": {
                 "hull_aggressiveness": self.parse_float_with_default(
                     self.service_area_hull_aggressiveness_edit.text(),
@@ -702,7 +744,13 @@ class ServiceAreaTabMixin:
         )
         if simplification_tolerance is not None:
             request["polygon"]["simplification_tolerance_m"] = simplification_tolerance
+        request["polygon"].update(self.build_service_area_polygon_cleanup())
         temporal_options = self.build_street_temporal_options("service_area")
+        if temporal_options and request["direction"] == "inbound":
+            raise ValueError(
+                "inbound service areas are static; clear the departure time "
+                "or switch Direction to outbound"
+            )
         if (
             temporal_options
             and self.service_area_threshold_metric_combo.currentData()
@@ -713,6 +761,39 @@ class ServiceAreaTabMixin:
             )
         request.update(temporal_options)
         return request
+
+    def build_service_area_polygon_cleanup(self):
+        """Optional polygon clean-up fields; empty inputs are omitted."""
+        options = {}
+        cell_size = self.parse_optional_float(
+            self.service_area_cell_size_edit.text(), "Polygon cell size"
+        )
+        if cell_size is not None:
+            if cell_size <= 0.0:
+                raise ValueError("Polygon cell size must be greater than 0")
+            options["cell_size_m"] = cell_size
+        denoise = self.parse_optional_float(
+            self.service_area_denoise_edit.text(), "Polygon denoise"
+        )
+        if denoise is not None:
+            if not 0.0 <= denoise <= 1.0:
+                raise ValueError("Polygon denoise must be between 0 and 1")
+            options["denoise"] = denoise
+        min_part_area = self.parse_optional_float(
+            self.service_area_min_part_area_edit.text(), "Polygon min part area"
+        )
+        if min_part_area is not None:
+            if min_part_area < 0.0:
+                raise ValueError("Polygon min part area cannot be negative")
+            options["min_part_area_m2"] = min_part_area
+        min_hole_area = self.parse_optional_float(
+            self.service_area_min_hole_area_edit.text(), "Polygon min hole area"
+        )
+        if min_hole_area is not None:
+            if min_hole_area < 0.0:
+                raise ValueError("Polygon min hole area cannot be negative")
+            options["min_hole_area_m2"] = min_hole_area
+        return options
 
     def write_service_area_request(self):
         try:

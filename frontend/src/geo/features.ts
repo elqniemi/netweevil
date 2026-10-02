@@ -53,6 +53,9 @@ export const SLOT_COLORS: Record<string, string> = {
   waypoints: PALETTE.ochre,
   od: PALETTE.crimson,
   zones: PALETTE.green,
+  stops: PALETTE.blue,
+  probe: PALETTE.ochre,
+  traffic_ways: PALETTE.crimson,
 };
 
 const GEOMETRY_TYPES = new Set(["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"]);
@@ -416,6 +419,24 @@ export function styleFeatures(collection: FeatureCollection, ctx: StyleContext):
         width = 2.5;
         dash = 1;
       }
+    } else if (kind === "legs" && ctx.tool === "trip") {
+      // Light to dark along the visit order, so the direction of travel reads.
+      const count = isNumber(p._leg_count) ? p._leg_count : 1;
+      const t = count > 1 && isNumber(p._index) ? p._index / (count - 1) : 1;
+      color = ramp(0.35 + 0.65 * t);
+      width = 5;
+      sort = 1;
+    } else if (kind === "trip_stops") {
+      color = p._late === 1 ? PALETTE.crimson : PALETTE.ink;
+      radius = 9;
+      opacity = 1;
+    } else if (kind === "heights") {
+      color = p.height_m === null ? PALETTE.grey : PALETTE.ochre;
+      radius = 5;
+    } else if (kind === "height_line") {
+      color = PALETTE.ochre;
+      width = 2.5;
+      dash = 1;
     } else if (kind === "legs") {
       color = multi ? runHue : ORDINAL[(isNumber(p._index) ? p._index : 0) % ORDINAL.length];
       width = 5;

@@ -1243,6 +1243,8 @@ fn build_component_route_result(
                 violations: Vec::new(),
                 diagnostics: Vec::new(),
                 warnings: Vec::new(),
+                regions: None,
+                elevation: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -1349,6 +1351,8 @@ fn build_temporal_component_route_result(
                 violations: Vec::new(),
                 diagnostics: alternative.hop_info.diagnostics,
                 warnings: Vec::new(),
+                regions: None,
+                elevation: None,
             })
         })
         .collect::<Result<Vec<_>>>()?;

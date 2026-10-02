@@ -130,8 +130,32 @@ function categoryLabel(key: string, value: unknown): string {
   return String(value);
 }
 
-function accessLabel(p: Record<string, unknown>): string {
-  const parts = [p.access_car ? "car" : null, p.access_bicycle ? "bike" : null, p.access_foot ? "foot" : null].filter(Boolean);
+/** Source access flags per travel mode, in legend order. */
+export const ACCESS_MODES: [string, string][] = [
+  ["access_car", "car"],
+  ["access_taxi", "taxi"],
+  ["access_bus", "bus"],
+  ["access_hgv", "hgv"],
+  ["access_motorcycle", "motorcycle"],
+  ["access_moped", "moped"],
+  ["access_bicycle", "bike"],
+  ["access_foot", "foot"],
+];
+
+/**
+ * Which modes the source allows. Motor vehicles are summarised as "motor"
+ * when every motorized mode agrees, so common roads keep short labels; APIs
+ * without the newer flags report only car, bike and foot.
+ */
+export function accessLabel(p: Record<string, unknown>): string {
+  const motorized = ACCESS_MODES.slice(0, 6).filter(([key]) => key in p);
+  const allMotor = motorized.length === 6 && motorized.every(([key]) => p[key] === true);
+  const parts: string[] = [];
+  if (allMotor) parts.push("motor");
+  for (const [key, label] of ACCESS_MODES) {
+    if (allMotor && motorized.some(([k]) => k === key)) continue;
+    if (p[key] === true) parts.push(label);
+  }
   return parts.length ? parts.join("+") : "none";
 }
 

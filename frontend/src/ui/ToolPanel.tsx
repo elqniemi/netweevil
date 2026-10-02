@@ -32,6 +32,8 @@ import {
 } from "../state/store";
 import { TOOL_BY_ID, fieldDefaults, type Field, type SlotDef, type ToolDef } from "../tools/registry";
 import { SimulationPanel } from "./SimulationPanel";
+import { TrafficBadge, TrafficPanel } from "./TrafficPanel";
+import { formatClock, parseClock, stopLetter } from "../tools/clock";
 import { GtfsEditorPanel } from "./GtfsEditorPanel";
 
 interface Props {
@@ -58,11 +60,13 @@ export function ToolPanel({ service }: Props) {
       {open && tool.input !== "editor" && (
         <>
           <ProfilePicker tool={tool} service={service} />
+          {tool.fields.some((f) => f.key === "traffic") && <TrafficBadge />}
           {tool.input === "routes" && <RoutesEditor tool={tool} />}
           <PointsEditor tool={tool} />
           <FormFields tool={tool} service={service} />
         </>
       )}
+      {tool.id === "traffic" && <TrafficPanel service={service} open={open} />}
       {tool.input === "editor" ? (open ? <GtfsEditorPanel service={service} /> : null) : tool.id === "simulation" ? (open ? <SimulationPanel service={service} /> : null) : <RunBar tool={tool} service={service} />}
     </section>
   );
@@ -399,8 +403,8 @@ function SlotRow({ tool, slot, points, active, viewport }: { tool: ToolDef; slot
           {points.length > 0 && (
             <ul className="point-list">
               {points.slice(0, 60).map((p, index) => (
-                <li key={`${p.id}-${index}`}>
-                  <span className="point-index">{index + 1}</span>
+                <li key={`${p.id}-${index}`} className={slot.timed || slot.ways ? "point-row-wrap" : undefined}>
+                  <span className="point-index">{slot.timed ? stopLetter(index) : index + 1}</span>
                   <input value={p.id} onChange={(e) => updatePoint(slot.id, index, { id: e.target.value })} aria-label="Point id" />
                   <span className="point-coord">
                     {p.lon.toFixed(5)}, {p.lat.toFixed(5)}
@@ -411,6 +415,12 @@ function SlotRow({ tool, slot, points, active, viewport }: { tool: ToolDef; slot
                   <button type="button" className="icon-btn" onClick={() => removePoint(slot.id, index)} aria-label="Remove point">
                     ×
                   </button>
+                  {slot.timed && <StopTiming slot={slot.id} index={index} point={p} />}
+                  {slot.ways && (
+                    <span className="point-extra muted">
+                      {p.way_id === undefined ? "finding the nearest road…" : `way ${p.way_id}${p.way_name ? ` · ${p.way_name}` : ""}`}
+                    </span>
+                  )}
                 </li>
               ))}
               {points.length > 60 && <li className="muted">and {points.length - 60} more</li>}
@@ -419,6 +429,39 @@ function SlotRow({ tool, slot, points, active, viewport }: { tool: ToolDef; slot
         </div>
       )}
     </div>
+  );
+}
+
+/** Service time and time window of one trip stop, on the trip clock. */
+function StopTiming({ slot, index, point }: { slot: string; index: number; point: InputPoint }) {
+  const clock = (key: "earliest_s" | "latest_s", label: string) => (
+    <input
+      type="time"
+      value={formatClock(point[key]).slice(0, 5)}
+      onChange={(e) => updatePoint(slot, index, { [key]: e.target.value === "" ? undefined : parseClock(e.target.value) })}
+      aria-label={label}
+      title={label}
+    />
+  );
+  return (
+    <span className="point-extra stop-timing">
+      <label title="Service time at this stop (s); blank uses the default">
+        service
+        <input
+          type="number"
+          min={0}
+          step={60}
+          className="point-weight"
+          placeholder="default"
+          value={point.service_s ?? ""}
+          onChange={(e) => updatePoint(slot, index, { service_s: e.target.value === "" ? undefined : Number(e.target.value) })}
+        />
+        s
+      </label>
+      <label>
+        window {clock("earliest_s", "Window opens")}–{clock("latest_s", "Window closes")}
+      </label>
+    </span>
   );
 }
 
@@ -513,6 +556,21 @@ function FieldControl({ tool, field, value, service }: { tool: ToolId; field: Fi
       </label>
     );
   }
+  if (field.type === "clock") {
+    let error: string | null = null;
+    try {
+      parseClock(value);
+    } catch (cause) {
+      error = (cause as Error).message;
+    }
+    return (
+      <label className="field">
+        <span>{field.label}</span>
+        <input type="text" inputMode="numeric" value={String(value ?? "")} placeholder="HH:MM" onChange={(e) => set(e.target.value)} />
+        {error ? <small role="alert">{error}</small> : field.hint && <small className="muted">{field.hint}</small>}
+      </label>
+    );
+  }
   if (field.type === "json") {
     return (
       <label className="field field-wide">
@@ -577,7 +635,7 @@ function RunBar({ tool, service }: { tool: ToolDef; service: ServiceInfo | null 
     <div className="run-bar">
       <div className="run-row">
         <button type="button" className="btn btn-primary" onClick={run} disabled={running || !!plan.error}>
-          {running ? "Running…" : count > 1 ? `Run ${count} routes` : `Run ${tool.label.toLowerCase()}`}
+          {running ? "Running…" : count > 1 ? `Run ${count} routes` : (tool.runLabel ?? `Run ${tool.label.toLowerCase()}`)}
         </button>
         {tool.live && (
           <label className={`live-toggle${liveOn ? " is-on" : ""}`} title="Re-run automatically while markers are dragged or options change">

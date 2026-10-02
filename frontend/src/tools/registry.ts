@@ -1,8 +1,9 @@
 import type { InputPoint, ResponseFormat, RouteInput, ToolId } from "../state/store";
 import type { ServiceInfo } from "../api/types";
 import { DEFAULT_TRANSIT_MODES, TRANSIT_MODE_OPTIONS, transitModeSelection } from "../state/transitModes";
+import { parseClock } from "./clock";
 
-export type FieldType = "number" | "text" | "select" | "multiselect" | "checkbox" | "datetime" | "json" | "list";
+export type FieldType = "number" | "text" | "select" | "multiselect" | "checkbox" | "datetime" | "json" | "list" | "clock";
 
 export interface FieldOption {
   value: string;
@@ -35,6 +36,10 @@ export interface SlotDef {
   kinds?: string[];
   /** Whether points carry a demand weight (betweenness). */
   weighted?: boolean;
+  /** Whether points carry a service time and a time window (trip stops). */
+  timed?: boolean;
+  /** Whether points are resolved to the nearest OSM way (live traffic). */
+  ways?: boolean;
   hint?: string;
 }
 
@@ -72,6 +77,8 @@ export interface ToolDef {
   input: "routes" | "slots" | "viewport" | "editor";
   /** Whether route vias (intermediate stops) are edited and used. */
   usesVias?: boolean;
+  /** Run button text, when "Run <label>" does not fit. */
+  runLabel?: string;
   /** Cheap enough to re-run live while points are dragged. */
   live?: boolean;
   /** Row set shown first in the table view, by result key (e.g. "pairs"). */
@@ -146,6 +153,8 @@ const returnFields: Field[] = [
   { key: "breakdowns", label: "Road type and surface breakdowns", type: "checkbox", default: false, group: "Returns" },
   { key: "penalty_breakdown", label: "Penalty breakdown", type: "checkbox", default: false, group: "Returns" },
   { key: "explain_cost_derivation", label: "Explain cost derivation", type: "checkbox", default: false, group: "Returns" },
+  { key: "admin_areas", label: "Regions (countries, states, timezones)", type: "checkbox", default: false, group: "Returns" },
+  { key: "elevation", label: "Elevation profile", type: "checkbox", default: false, group: "Returns", hint: "Heights need a dataset imported with a DEM; others report unknown heights." },
 ];
 
 const temporalFields: Field[] = [
@@ -170,6 +179,28 @@ const temporalFields: Field[] = [
   },
   { key: "max_labels_per_state", label: "Max labels per state", type: "number", min: 1, step: 1, group: "Time", placeholder: "default" },
 ];
+
+export const TRAFFIC_OPTIONS: FieldOption[] = [
+  { value: "auto", label: "auto (historical + live)" },
+  { value: "historical", label: "historical only" },
+  { value: "time_dependent", label: "exact time-dependent (slow)" },
+  { value: "off", label: "off" },
+];
+
+/** `traffic` of a timed request; batches cannot use the exact time-dependent engine. */
+function trafficField(batch: boolean): Field {
+  return {
+    key: "traffic",
+    label: "Traffic",
+    type: "select",
+    default: "auto",
+    group: "Time",
+    options: batch ? TRAFFIC_OPTIONS.filter((o) => o.value !== "time_dependent") : TRAFFIC_OPTIONS,
+    hint: batch
+      ? "Applies with a departure time: auto uses the departure-bucket speeds plus live updates, historical skips live updates."
+      : "Applies with a departure time: auto uses the departure-bucket speeds plus live updates, historical skips live updates, exact integrates traffic along every edge.",
+  };
+}
 
 const avoidFields: Field[] = [
   {
@@ -275,7 +306,7 @@ function fallback(form: Record<string, unknown>) {
 
 function returns(form: Record<string, unknown>) {
   const breakdown = bool(form, "breakdowns") ? ["time_s", "distance_m"] : [];
-  return {
+  const out: Record<string, unknown> = {
     geometry: str(form, "geometry") ?? "full",
     segment_rows: bool(form, "segment_rows"),
     road_type_breakdown: breakdown,
@@ -283,6 +314,9 @@ function returns(form: Record<string, unknown>) {
     penalty_breakdown: bool(form, "penalty_breakdown"),
     explain_cost_derivation: bool(form, "explain_cost_derivation"),
   };
+  if (bool(form, "admin_areas")) out.admin_areas = true;
+  if (bool(form, "elevation")) out.elevation = true;
+  return out;
 }
 
 function temporal(form: Record<string, unknown>) {
@@ -299,6 +333,8 @@ function temporal(form: Record<string, unknown>) {
   if (overlays) out.overlays = Array.isArray(overlays) ? overlays : [overlays];
   const labels = num(form, "max_labels_per_state");
   if (labels !== undefined) out.max_labels_per_state = labels;
+  const traffic = str(form, "traffic");
+  if (traffic && traffic !== "auto") out.traffic = traffic;
   return out;
 }
 
@@ -366,6 +402,7 @@ const routeFields: Field[] = [
   ...returnFields,
   ...alternativeFields,
   ...temporalFields,
+  trafficField(false),
   ...avoidFields,
   {
     key: "component_constraints",
@@ -616,6 +653,7 @@ const odTool: ToolDef = {
     },
     ...alternativeFields,
     ...temporalFields,
+    trafficField(true),
     ...avoidFields,
   ],
   build: (ctx) => {
@@ -669,6 +707,7 @@ const matrixTool: ToolDef = {
       ],
     },
     ...temporalFields,
+    trafficField(true),
     ...avoidFields,
   ],
   build: (ctx) =>
@@ -784,12 +823,14 @@ const serviceAreaFields: Field[] = [
       { value: "outbound", label: "from origins" },
       { value: "inbound", label: "to origins" },
     ],
+    hint: "To origins: every place that reaches an origin within the thresholds.",
   },
   { key: "hull_aggressiveness", label: "Hull aggressiveness", type: "number", default: 1, min: 0, step: 0.1, group: "Polygon" },
   { key: "simplification_tolerance_m", label: "Simplification (m)", type: "number", min: 0, step: 5, group: "Polygon", placeholder: "none" },
   { key: "cell_size_m", label: "Cell size (m)", type: "number", min: 1, step: 10, group: "Polygon", placeholder: "auto" },
   { key: "denoise", label: "Denoise (fraction of largest part)", type: "number", min: 0, step: 0.1, group: "Polygon", placeholder: "keep all", hint: "0..1; 1 keeps only the largest part" },
-  { key: "min_hole_area_m2", label: "Min hole area (m²)", type: "number", min: 0, step: 1000, group: "Polygon", placeholder: "keep all" },
+  { key: "min_part_area_m2", label: "Min part area (m²)", type: "number", min: 0, step: 1000, group: "Polygon", placeholder: "keep all", hint: "Drops polygon parts smaller than this." },
+  { key: "min_hole_area_m2", label: "Min hole area (m²)", type: "number", min: 0, step: 1000, group: "Polygon", placeholder: "keep all", hint: "Fills holes smaller than this." },
   { key: "segments", label: "Return segments", type: "checkbox", default: false, group: "Returns" },
   { key: "max_features", label: "Max features", type: "number", min: 1, step: 100, group: "Returns", placeholder: "default" },
   { key: "max_geometry_points", label: "Max geometry points", type: "number", min: 1, step: 1000, group: "Returns", placeholder: "default" },
@@ -808,6 +849,8 @@ function serviceAreaRequest(ctx: BuildContext) {
   if (cell !== undefined) polygon.cell_size_m = cell;
   const denoise = num(form, "denoise");
   if (denoise !== undefined) polygon.denoise = denoise;
+  const minPart = num(form, "min_part_area_m2");
+  if (minPart !== undefined) polygon.min_part_area_m2 = minPart;
   const minHole = num(form, "min_hole_area_m2");
   if (minHole !== undefined) polygon.min_hole_area_m2 = minHole;
   const returns: Record<string, unknown> = { geometry: true, attributes: true, per_threshold_summary: true, diagnostics: true, segments: bool(form, "segments") };
@@ -847,7 +890,7 @@ const serviceAreaTool: ToolDef = {
   usesProfile: true,
   input: "slots",
   slots: [{ id: "origins", label: "Origins" }],
-  fields: [...serviceAreaFields, ...temporalFields, ...avoidFields],
+  fields: [...serviceAreaFields, ...temporalFields, trafficField(true), ...avoidFields],
   build: (ctx) => envelope(ctx, serviceAreaRequest(ctx), false),
   ready: (ctx) => needPoints(ctx, "origins", 1, "origin"),
 };
@@ -1352,6 +1395,205 @@ const simulationTool: ToolDef = {
   ready: () => null,
 };
 
+// --- Trip optimization ---
+
+export const TRIP_MODE_OPTIONS: FieldOption[] = [
+  { value: "roundtrip", label: "roundtrip (back to the first stop)" },
+  { value: "fixed_start", label: "start at the first stop, end anywhere" },
+  { value: "fixed_end", label: "start anywhere, end at the last stop" },
+  { value: "fixed_endpoints", label: "first stop to last stop" },
+  { value: "open", label: "open (any start and end)" },
+];
+
+/** One `TripStop`: the point plus its own or the default service time, and its window. */
+export function tripStop(p: InputPoint, defaultServiceS: number) {
+  const stop: Record<string, unknown> = { point: labeled(p) };
+  const service = p.service_s ?? defaultServiceS;
+  if (service > 0) stop.service_s = service;
+  if (p.earliest_s !== undefined || p.latest_s !== undefined) {
+    const earliest = p.earliest_s ?? 0;
+    if (p.latest_s !== undefined && p.latest_s < earliest) throw new Error(`Stop ${p.id}: the window closes before it opens`);
+    stop.time_window = p.latest_s !== undefined ? { earliest_s: earliest, latest_s: p.latest_s } : { earliest_s: earliest };
+  }
+  return stop;
+}
+
+function tripRequest(ctx: BuildContext) {
+  const form = ctx.form;
+  const defaultService = num(form, "service_s") ?? 0;
+  const optimizer: Record<string, unknown> = {};
+  for (const key of ["seed", "max_iterations", "time_budget_ms", "exact_max_stops"]) {
+    const v = num(form, key);
+    if (v !== undefined) optimizer[key] = v;
+  }
+  const exact = optimizer.exact_max_stops as number | undefined;
+  if (exact !== undefined && exact > 18) throw new Error("Exact up to (stops) must be at most 18");
+  const request: Record<string, unknown> = {
+    trip_id: str(form, "trip_id") ?? "console_trip",
+    stops: ctx.points("stops").map((p) => tripStop(p, defaultService)),
+    mode: str(form, "mode") ?? "roundtrip",
+    departure_s: parseClock(form.departure) ?? 0,
+    allow_late: bool(form, "allow_late"),
+    snap: snap(form),
+    returns: returns(form),
+  };
+  if (Object.keys(optimizer).length) request.optimizer = optimizer;
+  return request;
+}
+
+const tripTool: ToolDef = {
+  id: "trip",
+  label: "Trip",
+  group: "street",
+  path: "/v1/trip",
+  layers: ["line", "point"],
+  method: "POST",
+  description: "Visits every stop in the cheapest directed order: exact up to 16 free stops, local search above. Stops may carry service times and time windows.",
+  supportsGeojson: true,
+  usesProfile: true,
+  input: "slots",
+  live: true,
+  tableKey: "visits",
+  slots: [{ id: "stops", label: "Stops", timed: true, hint: "Each click adds a stop. Letters keep the input order; numbers on the result show the visit order. The first stop is the start and the last the end, where the mode fixes them." }],
+  fields: [
+    { key: "trip_id", label: "Trip id", type: "text", default: "console_trip" },
+    { key: "mode", label: "Mode", type: "select", default: "roundtrip", options: TRIP_MODE_OPTIONS },
+    { key: "departure", label: "Departure", type: "clock", default: "08:00", hint: "Clock of the stop windows; the trip may not start earlier." },
+    { key: "service_s", label: "Service time per stop (s)", type: "number", default: 0, min: 0, step: 60, hint: "Used for stops without their own service time." },
+    { key: "allow_late", label: "Allow late arrivals", type: "checkbox", default: false, hint: "Return the least-late order instead of an error when no order meets every window." },
+    { key: "seed", label: "Seed", type: "number", min: 0, step: 1, group: "Optimizer", placeholder: "0" },
+    { key: "max_iterations", label: "Max iterations", type: "number", min: 1, step: 1000, group: "Optimizer", placeholder: "size-dependent" },
+    { key: "time_budget_ms", label: "Time budget (ms)", type: "number", min: 1, step: 100, group: "Optimizer", placeholder: "none", hint: "A time budget can make orders differ between runs." },
+    { key: "exact_max_stops", label: "Exact up to (stops)", type: "number", min: 0, step: 1, group: "Optimizer", placeholder: "16", hint: "Held-Karp below this many free stops, at most 18." },
+    ...snapFields,
+    returnFields[0],
+    ...returnFields.slice(-2),
+  ],
+  build: (ctx) => envelope(ctx, tripRequest(ctx), false),
+  ready: (ctx) => needPoints(ctx, "stops", 2, "stops"),
+};
+
+// --- Height probe ---
+
+const heightTool: ToolDef = {
+  id: "height",
+  label: "Heights",
+  group: "street",
+  path: "/v1/height",
+  layers: ["line", "point"],
+  method: "POST",
+  description: "Terrain heights from the dataset's DEM at clicked points, or a height profile along the line through them. Needs a dataset imported with --dem.",
+  supportsGeojson: false,
+  usesProfile: false,
+  input: "slots",
+  live: true,
+  tableKey: "heights",
+  slots: [{ id: "probe", label: "Probe points", hint: "Each click samples the DEM. In profile mode the points form a line." }],
+  fields: [
+    {
+      key: "probe_mode",
+      label: "Mode",
+      type: "select",
+      default: "points",
+      options: [
+        { value: "points", label: "height at each point" },
+        { value: "profile", label: "profile along the line" },
+      ],
+    },
+    { key: "resample_distance_m", label: "Sample every (m)", type: "number", min: 1, step: 5, placeholder: "vertices only", hint: "Resamples the line at even intervals (at least 1 m)." },
+  ],
+  build: (ctx) => {
+    const profile = str(ctx.form, "probe_mode") === "profile";
+    const body: Record<string, unknown> = { points: ctx.points("probe").map((p) => [round(p.lon), round(p.lat)]) };
+    if (profile) body.range = true;
+    const resample = num(ctx.form, "resample_distance_m");
+    if (resample !== undefined) {
+      if (resample < 1) throw new Error("Sample spacing must be at least 1 m");
+      body.resample_distance_m = resample;
+    }
+    return body;
+  },
+  ready: (ctx) => needPoints(ctx, "probe", str(ctx.form, "probe_mode") === "profile" ? 2 : 1, str(ctx.form, "probe_mode") === "profile" ? "line points" : "probe point"),
+};
+
+// --- Live traffic ---
+
+/** Body of `POST /v1/traffic/live`: one update per distinct clicked way. */
+export function liveTrafficBody(form: Record<string, unknown>, points: InputPoint[]) {
+  const action = str(form, "action") ?? "close";
+  const direction = str(form, "traffic_direction") ?? "both";
+  const ttl = num(form, "ttl_s");
+  const speed = num(form, "speed_kph");
+  if (action === "slow" && (speed === undefined || speed <= 0)) throw new Error("Set a speed above 0 km/h for the slowdown");
+  if (ttl !== undefined && ttl <= 0) throw new Error("Validity must be positive");
+  const seen = new Set<string>();
+  const updates: Record<string, unknown>[] = [];
+  for (const p of points) {
+    if (p.way_id === undefined) continue;
+    const key = `${p.way_id}:${direction}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const update: Record<string, unknown> = { feature_id: p.way_id };
+    if (direction !== "both") update.direction = direction;
+    if (action === "clear") update.clear = true;
+    else {
+      if (action === "slow") update.speed_kph = speed;
+      else update.closed = true;
+      if (ttl !== undefined) update.ttl_s = ttl;
+    }
+    updates.push(update);
+  }
+  return { updates, replace: bool(form, "replace") };
+}
+
+const trafficTool: ToolDef = {
+  id: "traffic",
+  label: "Live traffic",
+  group: "street",
+  path: "/v1/traffic/live?wait=true",
+  runLabel: "Post live updates",
+  layers: ["point"],
+  method: "POST",
+  description: "Closes or slows the clicked roads with live traffic updates, or clears them. Timed car, HGV and transit-vehicle requests with traffic auto use them until they expire.",
+  supportsGeojson: false,
+  usesProfile: false,
+  input: "slots",
+  slots: [{ id: "traffic_ways", label: "Roads", ways: true, hint: "Each click selects the OSM way nearest to it." }],
+  fields: [
+    {
+      key: "action",
+      label: "Update",
+      type: "select",
+      default: "close",
+      options: [
+        { value: "close", label: "close" },
+        { value: "slow", label: "slow down" },
+        { value: "clear", label: "clear live state" },
+      ],
+    },
+    { key: "speed_kph", label: "Speed (km/h)", type: "number", default: 15, min: 1, step: 5, when: (f) => (f.action ?? "close") === "slow" },
+    {
+      key: "traffic_direction",
+      label: "Direction",
+      type: "select",
+      default: "both",
+      options: [
+        { value: "both", label: "both directions" },
+        { value: "forward", label: "forward (along the way)" },
+        { value: "backward", label: "backward" },
+      ],
+    },
+    { key: "ttl_s", label: "Valid for (s)", type: "number", default: 1800, min: 1, step: 300, when: (f) => (f.action ?? "close") !== "clear" },
+    { key: "replace", label: "Replace all live entries", type: "checkbox", default: false, hint: "Otherwise updates merge with the current live state." },
+  ],
+  build: (ctx) => liveTrafficBody(ctx.form, ctx.points("traffic_ways")),
+  ready: (ctx) => {
+    const points = ctx.points("traffic_ways");
+    if (!points.length) return "Click roads on the map to select them";
+    if (points.some((p) => p.way_id === undefined)) return "Looking up the clicked roads…";
+    return null;
+  },
+};
 
 export const NETWORK_COLOR_BY: FieldOption[] = [
   { value: "road_class", label: "road class" },
@@ -1370,7 +1612,7 @@ export const NETWORK_COLOR_BY: FieldOption[] = [
   { value: "pedestrian_kind", label: "pedestrian connection type" },
   { value: "level", label: "source level" },
   { value: "indoor_location", label: "indoor / outdoor" },
-  { value: "access", label: "source access (car/bike/foot)" },
+  { value: "access", label: "source access by travel mode" },
   { value: "direction", label: "one-way / two-way" },
   { value: "component", label: "connected component" },
   { value: "temporal", label: "has opening hours" },
@@ -1446,6 +1688,9 @@ export const TOOLS: ToolDef[] = [
   directionsTool,
   locateTool,
   waypointsTool,
+  tripTool,
+  heightTool,
+  trafficTool,
   odTool,
   matrixTool,
   accessibilityTool,

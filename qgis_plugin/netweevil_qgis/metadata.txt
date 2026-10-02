@@ -3,12 +3,12 @@ name=netweevil
 qgisMinimumVersion=3.28
 qgisMaximumVersion=4.99.0
 supportsQt6=True
-description=Run static and time-dependent netweevil routing, transit, service-area, batch, and simulation analyses with grouped 3D and temporal outputs in QGIS 3 and QGIS 4.
-version=1.2.0
+description=Run static and time-dependent netweevil routing, transit, service-area, batch, trip-optimization, and simulation analyses with grouped 3D and temporal outputs in QGIS 3 and QGIS 4.
+version=1.3.0
 icon=logo.svg
 author=Elmeri Niemi
 email=elmeri.niemi@gmail.com
-about=Connects QGIS directly to the netweevil HTTP API, discovers loaded datasets, profiles, and transit feeds, submits route/transit/OD/matrix/service-area JSON requests with advanced analysis controls, supports time-dependent street routing with scenario, holiday-calendar, and continuous-overlay files, runs multi-mode agent-based traffic simulations, and loads grouped 3D and temporal outputs from API JSON or GeoJSON responses. Works on QGIS 3.28+ (Qt 5) and QGIS 4 (Qt 6).
+about=Connects QGIS directly to the netweevil HTTP API, discovers loaded datasets, profiles, and transit feeds, submits route/transit/OD/matrix/service-area/trip JSON requests with advanced analysis controls, supports time-dependent street routing with scenario, holiday-calendar, and continuous-overlay files, runs multi-mode agent-based traffic simulations, and loads grouped 3D and temporal outputs from API JSON or GeoJSON responses. Works on QGIS 3.28+ (Qt 5) and QGIS 4 (Qt 6).
 category=Vector
 hasProcessingProvider=no
 tags=routing,network analysis,accessibility,service area,transit,gtfs,simulation,temporal,3d,osm
@@ -16,6 +16,14 @@ homepage=https://github.com/elqniemi/netweevil
 tracker=https://github.com/elqniemi/netweevil/issues
 repository=https://github.com/elqniemi/netweevil
 changelog=
+  1.3.0
+  - Trip tab for optimized multi-stop tours (POST /v1/trip) with stops from
+    map picks, selected features, or a point layer; per-stop service times
+    and time windows; visit, leg, and summary layers
+  - Service areas: inbound direction and polygon denoise, minimum part/hole
+    area, and cell size options
+  - Route returns for admin areas (countries, border crossings, timezones)
+    and elevation (ascent/descent, profile table)
   1.2.0
   - Street route and service-area controls for departure datetime, scenario
     overlays, holiday calendars, and CSV/Parquet continuous temporal overlays

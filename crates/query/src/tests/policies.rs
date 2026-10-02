@@ -424,6 +424,98 @@ fn reverse_oneway_fallback_competes_on_penalized_cost() {
     }
 }
 
+fn reverse_oneway(penalty_s: f64, max_illegal_distance_m: Option<f64>) -> FallbackPolicy {
+    FallbackPolicy {
+        allow_reverse_oneway: true,
+        penalties: IllegalMovementPenaltyPolicy {
+            reverse_oneway_penalty_s: Some(penalty_s),
+            ..Default::default()
+        },
+        max_illegal_distance_m,
+        ..Default::default()
+    }
+}
+
+/// The penalized reverse traversal (100 m, 10 + 5 s) is the cheapest route,
+/// but a 50 m illegal-distance limit rules it out. The legal detour still
+/// satisfies the limit, so it is returned instead of an error.
+#[test]
+fn illegal_distance_limit_falls_back_to_a_route_within_it() {
+    let topology = oneway_with_detour_topology();
+    let metrics = uniform_metrics(topology.edge_count(), 10.0);
+    let mut request = route("reverse-or-detour", (6.001, 53.0), (6.0, 53.0), 5.0);
+    request.returns.segment_rows = true;
+    let legal = execute_route(&topology, &metrics, &request).expect("detour is legal");
+    assert_eq!(legal.edge_path, [1, 2]);
+
+    request.fallback = reverse_oneway(5.0, None);
+    let unlimited = execute_route(&topology, &metrics, &request).expect("route succeeds");
+    assert_eq!(unlimited.outcome, AnalysisOutcome::Degraded);
+
+    request.fallback = reverse_oneway(5.0, Some(50.0));
+    let limited = execute_route(&topology, &metrics, &request).expect("detour is within limits");
+    assert_eq!(limited.outcome, AnalysisOutcome::Legal);
+    assert_eq!(limited.edge_path, legal.edge_path);
+    assert!(
+        (limited.summary.total_generalized_cost - legal.summary.total_generalized_cost).abs()
+            < 1e-9
+    );
+}
+
+/// On a one-way dead end every route travels 200 m against the oneway, so
+/// a 50 m limit leaves no route and the limit error is reported.
+#[test]
+fn illegal_distance_limit_errors_only_when_no_route_satisfies_it() {
+    let topology = one_way_dead_end_topology();
+    let metrics = uniform_metrics(topology.edge_count(), 10.0);
+    let mut request = route("reverse-oneway", (6.002, 53.0), (6.0, 53.0), 2.0);
+    request.fallback = reverse_oneway(30.0, Some(50.0));
+
+    let error = execute_route(&topology, &metrics, &request).expect_err("no route fits");
+    assert!(
+        error.to_string().contains("max_illegal_distance_m"),
+        "{error}"
+    );
+}
+
+/// From node 0 to node 2 the turn 0 -> 1 is forbidden. Taking it costs
+/// 20 + 5 s; the legal way round through node 3 costs 30 s.
+#[test]
+fn illegal_turn_limit_falls_back_to_a_route_within_it() {
+    let topology = with_no_turn(
+        topology(
+            "illegal-turn-or-detour",
+            &[(6.0, 53.0), (6.001, 53.0), (6.002, 53.0), (6.001, 53.001)],
+            &[
+                edge(0, 0, 1, 500, 100),
+                edge(1, 1, 2, 501, 100),
+                edge(2, 1, 3, 502, 100),
+                edge(3, 3, 2, 503, 100),
+            ],
+        ),
+        203,
+        &[0, 1],
+    );
+    let metrics = uniform_metrics(topology.edge_count(), 10.0);
+    let mut request = route("illegal-turn-or-detour", (6.0, 53.0), (6.002, 53.0), 40.0);
+    request.returns.segment_rows = true;
+    request.fallback = FallbackPolicy {
+        penalties: IllegalMovementPenaltyPolicy {
+            illegal_turn_penalty_s: Some(5.0),
+            ..Default::default()
+        },
+        ..allow_illegal_turn()
+    };
+    let unlimited = execute_route(&topology, &metrics, &request).expect("route succeeds");
+    assert_eq!(unlimited.outcome, AnalysisOutcome::Degraded);
+    assert_eq!(unlimited.edge_path, [0, 1]);
+
+    request.fallback.max_illegal_turns = Some(0);
+    let limited = execute_route(&topology, &metrics, &request).expect("detour is within limits");
+    assert_eq!(limited.outcome, AnalysisOutcome::Legal);
+    assert_eq!(limited.edge_path, [0, 2, 3]);
+}
+
 #[test]
 fn detects_ferry_only_component_fixture() {
     let topology = ferry_only_subnetwork_topology();

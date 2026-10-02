@@ -24,8 +24,8 @@ use netweevil_persist::WorkspacePaths;
 use tracing_subscriber::EnvFilter;
 
 use crate::analyze::{
-    AnalyzeCommand, analyze_accessibility, analyze_betweenness, analyze_matrix, analyze_od,
-    analyze_route, analyze_route_batch, analyze_scenario_batch, analyze_service_area,
+    AnalyzeCommand, analyze_accessibility, analyze_betweenness, analyze_directions, analyze_matrix,
+    analyze_od, analyze_route, analyze_route_batch, analyze_scenario_batch, analyze_service_area,
     analyze_service_area_sequence, analyze_transit_batch, analyze_transit_route, analyze_trip,
 };
 use crate::api::{ApiCommand, BootstrapArgs, api_serve, bootstrap};
@@ -81,6 +81,7 @@ fn main() -> Result<()> {
         },
         Command::Analyze { command: analyze } => match analyze {
             AnalyzeCommand::Route(args) => analyze_route(&paths, args),
+            AnalyzeCommand::Directions(args) => analyze_directions(&paths, args),
             AnalyzeCommand::RouteBatch(args) => analyze_route_batch(&paths, args),
             AnalyzeCommand::Od(args) => analyze_od(&paths, args),
             AnalyzeCommand::Matrix(args) => analyze_matrix(&paths, args),

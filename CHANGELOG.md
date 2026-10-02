@@ -2,10 +2,26 @@
 
 ## Unreleased
 
+- `netweevil analyze directions` returns turn-by-turn directions from the
+  CLI. It reads a route request or a `/v1/directions` body, takes
+  `--language`, `--units`, `--driving-side` and `--facility-attribute`, and
+  writes the API `result` JSON with a `directions` run manifest.
 - Route failure modes pick the cheapest orientation of the snapped
   attachment on cost plus illegal-movement penalties. Before, the first
   routable orientation won, so a penalized forbidden U-turn could replace a
   cheaper legal route.
+- `fallback.max_illegal_distance_m` and `max_illegal_turns` no longer fail a
+  request whose cheapest penalized route breaks them. The cheapest
+  orientation and route within the limits is returned, and the request fails
+  only when none exists. Alternatives over a limit are dropped.
+- Profiles: `preferences.max_grade` excludes edges whose steepest DEM grade
+  in the travel direction is above a limit, either one rise/run value or
+  separate `uphill`/`downhill` limits.
+- `returns.admin_areas` and `returns.elevation` also annotate waypoint legs
+  (`/v1/waypoints`) and alternative routes, each from its own path.
+- Directions: two same-side turns joined by a short connector (a cycle path
+  hairpin) are one sharp turn, not a U-turn. Walking and cycling jogs that
+  barely change the heading get no step.
 - Inbound service areas (`"direction": "inbound"`): positions that reach the
   origins within the thresholds, from a backward search with turn costs and
   restrictions (backward PHAST for large areas).

@@ -37,12 +37,14 @@ import type { StationGeometryResponse } from "../geo/stationGeometry";
 import { StationGeometryCache } from "../geo/stationGeometryCache";
 import { applyTerrain, selectedTerrain, terrainTileError, TERRAIN_SOURCE } from "./terrain";
 import { applyNetworkTiles, networkTileUrl } from "./networkTiles";
+import { stopLetter } from "../tools/clock";
 
 const RESULT_SOURCE = "results";
 const INPUT_SOURCE = "inputs";
 const SIM_AGENTS_SOURCE = "sim-agents";
 const SIM_EDGES_SOURCE = "sim-edges";
 const EDITOR_SOURCE = "editor";
+const PROFILE_HOVER_SOURCE = "profile-hover";
 const EDITOR_LAYERS = ["editor-base-stop", "editor-stop"];
 
 /** Map features of the GTFS editor: base feed stops, scenario stops and lines. */
@@ -145,7 +147,7 @@ function inputFeatures(tool: ToolId, routes: RouteInput[]): FeatureCollection {
     const points = getPoints(slot.id);
     points.forEach((p, index) => {
       const color = SLOT_COLORS[slot.id] ?? "#7B3FB8";
-      const label = slot.max === 1 ? slot.label[0] : String(index + 1);
+      const label = slot.max === 1 ? slot.label[0] : slot.timed ? stopLetter(index) : String(index + 1);
       features.push({
         type: "Feature",
         id: id++,
@@ -170,7 +172,7 @@ function selectionExpression(selected: number | null): maplibregl.ExpressionSpec
 
 function addLayers(map: MapLibreMap) {
   if (map.getSource(RESULT_SOURCE)) return;
-  for (const id of [RESULT_SOURCE, INPUT_SOURCE, SIM_EDGES_SOURCE, SIM_AGENTS_SOURCE, EDITOR_SOURCE]) {
+  for (const id of [RESULT_SOURCE, INPUT_SOURCE, SIM_EDGES_SOURCE, SIM_AGENTS_SOURCE, EDITOR_SOURCE, PROFILE_HOVER_SOURCE]) {
     map.addSource(id, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
   }
 
@@ -216,7 +218,7 @@ function addLayers(map: MapLibreMap) {
     id: "results-point",
     type: "circle",
     source: RESULT_SOURCE,
-    filter: ["==", ["geometry-type"], "Point"],
+    filter: ["all", ["==", ["geometry-type"], "Point"], ["!=", ["get", "_kind"], "trip_stops"]],
     paint: {
       "circle-radius": ["get", "_radius"],
       "circle-color": ["get", "_color"],
@@ -224,6 +226,38 @@ function addLayers(map: MapLibreMap) {
       "circle-stroke-color": "#ffffff",
       "circle-stroke-width": 1.5,
     },
+  });
+
+  // Height labels next to probed points.
+  map.addLayer({
+    id: "results-label",
+    type: "symbol",
+    source: RESULT_SOURCE,
+    filter: ["all", ["==", ["geometry-type"], "Point"], ["==", ["get", "_kind"], "heights"]],
+    layout: { "text-field": ["get", "_label"], "text-size": 11, "text-font": ["Noto Sans Bold"], "text-anchor": "left", "text-offset": [0.8, 0], "text-allow-overlap": false },
+    paint: { "text-color": PALETTE.ink, "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
+  });
+  // Trip visit order: a numbered badge at the upper right of each stop marker.
+  map.addLayer({
+    id: "results-badge",
+    type: "circle",
+    source: RESULT_SOURCE,
+    filter: ["==", ["get", "_kind"], "trip_stops"],
+    paint: { "circle-radius": 9, "circle-color": ["get", "_color"], "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.5, "circle-translate": [13, -13] },
+  });
+  map.addLayer({
+    id: "results-badge-label",
+    type: "symbol",
+    source: RESULT_SOURCE,
+    filter: ["==", ["get", "_kind"], "trip_stops"],
+    layout: { "text-field": ["get", "_label"], "text-size": 10, "text-font": ["Noto Sans Bold"], "text-allow-overlap": true, "text-ignore-placement": true },
+    paint: { "text-color": "#ffffff", "text-translate": [13, -13] },
+  });
+  map.addLayer({
+    id: "profile-hover",
+    type: "circle",
+    source: PROFILE_HOVER_SOURCE,
+    paint: { "circle-radius": 6, "circle-color": PALETTE.ink, "circle-stroke-color": "#ffffff", "circle-stroke-width": 2 },
   });
 
   map.addLayer({
@@ -447,6 +481,7 @@ export function MapView({ service }: Props) {
       setSource(map, SIM_EDGES_SOURCE, getState().simulation.edgeFeatures ?? EMPTY_COLLECTION);
       setSource(map, EDITOR_SOURCE, editorFeatures(getState().editor, getState().tool === "transit_editor"));
       applySelection(map, getState().selectedRun);
+      setSource(map, PROFILE_HOVER_SOURCE, profileHoverFeatures(getState().profileHover));
       applyMarkerScale(map, getState().mapStyle.markerScale);
       apply3dPresentation(map, !!overlayRef.current && getState().mapStyle.view3d);
       setState({ terrainError: null });
@@ -592,7 +627,7 @@ export function MapView({ service }: Props) {
     map.on("mouseleave", "inputs-point", () => setCursor(placing() ? "crosshair" : ""));
 
     // --- Hover info for results. ---
-    const hoverLayers = ["results-point", "results-line", "results-line-dashed", "results-fill", "sim-agents", "sim-edges"];
+    const hoverLayers = ["results-badge", "results-point", "results-line", "results-line-dashed", "results-fill", "sim-agents", "sim-edges"];
     map.on("mousemove", (e) => {
       if (dragging || !styleReady.current) return;
       if (getState().mapStyle.view3d && overlayRef.current) return;
@@ -771,6 +806,13 @@ export function MapView({ service }: Props) {
     applySelection(map, selectedRun);
   }, [selectedRun]);
 
+  const profileHover = useStore((s) => s.profileHover);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady.current) return;
+    setSource(map, PROFILE_HOVER_SOURCE, profileHoverFeatures(profileHover));
+  }, [profileHover]);
+
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleReady.current) return;
@@ -848,8 +890,13 @@ export function MapView({ service }: Props) {
   return <><div ref={containerRef} className="map" />{threeDError && mapStyle.view3d && <div className="map-3d-error" role="alert">3D could not start. The flat map is still available. {threeDError}</div>}</>;
 }
 
+function profileHoverFeatures(position: [number, number] | null): FeatureCollection {
+  if (!position) return EMPTY_COLLECTION;
+  return { type: "FeatureCollection", features: [{ type: "Feature", geometry: { type: "Point", coordinates: position }, properties: {} }] };
+}
+
 function apply3dPresentation(map: MapLibreMap, active: boolean) {
-  for (const id of ["results-line", "results-line-casing", "results-line-dashed", "results-point", "results-fill", "results-fill-outline"]) {
+  for (const id of ["results-line", "results-line-casing", "results-line-dashed", "results-point", "results-fill", "results-fill-outline", "results-label", "results-badge", "results-badge-label"]) {
     const visibility = active ? "none" : "visible";
     if (map.getLayer(id) && map.getLayoutProperty(id, "visibility") !== visibility) map.setLayoutProperty(id, "visibility", visibility);
   }

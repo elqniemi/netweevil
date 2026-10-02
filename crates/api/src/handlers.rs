@@ -157,7 +157,7 @@ async fn execute_route_response(
     state: ApiState,
     query: ResponseFormatQuery,
     payload: RouteExecutionRequest,
-    directions: Option<DirectionsOptions>,
+    mut directions: Option<DirectionsOptions>,
 ) -> Result<Response, ApiError> {
     let runtime = state.runtime()?;
     let dynamic = if payload.profile.is_some() || payload.profile_overrides.is_some() {
@@ -173,14 +173,14 @@ async fn execute_route_response(
     } else {
         None
     };
-    let (engine, facility_attribute) = if let Some(dynamic) = &dynamic {
-        (Arc::clone(&dynamic.engine), None)
+    let engine = if let Some(dynamic) = &dynamic {
+        Arc::clone(&dynamic.engine)
     } else {
         let profile = resolve_profile(runtime.as_ref(), payload.profile_id.as_deref())?;
-        (
-            Arc::clone(&profile.engine),
-            Some(profile.document.facilities.attribute.clone()),
-        )
+        if let Some(options) = directions.as_mut() {
+            options.use_profile_facility_attribute(&profile.document);
+        }
+        Arc::clone(&profile.engine)
     };
     info!(
         endpoint = "route",
@@ -225,10 +225,7 @@ async fn execute_route_response(
         .await;
     }
     let result = run_inline_analysis(&state, "route", Some(&route_id), move || {
-        if let Some(mut options) = directions {
-            if options.facility_attribute.is_none() {
-                options.facility_attribute = facility_attribute;
-            }
+        if let Some(options) = directions {
             let names = edge_names.expect("directions load edge names");
             return engine
                 .execute_directions(

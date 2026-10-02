@@ -56,17 +56,48 @@ pub(crate) fn wants_annotations(returns: &ReturnConfig) -> bool {
     returns.admin_areas || returns.elevation
 }
 
-/// Adds the requested annotations to a route with an edge path.
+/// Adds the requested annotations to a route and its alternatives, each
+/// from its own edge path. Waypoint legs are routes and are annotated one
+/// leg at a time.
 pub(crate) fn annotate_route(
     topology: &TopologyBundle,
     returns: &ReturnConfig,
     route: &mut RouteResult,
 ) {
-    if !wants_annotations(returns) || route.edge_path.is_empty() {
+    if !wants_annotations(returns) {
         return;
     }
-    let edges = route
-        .edge_path
+    (route.regions, route.elevation) = path_annotations(
+        topology,
+        returns,
+        &route.edge_path,
+        &route.origin,
+        &route.destination,
+    );
+    for alternative in &mut route.alternatives {
+        (alternative.regions, alternative.elevation) = path_annotations(
+            topology,
+            returns,
+            &alternative.edge_path,
+            &route.origin,
+            &route.destination,
+        );
+    }
+}
+
+/// The requested regions and elevation profile of an edge path between two
+/// snapped points; nothing for an empty path.
+fn path_annotations(
+    topology: &TopologyBundle,
+    returns: &ReturnConfig,
+    edge_path: &[u32],
+    origin: &SnappedPoint,
+    destination: &SnappedPoint,
+) -> (Option<RouteRegions>, Option<RouteElevationProfile>) {
+    if edge_path.is_empty() {
+        return (None, None);
+    }
+    let edges = edge_path
         .iter()
         .map(|edge| *edge as usize)
         .filter(|edge| *edge < topology.edge_count())
@@ -79,23 +110,18 @@ pub(crate) fn annotate_route(
                 edge,
                 position == 0,
                 position + 1 == edges.len(),
-                &route.origin,
-                &route.destination,
+                origin,
+                destination,
             )
         })
         .collect::<Vec<_>>();
-    if returns.admin_areas {
-        route.regions = Some(route_regions(topology, &edges, &factors));
-    }
-    if returns.elevation {
-        route.elevation = Some(elevation_profile(
-            topology,
-            &edges,
-            &factors,
-            &route.origin,
-            &route.destination,
-        ));
-    }
+    let regions = returns
+        .admin_areas
+        .then(|| route_regions(topology, &edges, &factors));
+    let elevation = returns
+        .elevation
+        .then(|| elevation_profile(topology, &edges, &factors, origin, destination));
+    (regions, elevation)
 }
 
 fn route_regions(topology: &TopologyBundle, edges: &[usize], factors: &[f64]) -> RouteRegions {

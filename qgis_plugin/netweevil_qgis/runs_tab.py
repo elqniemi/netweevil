@@ -51,6 +51,7 @@ class RunsTabMixin:
         self.saved_run_kind_combo.addItem("OD", "od")
         self.saved_run_kind_combo.addItem("Matrix", "matrix")
         self.saved_run_kind_combo.addItem("Service area", "service_area")
+        self.saved_run_kind_combo.addItem("Trip", "trip")
         file_form.addRow(
             "File",
             self._line_with_browse(self.saved_run_path_edit, browse_dir=False),
@@ -165,6 +166,8 @@ class RunsTabMixin:
             self.load_route_layers(payload, layer_name)
         elif kind == "transit_route":
             self.load_transit_route_layers(payload, layer_name)
+        elif kind == "trip":
+            self.load_trip_layers(payload, layer_name)
         else:
             geojson = self.analysis_json_to_geojson(kind, payload)
             if geojson is None:
@@ -241,6 +244,8 @@ class RunsTabMixin:
     def infer_result_analysis_kind(self, result):
         if not isinstance(result, dict):
             return None
+        if "trip_id" in result and "stop_order" in result and "visits" in result:
+            return "trip"
         if "legs" in result and "summary" in result:
             return "transit_route"
         if "pairs" in result:
@@ -282,7 +287,7 @@ class RunsTabMixin:
 
     def saved_json_layer_name(self, path, kind, payload):
         result = payload.get("result") or {}
-        for key in ["route_id", "analysis_id"]:
+        for key in ["route_id", "analysis_id", "trip_id"]:
             value = result.get(key)
             if value:
                 return str(value)

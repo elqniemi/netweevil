@@ -360,7 +360,7 @@ Top-level commands:
 - `dataset import|update|audit|list`
 - `transit import|bindings apply|transfers build|list`
 - `profile validate|compile`
-- `analyze route|route-batch|od|matrix|accessibility|service-area|service-area-sequence|betweenness|scenario-batch|transit-route|transit-batch|trip`
+- `analyze route|directions|route-batch|od|matrix|accessibility|service-area|service-area-sequence|betweenness|scenario-batch|transit-route|transit-batch|trip`
 - `experiment run`
 - `simulate validate|run`
 - `report render`
@@ -420,8 +420,13 @@ Route `fallback` flags (`allow_reverse_oneway`, `allow_illegal_turn`,
 illegal movements available at their `penalties`. The route minimizes cost plus
 penalties, so a legal route is returned whenever it costs no more than the
 cheapest penalized one; a returned route is `degraded` only if it uses an
-illegal movement. `auto_relax_unreachable` instead routes strictly first and
-relaxes only when no legal route exists.
+illegal movement. `max_illegal_distance_m` (reverse-oneway metres) and
+`max_illegal_turns` (relaxed turn restrictions) cap a route's illegal
+movements. When the cheapest penalized route breaks a cap, the cheapest route
+and snapped orientation within the caps is returned. Only when no route stays
+within the caps does the request fail. Alternatives over a cap are dropped.
+`auto_relax_unreachable` instead routes strictly first and relaxes only when no
+legal route exists.
 
 ## Transit
 
@@ -709,7 +714,8 @@ plus optional `directions_options`:
 `fi` and `zh-Hant` (also `zh-HK`, `zh-TW`, `zh`). Subtags are dropped until a
 table matches (`nl-BE` uses `nl`). Unknown languages fall back to English and
 add a warning. `units` is `metric` or `imperial`. `driving_side` overrides the
-dataset; without it, right-hand traffic is assumed. `facility_attribute` names
+dataset. Without it, the traffic side of the country at the origin is used
+when the dataset has admin areas, and right-hand traffic otherwise. `facility_attribute` names
 the attribute that marks stairs, escalators, lifts and moving walkways. It
 defaults to the profile's `facilities.attribute`. `GET /v1/service` lists the
 languages under `capabilities.directions_languages`.
@@ -737,6 +743,11 @@ only when no name or route number carries over. `signs` holds `exit_number`
 and the junction `name`. `lanes` lists the approach lanes from `turn:lanes`,
 left to right, with their `indications` and `valid`/`active` flags. Walking and
 cycling routes get plain turns: no ramps, exits, lanes or U-turn collapsing.
+Two turns joined by a connector of up to 10 m are one turn. When they turn
+the route around, that is a sharp turn; only a motor vehicle crossing a
+dual carriageway gets a U-turn. A jog that leaves the heading
+almost unchanged, such as a step across onto a parallel cycle path, gets no
+step unless it leads onto a newly named street.
 
 Each maneuver identifies a half-open range in `route.edge_path`; distance and
 edge time sum those segments. Turn penalties remain in the route summary.
@@ -752,6 +763,22 @@ steps and walking instructions.
 curl -X POST http://127.0.0.1:8080/v1/directions \
   -H 'content-type: application/json' \
   --data @examples/api/north_nl_directions.json
+```
+
+`netweevil analyze directions` runs the same directions engine locally. It
+reads a bare route request or the `/v1/directions` body above. `--language`,
+`--units`, `--driving-side` and `--facility-attribute` replace the matching
+`directions_options` from the file. The command writes the `result` object
+as JSON (`--out` must be a `.json` path; without it, the result goes to
+`.netweevil/runs/`) and records a `directions` run manifest:
+
+```bash
+cargo run -p netweevil-cli -- analyze directions \
+  --dataset north_nl_2026_05_10 \
+  --profile examples/profiles/car_north_nl_2026_05.yml \
+  --request examples/api/north_nl_directions.json \
+  --language de --units imperial \
+  --out .netweevil/runs/example-directions.json
 ```
 
 Route request shape:

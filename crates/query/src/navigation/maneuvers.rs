@@ -255,6 +255,24 @@ fn is_plain_turn(kind: ManeuverType) -> bool {
     )
 }
 
+/// Maneuvers that a short connector can join into one turn.
+fn is_turn_like(kind: ManeuverType) -> bool {
+    is_plain_turn(kind)
+        || matches!(
+            kind,
+            ManeuverType::Continue
+                | ManeuverType::KeepLeft
+                | ManeuverType::KeepRight
+                | ManeuverType::KeepStraight
+        )
+}
+
+/// A step onto `street` names it when the street is known and differs from
+/// the one the previous step was on.
+fn announces_street(previous: &Draft, street: &Street) -> bool {
+    !street.is_empty() && !street.same_road(&previous.street)
+}
+
 /// Where `delta` lies among `angles`: left of all, right of all, or between.
 fn relative_side(delta: f64, angles: impl IntoIterator<Item = f64> + Clone) -> Option<bool> {
     let left_of_all = angles.clone().into_iter().all(|angle| angle > delta);
@@ -264,6 +282,19 @@ fn relative_side(delta: f64, angles: impl IntoIterator<Item = f64> + Clone) -> O
         (false, true) => Some(false),
         _ => None,
     }
+}
+
+/// The point `distance_m` from `from` toward `to` on an edge of
+/// `length_m`, or `to` when the edge is shorter.
+fn along(from: [f64; 2], to: [f64; 2], distance_m: u32, length_m: u32) -> [f64; 2] {
+    if length_m == 0 || distance_m >= length_m {
+        return to;
+    }
+    let fraction = f64::from(distance_m) / f64::from(length_m);
+    [
+        from[0] + (to[0] - from[0]) * fraction,
+        from[1] + (to[1] - from[1]) * fraction,
+    ]
 }
 
 pub(super) fn bearing(a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -396,14 +427,17 @@ impl ManeuverBuilder<'_> {
     }
 
     /// Heading from the head of `edge` back toward the route start, measured
-    /// over up to [`HEADING_LOOKAHEAD_M`].
+    /// over up to [`HEADING_LOOKAHEAD_M`]. The measuring point is
+    /// interpolated on the edge that crosses the lookahead, so a long edge
+    /// beyond a short connector does not stretch the heading past it.
     fn heading_into(&self, position: usize) -> f64 {
         let junction = self.node(self.topology.routing_edge(self.edge(position)).from);
         let mut travelled = 0;
         let mut point = junction;
         for back in (0..position).rev() {
             let edge = self.topology.routing_edge(self.edge(back));
-            point = self.node(edge.from);
+            let (near, far) = (self.node(edge.to), self.node(edge.from));
+            point = along(near, far, HEADING_LOOKAHEAD_M - travelled, edge.length_m);
             travelled += edge.length_m;
             if travelled >= HEADING_LOOKAHEAD_M {
                 break;
@@ -419,7 +453,8 @@ impl ManeuverBuilder<'_> {
         let mut point = junction;
         for ahead in position..self.route.edge_path.len() {
             let edge = self.topology.routing_edge(self.edge(ahead));
-            point = self.node(edge.to);
+            let (near, far) = (self.node(edge.from), self.node(edge.to));
+            point = along(near, far, HEADING_LOOKAHEAD_M - travelled, edge.length_m);
             travelled += edge.length_m;
             if travelled >= HEADING_LOOKAHEAD_M {
                 break;
@@ -455,7 +490,14 @@ impl ManeuverBuilder<'_> {
             edge = self.topology.routing_edge(next);
             travelled += edge.length_m;
         }
-        bearing(junction, self.node(edge.to))
+        let before = travelled.saturating_sub(edge.length_m);
+        let end = along(
+            self.node(edge.from),
+            self.node(edge.to),
+            HEADING_LOOKAHEAD_M.saturating_sub(before),
+            edge.length_m,
+        );
+        bearing(junction, end)
     }
 
     fn junction(&self, position: usize, state: usize) -> Junction {
@@ -726,62 +768,117 @@ impl ManeuverBuilder<'_> {
 
     /// Joins turns separated by a very short connector into one turn, and
     /// for motor vehicles the two turns of a dual-carriageway crossing into
-    /// one turn or a U-turn. A short jog that ends on the street it left
-    /// needs no instruction at all.
+    /// one turn or a U-turn. Only a dual-carriageway crossing becomes a
+    /// U-turn: two same-side turns around a connector (a cycle path hairpin)
+    /// are one sharp turn. A short jog with little overall heading change
+    /// needs no instruction unless it moves onto a differently named street.
     fn collapse_short_turns(&self, drafts: &mut Vec<Draft>) {
-        let turn_like = |kind| {
-            is_plain_turn(kind)
-                || matches!(
-                    kind,
-                    ManeuverType::Continue
-                        | ManeuverType::KeepLeft
-                        | ManeuverType::KeepRight
-                        | ManeuverType::KeepStraight
-                )
-        };
         let mut index = 1;
-        while index + 1 < drafts.len() {
-            let span = self.span_length(&drafts[index]);
-            let (first, second) = (&drafts[index], &drafts[index + 1]);
-            let crossing = self.motor_vehicle
-                && is_plain_turn(first.kind)
-                && is_plain_turn(second.kind)
-                && span <= INTERNAL_EDGE_MAX_M
-                && matches!(
-                    (first.turn_delta, second.turn_delta),
-                    (Some(a), Some(b)) if a.signum() == b.signum() && a.abs() >= 45.0 && b.abs() >= 45.0
-                );
-            let connector =
-                turn_like(first.kind) && turn_like(second.kind) && span <= SHORT_CONNECTOR_M;
-            if !(crossing || connector) {
-                index += 1;
+        while index < drafts.len() {
+            if index + 1 < drafts.len() && self.merge_with_next(drafts, index) {
                 continue;
             }
-            let delta = first.turn_delta.unwrap_or(0.0) + second.turn_delta.unwrap_or(0.0);
-            let (kind, movement) = if crossing && delta.abs() >= 160.0 {
-                uturn(self.driving_side)
-            } else {
-                turn_maneuver(normalize(delta), self.driving_side)
-            };
-            let second = drafts.remove(index + 1);
-            let back_on_previous_street = kind == ManeuverType::Continue
-                && !second.street.is_empty()
-                && second.street.same_road(&drafts[index - 1].street);
-            if back_on_previous_street {
-                let first = drafts.remove(index);
-                drafts[index - 1].end = second.end.max(first.end);
+            if !self.motor_vehicle && self.settle_single_jog(drafts, index) {
                 continue;
             }
-            let first = &mut drafts[index];
-            first.kind = kind;
-            first.lane_movement = Some(movement);
-            first.turn_delta = Some(delta);
-            first.end = second.end;
-            first.bearing_after = second.bearing_after;
-            if !second.street.is_empty() {
-                first.street = second.street;
-            }
+            index += 1;
         }
+    }
+
+    /// Merges `drafts[index]` with the next draft when they are the two
+    /// turns of a short connector or a crossing. Returns whether the drafts
+    /// changed.
+    fn merge_with_next(&self, drafts: &mut Vec<Draft>, index: usize) -> bool {
+        let span = self.span_length(&drafts[index]);
+        let (first, second) = (&drafts[index], &drafts[index + 1]);
+        let crossing = self.motor_vehicle
+            && is_plain_turn(first.kind)
+            && is_plain_turn(second.kind)
+            && span <= INTERNAL_EDGE_MAX_M
+            && matches!(
+                (first.turn_delta, second.turn_delta),
+                (Some(a), Some(b)) if a.signum() == b.signum() && a.abs() >= 45.0 && b.abs() >= 45.0
+            );
+        let connector =
+            is_turn_like(first.kind) && is_turn_like(second.kind) && span <= SHORT_CONNECTOR_M;
+        if !(crossing || connector) {
+            return false;
+        }
+        // The turn angles of two close junctions overlap (each heading looks
+        // past the connector), so their sum overstates the turn. The overall
+        // change is measured from the approach to the departure, wound to
+        // the side the two turns go.
+        let summed = first.turn_delta.unwrap_or(0.0) + second.turn_delta.unwrap_or(0.0);
+        let rotation = match (first.bearing_before, second.bearing_after) {
+            (Some(before), Some(after)) => summed + normalize(after - before - summed),
+            _ => summed,
+        };
+        let (kind, movement) = match turn_of(rotation) {
+            Turn::Reverse if crossing => uturn(self.driving_side),
+            Turn::Reverse if rotation > 0.0 => (ManeuverType::SharpRight, LaneMovement::SharpRight),
+            Turn::Reverse => (ManeuverType::SharpLeft, LaneMovement::SharpLeft),
+            _ => turn_maneuver(rotation, self.driving_side),
+        };
+        let second = drafts.remove(index + 1);
+        if kind == ManeuverType::Continue && !announces_street(&drafts[index - 1], &second.street) {
+            let first = drafts.remove(index);
+            drafts[index - 1].end = second.end.max(first.end);
+            return true;
+        }
+        let first = &mut drafts[index];
+        first.kind = kind;
+        first.lane_movement = Some(movement);
+        first.turn_delta = Some(rotation);
+        first.end = second.end;
+        first.bearing_after = second.bearing_after;
+        if !second.street.is_empty() {
+            first.street = second.street;
+        }
+        true
+    }
+
+    /// A walking or cycling step whose junction is followed within
+    /// [`SHORT_CONNECTOR_M`] by another junction the route passes without
+    /// an instruction: a cycle path jog when the heading after the second
+    /// junction is about the heading before the first. The jog is dropped,
+    /// or kept as a plain continue when it leads onto a newly named street.
+    /// Returns whether the drafts changed.
+    fn settle_single_jog(&self, drafts: &mut Vec<Draft>, index: usize) -> bool {
+        let draft = &drafts[index];
+        if !is_turn_like(draft.kind) || draft.kind == ManeuverType::Continue {
+            return false;
+        }
+        let Some(before) = draft.bearing_before else {
+            return false;
+        };
+        let mut connector_m = 0;
+        let mut exit = None;
+        for position in draft.begin..draft.end.saturating_sub(1) {
+            connector_m += self.topology.routing_edge(self.edge(position)).length_m;
+            if u64::from(connector_m) > SHORT_CONNECTOR_M {
+                break;
+            }
+            exit = Some(position + 1);
+        }
+        let Some(exit) = exit else {
+            return false;
+        };
+        let overall = normalize(self.heading_out_of(exit) - before);
+        if turn_of(overall) != Turn::Straight {
+            return false;
+        }
+        let street = self.street(exit);
+        if announces_street(&drafts[index - 1], &street) {
+            let draft = &mut drafts[index];
+            draft.kind = ManeuverType::Continue;
+            draft.lane_movement = Some(LaneMovement::Through);
+            draft.turn_delta = Some(overall);
+            draft.street = street;
+        } else {
+            let draft = drafts.remove(index);
+            drafts[index - 1].end = draft.end;
+        }
+        true
     }
 
     fn finish_facilities(&self, drafts: &mut [Draft]) {
