@@ -1,6 +1,6 @@
 # GTFS transfer rules
 
-`transfers.txt` is imported into transit bundle schema 6. Re-import existing feeds after upgrading. Changes to the file contribute to the source hash and invalidate derived bundles.
+`transfers.txt` is imported into transit bundle schema 7. Re-import existing feeds after upgrading. Changes to the file contribute to the source hash and invalidate derived bundles.
 
 Depart-at, arrive-by, and service-area searches apply these rules when changing vehicles:
 

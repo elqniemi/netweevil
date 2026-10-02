@@ -319,14 +319,7 @@ fn transfer_builder_routes_bound_stops_directionally() {
 
     let path = temp_path("transfers");
     write_transit_transfer_table(&path, &table).unwrap();
-    assert_eq!(
-        std::fs::read(&path).unwrap(),
-        bincode::serialize(&table).unwrap()
-    );
-    assert_eq!(
-        read_transit_transfer_table(&path).unwrap().transfers.len(),
-        table.transfers.len()
-    );
+    assert_eq!(read_transit_transfer_table(&path).unwrap(), table);
     std::fs::remove_file(path).unwrap();
 
     let coordinate_only =

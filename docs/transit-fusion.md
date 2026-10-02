@@ -60,10 +60,24 @@ Build separate tables for profiles such as `walk` and `step_free`.
 Unreachable pairs are omitted, so an unavailable lift or an inaccessible
 platform does not acquire a geometric fallback inside that table.
 
-Transfer tables can be written as readable JSON (a `.json` path) or compact
-bincode and loaded with `read_transit_transfer_table`. Construct a router with
-`PreparedTransitRouter::new_with_transfer_tables`, then select one in a transit
-request:
+Transfer tables can be written as readable JSON (a `.json` path) or in the
+packed binary layout (schema 2). `build_packed_transit_transfer_table`,
+`read_packed_transit_transfer_table` and
+`PreparedTransitRouter::new_with_packed_transfer_tables` keep the table packed;
+`build_transit_transfer_table`, `read_transit_transfer_table` and
+`new_with_transfer_tables` work with the expanded `TransitTransferTable`.
+
+The packed layout keeps the routing columns (target stop, straight-line
+distance, walking time) as flat arrays. Paths are stored once per origin stop
+as a trie of shared edge and geometry steps. Coordinates sit in a deduplicated
+`f64` point pool, and component values use the shortest exact encoding.
+Unpacking is lossless: a returned transfer leg carries the same edge path,
+geometry, distance and components as the street router produced. Only paths on
+returned legs are decoded. The checked Hong Kong pedestrian tables shrank from
+about 870–960 MB to 38–42 MB each. Older bincode tables are rejected; rebuild
+them with `netweevil transit transfers build`.
+
+Select a loaded table in a transit request:
 
 ```json
 {

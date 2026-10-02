@@ -1,9 +1,9 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 
-use crate::backward::{BackwardIndex, execute_transit_route_arrive_by};
+use crate::backward::{BackwardIndex, BackwardTimetable, execute_transit_route_arrive_by};
 use crate::fusion::index_transit_transfer_table;
 use crate::legs::{
     build_transit_route_stop_segments, build_transit_route_stops, coalesce_transit_legs,
@@ -21,6 +21,7 @@ use crate::runtime::{
     build_transfer_candidates, can_finish_with_egress, can_start_transfer_walk, relax_state,
 };
 use crate::service_area::execute_transit_service_area_with_runtime;
+use crate::transfer_pack::PackedTransitTransferTable;
 
 /// Completed journey candidate: a transit state plus the egress leg that
 /// finishes it at the requested destination.
@@ -33,6 +34,35 @@ struct FinalCandidate {
     egress_network_path: Option<TransitStreetPath>,
 }
 
+/// A loaded network transfer table: the routing adjacency plus the packed
+/// paths its candidates reference.
+struct NetworkTransfers {
+    candidates: Vec<Vec<StopCandidate>>,
+    table: PackedTransitTransferTable,
+}
+
+/// Transfer adjacency selected for one request.
+enum TransferSet {
+    Geometric(Arc<Vec<Vec<StopCandidate>>>),
+    Network(Arc<NetworkTransfers>),
+}
+
+impl TransferSet {
+    fn candidates(&self) -> &[Vec<StopCandidate>] {
+        match self {
+            Self::Geometric(candidates) => candidates,
+            Self::Network(transfers) => &transfers.candidates,
+        }
+    }
+
+    fn runtime<'a>(&'a self, runtime: TransitRuntime<'a>) -> TransitRuntime<'a> {
+        match self {
+            Self::Geometric(_) => runtime,
+            Self::Network(transfers) => runtime.with_transfer_paths(&transfers.table),
+        }
+    }
+}
+
 pub struct PreparedTransitRouter {
     bundle: Arc<TransitBundle>,
     departures_by_stop: DepartureIndex,
@@ -40,10 +70,12 @@ pub struct PreparedTransitRouter {
     /// Keep only the latest geometric radius so arbitrary request radii do
     /// not grow an unbounded cache. Active requests retain their Arc.
     transfer_candidates: Mutex<Option<(u64, Arc<Vec<Vec<StopCandidate>>>)>>,
-    network_transfer_candidates: HashMap<String, Arc<Vec<Vec<StopCandidate>>>>,
+    network_transfers: HashMap<String, Arc<NetworkTransfers>>,
     /// Reverse indexes per transfer profile, built on the first arrive-by
     /// request that needs them and shared by every later request.
     backward_indexes: Mutex<HashMap<(Option<String>, u64), Arc<BackwardIndex>>>,
+    /// Timetable half of the reverse indexes, shared across transfer profiles.
+    backward_timetable: OnceLock<Arc<BackwardTimetable>>,
 }
 
 impl PreparedTransitRouter {
@@ -55,8 +87,9 @@ impl PreparedTransitRouter {
             departures_by_stop,
             stop_index,
             transfer_candidates: Mutex::new(None),
-            network_transfer_candidates: HashMap::new(),
+            network_transfers: HashMap::new(),
             backward_indexes: Mutex::new(HashMap::new()),
+            backward_timetable: OnceLock::new(),
         }
     }
 
@@ -67,14 +100,30 @@ impl PreparedTransitRouter {
         bundle: Arc<TransitBundle>,
         tables: Vec<TransitTransferTable>,
     ) -> Result<Self> {
+        let tables = tables
+            .iter()
+            .map(PackedTransitTransferTable::from_table)
+            .collect::<Result<Vec<_>>>()?;
+        Self::new_with_packed_transfer_tables(bundle, tables)
+    }
+
+    /// Like [`Self::new_with_transfer_tables`] for tables read with
+    /// `read_packed_transit_transfer_table`; paths stay packed in memory.
+    pub fn new_with_packed_transfer_tables(
+        bundle: Arc<TransitBundle>,
+        tables: Vec<PackedTransitTransferTable>,
+    ) -> Result<Self> {
         let departures_by_stop = build_departures_by_stop(&bundle);
         let stop_index = StopSpatialIndex::new(&bundle.stops);
-        let mut network_transfer_candidates = HashMap::new();
+        let mut network_transfers = HashMap::new();
         for table in tables {
             let profile_id = table.profile_id.clone();
             let candidates = index_transit_transfer_table(&bundle, &table)?;
-            if network_transfer_candidates
-                .insert(profile_id.clone(), Arc::new(candidates))
+            if network_transfers
+                .insert(
+                    profile_id.clone(),
+                    Arc::new(NetworkTransfers { candidates, table }),
+                )
                 .is_some()
             {
                 anyhow::bail!("duplicate transit transfer table profile_id '{profile_id}'");
@@ -85,14 +134,15 @@ impl PreparedTransitRouter {
             departures_by_stop,
             stop_index,
             transfer_candidates: Mutex::new(None),
-            network_transfer_candidates,
+            network_transfers,
             backward_indexes: Mutex::new(HashMap::new()),
+            backward_timetable: OnceLock::new(),
         })
     }
 
     pub fn transfer_profile_ids(&self) -> Vec<&str> {
         let mut ids = self
-            .network_transfer_candidates
+            .network_transfers
             .keys()
             .map(String::as_str)
             .collect::<Vec<_>>();
@@ -123,7 +173,13 @@ impl PreparedTransitRouter {
         {
             return Ok(Arc::clone(index));
         }
-        let index = Arc::new(BackwardIndex::build(self.bundle.as_ref(), transfers));
+        let timetable = self
+            .backward_timetable
+            .get_or_init(|| Arc::new(BackwardTimetable::build(self.bundle.as_ref())));
+        let index = Arc::new(BackwardIndex::with_timetable(
+            Arc::clone(timetable),
+            transfers,
+        ));
         let mut indexes = self
             .backward_indexes
             .lock()
@@ -135,10 +191,7 @@ impl PreparedTransitRouter {
         Ok(index)
     }
 
-    fn transfer_candidates_for(
-        &self,
-        modes: &TransitModeOptions,
-    ) -> Result<Arc<Vec<Vec<StopCandidate>>>> {
+    fn transfer_candidates_for(&self, modes: &TransitModeOptions) -> Result<TransferSet> {
         if !modes.max_transfer_distance_m.is_finite() || modes.max_transfer_distance_m < 0.0 {
             anyhow::bail!("max_transfer_distance_m must be finite and nonnegative");
         }
@@ -151,7 +204,7 @@ impl PreparedTransitRouter {
             if let Some((radius, candidates)) = cache.as_ref()
                 && *radius == key
             {
-                return Ok(Arc::clone(candidates));
+                return Ok(TransferSet::Geometric(Arc::clone(candidates)));
             }
             let candidates = Arc::new(build_transfer_candidates(
                 &self.bundle,
@@ -159,11 +212,11 @@ impl PreparedTransitRouter {
                 modes.max_transfer_distance_m,
             ));
             *cache = Some((key, Arc::clone(&candidates)));
-            return Ok(candidates);
+            return Ok(TransferSet::Geometric(candidates));
         };
-        self.network_transfer_candidates
+        self.network_transfers
             .get(profile_id)
-            .map(Arc::clone)
+            .map(|transfers| TransferSet::Network(Arc::clone(transfers)))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "transit transfer profile '{}' is not loaded; available profiles: {:?}",
@@ -190,20 +243,20 @@ impl PreparedTransitRouter {
         request: &TransitRouteRequest,
         street_estimator: Option<&dyn StreetTimeEstimator>,
     ) -> Result<TransitRouteResult> {
-        let transfer_candidates = self.transfer_candidates_for(&request.modes)?;
+        let transfers = self.transfer_candidates_for(&request.modes)?;
         let backward_index = request
             .time
             .arrive_by
-            .then(|| self.backward_index_for(&request.modes, &transfer_candidates))
+            .then(|| self.backward_index_for(&request.modes, transfers.candidates()))
             .transpose()?;
-        let runtime = TransitRuntime::new(
+        let runtime = transfers.runtime(TransitRuntime::new(
             self.bundle.as_ref(),
             &self.departures_by_stop,
             &self.stop_index,
-            &transfer_candidates,
+            transfers.candidates(),
             &request.modes,
             street_estimator,
-        );
+        ));
         let runtime = match backward_index.as_deref() {
             Some(index) => runtime.with_backward_index(index),
             None => runtime,
@@ -227,20 +280,20 @@ impl PreparedTransitRouter {
         request: &TransitServiceAreaRequest,
         street_estimator: Option<&dyn StreetTimeEstimator>,
     ) -> Result<TransitServiceAreaResult> {
-        let transfer_candidates = self.transfer_candidates_for(&request.modes)?;
+        let transfers = self.transfer_candidates_for(&request.modes)?;
         let backward_index = request
             .time
             .arrive_by
-            .then(|| self.backward_index_for(&request.modes, &transfer_candidates))
+            .then(|| self.backward_index_for(&request.modes, transfers.candidates()))
             .transpose()?;
-        let runtime = TransitRuntime::new(
+        let runtime = transfers.runtime(TransitRuntime::new(
             self.bundle.as_ref(),
             &self.departures_by_stop,
             &self.stop_index,
-            &transfer_candidates,
+            transfers.candidates(),
             &request.modes,
             street_estimator,
-        );
+        ));
         let runtime = match backward_index.as_deref() {
             Some(index) => runtime.with_backward_index(index),
             None => runtime,
@@ -453,7 +506,7 @@ fn search_transit_route_with_runtime(
                         previous: entry.state,
                         departure_s: transfer_departure_s,
                         travel_time_s: walk_s,
-                        network_path: transfer.network_path.clone(),
+                        network_transfer: transfer.network_transfer,
                     },
                 );
             }

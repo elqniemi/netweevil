@@ -8,10 +8,14 @@ use sha2::{Digest, Sha256};
 use time::Date;
 use zip::ZipArchive;
 
+use serde::{Deserialize, Serialize};
+
 use crate::model::{
     TRANSIT_BUNDLE_SCHEMA_VERSION, TransitBundle, TransitConnection, TransitImportOptions,
-    TransitImportSummary, TransitMode, TransitRoute, TransitShape, TransitStop, TransitTrip,
+    TransitImportSummary, TransitMode, TransitRoute, TransitShape, TransitStop,
+    TransitTransferRule, TransitTrip,
 };
+use crate::timetable_pack::{ConnectionBounds, decode_connections, encode_connections};
 
 pub fn import_gtfs(path: impl AsRef<Path>, options: TransitImportOptions) -> Result<TransitBundle> {
     let path = path.as_ref();
@@ -20,6 +24,48 @@ pub fn import_gtfs(path: impl AsRef<Path>, options: TransitImportOptions) -> Res
     build_bundle_from_files(files, source_sha256, options)
 }
 
+/// Transit bundles start with this magic; files without it are rejected.
+const TRANSIT_BUNDLE_MAGIC: &[u8; 8] = b"NWTRBN07";
+
+/// Everything except the connections, which are packed separately.
+#[derive(Serialize)]
+struct BundleHeaderRef<'a> {
+    schema_version: u32,
+    feed_id: &'a str,
+    source_label: &'a str,
+    source_sha256: &'a str,
+    stop_binding_sha256: &'a Option<String>,
+    service_dates: &'a [String],
+    agency_timezone: &'a str,
+    time_origin_unix_s: i64,
+    stops: &'a [TransitStop],
+    routes: &'a [TransitRoute],
+    trips: &'a [TransitTrip],
+    shapes: &'a [TransitShape],
+    transfer_rules: &'a [TransitTransferRule],
+    import_diagnostics: &'a [String],
+}
+
+#[derive(Deserialize)]
+struct BundleHeader {
+    schema_version: u32,
+    feed_id: String,
+    source_label: String,
+    source_sha256: String,
+    stop_binding_sha256: Option<String>,
+    service_dates: Vec<String>,
+    agency_timezone: String,
+    time_origin_unix_s: i64,
+    stops: Vec<TransitStop>,
+    routes: Vec<TransitRoute>,
+    trips: Vec<TransitTrip>,
+    shapes: Vec<TransitShape>,
+    transfer_rules: Vec<TransitTransferRule>,
+    import_diagnostics: Vec<String>,
+}
+
+/// Writes the magic, a bincode header section, and the packed connection
+/// section (see `timetable_pack`), each section prefixed by its `u64` length.
 pub fn write_transit_bundle(path: impl AsRef<Path>, bundle: &TransitBundle) -> Result<()> {
     let path = path.as_ref();
     if bundle.schema_version != TRANSIT_BUNDLE_SCHEMA_VERSION {
@@ -33,33 +79,95 @@ pub fn write_transit_bundle(path: impl AsRef<Path>, bundle: &TransitBundle) -> R
         fs::create_dir_all(parent)
             .with_context(|| format!("creating directory {}", parent.display()))?;
     }
+    let header = bincode::serialize(&BundleHeaderRef {
+        schema_version: bundle.schema_version,
+        feed_id: &bundle.feed_id,
+        source_label: &bundle.source_label,
+        source_sha256: &bundle.source_sha256,
+        stop_binding_sha256: &bundle.stop_binding_sha256,
+        service_dates: &bundle.service_dates,
+        agency_timezone: &bundle.agency_timezone,
+        time_origin_unix_s: bundle.time_origin_unix_s,
+        stops: &bundle.stops,
+        routes: &bundle.routes,
+        trips: &bundle.trips,
+        shapes: &bundle.shapes,
+        transfer_rules: &bundle.transfer_rules,
+        import_diagnostics: &bundle.import_diagnostics,
+    })
+    .with_context(|| format!("serializing transit bundle {}", path.display()))?;
+    let connections = encode_connections(&bundle.connections)
+        .with_context(|| format!("packing transit connections {}", path.display()))?;
     let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    // Bincode writes individual scalars. Buffering avoids one filesystem call
-    // per field for feeds with millions of timetable connections.
     let mut writer = BufWriter::with_capacity(1024 * 1024, file);
-    bincode::serialize_into(&mut writer, bundle)
-        .with_context(|| format!("serializing transit bundle {}", path.display()))?;
-    writer
-        .flush()
-        .with_context(|| format!("flushing transit bundle {}", path.display()))
+    let mut write = || -> std::io::Result<()> {
+        writer.write_all(TRANSIT_BUNDLE_MAGIC)?;
+        for section in [&header, &connections] {
+            writer.write_all(&(section.len() as u64).to_le_bytes())?;
+            writer.write_all(section)?;
+        }
+        writer.flush()
+    };
+    write().with_context(|| format!("writing transit bundle {}", path.display()))
 }
 
 pub fn read_transit_bundle(path: impl AsRef<Path>) -> Result<TransitBundle> {
     let path = path.as_ref();
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let schema_version: u32 = bincode::deserialize_from(&mut bytes.as_slice())
-        .with_context(|| format!("reading transit bundle header {}", path.display()))?;
-    if schema_version != TRANSIT_BUNDLE_SCHEMA_VERSION {
+    let Some(sections) = bytes.strip_prefix(TRANSIT_BUNDLE_MAGIC.as_slice()) else {
         bail!(
-            "transit bundle {} has schema version {}; expected {}; re-import the GTFS feed",
-            path.display(),
-            schema_version,
-            TRANSIT_BUNDLE_SCHEMA_VERSION
+            "transit bundle {} uses an unsupported format; re-import the GTFS feed",
+            path.display()
         );
-    }
-    let bundle = bincode::deserialize(&bytes)
-        .with_context(|| format!("parsing transit bundle {}", path.display()))?;
-    Ok(bundle)
+    };
+    let parse = || -> Result<TransitBundle> {
+        let (header, rest) = split_section(sections)?;
+        let (connections, rest) = split_section(rest)?;
+        anyhow::ensure!(rest.is_empty(), "transit bundle has trailing bytes");
+        let header: BundleHeader = bincode::deserialize(header)?;
+        if header.schema_version != TRANSIT_BUNDLE_SCHEMA_VERSION {
+            bail!(
+                "transit bundle has schema version {}; expected {}; re-import the GTFS feed",
+                header.schema_version,
+                TRANSIT_BUNDLE_SCHEMA_VERSION
+            );
+        }
+        let connections = decode_connections(
+            connections,
+            &ConnectionBounds {
+                stops: header.stops.len(),
+                routes: header.routes.len(),
+                trips: header.trips.len(),
+            },
+        )?;
+        Ok(TransitBundle {
+            schema_version: header.schema_version,
+            feed_id: header.feed_id,
+            source_label: header.source_label,
+            source_sha256: header.source_sha256,
+            stop_binding_sha256: header.stop_binding_sha256,
+            service_dates: header.service_dates,
+            agency_timezone: header.agency_timezone,
+            time_origin_unix_s: header.time_origin_unix_s,
+            stops: header.stops,
+            routes: header.routes,
+            trips: header.trips,
+            shapes: header.shapes,
+            connections,
+            transfer_rules: header.transfer_rules,
+            import_diagnostics: header.import_diagnostics,
+        })
+    };
+    parse().with_context(|| format!("parsing transit bundle {}", path.display()))
+}
+
+fn split_section(bytes: &[u8]) -> Result<(&[u8], &[u8])> {
+    let (length, rest) = bytes
+        .split_first_chunk::<8>()
+        .ok_or_else(|| anyhow!("transit bundle is truncated"))?;
+    let length = usize::try_from(u64::from_le_bytes(*length))?;
+    anyhow::ensure!(length <= rest.len(), "transit bundle is truncated");
+    Ok(rest.split_at(length))
 }
 
 pub fn transit_import_summary(bundle: &TransitBundle) -> TransitImportSummary {

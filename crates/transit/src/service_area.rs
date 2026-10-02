@@ -488,7 +488,7 @@ fn search_service_area_origin(
                         previous: entry.state,
                         departure_s: transfer_departure_s,
                         travel_time_s: walk_s,
-                        network_path: None,
+                        network_transfer: None,
                     },
                 );
             }
@@ -796,7 +796,7 @@ fn search_service_area_target(
                         BackwardStep::Transfer {
                             next: entry.state,
                             travel_time_s: walk.travel_time_s,
-                            network_path: None,
+                            network_transfer: None,
                         },
                     );
                 }

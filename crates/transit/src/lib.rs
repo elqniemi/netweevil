@@ -15,7 +15,9 @@ mod router;
 mod runtime;
 mod service_area;
 mod stop_context;
+mod timetable_pack;
 mod timetable_time;
+mod transfer_pack;
 mod transfer_rules;
 
 pub use editor::{
@@ -25,8 +27,9 @@ pub use editor::{
     route_patterns, write_gtfs_zip,
 };
 pub use fusion::{
-    apply_transit_stop_bindings, build_transit_transfer_table, load_transit_stop_bindings,
-    network_transfer, read_transit_transfer_table, write_transit_transfer_table,
+    apply_transit_stop_bindings, build_packed_transit_transfer_table, build_transit_transfer_table,
+    load_transit_stop_bindings, network_transfer, read_packed_transit_transfer_table,
+    read_transit_transfer_table, write_transit_transfer_table,
 };
 pub use gtfs::{import_gtfs, read_transit_bundle, transit_import_summary, write_transit_bundle};
 pub use model::{
@@ -49,6 +52,7 @@ pub use router::{PreparedTransitRouter, execute_transit_route};
 pub use runtime::StreetTimeEstimator;
 pub use service_area::execute_transit_service_area;
 pub use stop_context::{GtfsStopContext, read_gtfs_stop_context};
+pub use transfer_pack::{PackedTransitTransferTable, write_packed_transit_transfer_table};
 
 #[cfg(test)]
 mod tests;

@@ -9,6 +9,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -34,13 +35,19 @@ const BACKWARD_WINDOW_TAIL_S: u32 = 6 * 60 * 60;
 /// are referenced by index into `TransitBundle::connections`, so the forward
 /// scan's arrays and the bundle itself are never duplicated.
 pub(crate) struct BackwardIndex {
+    timetable: Arc<BackwardTimetable>,
+    /// Per stop, the transfers that end there. Transfer tables are directed,
+    /// so the reverse scan cannot read the forward adjacency.
+    reverse_transfers: Vec<Vec<ReverseTransfer>>,
+}
+
+/// The transfer-independent half of [`BackwardIndex`], shared by the indexes
+/// of every transfer profile.
+pub(crate) struct BackwardTimetable {
     /// Per stop, connections ending there, ordered by arrival time.
     arrivals_by_stop: Vec<Vec<u32>>,
     /// Previous connection on the same vehicle, or u32::MAX at its first stop.
     previous_connection: Vec<u32>,
-    /// Per stop, the transfers that end there. Transfer tables are directed,
-    /// so the reverse scan cannot read the forward adjacency.
-    reverse_transfers: Vec<Vec<ReverseTransfer>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -52,11 +59,8 @@ struct ReverseTransfer {
     distance_m: f64,
 }
 
-impl BackwardIndex {
-    pub(crate) fn build(
-        bundle: &TransitBundle,
-        transfer_candidates: &[Vec<StopCandidate>],
-    ) -> Self {
+impl BackwardTimetable {
+    pub(crate) fn build(bundle: &TransitBundle) -> Self {
         let mut arrivals_by_stop = vec![Vec::<u32>::new(); bundle.stops.len()];
         for (connection_index, connection) in bundle.connections.iter().enumerate() {
             let connection_index = connection_index as u32;
@@ -67,10 +71,30 @@ impl BackwardIndex {
         for arrivals in &mut arrivals_by_stop {
             arrivals.sort_unstable_by_key(|index| bundle.connections[*index as usize].arrival_s);
         }
-        let previous_connection = build_run_links(bundle).0;
         Self {
             arrivals_by_stop,
-            previous_connection,
+            previous_connection: build_run_links(bundle).0,
+        }
+    }
+}
+
+impl BackwardIndex {
+    pub(crate) fn build(
+        bundle: &TransitBundle,
+        transfer_candidates: &[Vec<StopCandidate>],
+    ) -> Self {
+        Self::with_timetable(
+            Arc::new(BackwardTimetable::build(bundle)),
+            transfer_candidates,
+        )
+    }
+
+    pub(crate) fn with_timetable(
+        timetable: Arc<BackwardTimetable>,
+        transfer_candidates: &[Vec<StopCandidate>],
+    ) -> Self {
+        Self {
+            timetable,
             reverse_transfers: build_reverse_transfers(transfer_candidates),
         }
     }
@@ -140,7 +164,7 @@ pub(crate) enum BackwardStep {
     Transfer {
         next: BackwardStateKey,
         travel_time_s: u32,
-        network_path: Option<TransitStreetPath>,
+        network_transfer: Option<u32>,
     },
     Egress {
         time_s: u32,
@@ -193,6 +217,7 @@ pub(crate) fn arrivals_at_or_before<'a>(
     limit_s: u32,
 ) -> impl Iterator<Item = (u32, &'a TransitConnection)> {
     let arrivals = index
+        .timetable
         .arrivals_by_stop
         .get(stop_index as usize)
         .map(Vec::as_slice)
@@ -211,17 +236,20 @@ pub(crate) fn previous_run_connection<'a>(
     bundle: &'a TransitBundle,
     connection_index: u32,
 ) -> Option<(u32, &'a TransitConnection)> {
-    let previous = *index.previous_connection.get(connection_index as usize)?;
+    let previous = *index
+        .timetable
+        .previous_connection
+        .get(connection_index as usize)?;
     bundle
         .connections
         .get(previous as usize)
         .map(|connection| (previous, connection))
 }
 
-pub(crate) struct ReverseTransferWalk<'a> {
+pub(crate) struct ReverseTransferWalk {
     pub(crate) from_stop_index: u32,
     pub(crate) travel_time_s: u32,
-    pub(crate) network_path: Option<&'a TransitStreetPath>,
+    pub(crate) network_transfer: Option<u32>,
 }
 
 /// Transfer walks that end at `stop_index`, nearest first.
@@ -231,7 +259,7 @@ pub(crate) fn reverse_transfer_walks<'a>(
     stop_index: u32,
     max_transfer_distance_m: f64,
     walk_speed_kph: f64,
-) -> impl Iterator<Item = ReverseTransferWalk<'a>> {
+) -> impl Iterator<Item = ReverseTransferWalk> + 'a {
     index
         .reverse_transfers
         .get(stop_index as usize)
@@ -247,7 +275,7 @@ pub(crate) fn reverse_transfer_walks<'a>(
                 travel_time_s: candidate
                     .transfer_time_s
                     .unwrap_or_else(|| seconds_for_distance(candidate.distance_m, walk_speed_kph)),
-                network_path: candidate.network_path.as_ref(),
+                network_transfer: candidate.network_transfer,
             }
         })
 }
@@ -409,7 +437,7 @@ pub(crate) fn execute_transit_route_arrive_by(
                         BackwardStep::Transfer {
                             next: entry.state,
                             travel_time_s: walk.travel_time_s,
-                            network_path: walk.network_path.cloned(),
+                            network_transfer: walk.network_transfer,
                         },
                     );
                 }
@@ -534,7 +562,7 @@ pub(crate) fn execute_transit_route_arrive_by(
 
     let found_final_candidate = best_final.is_some();
     let Some((departure_s, arrival_s, mut legs)) = select_arrive_by_final_candidate(
-        bundle,
+        runtime,
         request,
         &next,
         best_final,
@@ -569,7 +597,7 @@ pub(crate) fn execute_transit_route_arrive_by(
     coalesce_transit_legs(&mut legs);
     let summary = summarize_legs(departure_s, arrival_s, &legs);
     let alternatives = build_arrive_by_alternatives(
-        bundle,
+        runtime,
         request,
         &next,
         deadline_s,
@@ -609,18 +637,19 @@ fn transit_alternative_departure_limit(
 }
 
 fn select_arrive_by_final_candidate(
-    bundle: &TransitBundle,
+    runtime: &TransitRuntime<'_>,
     request: &TransitRouteRequest,
     next: &HashMap<BackwardStateKey, BackwardStep>,
     best_final: Option<BackwardFinalCandidate>,
     final_candidates: &mut [BackwardFinalCandidate],
 ) -> Result<Option<(u32, u32, Vec<TransitLeg>)>> {
+    let bundle = runtime.bundle;
     if !transit_leg_minimums_enabled(&request.modes) {
         let Some(candidate) = best_final else {
             return Ok(None);
         };
         let (arrival_s, legs) = reconstruct_arrive_by_legs(
-            bundle,
+            runtime,
             request,
             next,
             candidate.state,
@@ -635,7 +664,7 @@ fn select_arrive_by_final_candidate(
     sort_arrive_by_candidates(final_candidates);
     for candidate in final_candidates.iter() {
         let (arrival_s, legs) = reconstruct_arrive_by_legs(
-            bundle,
+            runtime,
             request,
             next,
             candidate.state,
@@ -664,7 +693,7 @@ fn sort_arrive_by_candidates(candidates: &mut [BackwardFinalCandidate]) {
 }
 
 fn build_arrive_by_alternatives(
-    bundle: &TransitBundle,
+    runtime: &TransitRuntime<'_>,
     request: &TransitRouteRequest,
     next: &HashMap<BackwardStateKey, BackwardStep>,
     deadline_s: u32,
@@ -672,6 +701,7 @@ fn build_arrive_by_alternatives(
     best_legs: &[TransitLeg],
     mut final_candidates: Vec<BackwardFinalCandidate>,
 ) -> Result<Vec<TransitRouteAlternative>> {
+    let bundle = runtime.bundle;
     if request.alternatives.max_routes <= 1 {
         return Ok(Vec::new());
     }
@@ -690,7 +720,7 @@ fn build_arrive_by_alternatives(
             continue;
         }
         let (arrival_s, mut legs) = reconstruct_arrive_by_legs(
-            bundle,
+            runtime,
             request,
             next,
             candidate.state,
