@@ -1028,6 +1028,9 @@ pub(crate) struct ActivateRequest {
     pub(crate) profiles: Vec<String>,
     #[serde(default)]
     pub(crate) transit_feeds: Vec<String>,
+    /// Imported historical traffic set; live updates work without one.
+    #[serde(default)]
+    pub(crate) traffic: Option<String>,
 }
 
 /// Loads the selection in the background (compiling profiles that were not
@@ -1080,6 +1083,7 @@ pub(crate) async fn activate(
         default_profile,
         profiles,
         transit_feeds: payload.transit_feeds.clone(),
+        traffic: payload.traffic.clone(),
         updated_at: None,
     };
     let workspace = Arc::clone(&state.workspace);
@@ -1130,6 +1134,15 @@ pub(crate) fn reload_runtime(
     progress: impl FnMut(&str),
 ) -> Result<Value> {
     let runtime = load_service_runtime(&workspace.paths, selection, progress)?;
+    // Live traffic is keyed by source feature ids, so it survives a reload.
+    if let (Some(previous), Some(next)) = (
+        workspace
+            .runtime()
+            .and_then(|previous| previous.traffic.as_ref().map(|t| Arc::clone(&t.service))),
+        runtime.traffic.as_ref(),
+    ) {
+        next.carry_live_from(&previous);
+    }
     let manifest = &runtime.dataset_manifest;
     let summary = json!({
         "dataset_id": manifest.dataset_id.0,

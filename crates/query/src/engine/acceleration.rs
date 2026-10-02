@@ -462,7 +462,7 @@ pub(crate) fn build_forward_cch_space(
                 continue;
             }
             let rank = source.edge_rank[edge_index] as usize;
-            for &(head_rank, weight) in acceleration.ranked.upward_row(rank) {
+            for (head_rank, weight) in acceleration.ranked.upward_row(rank) {
                 let next_edge = source.edge_order[head_rank as usize] as usize;
                 let next_cost = cost + netweevil_core::decode_cch_weight(weight);
                 if !scratch.update_forward(next_edge, next_cost, edge_index as u32) {
@@ -521,7 +521,7 @@ pub(crate) fn build_backward_cch_space(
                 continue;
             }
             let rank = source.edge_rank[edge_index] as usize;
-            for &(tail_rank, weight) in acceleration.ranked.downward_row(rank) {
+            for (tail_rank, weight) in acceleration.ranked.downward_row(rank) {
                 let previous_edge = source.edge_order[tail_rank as usize] as usize;
                 let next_cost = cost + netweevil_core::decode_cch_weight(weight);
                 if !scratch.update_backward(previous_edge, next_cost, edge_index as u32) {

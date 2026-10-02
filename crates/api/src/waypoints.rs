@@ -26,7 +26,7 @@ pub(crate) async fn waypoints_handler(
         profile_hash: profile.manifest.profile_hash.clone(),
         route_engine: "waypoint_dijkstra_with_turn_history".into(),
         batch_engine: if payload.request.optimize_order {
-            "held_karp_exact"
+            "held_karp_or_iterated_local_search"
         } else {
             "input_order"
         }

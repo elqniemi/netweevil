@@ -1,0 +1,10 @@
+{
+  "profile_id": "car_north_nl_2026_05",
+  "request": {
+    "route_id": "groningen_evening_peak",
+    "origin": {"id": "station", "lon": 6.5665, "lat": 53.2194},
+    "destination": {"id": "zernike", "lon": 6.5303, "lat": 53.2410},
+    "departure_time": "2026-10-05T17:30:00+02:00",
+    "returns": {"geometry": "full", "segment_rows": true}
+  }
+}

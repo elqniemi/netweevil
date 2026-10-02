@@ -16,9 +16,10 @@ use netweevil_query::{
     AccessibilityCategoryRequest, AccessibilityRequest, AccessibilityResult, BetweennessRequest,
     MatrixResult, OdResult, PreparedRoutingEngine, RouteBatchResult, RouteResult,
     ScenarioBatchRequest, ScenarioBatchResult, ServiceAreaResult, ServiceAreaSequenceRequest,
-    ServiceAreaSequenceResult, TemporalRequestOptions, analysis_failure, execute_scenario_batch,
-    load_betweenness_request, load_od_pairs, load_point_set, load_route_batch, load_route_request,
-    load_scenario_batch_request, load_service_area_request, load_service_area_sequence_request,
+    ServiceAreaSequenceResult, TemporalRequestOptions, TripResult, analysis_failure,
+    execute_scenario_batch, load_betweenness_request, load_od_pairs, load_point_set,
+    load_route_batch, load_route_request, load_scenario_batch_request, load_service_area_request,
+    load_service_area_sequence_request, load_trip_request,
 };
 use netweevil_report::{
     write_betweenness_result, write_matrix_result, write_od_result, write_route_batch_result,
@@ -64,6 +65,22 @@ pub(crate) enum AnalyzeCommand {
     ScenarioBatch(ScenarioBatchArgs),
     TransitRoute(TransitRouteArgs),
     TransitBatch(TransitBatchArgs),
+    /// Order stops into an optimized trip and route its legs.
+    Trip(TripArgs),
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct TripArgs {
+    #[arg(long)]
+    dataset: String,
+    #[arg(long)]
+    profile: PathBuf,
+    /// Trip request (.json, .yml or .yaml).
+    #[arg(long)]
+    request: PathBuf,
+    /// `.json` writes the full result; `.geojson` writes legs and stops.
+    #[arg(long)]
+    out: Option<PathBuf>,
 }
 
 #[derive(Args, Debug)]
@@ -363,6 +380,145 @@ pub(crate) fn analyze_route(paths: &WorkspacePaths, args: RouteArgs) -> Result<(
     println!("route result written to {}", stored.result_path.display());
     println!("run manifest written to {}", stored.manifest_path.display());
     Ok(())
+}
+
+pub(crate) fn analyze_trip(paths: &WorkspacePaths, args: TripArgs) -> Result<()> {
+    let profile = load_profile(&args.profile)?;
+    profile.validate()?;
+    let mut request = load_trip_request(&args.request)?;
+    let geojson = args
+        .out
+        .as_deref()
+        .and_then(|path| path.extension())
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("geojson"));
+    if geojson && matches!(request.returns.geometry, ReturnGeometry::None) {
+        request.returns.geometry = ReturnGeometry::Full;
+    }
+    let (topology, acceleration, compiled_manifest, compiled_bundle) =
+        load_route_execution_inputs(paths, &args.dataset, &profile)?;
+    let prepared = PreparedRoutingEngine::new(
+        Arc::new(topology),
+        Arc::new(compiled_bundle),
+        acceleration.map(Arc::new),
+    )
+    .context("preparing routing engine")?;
+    let result = prepared
+        .execute_trip(&request)
+        .with_context(|| format!("executing trip '{}'", request.trip_id))?;
+    let optimization = &result.optimization;
+    let mut manifest = new_run_manifest(
+        RunKind::Trip,
+        args.dataset.clone(),
+        &profile,
+        args.request.display().to_string(),
+        RunStatus::Succeeded,
+        format!(
+            "Trip '{}' ordered {} stops ({:?}) by {} with generalized cost {:.1}; time windows {}.",
+            result.trip_id,
+            request.stops.len(),
+            result.mode,
+            optimization.method,
+            result.total_generalized_cost,
+            if result.time_windows_met {
+                "met"
+            } else {
+                "missed"
+            },
+        ),
+        software_info(),
+        Some(compiled_manifest.bundle.bundle_id.0.clone()),
+        algorithm_info(optimization.method.clone(), "stop_matrix_many_to_many"),
+        "Directed stop matrix from the many-to-many engine; exact Held-Karp (with Pareto time labels under windows) up to the exact stop limit, otherwise seeded iterated local search with 2-opt, Or-opt and or-3opt moves; legs routed again with the requested returns.",
+    )?;
+    record_effective_request(&mut manifest, &request)?;
+    let result_path = args.out.unwrap_or_else(|| {
+        paths
+            .runs_dir
+            .join(format!("{}-result.json", manifest.run_id))
+    });
+    if geojson {
+        write_json(&result_path, &trip_geojson(&result))?;
+    } else {
+        write_json(&result_path, &result)?;
+    }
+    manifest.result_path = Some(result_path.display().to_string());
+    let manifest_path = write_run_manifest(paths, &manifest)?;
+    println!(
+        "trip '{}': {} legs, cost {:.1}, {:.0} s travel, method {}",
+        result.trip_id,
+        result.legs.len(),
+        result.total_generalized_cost,
+        result.total_travel_time_s,
+        optimization.method
+    );
+    println!("trip result written to {}", result_path.display());
+    println!("run manifest written to {}", manifest_path.display());
+    Ok(())
+}
+
+/// Legs as line strings and visits as points, in visit order.
+fn trip_geojson(result: &TripResult) -> serde_json::Value {
+    let mut features = result
+        .legs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, leg)| {
+            let coordinates = leg
+                .geometry
+                .as_ref()?
+                .iter()
+                .map(|point| [point[0], point[1]])
+                .collect::<Vec<_>>();
+            Some(serde_json::json!({
+                "type": "Feature",
+                "geometry": {"type": "LineString", "coordinates": coordinates},
+                "properties": {
+                    "kind": "trip_leg",
+                    "leg_index": index,
+                    "from_stop": result.stop_order[index],
+                    "to_stop": result.stop_order[index + 1],
+                    "distance_m": leg.summary.total_distance_m,
+                    "travel_time_s": leg.summary.total_travel_time_s,
+                    "generalized_cost": leg.summary.total_generalized_cost,
+                },
+            }))
+        })
+        .collect::<Vec<_>>();
+    for (position, visit) in result.visits.iter().enumerate() {
+        let snapped = result
+            .legs
+            .get(position)
+            .map(|leg| &leg.origin)
+            .or_else(|| result.legs.last().map(|leg| &leg.destination));
+        if let Some(snapped) = snapped {
+            features.push(serde_json::json!({
+                "type": "Feature",
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [snapped.snapped_lon, snapped.snapped_lat],
+                },
+                "properties": {
+                    "kind": "trip_stop",
+                    "visit_index": position,
+                    "stop_index": visit.stop_index,
+                    "point_id": visit.point_id,
+                    "arrival_s": visit.arrival_s,
+                    "departure_s": visit.departure_s,
+                    "wait_s": visit.wait_s,
+                    "lateness_s": visit.lateness_s,
+                },
+            }));
+        }
+    }
+    serde_json::json!({
+        "type": "FeatureCollection",
+        "trip_id": result.trip_id,
+        "stop_order": result.stop_order,
+        "total_generalized_cost": result.total_generalized_cost,
+        "optimization": result.optimization,
+        "features": features,
+    })
 }
 
 pub(crate) fn analyze_route_batch(paths: &WorkspacePaths, args: RouteBatchArgs) -> Result<()> {
@@ -1785,7 +1941,7 @@ fn emit_structured_failure_diagnostics(error: &anyhow::Error) {
     }
 }
 
-fn load_route_execution_inputs(
+pub(crate) fn load_route_execution_inputs(
     paths: &WorkspacePaths,
     dataset_id: &str,
     profile: &ProfileDocument,

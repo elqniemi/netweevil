@@ -124,6 +124,10 @@ pub fn load_route_request(path: impl AsRef<Path>) -> Result<RouteRequest> {
     read_request_document(path.as_ref(), "route request")
 }
 
+pub fn load_trip_request(path: impl AsRef<Path>) -> Result<TripRequest> {
+    read_request_document(path.as_ref(), "trip request")
+}
+
 pub fn load_route_batch(path: impl AsRef<Path>) -> Result<RouteBatchDocument> {
     read_request_document(path.as_ref(), "route batch")
 }

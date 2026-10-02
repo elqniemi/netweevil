@@ -351,11 +351,47 @@ curl -X POST 'http://127.0.0.1:8080/v1/waypoints?format=geojson' \
 ```
 
 Set `optimize_order: true` to minimize directed static costs while keeping the
-first and last locations fixed. Optimization supports at most 16 intermediate
-`break` locations; the returned `waypoint_order` contains their original input
-indexes. Ordered routing supports up to 128 locations. Temporal, scenario and
-component-constrained requests are rejected. Requests use a loaded profile and
-the same elevation and attribute snapping options as street routes.
+first and last locations fixed. Up to 16 intermediate `break` locations are
+ordered exactly (Held–Karp); larger sets use the trip solver's local search.
+The returned `waypoint_order` contains original input indexes and
+`optimization_method` says which solver ran. Ordered routing supports up to
+128 locations. Temporal, scenario and component-constrained requests are
+rejected. Requests use a loaded profile and the same elevation and attribute
+snapping options as street routes.
+
+## Optimized trips
+
+`POST /v1/trip` orders up to 2,000 stops by directed generalized cost and
+routes the legs, like OSRM `/trip` or Valhalla `optimized_route`:
+
+```bash
+curl -X POST 'http://127.0.0.1:8080/v1/trip?format=geojson' \
+  -H 'Content-Type: application/json' \
+  --data '{"request": '"$(cat examples/requests/trip_groningen.json)"'}'
+```
+
+- `mode`: `roundtrip` (default; start at the first stop and return),
+  `fixed_start`, `fixed_end` (end at the last stop), `fixed_endpoints` or
+  `open` (any start and end).
+- `stops[].service_s` and `stops[].time_window` (`earliest_s`, optional
+  `latest_s`) are seconds on one clock, for example since midnight;
+  `departure_s` is the earliest start. Arriving early waits; service must
+  start by `latest_s`.
+- If no order meets every window the request fails and names the late stops
+  (and stops unreachable in time even directly from the start). Set
+  `allow_late: true` to get the least-late order with `late_stops` and
+  per-visit `lateness_s` instead.
+- `optimizer`: `seed` (default 0), `max_iterations`, `time_budget_ms`,
+  `exact_max_stops` (default 16, at most 18). Equal seeds give equal orders
+  unless the time budget ends the search first.
+
+The response has `stop_order` (request indexes; a roundtrip ends with its
+start), one route per leg, `visits` with arrival, wait, service and departure
+times, totals, and `optimization` (method, whether the order is proven
+optimal, input-order cost, iterations and matrix/solve/leg timings). Each stop
+uses the same snapping as `/v1/route`; costs are static. The CLI equivalent is
+`netweevil analyze trip --dataset ... --profile ... --request
+examples/requests/trip_groningen.json --out trip.geojson`.
 
 ## Directed snapping
 

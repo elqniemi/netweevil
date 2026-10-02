@@ -13,6 +13,7 @@ pub mod geo;
 pub mod graph;
 pub mod metrics;
 pub mod temporal;
+pub mod traffic;
 
 pub use acceleration::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, AccelerationBundleStats, CCH_ALGORITHM,
@@ -44,4 +45,8 @@ pub use metrics::{
 pub use temporal::{
     EVERY_DAY, FRIDAY, MONDAY, MinuteInterval, PUBLIC_HOLIDAY, SATURDAY, SUNDAY, THURSDAY, TUESDAY,
     TemporalEffect, TemporalRule, TemporalRuleSet, WEDNESDAY,
+};
+pub use traffic::{
+    TRAFFIC_BACKWARD, TRAFFIC_BUNDLE_SCHEMA_VERSION, TRAFFIC_FORWARD, TRAFFIC_SPEED_NO_DATA,
+    TRAFFIC_SPEED_UNITS_PER_KPH, TrafficSpeedBundle,
 };

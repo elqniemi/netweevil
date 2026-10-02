@@ -1388,3 +1388,100 @@ fn reconstruct_single_source_route_path(
         total_generalized_cost,
     }
 }
+
+/// Upper bound on cells materialized at once by [`route_set_matrix`].
+const SET_MATRIX_CHUNK_CELLS: usize = 200_000;
+
+/// Routes every origin set to every destination set with default policies
+/// and reduces each cell as soon as its chunk of rows is routed, so memory
+/// follows the chunk rather than the full matrix. Accelerated graphs use the
+/// many-to-many engine.
+pub(crate) fn route_set_matrix<T: Send>(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    origin_sets: &[Vec<SnappedPoint>],
+    destination_sets: &[Vec<SnappedPoint>],
+    snap_max_distance_m: f64,
+    reduce: impl Fn(usize, usize, std::result::Result<&RouteResult, &anyhow::Error>) -> T + Sync,
+) -> Vec<Vec<T>> {
+    let columns = destination_sets.len();
+    let rows_per_chunk = (SET_MATRIX_CHUNK_CELLS / columns.max(1)).max(1);
+    let mut matrix = Vec::with_capacity(origin_sets.len());
+    for first_row in (0..origin_sets.len()).step_by(rows_per_chunk) {
+        let rows = first_row..(first_row + rows_per_chunk).min(origin_sets.len());
+        let pairs = rows
+            .clone()
+            .flat_map(|row| (0..columns).map(move |column| (row, column)))
+            .collect::<Vec<_>>();
+        let mut cells = route_set_pairs(
+            topology,
+            metrics,
+            routing_graph,
+            origin_sets,
+            destination_sets,
+            &pairs,
+            snap_max_distance_m,
+            &ReturnConfig::default(),
+            |index, route| reduce(pairs[index].0, pairs[index].1, route),
+        )
+        .into_iter();
+        for _ in rows {
+            matrix.push(cells.by_ref().take(columns).collect());
+        }
+    }
+    matrix
+}
+
+/// Routes `(origin set, destination set)` index pairs with default policies.
+/// Accelerated graphs always use the parallel many-to-many engine.
+pub(crate) fn route_set_pairs<R: Send>(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    origin_sets: &[Vec<SnappedPoint>],
+    destination_sets: &[Vec<SnappedPoint>],
+    pairs: &[(usize, usize)],
+    snap_max_distance_m: f64,
+    returns: &ReturnConfig,
+    build: impl Fn(usize, std::result::Result<&RouteResult, &anyhow::Error>) -> R + Sync,
+) -> Vec<R> {
+    let origin_refs = (0..origin_sets.len()).map(Ok).collect::<Vec<SnapRef>>();
+    let destination_refs = (0..destination_sets.len())
+        .map(Ok)
+        .collect::<Vec<SnapRef>>();
+    let strategy = if routing_graph.acceleration.is_some() {
+        BatchRouteStrategy::AcceleratedManyToMany
+    } else {
+        let origins = pairs
+            .iter()
+            .map(|&(origin, _)| origin)
+            .collect::<std::collections::BTreeSet<_>>();
+        choose_batch_route_strategy(routing_graph, origins.len(), pairs.len())
+    };
+    let connectivity = ConnectivityPolicy::default();
+    let fallback = FallbackPolicy::default();
+    let alternatives = AlternativeRouteOptions::default();
+    let context = BatchRouteContext {
+        topology,
+        metrics,
+        routing_graph,
+        strategy,
+        snap_max_distance_m,
+        connectivity: &connectivity,
+        fallback: &fallback,
+        returns,
+        alternatives: &alternatives,
+        origin_candidates: origin_sets,
+        destination_candidates: destination_sets,
+    };
+    resolve_batch_routes(
+        &context,
+        pairs.len(),
+        |index| {
+            let (origin, destination) = pairs[index];
+            (&origin_refs[origin], &destination_refs[destination])
+        },
+        build,
+    )
+}

@@ -102,6 +102,64 @@ impl PreparedRoutingEngine {
         })
     }
 
+    /// An engine over the same topology and dataset hierarchy with replaced
+    /// per-edge metrics (traffic buckets, live updates). The hierarchy is
+    /// customized for `metrics`, so queries stay exact for that metric. No
+    /// multi-edge-restriction-ignoring graph is built: such engines serve
+    /// [`EngineMode::Auto`] requests only.
+    pub fn with_edge_metrics(&self, metrics: Arc<CompiledProfileBundle>) -> Result<Self> {
+        let acceleration = self.dataset_acceleration();
+        validate_execution_inputs(self.topology.as_ref(), metrics.as_ref())?;
+        let weights = customize_loaded_metrics(
+            self.topology.as_ref(),
+            metrics.as_ref(),
+            acceleration.as_deref(),
+        );
+        let customized_at_load = weights.is_some();
+        // Speed-only changes keep the adjacency: share it with this engine.
+        let shared = self.default_routing_graph.with_metrics(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            metrics.clone(),
+            weights.as_ref(),
+        );
+        let mut default_routing_graph = match shared {
+            Some(graph) => graph,
+            None => build_routing_graph_with_weights(
+                self.topology.as_ref(),
+                metrics.clone(),
+                weights,
+                acceleration,
+                RoutingGraphBuildOptions::default(),
+            )?,
+        };
+        if customized_at_load
+            && let Some(acceleration) = default_routing_graph
+                .acceleration
+                .as_mut()
+                .and_then(Arc::get_mut)
+        {
+            acceleration.deferred_metric_weights = Some(Arc::default());
+        }
+        Ok(Self {
+            topology: self.topology.clone(),
+            metrics,
+            default_routing_graph,
+            ignore_multi_edge_restrictions_graph: None,
+            avoid_engines: AvoidEngineCache::default(),
+            avoid_applied: false,
+            avoid_index: std::sync::OnceLock::new(),
+        })
+    }
+
+    /// The dataset CCH topology the default graph routes on, if any.
+    pub fn dataset_acceleration(&self) -> Option<Arc<DatasetAccelerationBundle>> {
+        self.default_routing_graph
+            .acceleration
+            .as_ref()
+            .map(|acceleration| acceleration.source.clone())
+    }
+
     pub fn topology(&self) -> &TopologyBundle {
         self.topology.as_ref()
     }
@@ -140,6 +198,29 @@ impl PreparedRoutingEngine {
             return engine.execute_waypoints(request);
         }
         crate::waypoints::execute_waypoints_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            request,
+        )
+    }
+
+    pub fn execute_trip(&self, request: &crate::TripRequest) -> Result<crate::TripResult> {
+        crate::trip::execute_trip_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            request,
+        )
+    }
+
+    /// The directed tour instance behind a trip request: snapping and the
+    /// stop matrix without solving, for benchmarking the solver.
+    pub fn trip_tour_problem(
+        &self,
+        request: &crate::TripRequest,
+    ) -> Result<crate::trip_solver::TourProblem> {
+        crate::trip::trip_tour_problem_with_graph(
             self.topology.as_ref(),
             self.metrics.as_ref(),
             &self.default_routing_graph,

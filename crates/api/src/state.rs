@@ -36,6 +36,8 @@ pub struct ApiServeOptions {
     pub default_profile: Option<PathBuf>,
     pub profiles: Vec<PathBuf>,
     pub transit_feeds: Vec<String>,
+    /// Historical traffic set to load with the dataset.
+    pub traffic: Option<String>,
     /// Directory of the built web console to serve at `/`.
     pub console_dir: Option<PathBuf>,
 }
@@ -54,6 +56,7 @@ impl ApiServeOptions {
                 .map(|path| path.display().to_string())
                 .collect(),
             transit_feeds: self.transit_feeds.clone(),
+            traffic: self.traffic.clone(),
             updated_at: None,
         })
     }
@@ -120,6 +123,8 @@ pub(crate) struct ServiceRuntime {
     transit_feeds: RwLock<BTreeMap<String, Arc<LoadedTransitFeed>>>,
     pub(crate) capabilities: ServiceCapabilities,
     pub(crate) engine: EngineDescription,
+    /// Historical and live traffic for the motorized profiles.
+    pub(crate) traffic: Option<crate::traffic::TrafficRuntime>,
 }
 
 impl ServiceRuntime {
@@ -202,6 +207,7 @@ fn service_capabilities() -> ServiceCapabilities {
             "directions",
             "match",
             "waypoints",
+            "trip",
             "od",
             "matrix",
             "accessibility",
@@ -334,6 +340,10 @@ pub(crate) fn load_service_runtime(
         acceleration: effective.acceleration,
     };
 
+    progress("Preparing traffic");
+    let traffic =
+        crate::traffic::load_traffic_runtime(paths, selection, &topology, &loaded_profiles)?;
+
     let mut loaded_transit_feeds = BTreeMap::new();
     for feed_id in &selection.transit_feeds {
         progress(&format!("Loading transit feed '{feed_id}'"));
@@ -362,6 +372,7 @@ pub(crate) fn load_service_runtime(
         transit_feeds: RwLock::new(loaded_transit_feeds),
         capabilities: service_capabilities(),
         engine,
+        traffic,
     })
 }
 
