@@ -2675,6 +2675,8 @@ fn build_temporal_route_result(
             warnings
         },
         alternatives: Vec::new(),
+        regions: None,
+        elevation: None,
     })
 }
 

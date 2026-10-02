@@ -625,6 +625,14 @@ pub struct ReturnConfig {
     pub penalty_breakdown: bool,
     #[serde(default)]
     pub explain_cost_derivation: bool,
+    /// Report the countries/states, border crossings and timezones along a
+    /// route.
+    #[serde(default)]
+    pub admin_areas: bool,
+    /// Report the route's elevation profile, ascent/descent and steepest
+    /// grades.
+    #[serde(default)]
+    pub elevation: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]

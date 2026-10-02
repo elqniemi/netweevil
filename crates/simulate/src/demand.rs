@@ -263,6 +263,8 @@ fn dispatch_request(
             // (geometry/segments stay off).
             penalty_breakdown: true,
             explain_cost_derivation: false,
+            admin_areas: false,
+            elevation: false,
         },
         alternatives: if wants_alternative {
             AlternativeRouteOptions {

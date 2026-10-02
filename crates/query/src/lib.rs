@@ -9,6 +9,7 @@
 
 mod accessibility;
 mod alternatives;
+mod annotations;
 mod batch;
 mod betweenness;
 mod diagnostics;
@@ -34,6 +35,8 @@ mod waypoints;
 
 pub use accessibility::*;
 pub(crate) use alternatives::*;
+pub use annotations::{RouteAdminSpan, RouteElevationProfile, RouteRegions};
+pub(crate) use annotations::{annotate_route, wants_annotations};
 pub use batch::*;
 pub(crate) use betweenness::execute_betweenness_with_graph;
 pub use betweenness::{

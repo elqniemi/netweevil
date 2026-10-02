@@ -28,7 +28,7 @@ pub(super) fn node(id: u32, lon: f64, lat: f64) -> TopologyNode {
 }
 
 /// A car-accessible residential asphalt edge without geometry, name or flags.
-pub(super) fn edge(id: u32, from: u32, to: u32, source_way_id: i64, length_m: u32) -> DirectedEdge {
+pub(crate) fn edge(id: u32, from: u32, to: u32, source_way_id: i64, length_m: u32) -> DirectedEdge {
     DirectedEdge {
         edge_id: EdgeId(id),
         from: NodeId(from),
@@ -65,7 +65,7 @@ fn service_edge(id: u32, from: u32, to: u32, source_way_id: i64, length_m: u32) 
 
 /// Builds a car topology with node ids in `nodes` order, a single spatial
 /// index cell covering every node, edge-based transitions and weak components.
-pub(super) fn topology(
+pub(crate) fn topology(
     source_path: &str,
     nodes: &[(f64, f64)],
     edges: &[DirectedEdge],
@@ -309,7 +309,7 @@ pub(super) fn hop_disconnected_topology() -> TopologyBundle {
 
 /// Car metrics whose per-edge travel time equals the generalized cost. Turn
 /// penalties do not contribute to the cost (`cost_time_weight = 0`).
-pub(super) fn metrics(costs: &[f64]) -> CompiledProfileBundle {
+pub(crate) fn metrics(costs: &[f64]) -> CompiledProfileBundle {
     CompiledProfileBundle {
         schema_version: 3,
         profile_id: "test".to_string(),
@@ -390,7 +390,7 @@ pub(super) fn disconnected_metrics() -> CompiledProfileBundle {
 
 // Request builders.
 
-pub(super) fn point(id: &str, lon: f64, lat: f64) -> LabeledPoint {
+pub(crate) fn point(id: &str, lon: f64, lat: f64) -> LabeledPoint {
     LabeledPoint {
         id: id.to_string(),
         lon,
@@ -414,7 +414,7 @@ pub(super) fn full_geometry() -> ReturnConfig {
 }
 
 /// A static route request with default options (500 m snap, summary only).
-pub(super) fn route_request(
+pub(crate) fn route_request(
     route_id: &str,
     origin: LabeledPoint,
     destination: LabeledPoint,
@@ -464,7 +464,7 @@ pub(super) fn od_pairs(pairs: Vec<OdPair>) -> OdPairsDocument {
     }
 }
 
-pub(super) fn exact_engine(
+pub(crate) fn exact_engine(
     topology: TopologyBundle,
     metrics: CompiledProfileBundle,
 ) -> PreparedRoutingEngine {
@@ -473,7 +473,7 @@ pub(super) fn exact_engine(
 }
 
 /// A prepared engine accelerated by the independent [`build_test_cch`].
-pub(super) fn cch_engine(
+pub(crate) fn cch_engine(
     topology: TopologyBundle,
     metrics: &CompiledProfileBundle,
 ) -> PreparedRoutingEngine {

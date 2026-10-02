@@ -341,6 +341,12 @@ pub struct RouteResult {
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub alternatives: Vec<RouteAlternative>,
+    /// Areas, border crossings and timezones (`returns.admin_areas`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regions: Option<RouteRegions>,
+    /// Elevation profile (`returns.elevation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevation: Option<RouteElevationProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

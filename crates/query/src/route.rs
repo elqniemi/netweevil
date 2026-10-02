@@ -386,6 +386,18 @@ pub(crate) fn execute_route_with_graph(
     request: &RouteRequest,
     edge_names: Option<&[String]>,
 ) -> Result<RouteResult> {
+    let mut route = route_with_graph(topology, metrics, routing_graph, request, edge_names)?;
+    annotate_route(topology, &request.returns, &mut route);
+    Ok(route)
+}
+
+fn route_with_graph(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    request: &RouteRequest,
+    edge_names: Option<&[String]>,
+) -> Result<RouteResult> {
     let temporal_routing_graph;
     let routing_graph = if request.temporal.is_temporal()
         && !routing_graph.includes_temporal_materialized_directions
@@ -659,6 +671,8 @@ pub(crate) fn execute_route_with_candidates(
         diagnostics: hop_info.diagnostics,
         warnings: merge_warnings(analysis.warnings, hop_info.warnings),
         alternatives: Vec::new(),
+        regions: None,
+        elevation: None,
     };
     result.alternatives = build_route_alternatives(
         topology,
@@ -770,6 +784,7 @@ pub(crate) fn request_returns_detailed_path(returns: &ReturnConfig) -> bool {
         || !returns.surface_breakdown.is_empty()
         || returns.penalty_breakdown
         || returns.explain_cost_derivation
+        || wants_annotations(returns)
 }
 
 #[derive(Debug, Clone)]
@@ -1114,6 +1129,8 @@ pub(crate) fn ignored_unreachable_route_result(
         diagnostics: failure.diagnostics,
         warnings: merge_warnings(warnings, vec![ignored_unreachable_warning()]),
         alternatives: Vec::new(),
+        regions: None,
+        elevation: None,
     }
 }
 

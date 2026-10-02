@@ -401,6 +401,8 @@ pub(crate) fn merge_point_set_returns(left: &ReturnConfig, right: &ReturnConfig)
     }
     merged.penalty_breakdown |= right.penalty_breakdown;
     merged.explain_cost_derivation |= right.explain_cost_derivation;
+    merged.admin_areas |= right.admin_areas;
+    merged.elevation |= right.elevation;
     merged
 }
 

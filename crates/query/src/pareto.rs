@@ -1279,6 +1279,8 @@ fn build_component_route_result(
         diagnostics: primary.hop_info.diagnostics,
         warnings,
         alternatives,
+        regions: None,
+        elevation: None,
     })
 }
 
@@ -1389,6 +1391,8 @@ fn build_temporal_component_route_result(
             warnings
         },
         alternatives,
+        regions: None,
+        elevation: None,
     })
 }
 
