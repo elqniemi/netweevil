@@ -1791,6 +1791,28 @@ fn cch_pruning_matches_complete_spaces_on_directed_graphs() {
                 None,
             )
             .unwrap();
+            // The unpacked path must be a transition chain from an origin
+            // seed to a destination seed whose cost is the query's cost.
+            if let Some(path) = actual.as_ref().filter(|path| !path.edge_indexes.is_empty()) {
+                let edges = &path.edge_indexes;
+                let seed_cost = |seeds: &[(usize, f64)], edge: usize| {
+                    seeds
+                        .iter()
+                        .filter(|(seed, _)| *seed == edge)
+                        .map(|&(_, cost)| cost)
+                        .fold(f64::INFINITY, f64::min)
+                };
+                let mut cost = seed_cost(&origins, edges[0]);
+                for pair in edges.windows(2) {
+                    let transition = graph
+                        .transition_range(pair[0])
+                        .find(|&index| graph.transition_edges[index] as usize == pair[1])
+                        .expect("unpacked path follows transitions");
+                    cost += graph.transition_costs[transition];
+                }
+                cost += seed_cost(&destinations, *edges.last().unwrap());
+                assert!((cost - path.total_generalized_cost).abs() < 1e-3);
+            }
             assert_eq!(actual.map(|path| path.total_generalized_cost), expected);
             let exact = crate::seeded_bidirectional_dijkstra_on_edge_transitions(
                 &topology,

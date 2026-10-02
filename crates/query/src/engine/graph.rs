@@ -85,6 +85,8 @@ pub(crate) struct AccelerationGraph {
     /// carry request-specific penalties (failure modes), which must never
     /// gain plain per-metric weights.
     pub(crate) deferred_metric_weights: Option<Arc<DeferredMetricWeights>>,
+    pub(crate) unpack: UnpackTable,
+    pub(crate) ranked: RankedCchCell,
 }
 
 type ArcWeights = Option<(Vec<u32>, Vec<u32>)>;
@@ -777,5 +779,7 @@ pub(crate) fn build_acceleration_graph(
         reverse_downward_edge,
         reverse_downward_arc,
         deferred_metric_weights: None,
+        unpack: UnpackTable::new(upward_len, downward_len),
+        ranked: RankedCchCell::default(),
     }))
 }

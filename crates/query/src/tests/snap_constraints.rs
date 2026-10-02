@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use super::fixtures::{
-    edge, exact_engine, full_geometry, metrics, route_request, set_edge_cost, test_metrics,
-    test_topology, topology,
+    edge, exact_engine, full_geometry, metrics, node, route_request, set_edge_cost, test_metrics,
+    test_topology, topology, uniform_metrics, with_edge_based_topology,
 };
 use crate::*;
 
@@ -418,4 +418,130 @@ fn coincident_waypoints_cannot_use_departure_as_arrival_or_skip_opposite_heading
         Some(1),
         "zero-length result must return the matching candidate, not the first candidate"
     );
+}
+
+/// Radius widening must return exactly the candidates of a single scan at
+/// the full snap radius, including across spatial-index cell borders.
+#[test]
+fn widening_snap_radius_matches_a_full_radius_scan() {
+    const SIDE: u32 = 24;
+    const STEP_DEG: f64 = 0.0005;
+    let mut topology = test_topology();
+    topology.nodes = (0..SIDE * SIDE)
+        .map(|index| {
+            node(
+                index,
+                6.0 + f64::from(index % SIDE) * STEP_DEG,
+                53.0 + f64::from(index / SIDE) * STEP_DEG * 0.6,
+            )
+        })
+        .collect();
+    let mut edges = Vec::new();
+    for index in 0..SIDE * SIDE {
+        let (col, row) = (index % SIDE, index / SIDE);
+        // Gaps leave some nodes reachable only as node candidates.
+        let neighbours = [
+            (col + 1 < SIDE && row % 3 != 1, index + 1),
+            (row + 1 < SIDE && col % 4 != 2, index + SIDE),
+        ];
+        for (present, other) in neighbours {
+            if !present {
+                continue;
+            }
+            for (from, to) in [(index, other), (other, index)] {
+                edges.push(edge(edges.len() as u32, from, to, 10, 100));
+            }
+        }
+    }
+    topology.edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges);
+    // A 5 x 5 grid of index cells.
+    let (min_lon, min_lat) = (6.0, 53.0);
+    let cell_deg = STEP_DEG * f64::from(SIDE) / 5.0;
+    let mut cells = vec![Vec::new(); 25];
+    for node in &topology.nodes {
+        let col = (((node.lon - min_lon) / cell_deg).floor() as usize).min(4);
+        let row = (((node.lat - min_lat) / cell_deg).floor() as usize).min(4);
+        cells[row * 5 + col].push(node.node_id.0);
+    }
+    let mut node_ids = Vec::new();
+    let cells = cells
+        .into_iter()
+        .map(|ids| {
+            let cell = netweevil_core::SpatialIndexCell {
+                node_start: node_ids.len() as u32,
+                node_len: ids.len() as u32,
+            };
+            node_ids.extend(ids);
+            cell
+        })
+        .collect();
+    topology.spatial_index = Some(netweevil_core::NodeSpatialIndex {
+        bounds: netweevil_core::TopologyBounds {
+            min_lon,
+            min_lat,
+            max_lon: min_lon + STEP_DEG * f64::from(SIDE - 1),
+            max_lat: min_lat + STEP_DEG * 0.6 * f64::from(SIDE - 1),
+        },
+        columns: 5,
+        rows: 5,
+        cell_width_deg: cell_deg,
+        cell_height_deg: cell_deg,
+        cells,
+        node_ids,
+    });
+    topology = with_edge_based_topology(topology);
+    let metrics = uniform_metrics(edges.len(), 10.0);
+    let graph = build_routing_graph(&topology, &metrics).unwrap();
+    // The reference scans every node, so it also checks the grid window.
+    let mut unindexed = topology.clone();
+    unindexed.spatial_index = None;
+
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = || {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        (state >> 11) as f64 / (1_u64 << 53) as f64
+    };
+    let key = |candidates: Option<Vec<SnappedPoint>>| {
+        candidates.map(|candidates| {
+            candidates
+                .iter()
+                .map(|candidate| {
+                    (
+                        candidate.snapped_node_id,
+                        candidate.snapped_edge_id,
+                        candidate.snapped_edge_fraction.map(f64::to_bits),
+                        candidate.snap_distance_m.to_bits(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+    };
+    for case in 0..400 {
+        let point = LabeledPoint {
+            id: format!("p{case}"),
+            lon: 5.998 + next() * STEP_DEG * f64::from(SIDE + 8),
+            lat: 52.998 + next() * STEP_DEG * 0.6 * f64::from(SIDE + 8),
+            z: None,
+        };
+        for max_distance_m in [0.5, 30.0, 120.0, 500.0] {
+            let options = SnapOptions {
+                max_distance_m,
+                ..Default::default()
+            };
+            for is_origin in [true, false] {
+                let widened =
+                    snap_candidates_with_options(&topology, &graph, &point, &options, is_origin);
+                let reference = crate::snapping::snap_candidates_single_scan(
+                    &unindexed, &graph, &point, &options, is_origin,
+                );
+                assert_eq!(
+                    key(widened.ok()),
+                    key(reference.ok()),
+                    "case {case} radius {max_distance_m}"
+                );
+            }
+        }
+    }
 }

@@ -1,5 +1,9 @@
 use super::*;
-use netweevil_core::{CacheBundleId, CompiledAcceleration, TravelMode};
+use netweevil_core::{
+    CacheBundleId, CompiledAcceleration, CompiledProfileBundle, DatasetAccelerationBundle,
+    TravelMode,
+};
+use std::sync::Arc;
 
 /// Upward arc 1 has weight `direct_weight`; the triangle through edge 0
 /// costs 4 + 2, so arc 1 unpacks through edge 0 only when that weight is 6.
@@ -45,6 +49,8 @@ fn graph(direct_weight: u32) -> AccelerationGraph {
         reverse_downward_edge: vec![1],
         reverse_downward_arc: vec![0],
         deferred_metric_weights: None,
+        unpack: UnpackTable::new(2, 1),
+        ranked: Default::default(),
     }
 }
 

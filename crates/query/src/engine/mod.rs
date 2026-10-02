@@ -1,14 +1,18 @@
 mod acceleration;
 mod automaton;
+mod cch_query;
 mod exact;
 mod fallback;
 mod graph;
+mod state_heap;
 
 pub(crate) use acceleration::*;
 pub(crate) use automaton::*;
+pub(crate) use cch_query::*;
 pub(crate) use exact::*;
 pub(crate) use fallback::*;
 pub(crate) use graph::*;
+pub(crate) use state_heap::*;
 
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -43,6 +47,11 @@ impl PreparedRoutingEngine {
             metrics.clone(),
             acceleration.clone(),
         )?;
+        // Build the rank-ordered query arrays now rather than on the first
+        // route request (~40 ms on a province-sized graph).
+        if let Some(acceleration) = default_routing_graph.acceleration.as_ref() {
+            acceleration.ranked.get(acceleration);
+        }
         let mut ignore_multi_edge_restrictions_graph =
             if default_routing_graph.has_restriction_sequences() {
                 Some(build_routing_graph_with_options_from_shared(

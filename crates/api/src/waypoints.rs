@@ -10,7 +10,7 @@ use serde_json::json;
 use crate::dto::{AnalysisResponse, ExecutionContext, ProfiledRequest, ResponseFormatQuery};
 use crate::error::ApiError;
 use crate::geojson::{geojson_response, route_result_geojson, wants_geojson};
-use crate::state::{ApiState, execute_on_routing_worker, resolve_profile};
+use crate::state::{ApiState, execute_inline_on_routing_worker, resolve_profile};
 
 pub(crate) async fn waypoints_handler(
     State(state): State<ApiState>,
@@ -37,9 +37,10 @@ pub(crate) async fn waypoints_handler(
     if wants_geojson(&query) {
         request.returns.geometry = ReturnGeometry::Full;
     }
-    let result = execute_on_routing_worker(&runtime, move || engine.execute_waypoints(&request))
-        .await
-        .map_err(ApiError::from_execution_error)?;
+    let result =
+        execute_inline_on_routing_worker(&runtime, move || engine.execute_waypoints(&request))
+            .await
+            .map_err(ApiError::from_execution_error)?;
     if wants_geojson(&query) {
         let mut features = Vec::new();
         for (leg_index, leg) in result.legs.iter().enumerate() {

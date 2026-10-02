@@ -124,6 +124,12 @@ fn builds_engine_requests() {
     assert_eq!(body["request"]["route_id"], "r1");
     assert_eq!(body["request"]["returns"]["geometry"], "none");
     assert_eq!(body["request"]["origin"]["lon"], 4.9);
+    // The compact body must mean exactly the in-process request.
+    let parsed: RouteRequest = serde_json::from_value(body["request"].clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(parsed).unwrap(),
+        serde_json::to_value(route_request(&row("r1"), ReturnGeometry::None)).unwrap()
+    );
     assert!(
         netweevil_route_body(&row("r1"), None)
             .get("profile_id")

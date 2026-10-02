@@ -139,6 +139,10 @@ pub(crate) fn snap_candidates(
     )
 }
 
+const MAX_SNAP_CANDIDATES: usize = 8;
+const INITIAL_SNAP_RADIUS_M: f64 = 50.0;
+const SNAP_RADIUS_GROWTH: f64 = 4.0;
+
 pub(crate) fn snap_candidates_with_options(
     topology: &TopologyBundle,
     routing_graph: &RoutingGraph,
@@ -172,7 +176,76 @@ pub(crate) fn snap_candidates_with_options(
     let directed = constraint.is_some_and(|constraint| {
         constraint.bearing.is_some() || constraint.approach != SnapApproach::Unrestricted
     });
-    const MAX_SNAP_CANDIDATES: usize = 8;
+    // Search a small radius first and widen it only while fewer than
+    // `MAX_SNAP_CANDIDATES` candidates qualify. Every candidate within the
+    // radius is found, so the nearest `MAX_SNAP_CANDIDATES` (ties in scan
+    // order, which is window-independent) equal those of a full-radius scan.
+    let mut radius_m = options.max_distance_m.min(INITIAL_SNAP_RADIUS_M);
+    let mut candidates = loop {
+        let candidates = collect_snap_candidates(
+            topology,
+            routing_graph,
+            point,
+            options,
+            directed,
+            is_origin,
+            radius_m,
+        )?;
+        if candidates.len() >= MAX_SNAP_CANDIDATES || radius_m >= options.max_distance_m {
+            break candidates;
+        }
+        radius_m = options.max_distance_m.min(radius_m * SNAP_RADIUS_GROWTH);
+    };
+
+    if candidates.is_empty() {
+        return Err(route_snap_failure(point, options.max_distance_m).into());
+    }
+
+    candidates.sort_by(|left, right| left.snap_distance_m.total_cmp(&right.snap_distance_m));
+    candidates.dedup_by(|left, right| snap_candidate_key(left) == snap_candidate_key(right));
+    candidates.truncate(MAX_SNAP_CANDIDATES);
+    Ok(candidates)
+}
+
+/// Reference for tests: one scan at the full radius, without widening.
+#[cfg(test)]
+pub(crate) fn snap_candidates_single_scan(
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    point: &LabeledPoint,
+    options: &SnapOptions,
+    is_origin: bool,
+) -> Result<Vec<SnappedPoint>> {
+    let mut candidates = collect_snap_candidates(
+        topology,
+        routing_graph,
+        point,
+        options,
+        false,
+        is_origin,
+        options.max_distance_m,
+    )?;
+    if candidates.is_empty() {
+        return Err(route_snap_failure(point, options.max_distance_m).into());
+    }
+    candidates.sort_by(|left, right| left.snap_distance_m.total_cmp(&right.snap_distance_m));
+    candidates.dedup_by(|left, right| snap_candidate_key(left) == snap_candidate_key(right));
+    candidates.truncate(MAX_SNAP_CANDIDATES);
+    Ok(candidates)
+}
+
+/// Snap candidates within `radius_m`, keeping the `2 * MAX_SNAP_CANDIDATES`
+/// nearest in push order (nodes first, then edges by id).
+fn collect_snap_candidates(
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    point: &LabeledPoint,
+    options: &SnapOptions,
+    directed: bool,
+    is_origin: bool,
+    radius_m: f64,
+) -> Result<Vec<SnappedPoint>> {
+    let constraint = options.point_constraints.get(&point.id);
     // Node scans without an index are only acceptable on small graphs.
     const MAX_FULL_SCAN_ELEMENTS: usize = 250_000;
 
@@ -181,7 +254,7 @@ pub(crate) fn snap_candidates_with_options(
         // bearing/approach restrictions. Directed endpoints are added below.
         Vec::new()
     } else if let Some(spatial_index) = topology.spatial_index.as_ref() {
-        spatial_snap_nodes(topology, spatial_index, point, options.max_distance_m)
+        spatial_snap_nodes(topology, spatial_index, point, radius_m)
     } else {
         if topology.nodes.len() > MAX_FULL_SCAN_ELEMENTS {
             bail!(
@@ -197,7 +270,7 @@ pub(crate) fn snap_candidates_with_options(
                     haversine_meters(point.lon, point.lat, node.lon, node.lat),
                 )
             })
-            .filter(|(_, distance_m)| *distance_m <= options.max_distance_m)
+            .filter(|(_, distance_m)| *distance_m <= radius_m)
             .collect()
     };
 
@@ -241,10 +314,9 @@ pub(crate) fn snap_candidates_with_options(
         );
     }
 
-    let candidate_edges =
-        routing_graph
-            .edge_spatial_index
-            .candidates(point.lon, point.lat, options.max_distance_m);
+    let candidate_edges = routing_graph
+        .edge_spatial_index
+        .candidates(point.lon, point.lat, radius_m);
 
     for edge_index in candidate_edges {
         let edge = topology.routing_edge(edge_index as usize);
@@ -258,7 +330,7 @@ pub(crate) fn snap_candidates_with_options(
         } else {
             (from.z.is_finite() && to.z.is_finite()).then_some(projection.z)
         };
-        if projection.distance_m > options.max_distance_m
+        if projection.distance_m > radius_m
             || !edge_matches_filters(topology, edge_index as usize, &options.attribute_filters)
             || !elevation_is_eligible(point, candidate_z, options.z_window_m)
             || constraint.is_some_and(|constraint| {
@@ -305,13 +377,6 @@ pub(crate) fn snap_candidates_with_options(
         );
     }
 
-    if candidates.is_empty() {
-        return Err(route_snap_failure(point, options.max_distance_m).into());
-    }
-
-    candidates.sort_by(|left, right| left.snap_distance_m.total_cmp(&right.snap_distance_m));
-    candidates.dedup_by(|left, right| snap_candidate_key(left) == snap_candidate_key(right));
-    candidates.truncate(MAX_SNAP_CANDIDATES);
     Ok(candidates)
 }
 
@@ -493,46 +558,49 @@ fn spatial_snap_nodes(
     point: &LabeledPoint,
     max_distance_m: f64,
 ) -> Vec<(u32, f64)> {
-    let Some((center_col, center_row)) =
-        spatial_index_cell_for_point(spatial_index, point.lon, point.lat)
-    else {
+    if spatial_index.columns == 0 || spatial_index.rows == 0 {
         return Vec::new();
+    }
+    let window = SnapWindow::new(point.lon, point.lat, max_distance_m);
+    // Cells overlapping the window's bounding box, clamped to the grid. All
+    // indexed nodes lie inside the grid bounds, so clamping loses nothing.
+    let cell_range = |low: f64, high: f64, origin: f64, span: f64, count: u32| {
+        let last = i64::from(count) - 1;
+        let first = (((low - origin) / span).floor() as i64).clamp(0, last);
+        let end = (((high - origin) / span).floor() as i64).clamp(0, last);
+        first..=end
     };
-    let cell_height_m = haversine_meters(
-        point.lon,
-        point.lat,
-        point.lon,
-        point.lat + spatial_index.cell_height_deg,
-    )
-    .max(1.0);
-    let cell_width_m = haversine_meters(
-        point.lon,
-        point.lat,
-        point.lon + spatial_index.cell_width_deg,
-        point.lat,
-    )
-    .max(1.0);
-    // A finite radius can still overflow integer arithmetic or imply billions
-    // of empty cells. No query needs to visit cells outside this grid.
-    let ring_limit = (max_distance_m / cell_height_m.min(cell_width_m))
-        .ceil()
-        .max(1.0)
-        .min(f64::from(spatial_index.columns.max(spatial_index.rows))) as i64
-        + 1;
-    let row_start = (center_row - ring_limit).max(0);
-    let row_end = (center_row + ring_limit).min(i64::from(spatial_index.rows) - 1);
-    let col_start = (center_col - ring_limit).max(0);
-    let col_end = (center_col + ring_limit).min(i64::from(spatial_index.columns) - 1);
+    let rows = cell_range(
+        window.min_lat,
+        window.max_lat,
+        spatial_index.bounds.min_lat,
+        spatial_index.cell_height_deg,
+        spatial_index.rows,
+    );
+    let cols = if window.full_longitude {
+        0..=i64::from(spatial_index.columns) - 1
+    } else {
+        cell_range(
+            point.lon - window.lon_delta,
+            point.lon + window.lon_delta,
+            spatial_index.bounds.min_lon,
+            spatial_index.cell_width_deg,
+            spatial_index.columns,
+        )
+    };
     let mut candidates = Vec::with_capacity(8);
 
-    for row in row_start..=row_end {
-        for col in col_start..=col_end {
+    for row in rows {
+        for col in cols.clone() {
             let cell =
                 &spatial_index.cells[row as usize * spatial_index.columns as usize + col as usize];
             let start = cell.node_start as usize;
             let end = start + cell.node_len as usize;
             for &node_id in &spatial_index.node_ids[start..end] {
                 let node = &topology.nodes[node_id as usize];
+                if !window.may_contain(node.lon, node.lat) {
+                    continue;
+                }
                 let distance_m = haversine_meters(point.lon, point.lat, node.lon, node.lat);
                 if distance_m <= max_distance_m {
                     let insert_index =
@@ -549,6 +617,70 @@ fn spatial_snap_nodes(
     candidates
 }
 
+/// A conservative longitude/latitude box around a point: every location
+/// within `radius_m` great-circle metres lies inside it. It only prefilters;
+/// the haversine distance still decides membership.
+struct SnapWindow {
+    lon: f64,
+    min_lat: f64,
+    max_lat: f64,
+    lon_delta: f64,
+    full_longitude: bool,
+}
+
+impl SnapWindow {
+    fn new(lon: f64, lat: f64, radius_m: f64) -> Self {
+        // Slack covers floating-point rounding in the bound below.
+        const SLACK: f64 = 1.0 + 1.0e-6;
+        let angle = (radius_m / netweevil_core::geo::EARTH_RADIUS_M) * SLACK;
+        // hav(d) >= hav(dlat), so |dlat| <= d / R.
+        let lat_delta = angle.to_degrees() + 1.0e-9;
+        let min_lat = lat - lat_delta;
+        let max_lat = lat + lat_delta;
+        // hav(d) >= cos(lat1) cos(lat2) hav(dlon), with cos(lat2) bounded
+        // below over the latitude band.
+        let extreme_lat = min_lat.abs().max(max_lat.abs());
+        let cos_product = if extreme_lat >= 90.0 {
+            0.0
+        } else {
+            lat.to_radians().cos() * extreme_lat.to_radians().cos()
+        };
+        let half_angle = (angle / 2.0).min(std::f64::consts::FRAC_PI_2);
+        let sine = if cos_product > 0.0 {
+            half_angle.sin() / cos_product.sqrt()
+        } else {
+            f64::INFINITY
+        };
+        let (lon_delta, full_longitude) = if sine >= 1.0 || !sine.is_finite() {
+            (180.0, true)
+        } else {
+            let delta = (2.0 * sine.asin()).to_degrees() * SLACK + 1.0e-9;
+            (delta, delta >= 180.0)
+        };
+        Self {
+            lon,
+            min_lat,
+            max_lat,
+            lon_delta,
+            full_longitude,
+        }
+    }
+
+    fn may_contain(&self, lon: f64, lat: f64) -> bool {
+        if lat < self.min_lat || lat > self.max_lat {
+            return false;
+        }
+        if self.full_longitude {
+            return true;
+        }
+        let mut delta = (lon - self.lon).abs();
+        if delta > 180.0 {
+            delta = 360.0 - delta;
+        }
+        delta <= self.lon_delta
+    }
+}
+
 fn push_best_snap_candidate(
     candidates: &mut Vec<SnappedPoint>,
     candidate: SnappedPoint,
@@ -563,23 +695,6 @@ fn push_best_snap_candidate(
     if candidates.len() > max_candidates * 2 {
         candidates.pop();
     }
-}
-
-fn spatial_index_cell_for_point(
-    spatial_index: &netweevil_core::NodeSpatialIndex,
-    lon: f64,
-    lat: f64,
-) -> Option<(i64, i64)> {
-    if spatial_index.columns == 0 || spatial_index.rows == 0 {
-        return None;
-    }
-    let col = (((lon - spatial_index.bounds.min_lon) / spatial_index.cell_width_deg).floor()
-        as i64)
-        .clamp(0, i64::from(spatial_index.columns) - 1);
-    let row = (((lat - spatial_index.bounds.min_lat) / spatial_index.cell_height_deg).floor()
-        as i64)
-        .clamp(0, i64::from(spatial_index.rows) - 1);
-    Some((col, row))
 }
 
 #[cfg(test)]

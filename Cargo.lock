@@ -1460,6 +1460,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arrow-json",
+ "bytemuck",
  "csv",
  "netweevil-core",
  "netweevil-profile",

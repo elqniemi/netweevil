@@ -1365,9 +1365,18 @@ fn osrm_route_url(base_url: &str, profile: &str, row: &CorpusRow) -> String {
     )
 }
 
+/// The smallest request equivalent to `route_request(row, None)`: fields
+/// left at their defaults are omitted, as a real client would, so the
+/// benchmark does not time serializing and parsing ~1.7 KB of defaults.
 fn netweevil_route_body(row: &CorpusRow, profile_id: Option<&str>) -> serde_json::Value {
     let mut body = serde_json::json!({
-        "request": route_request(row, ReturnGeometry::None),
+        "request": {
+            "route_id": row.id,
+            "origin": {"id": format!("{}_o", row.id), "lon": row.source_lon, "lat": row.source_lat},
+            "destination": {"id": format!("{}_d", row.id), "lon": row.target_lon, "lat": row.target_lat},
+            "snap": {"max_distance_m": DEFAULT_SNAP_DISTANCE_M},
+            "returns": {"geometry": "none"},
+        },
     });
     if let Some(profile_id) = profile_id {
         body["profile_id"] = serde_json::Value::String(profile_id.to_string());

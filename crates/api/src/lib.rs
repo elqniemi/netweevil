@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
 use axum::routing::{get, post};
+use axum::serve::ListenerExt;
 use netweevil_persist::{WorkspacePaths, read_workspace_config, write_workspace_config};
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
@@ -108,6 +109,13 @@ pub async fn serve(paths: WorkspacePaths, options: ApiServeOptions) -> Result<()
     let listener = TcpListener::bind(options.bind)
         .await
         .with_context(|| format!("binding API listener on {}", options.bind))?;
+    // Responses are written in one call; disabling Nagle keeps a reply from
+    // waiting on the ACK of a previous one on keep-alive connections.
+    let listener = listener.tap_io(|stream| {
+        if let Err(error) = stream.set_nodelay(true) {
+            warn!(%error, "could not set TCP_NODELAY");
+        }
+    });
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await

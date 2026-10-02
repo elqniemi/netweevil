@@ -1,67 +1,44 @@
-use std::cell::RefCell;
 use std::collections::BinaryHeap;
-use std::sync::{Arc, Weak};
+
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use anyhow::Result;
 #[cfg(test)]
 use anyhow::bail;
-use netweevil_core::{CompiledProfileBundle, DatasetAccelerationBundle, TopologyBundle};
+use netweevil_core::TopologyBundle;
 
 use crate::*;
 
-// 512 KiB per routing thread. Collisions replace entries and only cause a
-// repeated lookup; they never substitute a different arc's decomposition.
-const UNPACK_CACHE_SLOTS: usize = 32_768;
-
-#[derive(Clone, Copy)]
-struct UnpackWitness {
-    key: u64,
-    left: u32,
-    right: u32,
+/// Lazily filled lower-triangle witnesses for every hierarchy arc of one
+/// customized metric, shared by all threads querying it.
+///
+/// Each entry is 0 until first unpacked, [`UNPACK_BASE_ARC`] for an arc
+/// without a lower triangle of equal weight, or `(left + 1) << 32 | right`.
+/// The arrays are zero-allocated, so only pages of arcs that some route has
+/// unpacked are ever committed.
+pub(crate) struct UnpackTable {
+    upward: Box<[AtomicU64]>,
+    downward: Box<[AtomicU64]>,
 }
 
-impl Default for UnpackWitness {
-    fn default() -> Self {
+const UNPACK_UNKNOWN: u64 = 0;
+const UNPACK_BASE_ARC: u64 = u64::MAX;
+
+impl UnpackTable {
+    pub(crate) fn new(upward_len: usize, downward_len: usize) -> Self {
         Self {
-            key: u64::MAX,
-            left: u32::MAX,
-            right: u32::MAX,
-        }
-    }
-}
-
-#[derive(Default)]
-struct UnpackCache {
-    source: Weak<DatasetAccelerationBundle>,
-    metrics: Weak<CompiledProfileBundle>,
-    entries: Vec<UnpackWitness>,
-}
-
-impl UnpackCache {
-    fn prepare(&mut self, graph: &AccelerationGraph) {
-        if self.source.as_ptr() != Arc::as_ptr(&graph.source)
-            || self.metrics.as_ptr() != Arc::as_ptr(&graph.metrics)
-        {
-            // Weak owners keep allocations distinct even after the last
-            // engine is dropped. A reused address cannot revive stale weights.
-            self.source = Arc::downgrade(&graph.source);
-            self.metrics = Arc::downgrade(&graph.metrics);
-            self.entries
-                .resize(UNPACK_CACHE_SLOTS, UnpackWitness::default());
-            self.entries.fill(UnpackWitness::default());
+            upward: bytemuck::zeroed_slice_box(upward_len),
+            downward: bytemuck::zeroed_slice_box(downward_len),
         }
     }
 
-    fn slot(&mut self, upward: bool, arc: u32) -> (&mut UnpackWitness, u64) {
-        let key = (u64::from(arc) << 1) | u64::from(upward);
-        let mixed = key ^ (key >> 17);
-        let index = mixed.wrapping_mul(0x9e37_79b9) as usize & (UNPACK_CACHE_SLOTS - 1);
-        (&mut self.entries[index], key)
+    fn entry(&self, is_upward: bool, slot: usize) -> &AtomicU64 {
+        if is_upward {
+            &self.upward[slot]
+        } else {
+            &self.downward[slot]
+        }
     }
-}
-
-thread_local! {
-    static UNPACK_CACHE: RefCell<UnpackCache> = RefCell::new(UnpackCache::default());
 }
 
 #[derive(Default)]
@@ -74,7 +51,6 @@ pub(crate) struct BidirectionalAccelerationScratch {
     backward_next_arc: Vec<u32>,
     backward_touched: Vec<u32>,
     backward_heap: BinaryHeap<State>,
-    unpack_stack: Vec<(bool, u32)>,
 }
 
 impl BidirectionalAccelerationScratch {
@@ -133,147 +109,86 @@ impl BidirectionalAccelerationScratch {
 
 /// Unpacks arcs by finding a lower triangle with the same integer weight.
 /// Child endpoints have lower rank, so expansion terminates even with zero costs.
-fn push_unpacked_arc(
+/// Witnesses are memoized in the graph's [`UnpackTable`]; a witness depends
+/// only on the arc topology and customized weights that the graph owns.
+pub(crate) fn push_unpacked_arc(
     acceleration: &AccelerationGraph,
     stack: &mut Vec<(bool, u32)>,
     is_upward: bool,
     arc_slot: u32,
     edge_indexes: &mut Vec<usize>,
-) {
-    UNPACK_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        cache.prepare(acceleration);
-        push_unpacked_arc_cached(
-            acceleration,
-            stack,
-            is_upward,
-            arc_slot,
-            edge_indexes,
-            &mut cache,
-        );
-    });
-}
-
-fn push_unpacked_arc_cached(
-    acceleration: &AccelerationGraph,
-    stack: &mut Vec<(bool, u32)>,
-    is_upward: bool,
-    arc_slot: u32,
-    edge_indexes: &mut Vec<usize>,
-    cache: &mut UnpackCache,
 ) {
     let compiled = acceleration
         .metrics
         .acceleration
         .as_ref()
         .expect("validated acceleration weights");
+    let source = &acceleration.source;
     debug_assert!(stack.is_empty());
     stack.push((is_upward, arc_slot));
     while let Some((is_upward, slot)) = stack.pop() {
         let slot_index = slot as usize;
-        let (tail, head, weight) = if is_upward {
-            (
-                acceleration.upward_tail[slot_index] as usize,
-                acceleration.source.upward_head[slot_index],
-                compiled.upward_weight[slot_index],
-            )
-        } else {
-            (
-                acceleration.downward_tail[slot_index] as usize,
-                acceleration.source.downward_head[slot_index],
-                compiled.downward_weight[slot_index],
-            )
-        };
-        assert!(
-            weight < netweevil_core::CCH_WEIGHT_OVERFLOW,
-            "only finite CCH arcs can be unpacked"
-        );
-        let source = &acceleration.source;
-        let (entry, key) = cache.slot(is_upward, slot);
-        let triangle = if entry.key == key {
-            (entry.left != u32::MAX).then_some((entry.left as usize, entry.right as usize))
-        } else {
-            let triangle = (source.downward_first_out[tail] as usize
-                ..source.downward_first_out[tail + 1] as usize)
-                .find_map(|left| {
-                    let middle = source.downward_head[left] as usize;
-                    if source.edge_rank[middle] >= source.edge_rank[head as usize] {
-                        return None;
-                    }
-                    let right = acceleration.upward_arc_slot(middle, head)?;
-                    (netweevil_core::add_cch_weights(
-                        compiled.downward_weight[left],
-                        compiled.upward_weight[right],
-                    ) == weight)
-                        .then_some((left, right))
-                });
-            *entry = UnpackWitness {
-                key,
-                left: triangle.map_or(u32::MAX, |(left, _)| left as u32),
-                right: triangle.map_or(u32::MAX, |(_, right)| right as u32),
-            };
-            triangle
-        };
-        let Some((left, right)) = triangle else {
-            edge_indexes.push(head as usize);
+        let entry = acceleration.unpack.entry(is_upward, slot_index);
+        let mut witness = entry.load(AtomicOrdering::Relaxed);
+        if witness == UNPACK_UNKNOWN {
+            witness = find_unpack_witness(acceleration, compiled, is_upward, slot_index);
+            entry.store(witness, AtomicOrdering::Relaxed);
+        }
+        if witness == UNPACK_BASE_ARC {
+            edge_indexes.push(if is_upward {
+                source.upward_head[slot_index]
+            } else {
+                source.downward_head[slot_index]
+            } as usize);
             continue;
-        };
+        }
+        let left = (witness >> 32) as u32 - 1;
+        let right = witness as u32;
         // Process left before right: LIFO stack, so push right first.
-        stack.push((true, right as u32));
-        stack.push((false, left as u32));
+        stack.push((true, right));
+        stack.push((false, left));
     }
 }
 
-fn reconstruct_accelerated_route_path(
+fn find_unpack_witness(
     acceleration: &AccelerationGraph,
-    scratch: &mut BidirectionalAccelerationScratch,
-    meeting_edge: usize,
-    total_generalized_cost: f64,
-) -> RoutePath {
-    let mut edge_indexes = Vec::new();
-    let mut forward_arc_ids = Vec::new();
-    let mut cursor = meeting_edge;
-    loop {
-        let previous_arc = scratch.forward_previous_arc[cursor];
-        if previous_arc == NO_PREVIOUS_ARC {
-            break;
-        }
-        forward_arc_ids.push(previous_arc);
-        cursor = acceleration.upward_tail[previous_arc as usize] as usize;
-    }
-    edge_indexes.push(cursor);
-    let mut unpack_stack = std::mem::take(&mut scratch.unpack_stack);
-    for arc_slot in forward_arc_ids.into_iter().rev() {
-        push_unpacked_arc(
-            acceleration,
-            &mut unpack_stack,
-            true,
-            arc_slot,
-            &mut edge_indexes,
-        );
-    }
-
-    let mut cursor = meeting_edge;
-    loop {
-        let next_arc = scratch.backward_next_arc[cursor];
-        if next_arc == NO_PREVIOUS_ARC {
-            break;
-        }
-        push_unpacked_arc(
-            acceleration,
-            &mut unpack_stack,
-            false,
-            next_arc,
-            &mut edge_indexes,
-        );
-        cursor = acceleration.source.downward_head[next_arc as usize] as usize;
-    }
-    scratch.unpack_stack = unpack_stack;
-
-    RoutePath {
-        edge_indexes,
-        total_generalized_cost,
-    }
+    compiled: &netweevil_core::CompiledAcceleration,
+    is_upward: bool,
+    slot_index: usize,
+) -> u64 {
+    let source = &acceleration.source;
+    let (tail, head, weight) = if is_upward {
+        (
+            acceleration.upward_tail[slot_index] as usize,
+            source.upward_head[slot_index],
+            compiled.upward_weight[slot_index],
+        )
+    } else {
+        (
+            acceleration.downward_tail[slot_index] as usize,
+            source.downward_head[slot_index],
+            compiled.downward_weight[slot_index],
+        )
+    };
+    assert!(
+        weight < netweevil_core::CCH_WEIGHT_OVERFLOW,
+        "only finite CCH arcs can be unpacked"
+    );
+    let head_rank = source.edge_rank[head as usize];
+    (source.downward_first_out[tail] as usize..source.downward_first_out[tail + 1] as usize)
+        .find_map(|left| {
+            let middle = source.downward_head[left] as usize;
+            if source.edge_rank[middle] >= head_rank {
+                return None;
+            }
+            let right = acceleration.upward_arc_slot(middle, head)?;
+            (netweevil_core::add_cch_weights(
+                compiled.downward_weight[left],
+                compiled.upward_weight[right],
+            ) == weight)
+                .then(|| ((left as u64 + 1) << 32) | right as u64)
+        })
+        .unwrap_or(UNPACK_BASE_ARC)
 }
 
 #[cfg(test)]
@@ -314,185 +229,7 @@ pub(crate) fn accelerated_route_query(
     )
 }
 
-/// Point-to-point query that minimizes the quantized CCH metric.
-///
-/// Forward search relaxes upward arcs from the origin seeds; backward search
-/// relaxes downward arcs toward the destination seeds. Each direction runs
-/// until its queue minimum plus the opposite seed lower bound reaches the
-/// best known up-down cost. The sum rule
-/// used by same-graph bidirectional Dijkstra is NOT sound here because the
-/// two directions explore disjoint arc sets, so a meeting state is only ever
-/// labeled by the side that reaches it.
-///
-/// Complete contraction preserves the optimum of the quantized metric.
-/// No follow-up search optimizes the original floating-point metric.
-pub(crate) fn accelerated_route_query_seeded(
-    topology: &TopologyBundle,
-    routing_graph: &RoutingGraph,
-    origin_seeds: &[(usize, f64)],
-    destination_seeds: &[(usize, f64)],
-    initial_path: Option<RoutePath>,
-) -> Result<Option<RoutePath>> {
-    let Some(acceleration) = routing_graph.acceleration.as_ref() else {
-        return Ok(None);
-    };
-
-    // Destination phantoms subtract the unused part of the final edge. A
-    // queue minimum alone is therefore not a lower bound on a complete path.
-    let minimum_origin_cost = minimum_seed_cost(origin_seeds);
-    let minimum_destination_cost = minimum_seed_cost(destination_seeds);
-
-    ACCELERATION_SEARCH_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
-        scratch.prepare(topology.edge_count());
-
-        for &(edge_index, cost) in origin_seeds {
-            if !scratch.update_forward(edge_index, cost, NO_PREVIOUS_ARC) {
-                continue;
-            }
-            scratch.forward_heap.push(State {
-                edge_index,
-                automaton_state: 0,
-                cost,
-                score: cost,
-            });
-        }
-        for &(edge_index, cost) in destination_seeds {
-            if !scratch.update_backward(edge_index, cost, NO_PREVIOUS_ARC) {
-                continue;
-            }
-            scratch.backward_heap.push(State {
-                edge_index,
-                automaton_state: 0,
-                cost,
-                score: cost,
-            });
-        }
-
-        let mut best_path = initial_path;
-        let mut best_cost = best_path
-            .as_ref()
-            .map(|path| path.total_generalized_cost)
-            .unwrap_or(f64::INFINITY);
-        let mut best_edge = None;
-
-        let compiled = acceleration
-            .metrics
-            .acceleration
-            .as_ref()
-            .expect("validated acceleration weights");
-
-        loop {
-            let next_forward_cost = scratch
-                .forward_heap
-                .peek()
-                .map(|state| state.cost)
-                .unwrap_or(f64::INFINITY);
-            let next_backward_cost = scratch
-                .backward_heap
-                .peek()
-                .map(|state| state.cost)
-                .unwrap_or(f64::INFINITY);
-            let forward_active = next_forward_cost + minimum_destination_cost < best_cost;
-            let backward_active = next_backward_cost + minimum_origin_cost < best_cost;
-            if !forward_active && !backward_active {
-                break;
-            }
-
-            if forward_active && (next_forward_cost <= next_backward_cost || !backward_active) {
-                let Some(State {
-                    edge_index, cost, ..
-                }) = scratch.forward_heap.pop()
-                else {
-                    break;
-                };
-                if cost > scratch.forward_dist[edge_index] {
-                    continue;
-                }
-                if scratch.backward_dist[edge_index].is_finite() {
-                    let candidate_cost = cost + scratch.backward_dist[edge_index];
-                    if candidate_cost < best_cost {
-                        best_cost = candidate_cost;
-                        best_edge = Some(edge_index);
-                    }
-                }
-
-                for slot in acceleration.source.upward_first_out[edge_index] as usize
-                    ..acceleration.source.upward_first_out[edge_index + 1] as usize
-                {
-                    let next_edge = acceleration.source.upward_head[slot] as usize;
-                    let next_cost =
-                        cost + netweevil_core::decode_cch_weight(compiled.upward_weight[slot]);
-                    if !scratch.update_forward(next_edge, next_cost, slot as u32) {
-                        continue;
-                    }
-                    scratch.forward_heap.push(State {
-                        edge_index: next_edge,
-                        automaton_state: 0,
-                        cost: next_cost,
-                        score: next_cost,
-                    });
-                }
-            } else {
-                let Some(State {
-                    edge_index, cost, ..
-                }) = scratch.backward_heap.pop()
-                else {
-                    break;
-                };
-                if cost > scratch.backward_dist[edge_index] {
-                    continue;
-                }
-                if scratch.forward_dist[edge_index].is_finite() {
-                    let candidate_cost = scratch.forward_dist[edge_index] + cost;
-                    if candidate_cost < best_cost {
-                        best_cost = candidate_cost;
-                        best_edge = Some(edge_index);
-                    }
-                }
-
-                for slot in acceleration.reverse_downward_first_out[edge_index] as usize
-                    ..acceleration.reverse_downward_first_out[edge_index + 1] as usize
-                {
-                    let previous_edge = acceleration.reverse_downward_edge[slot] as usize;
-                    let next_cost = cost
-                        + netweevil_core::decode_cch_weight(
-                            compiled.downward_weight
-                                [acceleration.reverse_downward_arc[slot] as usize],
-                        );
-                    if !scratch.update_backward(
-                        previous_edge,
-                        next_cost,
-                        acceleration.reverse_downward_arc[slot],
-                    ) {
-                        continue;
-                    }
-                    scratch.backward_heap.push(State {
-                        edge_index: previous_edge,
-                        automaton_state: 0,
-                        cost: next_cost,
-                        score: next_cost,
-                    });
-                }
-            }
-        }
-
-        let Some(meeting_edge) = best_edge else {
-            return Ok(best_path);
-        };
-
-        best_path = Some(reconstruct_accelerated_route_path(
-            acceleration,
-            &mut scratch,
-            meeting_edge,
-            best_cost,
-        ));
-
-        Ok(best_path)
-    })
-}
-
-fn minimum_seed_cost(seeds: &[(usize, f64)]) -> f64 {
+pub(crate) fn minimum_seed_cost(seeds: &[(usize, f64)]) -> f64 {
     seeds
         .iter()
         .map(|&(_, cost)| cost)
