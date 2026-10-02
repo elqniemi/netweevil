@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Route failure modes pick the cheapest orientation of the snapped
+  attachment on cost plus illegal-movement penalties. Before, the first
+  routable orientation won, so a penalized forbidden U-turn could replace a
+  cheaper legal route.
+- Inbound service areas (`"direction": "inbound"`): positions that reach the
+  origins within the thresholds, from a backward search with turn costs and
+  restrictions (backward PHAST for large areas).
+- Isochrone polygons: `denoise`, `min_part_area_m2` and `min_hole_area_m2`
+  drop small parts and holes; `simplification_tolerance_m` is now
+  Douglas-Peucker generalization.
+- `POST /v1/locate` takes `count` and returns the nearest road segments with
+  edge attributes; points without a match return empty lists.
+- `POST /v1/expansion` returns the settled edges of a route or service-area
+  search as GeoJSON.
+- `GET /v1/tiles/{z}/{x}/{y}.mvt` serves the profile's routable network as
+  vector tiles; the console map can overlay them.
 - `netweevil bootstrap` and argument-less `api serve` start in setup mode and
   serve the web console, which is embedded in the executable when
   `frontend/dist` exists at build time. `bootstrap` opens the browser

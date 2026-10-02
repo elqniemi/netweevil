@@ -389,6 +389,25 @@ only the matching request-file field; CLI overlays append to any overlays
 already in the document. See the multilayer runbook for matrix and
 service-area-sequence semantics.
 
+Service areas expand outbound from their origins by default. Set
+`"direction": "inbound"` to get every position that reaches an origin within
+the thresholds instead ("who can get here in ten minutes"); the backward search
+applies the same turn costs and turn restrictions as forward routes. Inbound
+service areas are static (no `departure_time`) and omit component vectors.
+Polygon output takes `polygon.simplification_tolerance_m` (Douglas-Peucker, in
+metres), `polygon.denoise` (drop parts smaller than this fraction of the
+largest part; `1` keeps only the largest), `polygon.min_part_area_m2` and
+`polygon.min_hole_area_m2`. See
+[`service_area_inbound.json`](examples/requests/service_area_inbound.json).
+
+Route `fallback` flags (`allow_reverse_oneway`, `allow_illegal_turn`,
+`ignore_turn_restrictions`, `allow_uturn_where_normally_forbidden`) make the
+illegal movements available at their `penalties`. The route minimizes cost plus
+penalties, so a legal route is returned whenever it costs no more than the
+cheapest penalized one; a returned route is `degraded` only if it uses an
+illegal movement. `auto_relax_unreachable` instead routes strictly first and
+relaxes only when no legal route exists.
+
 ## Transit
 
 The web console has a GTFS editor (rail: "GTFS editor") for drawing new lines
@@ -600,6 +619,7 @@ Discovery endpoints:
 - `GET /v1/profiles/{profile_id}`
 - `GET /v1/terrain-sources`: prepared DEM metadata and local terrain tile URLs
 - `GET /v1/terrain/{source}/{version}/{z}/{x}/{y}.png`: immutable local DEM tiles
+- `GET /v1/tiles/{z}/{x}/{y}.mvt?profile_id=...`: the profile's routable network as Mapbox Vector Tiles (see [examples/api](examples/api/README.md#network-vector-tiles))
 
 Execution endpoints:
 
@@ -607,7 +627,8 @@ Execution endpoints:
 - `POST /v1/directions`
 - `POST /v1/match`
 - `POST /v1/waypoints`
-- `POST /v1/locate`
+- `POST /v1/locate`: routing snap candidates plus the `count` nearest road segments with edge attributes
+- `POST /v1/expansion`: settled edges of the exact search behind a route or service area, in order, as GeoJSON
 - `POST /v1/od`
 - `POST /v1/matrix`
 - `POST /v1/accessibility`
