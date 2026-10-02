@@ -168,7 +168,7 @@ fn avoided_routes_match_an_exact_engine_on_the_reduced_metric() {
             continue;
         }
         let forced = engine
-            .avoid_engine(&resolved)
+            .avoid_engine(&resolved, EngineMode::Auto)
             .unwrap()
             .execute_route(&request);
         assert_same_outcome(&format!("case {case} (re-customized)"), &forced, &expected);

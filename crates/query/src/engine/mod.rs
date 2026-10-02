@@ -52,6 +52,18 @@ impl PreparedRoutingEngine {
         metrics: Arc<CompiledProfileBundle>,
         acceleration: Option<Arc<DatasetAccelerationBundle>>,
     ) -> Result<Self> {
+        Self::build(topology, metrics, acceleration, true)
+    }
+
+    /// `with_ignore_mode_graph = false` skips the graph that serves
+    /// [`EngineMode::IgnoreMultiEdgeRestrictions`]; such an engine must only
+    /// be asked for [`EngineMode::Auto`] work.
+    fn build(
+        topology: Arc<TopologyBundle>,
+        metrics: Arc<CompiledProfileBundle>,
+        acceleration: Option<Arc<DatasetAccelerationBundle>>,
+        with_ignore_mode_graph: bool,
+    ) -> Result<Self> {
         validate_execution_inputs(topology.as_ref(), metrics.as_ref())?;
         let (metrics, customized_at_load) =
             customize_loaded_metrics(topology.as_ref(), metrics, acceleration.as_deref());
@@ -66,7 +78,7 @@ impl PreparedRoutingEngine {
             acceleration.ranked.get(acceleration);
         }
         let mut ignore_multi_edge_restrictions_graph =
-            if default_routing_graph.has_restriction_sequences() {
+            if with_ignore_mode_graph && default_routing_graph.has_restriction_sequences() {
                 Some(build_routing_graph_with_options_from_shared(
                     topology.as_ref(),
                     metrics.clone(),
@@ -121,7 +133,7 @@ impl PreparedRoutingEngine {
         &self,
         request: &crate::TraceMatchRequest,
     ) -> Result<crate::TraceMatchResult> {
-        if let Some(engine) = self.avoid_target(&request.temporal.avoid)? {
+        if let Some(engine) = self.avoid_target(&request.temporal.avoid, EngineMode::Auto)? {
             return engine.execute_trace_match(request);
         }
         crate::trace_matching::execute_trace_match_with_graph(
@@ -135,7 +147,7 @@ impl PreparedRoutingEngine {
         &self,
         request: &crate::WaypointRequest,
     ) -> Result<crate::WaypointResult> {
-        if let Some(engine) = self.avoid_target(&request.temporal.avoid)? {
+        if let Some(engine) = self.avoid_target(&request.temporal.avoid, EngineMode::Auto)? {
             return engine.execute_waypoints(request);
         }
         crate::waypoints::execute_waypoints_with_graph(
@@ -255,7 +267,7 @@ impl PreparedRoutingEngine {
                 return Ok(result);
             }
             return self
-                .avoid_engine(&resolved)?
+                .avoid_engine(&resolved, mode)?
                 .execute_route_with_optional_edge_names(request, edge_names, mode);
         }
         if has_failure_modes(&request.fallback) {
@@ -292,7 +304,7 @@ impl PreparedRoutingEngine {
         document: &OdPairsDocument,
         mode: EngineMode,
     ) -> Result<OdResult> {
-        if let Some(engine) = self.avoid_target(&document.temporal.avoid)? {
+        if let Some(engine) = self.avoid_target(&document.temporal.avoid, mode)? {
             return engine.execute_od_with_mode(document, mode);
         }
         if has_failure_modes(&document.fallback) {
@@ -333,7 +345,7 @@ impl PreparedRoutingEngine {
         mode: EngineMode,
     ) -> Result<MatrixResult> {
         let avoid = AvoidOptions::union([&origins.temporal.avoid, &destinations.temporal.avoid]);
-        if let Some(engine) = self.avoid_target(&avoid)? {
+        if let Some(engine) = self.avoid_target(&avoid, mode)? {
             return engine.execute_matrix_with_mode(origins, destinations, mode);
         }
         let fallback = merge_point_set_fallback_policy(&origins.fallback, &destinations.fallback);
@@ -382,7 +394,7 @@ impl PreparedRoutingEngine {
                     .map(|category| &category.destinations.temporal.avoid),
             ),
         );
-        if let Some(engine) = self.avoid_target(&avoid)? {
+        if let Some(engine) = self.avoid_target(&avoid, mode)? {
             return engine.execute_accessibility_with_mode(request, mode);
         }
         if has_failure_modes(&request.origins.fallback) {
@@ -438,7 +450,9 @@ impl PreparedRoutingEngine {
         &self,
         request: &ServiceAreaSequenceRequest,
     ) -> Result<ServiceAreaSequenceResult> {
-        if let Some(engine) = self.avoid_target(&request.request.temporal.avoid)? {
+        if let Some(engine) =
+            self.avoid_target(&request.request.temporal.avoid, EngineMode::Auto)?
+        {
             return engine.execute_service_area_sequence(request);
         }
         execute_service_area_sequence_with_graph(
@@ -450,7 +464,7 @@ impl PreparedRoutingEngine {
     }
 
     pub fn execute_betweenness(&self, request: &BetweennessRequest) -> Result<BetweennessResult> {
-        if let Some(engine) = self.avoid_target(&request.temporal.avoid)? {
+        if let Some(engine) = self.avoid_target(&request.temporal.avoid, EngineMode::Auto)? {
             return engine.execute_betweenness(request);
         }
         execute_betweenness_with_graph(
@@ -466,7 +480,7 @@ impl PreparedRoutingEngine {
         &self,
         request: &BetweennessRequest,
     ) -> Result<BetweennessResult> {
-        if let Some(engine) = self.avoid_target(&request.temporal.avoid)? {
+        if let Some(engine) = self.avoid_target(&request.temporal.avoid, EngineMode::Auto)? {
             return engine.execute_betweenness_with_pair_results(request);
         }
         execute_betweenness_with_graph(
@@ -483,7 +497,7 @@ impl PreparedRoutingEngine {
         request: &ServiceAreaRequest,
         mode: EngineMode,
     ) -> Result<ServiceAreaResult> {
-        if let Some(engine) = self.avoid_target(&request.temporal.avoid)? {
+        if let Some(engine) = self.avoid_target(&request.temporal.avoid, mode)? {
             return engine.execute_service_area_with_mode(request, mode);
         }
         let (routing_graph, _) = self.routing_graph_for_mode(mode);

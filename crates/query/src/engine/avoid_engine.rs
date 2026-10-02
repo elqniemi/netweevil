@@ -14,10 +14,15 @@ use crate::*;
 /// first build instead of customizing twice.
 #[derive(Default)]
 pub(crate) struct AvoidEngineCache {
-    entries: Mutex<Vec<(Vec<(u32, u64)>, AvoidEngineSlot)>>,
+    entries: Mutex<Vec<(AvoidEngineKey, AvoidEngineSlot)>>,
 }
 
 type AvoidEngineSlot = Arc<Mutex<Option<Arc<PreparedRoutingEngine>>>>;
+
+/// Resolved edges with factor bits, plus whether the engine needs the
+/// `IgnoreMultiEdgeRestrictions` graph (skipped otherwise: building it is a
+/// large share of the preparation time on restriction-rich networks).
+type AvoidEngineKey = (Vec<(u32, u64)>, bool);
 
 const AVOID_ENGINE_CACHE_CAPACITY: usize = 4;
 
@@ -28,9 +33,10 @@ impl PreparedRoutingEngine {
     pub(crate) fn avoid_target(
         &self,
         avoid: &AvoidOptions,
+        mode: EngineMode,
     ) -> Result<Option<Arc<PreparedRoutingEngine>>> {
         match self.resolve_request_avoid(avoid)? {
-            Some(resolved) => self.avoid_engine(&resolved).map(Some),
+            Some(resolved) => self.avoid_engine(&resolved, mode).map(Some),
             None => Ok(None),
         }
     }
@@ -80,12 +86,18 @@ impl PreparedRoutingEngine {
     pub(crate) fn avoid_engine(
         &self,
         resolved: &ResolvedAvoid,
+        mode: EngineMode,
     ) -> Result<Arc<PreparedRoutingEngine>> {
-        let key = resolved
-            .edges
-            .iter()
-            .map(|&(edge, factor)| (edge, factor.to_bits()))
-            .collect::<Vec<_>>();
+        let with_ignore_mode_graph = mode == EngineMode::IgnoreMultiEdgeRestrictions
+            && self.ignore_multi_edge_restrictions_graph.is_some();
+        let key = (
+            resolved
+                .edges
+                .iter()
+                .map(|&(edge, factor)| (edge, factor.to_bits()))
+                .collect::<Vec<_>>(),
+            with_ignore_mode_graph,
+        );
         let slot = {
             let mut entries = self
                 .avoid_engines
@@ -109,13 +121,14 @@ impl PreparedRoutingEngine {
             return Ok(engine.clone());
         }
         let started = std::time::Instant::now();
-        let mut engine = PreparedRoutingEngine::new(
+        let mut engine = PreparedRoutingEngine::build(
             self.topology.clone(),
             Arc::new(resolved.apply(self.metrics.as_ref())),
             self.default_routing_graph
                 .acceleration
                 .as_ref()
                 .map(|acceleration| acceleration.source.clone()),
+            with_ignore_mode_graph,
         )?;
         engine.avoid_applied = true;
         tracing::debug!(
