@@ -2,7 +2,7 @@ use netweevil_core::{
     CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, add_cch_weights, encode_cch_weight,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use rayon::prelude::*;
 
@@ -628,13 +628,18 @@ struct CustomizationContext<'a> {
     downward_tail: Vec<u32>,
     reverse_downward_first_out: Vec<u32>,
     reverse_downward_arc: Vec<u32>,
-    /// Middles grouped by elimination level (CSR over `level_middles`). A
-    /// middle's level exceeds that of every lower neighbour, so all arcs a
-    /// level reads are final before it runs and its middles can relax their
-    /// triangles concurrently.
-    level_first: Vec<u32>,
-    level_middles: Vec<u32>,
+    /// Independent elimination subtrees (CSR over `task_middles`), each
+    /// listed in rank order. Every lower neighbour of a middle lies in its
+    /// subtree, so subtrees relax concurrently, each one sequentially.
+    task_first: Vec<u32>,
+    task_middles: Vec<u32>,
+    /// Middles above every task subtree, in rank order, relaxed after all
+    /// tasks.
+    top_middles: Vec<u32>,
 }
+
+/// Sentinel for "no vertex" in elimination-tree arrays.
+const NO_VERTEX: u32 = u32::MAX;
 
 fn find_arc(first_out: &[u32], heads: &[u32], tail: usize, head: u32) -> Option<usize> {
     let start = first_out[tail] as usize;
@@ -649,6 +654,214 @@ fn find_arc(first_out: &[u32], heads: &[u32], tail: usize, head: u32) -> Option<
 /// parallel; smaller ones run on one thread.
 const PARALLEL_MIDDLE_TRIANGLES: usize = 4096;
 
+/// Hierarchy arc of every static, non-forbidden edge transition, aligned
+/// with `edge_transition_edges`.
+fn transition_arcs(
+    bundle: &DatasetAccelerationBundle,
+    topology: &TopologyBundle,
+    edge_metrics: &[CompiledEdgeMetric],
+    mode_bit: u16,
+) -> Vec<u32> {
+    let edge_count = topology.edge_count();
+    let transitions = &topology.edge_based_topology;
+    let pairwise_forbidden_turns = build_pairwise_forbidden_turn_table(topology, mode_bit);
+    let usable = |edge_index: usize| {
+        edge_metrics[edge_index].generalized_cost.is_some()
+            && topology.routing_edge(edge_index).flags & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION
+                == 0
+    };
+    // Base arcs mirror the exact engine's transition construction: both
+    // endpoint edges traversable and static, the pairwise turn allowed.
+    let mut transition_tail = vec![0_u32; transitions.edge_transition_edges.len()];
+    for edge_index in 0..edge_count {
+        let range = transitions.edge_transition_first_out[edge_index] as usize
+            ..transitions.edge_transition_first_out[edge_index + 1] as usize;
+        transition_tail[range].fill(edge_index as u32);
+    }
+    let transition_arc: Vec<u32> = transition_tail
+        .par_iter()
+        .zip(transitions.edge_transition_edges.par_iter())
+        .map(|(&edge, &next_edge)| {
+            let (edge_index, next_index) = (edge as usize, next_edge as usize);
+            if next_index == edge_index
+                || next_index >= edge_count
+                || !usable(edge_index)
+                || !usable(next_index)
+                || pairwise_forbidden_turns[edge_index]
+                    .binary_search(&next_edge)
+                    .is_ok()
+            {
+                return NO_ARC;
+            }
+            let arc = if bundle.edge_rank[edge_index] < bundle.edge_rank[next_index] {
+                find_arc(
+                    &bundle.upward_first_out,
+                    &bundle.upward_head,
+                    edge_index,
+                    next_edge,
+                )
+                .map(|slot| slot as u32)
+            } else {
+                find_arc(
+                    &bundle.downward_first_out,
+                    &bundle.downward_head,
+                    edge_index,
+                    next_edge,
+                )
+                .map(|slot| slot as u32 | DOWNWARD_ARC)
+            };
+            arc.unwrap_or(NO_ARC)
+        })
+        .collect();
+    drop(transition_tail);
+
+    transition_arc
+}
+
+/// Downward arcs grouped by head: `(downward_tail, first_out, arc)`, used
+/// to find all `x -> v` with `rank(x) > rank(v)` when processing `v`.
+fn reverse_downward_index(
+    bundle: &DatasetAccelerationBundle,
+    edge_count: usize,
+) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+    let downward_len = bundle.downward_head.len();
+    let mut downward_tail = vec![0_u32; downward_len];
+    for tail in 0..edge_count {
+        let range =
+            bundle.downward_first_out[tail] as usize..bundle.downward_first_out[tail + 1] as usize;
+        downward_tail[range].fill(tail as u32);
+    }
+    let mut reverse_downward_first_out = vec![0_u32; edge_count + 1];
+    for &head in &bundle.downward_head {
+        reverse_downward_first_out[head as usize + 1] += 1;
+    }
+    for edge_index in 0..edge_count {
+        reverse_downward_first_out[edge_index + 1] += reverse_downward_first_out[edge_index];
+    }
+    let mut reverse_downward_arc = vec![0_u32; downward_len];
+    let mut write_positions = reverse_downward_first_out[..edge_count].to_vec();
+    for (slot, &head) in bundle.downward_head.iter().enumerate() {
+        let write_index = &mut write_positions[head as usize];
+        reverse_downward_arc[*write_index as usize] = slot as u32;
+        *write_index += 1;
+    }
+    drop(write_positions);
+
+    (
+        downward_tail,
+        reverse_downward_first_out,
+        reverse_downward_arc,
+    )
+}
+
+/// Splits the elimination order into independent subtrees (CSR of middles
+/// in rank order) plus the remaining top middles in rank order.
+fn elimination_tasks(
+    bundle: &DatasetAccelerationBundle,
+    edge_count: usize,
+) -> (Vec<u32>, Vec<u32>, Vec<u32>) {
+    // With one or two workers the tree costs more than it saves: run every
+    // middle in rank order instead.
+    if rayon::current_num_threads() <= 2 {
+        return (vec![0], Vec::new(), bundle.edge_order.clone());
+    }
+    // Elimination tree (Liu's algorithm with path compression). Middle
+    // `v` reads `x -> v` and `v -> y`, whose lower triangles have middles
+    // `u` with `u -> v` upward or `v -> u` downward: `v`'s lower
+    // neighbours. Linking every lower neighbour's current root under `v`
+    // makes each of them a descendant of `v`.
+    let mut upward_in_first = vec![0_u32; edge_count + 1];
+    for &head in &bundle.upward_head {
+        upward_in_first[head as usize + 1] += 1;
+    }
+    for edge_index in 0..edge_count {
+        upward_in_first[edge_index + 1] += upward_in_first[edge_index];
+    }
+    let mut upward_in_tail = vec![0_u32; bundle.upward_head.len()];
+    let mut write_positions = upward_in_first[..edge_count].to_vec();
+    for tail in 0..edge_count {
+        for &head in &bundle.upward_head
+            [bundle.upward_first_out[tail] as usize..bundle.upward_first_out[tail + 1] as usize]
+        {
+            let write_index = &mut write_positions[head as usize];
+            upward_in_tail[*write_index as usize] = tail as u32;
+            *write_index += 1;
+        }
+    }
+    drop(write_positions);
+    let mut parent = vec![NO_VERTEX; edge_count];
+    let mut ancestor = vec![NO_VERTEX; edge_count];
+    for &middle in &bundle.edge_order {
+        let lower_neighbours = upward_in_tail[upward_in_first[middle as usize] as usize
+            ..upward_in_first[middle as usize + 1] as usize]
+            .iter()
+            .chain(
+                &bundle.downward_head[bundle.downward_first_out[middle as usize] as usize
+                    ..bundle.downward_first_out[middle as usize + 1] as usize],
+            );
+        for &neighbour in lower_neighbours {
+            let mut root = neighbour;
+            while ancestor[root as usize] != NO_VERTEX && ancestor[root as usize] != middle {
+                let next = ancestor[root as usize];
+                ancestor[root as usize] = middle;
+                root = next;
+            }
+            if ancestor[root as usize] == NO_VERTEX && root != middle {
+                ancestor[root as usize] = middle;
+                parent[root as usize] = middle;
+            }
+        }
+    }
+    drop((ancestor, upward_in_first, upward_in_tail));
+
+    // Cut the tree into subtrees of at most `task_limit` middles.
+    let mut subtree_size = vec![1_u32; edge_count];
+    for &middle in &bundle.edge_order {
+        let parent_index = parent[middle as usize];
+        if parent_index != NO_VERTEX {
+            subtree_size[parent_index as usize] += subtree_size[middle as usize];
+        }
+    }
+    let task_limit = (edge_count / 256).max(1024) as u32;
+    let mut task = vec![NO_VERTEX; edge_count];
+    let mut task_count = 0_u32;
+    for &middle in bundle.edge_order.iter().rev() {
+        let middle_index = middle as usize;
+        let parent_index = parent[middle_index];
+        task[middle_index] = if subtree_size[middle_index] > task_limit {
+            NO_VERTEX
+        } else if parent_index != NO_VERTEX && task[parent_index as usize] != NO_VERTEX {
+            task[parent_index as usize]
+        } else {
+            task_count += 1;
+            task_count - 1
+        };
+    }
+    let mut task_first = vec![0_u32; task_count as usize + 1];
+    let mut top_middles = Vec::new();
+    for &middle in &bundle.edge_order {
+        match task[middle as usize] {
+            NO_VERTEX => top_middles.push(middle),
+            task_index => task_first[task_index as usize + 1] += 1,
+        }
+    }
+    for index in 0..task_count as usize {
+        task_first[index + 1] += task_first[index];
+    }
+    let mut task_middles = vec![0_u32; task_first[task_count as usize] as usize];
+    let mut write_positions = task_first[..task_count as usize].to_vec();
+    for &middle in &bundle.edge_order {
+        let task_index = task[middle as usize];
+        if task_index != NO_VERTEX {
+            let write_index = &mut write_positions[task_index as usize];
+            task_middles[*write_index as usize] = middle;
+            *write_index += 1;
+        }
+    }
+
+    (task_first, task_middles, top_middles)
+}
+
 impl<'a> CustomizationContext<'a> {
     fn new(
         bundle: &'a DatasetAccelerationBundle,
@@ -657,138 +870,37 @@ impl<'a> CustomizationContext<'a> {
         mode_bit: u16,
     ) -> Self {
         let edge_count = topology.edge_count();
-        let transitions = &topology.edge_based_topology;
-        let pairwise_forbidden_turns = build_pairwise_forbidden_turn_table(topology, mode_bit);
-        let usable = |edge_index: usize| {
-            edge_metrics[edge_index].generalized_cost.is_some()
-                && topology.routing_edge(edge_index).flags
-                    & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION
-                    == 0
-        };
-        // Base arcs mirror the exact engine's transition construction: both
-        // endpoint edges traversable and static, the pairwise turn allowed.
-        let mut transition_tail = vec![0_u32; transitions.edge_transition_edges.len()];
-        for edge_index in 0..edge_count {
-            let range = transitions.edge_transition_first_out[edge_index] as usize
-                ..transitions.edge_transition_first_out[edge_index + 1] as usize;
-            transition_tail[range].fill(edge_index as u32);
-        }
-        let transition_arc = transition_tail
-            .par_iter()
-            .zip(transitions.edge_transition_edges.par_iter())
-            .map(|(&edge, &next_edge)| {
-                let (edge_index, next_index) = (edge as usize, next_edge as usize);
-                if next_index == edge_index
-                    || next_index >= edge_count
-                    || !usable(edge_index)
-                    || !usable(next_index)
-                    || pairwise_forbidden_turns[edge_index]
-                        .binary_search(&next_edge)
-                        .is_ok()
-                {
-                    return NO_ARC;
-                }
-                let arc = if bundle.edge_rank[edge_index] < bundle.edge_rank[next_index] {
-                    find_arc(
-                        &bundle.upward_first_out,
-                        &bundle.upward_head,
-                        edge_index,
-                        next_edge,
-                    )
-                    .map(|slot| slot as u32)
-                } else {
-                    find_arc(
-                        &bundle.downward_first_out,
-                        &bundle.downward_head,
-                        edge_index,
-                        next_edge,
-                    )
-                    .map(|slot| slot as u32 | DOWNWARD_ARC)
-                };
-                arc.unwrap_or(NO_ARC)
-            })
-            .collect();
-        drop(transition_tail);
-
-        // Reverse-downward index: downward arcs grouped by head, used to
-        // find all `x -> v` with `rank(x) > rank(v)` when processing `v`.
-        let downward_len = bundle.downward_head.len();
-        let mut downward_tail = vec![0_u32; downward_len];
-        for tail in 0..edge_count {
-            let range = bundle.downward_first_out[tail] as usize
-                ..bundle.downward_first_out[tail + 1] as usize;
-            downward_tail[range].fill(tail as u32);
-        }
-        let mut reverse_downward_first_out = vec![0_u32; edge_count + 1];
-        for &head in &bundle.downward_head {
-            reverse_downward_first_out[head as usize + 1] += 1;
-        }
-        for edge_index in 0..edge_count {
-            reverse_downward_first_out[edge_index + 1] += reverse_downward_first_out[edge_index];
-        }
-        let mut reverse_downward_arc = vec![0_u32; downward_len];
-        let mut write_positions = reverse_downward_first_out[..edge_count].to_vec();
-        for (slot, &head) in bundle.downward_head.iter().enumerate() {
-            let write_index = &mut write_positions[head as usize];
-            reverse_downward_arc[*write_index as usize] = slot as u32;
-            *write_index += 1;
-        }
-        drop(write_positions);
-
-        // Elimination levels. Middle `v` reads `x -> v` and `v -> y`, whose
-        // own lower triangles have middles `u` adjacent to `v` with lower
-        // rank (`u -> v` upward or `v -> u` downward). Pushing levels upward
-        // in rank order finalizes each level before its middle is reached.
-        let mut level = vec![0_u32; edge_count];
-        for &middle in &bundle.edge_order {
-            let middle_index = middle as usize;
-            let next_level = level[middle_index] + 1;
-            for &head in &bundle.upward_head[bundle.upward_first_out[middle_index] as usize
-                ..bundle.upward_first_out[middle_index + 1] as usize]
-            {
-                let slot = &mut level[head as usize];
-                *slot = (*slot).max(next_level);
-            }
-            for &arc in &reverse_downward_arc[reverse_downward_first_out[middle_index] as usize
-                ..reverse_downward_first_out[middle_index + 1] as usize]
-            {
-                let slot = &mut level[downward_tail[arc as usize] as usize];
-                *slot = (*slot).max(next_level);
-            }
-        }
-        let level_count = level.iter().max().map_or(0, |max| *max as usize + 1);
-        let mut level_first = vec![0_u32; level_count + 1];
-        for &middle_level in &level {
-            level_first[middle_level as usize + 1] += 1;
-        }
-        for index in 0..level_count {
-            level_first[index + 1] += level_first[index];
-        }
-        let mut level_middles = vec![0_u32; edge_count];
-        let mut write_positions = level_first[..level_count].to_vec();
-        for &middle in &bundle.edge_order {
-            let write_index = &mut write_positions[level[middle as usize] as usize];
-            level_middles[*write_index as usize] = middle;
-            *write_index += 1;
-        }
-
+        let (transition_arc, (reverse_downward, tasks)) = rayon::join(
+            || transition_arcs(bundle, topology, edge_metrics, mode_bit),
+            || {
+                rayon::join(
+                    || reverse_downward_index(bundle, edge_count),
+                    || elimination_tasks(bundle, edge_count),
+                )
+            },
+        );
+        let (downward_tail, reverse_downward_first_out, reverse_downward_arc) = reverse_downward;
+        let (task_first, task_middles, top_middles) = tasks;
         Self {
             bundle,
             transition_arc,
             downward_tail,
             reverse_downward_first_out,
             reverse_downward_arc,
-            level_first,
-            level_middles,
+            task_first,
+            task_middles,
+            top_middles,
         }
     }
 
     /// Basic customization of one metric. Phase 1 gives every base arc the
     /// minimum `base_weight(edge, next)` of its transitions; phase 2 relaxes
-    /// lower triangles `w(x -> y) = min(w(x -> y), w(x -> v) + w(v -> y))`
-    /// level by level. Both child arcs of a triangle are final before their
-    /// middle's level runs, and `min` is order-independent, so the parallel
-    /// result is identical to a sequential pass in rank order.
+    /// lower triangles `w(x -> y) = min(w(x -> y), w(x -> v) + w(v -> y))`:
+    /// independent elimination subtrees concurrently (each in rank order),
+    /// then the remaining top middles in rank order. Both child arcs of a
+    /// triangle are final before its middle runs, and `min` is
+    /// order-independent, so the result is identical to a sequential pass
+    /// in rank order.
     /// `on_progress` receives the number of processed middles.
     fn customize(
         &self,
@@ -870,28 +982,42 @@ impl<'a> CustomizationContext<'a> {
                 }
             }
         };
-        for level in self.level_first.windows(2) {
-            self.level_middles[level[0] as usize..level[1] as usize]
-                .par_iter()
-                .for_each(|&middle| {
-                    let middle_index = middle as usize;
-                    let incoming = self.reverse_downward_first_out[middle_index] as usize
-                        ..self.reverse_downward_first_out[middle_index + 1] as usize;
-                    let outgoing = bundle.upward_first_out[middle_index] as usize
-                        ..bundle.upward_first_out[middle_index + 1] as usize;
-                    if incoming.len() * outgoing.len() >= PARALLEL_MIDDLE_TRIANGLES {
-                        // Distinct incoming arcs write distinct tail rows.
-                        incoming.into_par_iter().for_each(|reverse_slot| {
-                            relax_incoming(reverse_slot, outgoing.clone())
-                        });
-                    } else {
-                        for reverse_slot in incoming {
-                            relax_incoming(reverse_slot, outgoing.clone());
-                        }
-                    }
-                });
-            on_progress(level[1] as usize);
+        let relax_middle = |middle: u32, parallel: bool| {
+            let middle_index = middle as usize;
+            let incoming = self.reverse_downward_first_out[middle_index] as usize
+                ..self.reverse_downward_first_out[middle_index + 1] as usize;
+            let outgoing = bundle.upward_first_out[middle_index] as usize
+                ..bundle.upward_first_out[middle_index + 1] as usize;
+            if parallel && incoming.len() * outgoing.len() >= PARALLEL_MIDDLE_TRIANGLES {
+                // Distinct incoming arcs write distinct tail rows.
+                incoming
+                    .into_par_iter()
+                    .for_each(|reverse_slot| relax_incoming(reverse_slot, outgoing.clone()));
+            } else {
+                for reverse_slot in incoming {
+                    relax_incoming(reverse_slot, outgoing.clone());
+                }
+            }
+        };
+        let done = AtomicUsize::new(0);
+        self.task_first.par_windows(2).for_each(|task| {
+            let middles = &self.task_middles[task[0] as usize..task[1] as usize];
+            for &middle in middles {
+                relax_middle(middle, false);
+            }
+            done.fetch_add(middles.len(), Ordering::Relaxed);
+        });
+        let mut done = done.into_inner();
+        on_progress(done);
+        let parallel = rayon::current_num_threads() > 1;
+        for (index, &middle) in self.top_middles.iter().enumerate() {
+            relax_middle(middle, parallel);
+            if index % 1024 == 1023 {
+                done += 1024;
+                on_progress(done);
+            }
         }
+        on_progress(self.task_middles.len() + self.top_middles.len());
         let into_weights = |weights: Vec<AtomicU32>| {
             weights
                 .into_iter()
