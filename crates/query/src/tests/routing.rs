@@ -1200,6 +1200,53 @@ fn respects_pairwise_and_multi_edge_turn_restrictions() {
     }
 }
 
+/// When the hierarchy candidate of a single route violates a via-way
+/// restriction, the accelerated engine reroutes with the restriction-aware
+/// A*. It must return the same path and cost as the automaton Dijkstra the
+/// exact engine runs.
+#[test]
+fn single_route_restricted_fallback_matches_the_exact_engine() {
+    let topology = multi_edge_restricted_topology();
+    let mut metrics = restricted_metrics();
+    // 0, 1, 2 (30) beats the legal 3, 2 (35) once restrictions are ignored.
+    set_edge_cost(&mut metrics, 3, Some(25.0));
+    let (bundle, compiled) = build_test_cch(&topology, &metrics);
+    let graph = crate::build_routing_graph_from_shared(
+        &topology,
+        Arc::new(compiled.clone()),
+        Some(bundle.clone()),
+    )
+    .expect("graph builds");
+    assert!(crate::lower_bound_weights(&graph).is_some());
+    let accelerated =
+        PreparedRoutingEngine::new(Arc::new(topology.clone()), Arc::new(compiled), Some(bundle))
+            .expect("accelerated engine builds");
+    let exact = exact_engine(topology, metrics);
+
+    let request = restricted_a_to_d("restricted-fallback");
+    let blind = accelerated
+        .execute_route_with_mode(&request, EngineMode::IgnoreMultiEdgeRestrictions)
+        .expect("restriction-blind route succeeds");
+    assert_eq!(blind.edge_path, vec![0, 1, 2]);
+
+    let via_astar = accelerated.execute_route(&request).expect("A* fallback");
+    let via_dijkstra = exact.execute_route(&request).expect("Dijkstra fallback");
+    assert_eq!(via_astar.edge_path, vec![3, 2]);
+    assert_eq!(via_astar.edge_path, via_dijkstra.edge_path);
+    assert_eq!(
+        via_astar.summary.total_generalized_cost,
+        via_dijkstra.summary.total_generalized_cost
+    );
+    assert_eq!(
+        via_astar.summary.total_travel_time_s,
+        via_dijkstra.summary.total_travel_time_s
+    );
+    assert_eq!(
+        via_astar.summary.total_distance_m,
+        via_dijkstra.summary.total_distance_m
+    );
+}
+
 #[test]
 fn builds_pairwise_turn_table_without_automaton_for_two_edge_restrictions() {
     let graph =

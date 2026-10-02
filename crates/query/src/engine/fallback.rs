@@ -373,6 +373,47 @@ pub(crate) fn relax_lower_triangles(
     }
 }
 
+/// Exact restriction-aware route between edge seeds, for pairs whose
+/// restriction-blind candidate is illegal. Uses the restriction-aware A*
+/// with lower-bound hierarchy potentials when the graph has them, and the
+/// automaton Dijkstra otherwise. Both minimize the same floating-point
+/// metric over the same state space, so they return the same optimal cost.
+/// The A* is only proven for policies without failure modes; those keep the
+/// Dijkstra search.
+pub(crate) fn restricted_route_between_edge_seeds(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    origin_seeds: &[(usize, f64)],
+    destination_seeds: &[(usize, f64)],
+    initial_upper_bound: Option<RoutePath>,
+    fallback: &FallbackPolicy,
+) -> Result<Option<RoutePath>> {
+    if !has_failure_modes(fallback)
+        && let Some(weights) = lower_bound_weights(routing_graph)
+    {
+        return restricted_astar_route(
+            topology,
+            metrics,
+            routing_graph,
+            weights,
+            origin_seeds,
+            destination_seeds,
+            initial_upper_bound,
+            fallback,
+        );
+    }
+    dijkstra_between_edge_seeds_with_failure_modes(
+        topology,
+        metrics,
+        routing_graph,
+        origin_seeds,
+        destination_seeds,
+        initial_upper_bound,
+        fallback,
+    )
+}
+
 pub(crate) fn dijkstra_between_edge_seeds_with_failure_modes(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,

@@ -183,6 +183,21 @@ fn restricted_astar_matches_restricted_dijkstra_on_random_graphs() {
                 actual.as_ref().map(|path| path.total_generalized_cost),
                 expected
             );
+            // The single-route fallback dispatches to the same A*.
+            let single_route = crate::restricted_route_between_edge_seeds(
+                &topology,
+                &compiled,
+                &graph,
+                &origins,
+                &destinations,
+                None,
+                &fallback,
+            )
+            .unwrap();
+            assert_eq!(
+                single_route.map(|path| path.total_generalized_cost),
+                expected
+            );
             if let Some(path) = actual {
                 assert!(crate::path_respects_restriction_sequences(
                     &graph,

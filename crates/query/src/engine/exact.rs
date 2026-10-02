@@ -247,7 +247,7 @@ pub(crate) fn route_between_candidates(
                             {
                                 Some(path)
                             }
-                            Some(_) => dijkstra_between_edge_seeds_with_failure_modes(
+                            Some(_) => restricted_route_between_edge_seeds(
                                 topology,
                                 metrics,
                                 routing_graph,
