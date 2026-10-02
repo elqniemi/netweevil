@@ -124,14 +124,16 @@ impl AStarScratch {
             if cost > self.backward[&(edge_index as u32)] {
                 continue;
             }
-            for slot in acceleration.reverse_downward_first_out[edge_index] as usize
-                ..acceleration.reverse_downward_first_out[edge_index + 1] as usize
-            {
-                let weight = weights.downward[acceleration.reverse_downward_arc[slot] as usize];
+            let source = acceleration.source.as_ref();
+            let downward_slots = acceleration.downward_slots();
+            let rank = source.edge_rank[edge_index] as usize;
+            for position in acceleration.ranked.downward_range(rank) {
+                let weight = weights.downward[downward_slots[position] as usize];
                 if weight == CCH_WEIGHT_INFINITY {
                     continue;
                 }
-                let previous = acceleration.reverse_downward_edge[slot];
+                let (tail_rank, _) = acceleration.ranked.downward_arc(position);
+                let previous = source.edge_order[tail_rank as usize];
                 let next_cost = cost + decode_cch_weight(weight);
                 let known = self.backward.entry(previous).or_insert(f64::INFINITY);
                 if next_cost < *known {

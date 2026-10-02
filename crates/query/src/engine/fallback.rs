@@ -338,7 +338,7 @@ pub(crate) fn customize_failure_mode_acceleration(
     }
 
     // Phase 2: triangle relaxation in elimination order, reusing the base
-    // graph's reverse-downward index over the identical arc topology.
+    // graph's ranked downward rows over the identical arc topology.
     relax_lower_triangles(base_acceleration, &mut upward_weight, &mut downward_weight);
 
     if upward_weight.contains(&CCH_WEIGHT_OVERFLOW)
@@ -369,19 +369,19 @@ pub(crate) fn relax_lower_triangles(
     downward_weight: &mut [u32],
 ) {
     let source = acceleration.source.as_ref();
-    for &middle in source.edge_order.iter() {
+    let downward_slots = acceleration.downward_slots();
+    for (middle_rank, &middle) in source.edge_order.iter().enumerate() {
         let middle_index = middle as usize;
-        let incoming_range = acceleration.reverse_downward_first_out[middle_index] as usize
-            ..acceleration.reverse_downward_first_out[middle_index + 1] as usize;
         let outgoing_range = source.upward_first_out[middle_index] as usize
             ..source.upward_first_out[middle_index + 1] as usize;
-        for reverse_slot in incoming_range {
-            let incoming_arc = acceleration.reverse_downward_arc[reverse_slot] as usize;
+        for position in acceleration.ranked.downward_range(middle_rank) {
+            let incoming_arc = downward_slots[position] as usize;
             let incoming_weight = downward_weight[incoming_arc];
             if incoming_weight == CCH_WEIGHT_INFINITY {
                 continue;
             }
-            let tail = acceleration.downward_tail[incoming_arc] as usize;
+            let (tail_rank, _) = acceleration.ranked.downward_arc(position);
+            let tail = source.edge_order[tail_rank as usize] as usize;
             for outgoing_arc in outgoing_range.clone() {
                 let head = source.upward_head[outgoing_arc];
                 if head as usize == tail {

@@ -1,49 +1,46 @@
 //! Point-to-point CCH query used by single routes and waypoint legs.
 //!
-//! The query runs on a copy of the hierarchy renumbered by contraction rank
+//! The query runs on the hierarchy renumbered by contraction rank
 //! ([`RankedCch`]). Both searches climb towards high ranks, and every query
 //! shares the top of the hierarchy, so with rank-ordered rows and labels
 //! most of the work hits the same few hot cache lines. One 24-byte label per
 //! state holds both directions' costs and parents, and both queues are 4-ary
 //! [`StateHeap`]s of 16-byte entries.
 
-use std::sync::OnceLock;
-
 use anyhow::Result;
-use netweevil_core::{TopologyBundle, decode_cch_weight};
+use netweevil_core::{DatasetAccelerationBundle, TopologyBundle, decode_cch_weight};
 
 use crate::*;
 
 static PAIRWISE_CCH_SCRATCH: ScratchPool<PairwiseCchScratch> = ScratchPool::new();
 
-/// The hierarchy arcs used by the pairwise query, with states renumbered by
-/// rank. Rows keep the original row order, so relaxations happen in the
-/// same order as on the original arrays and results are unchanged.
+/// The customized hierarchy of one metric with states renumbered by rank:
+/// the arcs every hierarchy search walks and the only copy of the arc
+/// weights. Upward rows keep the dataset bundle's row order, so slot `s` of
+/// edge `e`'s row sits at offset `s - upward_first_out[e]` of `e`'s ranked
+/// row. Downward arcs are grouped by head, tails ascending by edge id: the
+/// order of the former reverse-downward index.
 pub(crate) struct RankedCch {
     /// Upward arcs `(head rank, weight)` per tail rank.
     upward_first_out: Vec<u32>,
     upward_arcs: Vec<(u32, u32)>,
     /// Downward arcs `w -> v` as `(tail rank, weight)` per head rank `v`,
-    /// the order in which the backward search relaxes them.
+    /// the order in which backward searches relax them.
     downward_first_out: Vec<u32>,
     downward_arcs: Vec<(u32, u32)>,
 }
 
 impl RankedCch {
-    fn build(acceleration: &AccelerationGraph) -> Self {
-        let source = acceleration.source.as_ref();
-        let compiled = acceleration
-            .metrics
-            .acceleration
-            .as_ref()
-            .expect("validated acceleration weights");
+    /// Ranked rows of `source` carrying the slot-ordered arc weights.
+    pub(crate) fn build(
+        source: &DatasetAccelerationBundle,
+        upward_weight: &[u32],
+        downward_weight: &[u32],
+    ) -> Self {
         let state_count = source.edge_order.len();
         let mut upward_first_out = Vec::with_capacity(state_count + 1);
         let mut upward_arcs = Vec::with_capacity(source.upward_head.len());
-        let mut downward_first_out = Vec::with_capacity(state_count + 1);
-        let mut downward_arcs = Vec::with_capacity(source.downward_head.len());
         upward_first_out.push(0);
-        downward_first_out.push(0);
         for &edge in &source.edge_order {
             let edge = edge as usize;
             for slot in
@@ -51,20 +48,13 @@ impl RankedCch {
             {
                 upward_arcs.push((
                     source.edge_rank[source.upward_head[slot] as usize],
-                    compiled.upward_weight[slot],
+                    upward_weight[slot],
                 ));
             }
             upward_first_out.push(upward_arcs.len() as u32);
-            for slot in acceleration.reverse_downward_first_out[edge] as usize
-                ..acceleration.reverse_downward_first_out[edge + 1] as usize
-            {
-                downward_arcs.push((
-                    source.edge_rank[acceleration.reverse_downward_edge[slot] as usize],
-                    compiled.downward_weight[acceleration.reverse_downward_arc[slot] as usize],
-                ));
-            }
-            downward_first_out.push(downward_arcs.len() as u32);
         }
+        let (downward_first_out, downward_arcs) =
+            Self::group_downward_by_head(source, |slot| downward_weight[slot]);
         Self {
             upward_first_out,
             upward_arcs,
@@ -72,15 +62,109 @@ impl RankedCch {
             downward_arcs,
         }
     }
-}
 
-/// Lazily built [`RankedCch`] of one acceleration graph.
-#[derive(Default)]
-pub(crate) struct RankedCchCell(OnceLock<RankedCch>);
+    /// Downward arcs grouped by head rank, tails ascending by edge id, as
+    /// `(tail rank, value(slot))`.
+    fn group_downward_by_head<T: Copy + Default>(
+        source: &DatasetAccelerationBundle,
+        value: impl Fn(usize) -> T,
+    ) -> (Vec<u32>, Vec<(u32, T)>) {
+        let state_count = source.edge_order.len();
+        let mut first_out = vec![0_u32; state_count + 1];
+        for &head in &source.downward_head {
+            first_out[source.edge_rank[head as usize] as usize + 1] += 1;
+        }
+        for rank in 0..state_count {
+            first_out[rank + 1] += first_out[rank];
+        }
+        let mut write = first_out[..state_count].to_vec();
+        let mut arcs = vec![(0, T::default()); source.downward_head.len()];
+        for tail in 0..state_count {
+            let tail_rank = source.edge_rank[tail];
+            for slot in source.downward_first_out[tail] as usize
+                ..source.downward_first_out[tail + 1] as usize
+            {
+                let head_rank = source.edge_rank[source.downward_head[slot] as usize] as usize;
+                arcs[write[head_rank] as usize] = (tail_rank, value(slot));
+                write[head_rank] += 1;
+            }
+        }
+        (first_out, arcs)
+    }
 
-impl RankedCchCell {
-    pub(crate) fn get(&self, acceleration: &AccelerationGraph) -> &RankedCch {
-        self.0.get_or_init(|| RankedCch::build(acceleration))
+    /// Bundle slot of every downward arc, in the order of the ranked
+    /// downward rows.
+    pub(crate) fn downward_slots(source: &DatasetAccelerationBundle) -> Vec<u32> {
+        Self::group_downward_by_head(source, |slot| slot as u32)
+            .1
+            .into_iter()
+            .map(|(_, slot)| slot)
+            .collect()
+    }
+
+    /// Upward arcs `(head rank, weight)` leaving `rank`, in bundle row order.
+    pub(crate) fn upward_row(&self, rank: usize) -> &[(u32, u32)] {
+        &self.upward_arcs
+            [self.upward_first_out[rank] as usize..self.upward_first_out[rank + 1] as usize]
+    }
+
+    /// Range of the downward arcs entering `rank` in the ranked downward
+    /// rows (the positions [`Self::downward_slots`] maps to bundle slots).
+    pub(crate) fn downward_range(&self, rank: usize) -> std::ops::Range<usize> {
+        self.downward_first_out[rank] as usize..self.downward_first_out[rank + 1] as usize
+    }
+
+    /// Downward arcs `(tail rank, weight)` entering `rank`.
+    pub(crate) fn downward_row(&self, rank: usize) -> &[(u32, u32)] {
+        &self.downward_arcs[self.downward_range(rank)]
+    }
+
+    /// The downward arc `(tail rank, weight)` at a position of a
+    /// [`Self::downward_range`].
+    pub(crate) fn downward_arc(&self, position: usize) -> (u32, u32) {
+        self.downward_arcs[position]
+    }
+
+    /// Weight of the upward arc in bundle slot `slot` of `tail`'s row.
+    pub(crate) fn upward_weight(
+        &self,
+        source: &DatasetAccelerationBundle,
+        tail: usize,
+        slot: usize,
+    ) -> u32 {
+        let offset = slot - source.upward_first_out[tail] as usize;
+        self.upward_row(source.edge_rank[tail] as usize)[offset].1
+    }
+
+    /// Weight of the downward arc `tail -> head`, if the hierarchy has it.
+    pub(crate) fn downward_weight(
+        &self,
+        source: &DatasetAccelerationBundle,
+        tail: usize,
+        head: usize,
+    ) -> Option<u32> {
+        let row = self.downward_row(source.edge_rank[head] as usize);
+        row.binary_search_by(|&(tail_rank, _)| {
+            (source.edge_order[tail_rank as usize] as usize).cmp(&tail)
+        })
+        .ok()
+        .map(|position| row[position].1)
+    }
+
+    /// Slot-ordered `(upward, downward)` weights, as customization emits them.
+    #[cfg(test)]
+    pub(crate) fn slot_weights(&self, source: &DatasetAccelerationBundle) -> (Vec<u32>, Vec<u32>) {
+        let upward = (0..source.edge_order.len())
+            .flat_map(|tail| {
+                (source.upward_first_out[tail] as usize..source.upward_first_out[tail + 1] as usize)
+                    .map(move |slot| self.upward_weight(source, tail, slot))
+            })
+            .collect();
+        let mut downward = vec![0; source.downward_head.len()];
+        for (position, slot) in Self::downward_slots(source).into_iter().enumerate() {
+            downward[slot as usize] = self.downward_arcs[position].1;
+        }
+        (upward, downward)
     }
 }
 
@@ -112,8 +196,8 @@ struct PairwiseCchScratch {
     touched: Vec<u32>,
     forward_heap: StateHeap,
     backward_heap: StateHeap,
-    forward_arcs: Vec<u32>,
-    unpack_stack: Vec<(bool, u32)>,
+    forward_arcs: Vec<HierarchyArc>,
+    unpack_stack: UnpackStack,
 }
 
 impl PairwiseCchScratch {
@@ -185,7 +269,7 @@ pub(crate) fn accelerated_route_query_seeded(
         return Ok(None);
     };
     let source = acceleration.source.as_ref();
-    let ranked = acceleration.ranked.get(acceleration);
+    let ranked = &acceleration.ranked;
     let edge_rank = source.edge_rank.as_slice();
     let edge_order = source.edge_order.as_slice();
 
@@ -244,9 +328,7 @@ pub(crate) fn accelerated_route_query_seeded(
                     }
                 }
 
-                let arcs = &ranked.upward_arcs[ranked.upward_first_out[rank] as usize
-                    ..ranked.upward_first_out[rank + 1] as usize];
-                for &(head, weight) in arcs {
+                for &(head, weight) in ranked.upward_row(rank) {
                     let next_cost = cost + decode_cch_weight(weight);
                     if scratch.update_forward(head, next_cost, rank as u32) {
                         scratch.forward_heap.push(
@@ -272,9 +354,7 @@ pub(crate) fn accelerated_route_query_seeded(
                     }
                 }
 
-                let arcs = &ranked.downward_arcs[ranked.downward_first_out[rank] as usize
-                    ..ranked.downward_first_out[rank + 1] as usize];
-                for &(tail, weight) in arcs {
+                for &(tail, weight) in ranked.downward_row(rank) {
                     let next_cost = cost + decode_cch_weight(weight);
                     if scratch.update_backward(tail, next_cost, rank as u32) {
                         scratch.backward_heap.push(
@@ -314,22 +394,17 @@ fn reconstruct_pairwise_path(
         if parent == NO_PARENT {
             break;
         }
+        let tail = edge_order[parent as usize];
         let slot = acceleration
-            .upward_arc_slot(edge_order[parent as usize] as usize, edge_order[cursor])
+            .upward_arc_slot(tail as usize, edge_order[cursor])
             .expect("forward parent is joined by an upward arc");
-        forward_arcs.push(slot as u32);
+        forward_arcs.push(HierarchyArc::upward(tail, slot));
         cursor = parent as usize;
     }
     let mut edge_indexes = vec![edge_order[cursor] as usize];
     let mut unpack_stack = std::mem::take(&mut scratch.unpack_stack);
-    for &arc_slot in forward_arcs.iter().rev() {
-        push_unpacked_arc(
-            acceleration,
-            &mut unpack_stack,
-            true,
-            arc_slot,
-            &mut edge_indexes,
-        );
+    for &arc in forward_arcs.iter().rev() {
+        push_unpacked_arc(acceleration, &mut unpack_stack, arc, &mut edge_indexes);
     }
 
     let mut cursor = meeting_rank;
@@ -338,14 +413,14 @@ fn reconstruct_pairwise_path(
         if parent == NO_PARENT {
             break;
         }
+        let tail = edge_order[cursor];
         let slot = acceleration
-            .downward_arc_slot(edge_order[cursor] as usize, edge_order[parent as usize])
+            .downward_arc_slot(tail as usize, edge_order[parent as usize])
             .expect("backward parent is joined by a downward arc");
         push_unpacked_arc(
             acceleration,
             &mut unpack_stack,
-            false,
-            slot as u32,
+            HierarchyArc::downward(tail, slot),
             &mut edge_indexes,
         );
         cursor = parent as usize;

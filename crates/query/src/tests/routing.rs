@@ -740,14 +740,21 @@ fn engine_customizes_stored_metrics_like_the_reference_cch() {
     }
     let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(stored), Some(bundle))
         .expect("engine prepares");
-    let customized = engine.metrics().acceleration.as_ref().expect("customized");
+    let header = engine.metrics().acceleration.as_ref().expect("customized");
     let reference = reference.acceleration.expect("reference weights");
-    assert_eq!(customized.upward_weight, reference.upward_weight);
-    assert_eq!(customized.downward_weight, reference.downward_weight);
+    // The ranked hierarchy holds the only copy of the cost weights.
+    assert!(header.upward_weight.is_empty() && header.downward_weight.is_empty());
     // Service-area weights are customized on first use.
-    assert!(customized.time_upward_weight.is_empty());
+    assert!(header.time_upward_weight.is_empty());
     let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
     let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
+    assert_eq!(
+        acceleration.ranked.slot_weights(&acceleration.source),
+        (
+            reference.upward_weight.clone(),
+            reference.downward_weight.clone()
+        )
+    );
     let time = ServiceAreaMetricKind::TravelTimeS;
     let distance = ServiceAreaMetricKind::DistanceM;
     assert!(acceleration.has_metric_weights(time));

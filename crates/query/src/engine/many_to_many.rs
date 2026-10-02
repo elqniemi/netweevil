@@ -240,7 +240,7 @@ impl SharedArcSummaries {
 struct ArcSummaryCache<'a> {
     shared: &'a SharedArcSummaries,
     local: FxHashMap<u64, ArcSummary>,
-    stack: Vec<(bool, u32, Option<(u32, u32)>)>,
+    stack: Vec<(HierarchyArc, Option<(u32, u32)>)>,
 }
 
 impl<'a> ArcSummaryCache<'a> {
@@ -270,32 +270,29 @@ impl<'a> ArcSummaryCache<'a> {
         self.local.get(&key)
     }
 
-    fn summary(&mut self, context: &SummaryContext<'_>, is_upward: bool, slot: u32) -> &ArcSummary {
-        let root = Self::key(is_upward, slot);
+    fn summary(&mut self, context: &SummaryContext<'_>, arc: HierarchyArc) -> &ArcSummary {
+        let root = Self::key(arc.is_upward, arc.slot);
         if self.lookup(root).is_none() {
-            self.compute(context, is_upward, slot);
+            self.compute(context, arc);
         }
         &self.local[&root]
     }
 
-    fn compute(&mut self, context: &SummaryContext<'_>, is_upward: bool, slot: u32) {
+    fn compute(&mut self, context: &SummaryContext<'_>, arc: HierarchyArc) {
         let component_count = context.metrics.components.len();
         debug_assert!(self.stack.is_empty());
-        self.stack.push((
-            is_upward,
-            slot,
-            unpack_witness(context.acceleration, is_upward, slot),
-        ));
-        while let Some(&(is_upward, slot, witness)) = self.stack.last() {
-            let key = Self::key(is_upward, slot);
+        self.stack
+            .push((arc, unpack_witness(context.acceleration, arc)));
+        while let Some(&(arc, witness)) = self.stack.last() {
+            let key = Self::key(arc.is_upward, arc.slot);
             if self.lookup(key).is_some() {
                 self.stack.pop();
                 continue;
             }
             let summary = match witness {
                 None => {
-                    let tail = arc_tail(context.acceleration, is_upward, slot) as usize;
-                    let head = arc_head(context.acceleration, is_upward, slot) as usize;
+                    let tail = arc.tail as usize;
+                    let head = arc.head(context.acceleration) as usize;
                     let turn_s = context.routing_graph.turn_seconds_between(
                         context.topology,
                         context.metrics,
@@ -324,25 +321,20 @@ impl<'a> ArcSummaryCache<'a> {
                         components,
                     }
                 }
-                Some((left, right)) => {
-                    let left_key = Self::key(false, left);
-                    let right_key = Self::key(true, right);
+                Some(witness) => {
+                    let (left, right) = arc.children(context.acceleration, witness);
+                    let left_key = Self::key(false, left.slot);
+                    let right_key = Self::key(true, right.slot);
                     let left_known = self.lookup(left_key).is_some();
                     let right_known = self.lookup(right_key).is_some();
                     if !left_known || !right_known {
                         if !left_known {
-                            self.stack.push((
-                                false,
-                                left,
-                                unpack_witness(context.acceleration, false, left),
-                            ));
+                            self.stack
+                                .push((left, unpack_witness(context.acceleration, left)));
                         }
                         if !right_known {
-                            self.stack.push((
-                                true,
-                                right,
-                                unpack_witness(context.acceleration, true, right),
-                            ));
+                            self.stack
+                                .push((right, unpack_witness(context.acceleration, right)));
                         }
                         continue;
                     }
@@ -405,7 +397,7 @@ struct PathSummary {
 fn summarize_space_path(
     context: &SummaryContext<'_>,
     cache: &mut ArcSummaryCache<'_>,
-    arcs: &mut Vec<(bool, u32)>,
+    arcs: &mut Vec<HierarchyArc>,
     forward: &CchSearchSpace,
     backward: &CchSearchSpace,
     meeting_edge: u32,
@@ -415,33 +407,22 @@ fn summarize_space_path(
     let acceleration = context.acceleration;
     arcs.clear();
     let mut position = forward.position(meeting_edge)?;
-    loop {
-        let entry = forward.entries[position];
-        if entry.arc == NO_PREVIOUS_ARC {
-            break;
-        }
-        arcs.push((true, entry.arc));
-        position = entry.parent as usize;
+    while let Some(arc) = forward.arc(position, true) {
+        arcs.push(arc);
+        position = forward.entries[position].parent as usize;
     }
     let first_edge = forward.entries[position].edge_index;
     arcs.reverse();
     let mut position = backward.position(meeting_edge)?;
-    loop {
-        let entry = backward.entries[position];
-        if entry.arc == NO_PREVIOUS_ARC {
-            break;
-        }
-        arcs.push((false, entry.arc));
-        position = entry.parent as usize;
+    while let Some(arc) = backward.arc(position, false) {
+        arcs.push(arc);
+        position = backward.entries[position].parent as usize;
     }
     let last_edge = backward.entries[position].edge_index;
-    if arcs.is_empty() {
+    let Some(&last_arc) = arcs.last() else {
         return None;
-    }
-    debug_assert_eq!(
-        arc_head(acceleration, arcs[arcs.len() - 1].0, arcs[arcs.len() - 1].1),
-        last_edge
-    );
+    };
+    debug_assert_eq!(last_arc.head(acceleration), last_edge);
 
     let metrics = context.metrics;
     let first = first_edge as usize;
@@ -467,8 +448,8 @@ fn summarize_space_path(
         .map(|restrictions| restrictions.single(first_edge))
         .unwrap_or_default();
     let clean = RunSummary::default();
-    for &(is_upward, slot) in arcs.iter() {
-        let summary = cache.summary(context, is_upward, slot);
+    for &arc in arcs.iter() {
+        let summary = cache.summary(context, arc);
         cost += summary.cost;
         time_s += summary.time_s;
         distance_m += summary.distance_m;
@@ -914,7 +895,7 @@ struct CellShared<'a, 'b> {
 
 struct CellWorker<'a> {
     cache: ArcSummaryCache<'a>,
-    arcs: Vec<(bool, u32)>,
+    arcs: Vec<HierarchyArc>,
     /// Defer cells that need the restriction-aware search instead of
     /// computing them inline.
     defer_restricted: bool,

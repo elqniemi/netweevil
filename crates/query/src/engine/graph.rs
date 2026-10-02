@@ -169,19 +169,20 @@ impl RoutingGraph {
 
 pub(crate) struct AccelerationGraph {
     pub(crate) source: Arc<DatasetAccelerationBundle>,
+    /// The customized profile. Its generalized-cost arc weights may be
+    /// absent: [`Self::ranked`] holds them.
     pub(crate) metrics: Arc<CompiledProfileBundle>,
-    pub(crate) upward_tail: Vec<u32>,
-    pub(crate) downward_tail: Vec<u32>,
-    pub(crate) reverse_downward_first_out: Vec<u32>,
-    pub(crate) reverse_downward_edge: Vec<u32>,
-    pub(crate) reverse_downward_arc: Vec<u32>,
+    /// The hierarchy renumbered by rank, with the cost weights.
+    pub(crate) ranked: RankedCch,
+    /// Bundle slot of every arc of the ranked downward rows, built for the
+    /// searches that pair them with other slot-ordered weight sets.
+    downward_slots: std::sync::OnceLock<Vec<u32>>,
     /// Service-area weight sets customized on first use when the compiled
     /// profile was loaded without them. `None` for graphs whose weights
     /// carry request-specific penalties (failure modes), which must never
     /// gain plain per-metric weights.
     pub(crate) deferred_metric_weights: Option<Arc<DeferredMetricWeights>>,
     pub(crate) unpack: UnpackTable,
-    pub(crate) ranked: RankedCchCell,
     /// Lower-bound customization for restriction-aware A* potentials,
     /// built on first use.
     pub(crate) lower_bounds: std::sync::OnceLock<Option<LowerBoundWeights>>,
@@ -199,6 +200,14 @@ pub(crate) struct DeferredMetricWeights {
 }
 
 impl AccelerationGraph {
+    /// Bundle slot of each arc of the ranked downward rows, built on first
+    /// use: `downward_slots()[p]` is the slot of the arc at position `p` of
+    /// [`RankedCch::downward_range`].
+    pub(crate) fn downward_slots(&self) -> &[u32] {
+        self.downward_slots
+            .get_or_init(|| RankedCch::downward_slots(&self.source))
+    }
+
     fn compiled_metric_weights(
         &self,
         metric_kind: crate::service_area::ServiceAreaMetricKind,
@@ -431,6 +440,7 @@ pub(crate) fn build_routing_graph_with_options(
     build_routing_graph_with_options_from_shared(topology, Arc::new(metrics.clone()), None, options)
 }
 
+#[cfg(test)]
 pub(crate) fn build_routing_graph_from_shared(
     topology: &TopologyBundle,
     metrics: Arc<CompiledProfileBundle>,
@@ -444,10 +454,22 @@ pub(crate) fn build_routing_graph_from_shared(
     )
 }
 
-#[allow(clippy::needless_range_loop)]
 pub(crate) fn build_routing_graph_with_options_from_shared(
     topology: &TopologyBundle,
     metrics: Arc<CompiledProfileBundle>,
+    acceleration: Option<Arc<DatasetAccelerationBundle>>,
+    options: RoutingGraphBuildOptions,
+) -> Result<RoutingGraph> {
+    build_routing_graph_with_weights(topology, metrics, None, acceleration, options)
+}
+
+/// [`build_routing_graph_with_options_from_shared`] with the hierarchy's
+/// cost weights passed separately (see [`build_acceleration_graph`]).
+#[allow(clippy::needless_range_loop)]
+pub(crate) fn build_routing_graph_with_weights(
+    topology: &TopologyBundle,
+    metrics: Arc<CompiledProfileBundle>,
+    weights: Option<CchArcWeights>,
     acceleration: Option<Arc<DatasetAccelerationBundle>>,
     options: RoutingGraphBuildOptions,
 ) -> Result<RoutingGraph> {
@@ -684,7 +706,7 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
         acceleration: if options.include_temporal_materialized_directions {
             None
         } else {
-            build_acceleration_graph(metrics, acceleration, edge_count)?.map(Arc::new)
+            build_acceleration_graph(metrics, weights, acceleration, edge_count)?.map(Arc::new)
         },
         acceleration_includes_failure_penalties: false,
         automaton: RestrictionAutomaton::build(&restricted_sequences),
@@ -727,20 +749,26 @@ impl RoutingGraph {
     }
 }
 
+/// Slot-ordered `(upward, downward)` generalized-cost weights of a
+/// hierarchy, as customization emits them.
+pub(crate) type CchArcWeights = (Vec<u32>, Vec<u32>);
+
 /// Compiled profile bundles persist per-edge metrics only. When `metrics`
 /// carries an acceleration header for `dataset_acceleration` but no arc
-/// weights yet, customize the generalized-cost weights now and report
-/// `true`; service-area weights are then deferred (see
-/// [`DeferredMetricWeights`]). Bundles that do not belong together are
-/// returned unchanged so [`build_acceleration_graph`] reports the mismatch.
+/// weights yet, customize the generalized-cost weights now and return them
+/// for [`build_routing_graph_with_weights`]; the bundle itself stays
+/// weightless, so the ranked hierarchy holds the only copy. Service-area
+/// weights are then deferred (see [`DeferredMetricWeights`]). Returns `None`
+/// for bundles that carry weights already and for bundles that do not belong
+/// together, which [`build_acceleration_graph`] reports.
 pub(crate) fn customize_loaded_metrics(
     topology: &TopologyBundle,
-    metrics: Arc<CompiledProfileBundle>,
+    metrics: &CompiledProfileBundle,
     dataset_acceleration: Option<&DatasetAccelerationBundle>,
-) -> (Arc<CompiledProfileBundle>, bool) {
+) -> Option<CchArcWeights> {
     let (Some(source), Some(compiled)) = (dataset_acceleration, metrics.acceleration.as_ref())
     else {
-        return (metrics, false);
+        return None;
     };
     let customized = compiled.upward_weight.len() == source.upward_head.len()
         && compiled.downward_weight.len() == source.downward_head.len();
@@ -751,22 +779,23 @@ pub(crate) fn customize_loaded_metrics(
         || compiled.schema_version != netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION
         || metrics.edge_metrics.len() != topology.edge_count()
     {
-        return (metrics, false);
+        return None;
     }
     let weights = netweevil_profile::customize_acceleration(
         topology,
-        &metrics,
+        metrics,
         source,
         compiled.source_acceleration_bundle_id.clone(),
     );
-    let mut owned = Arc::unwrap_or_clone(metrics);
-    owned.acceleration = Some(weights);
-    (Arc::new(owned), true)
+    Some((weights.upward_weight, weights.downward_weight))
 }
 
-#[allow(clippy::needless_range_loop)]
+/// The ranked hierarchy of `metrics` over `dataset_acceleration`. The cost
+/// weights come from `weights` when given (customized at load) and from the
+/// bundle's acceleration otherwise.
 pub(crate) fn build_acceleration_graph(
     metrics: Arc<CompiledProfileBundle>,
+    weights: Option<CchArcWeights>,
     dataset_acceleration: Option<Arc<DatasetAccelerationBundle>>,
     edge_count: usize,
 ) -> Result<Option<AccelerationGraph>> {
@@ -781,12 +810,15 @@ pub(crate) fn build_acceleration_graph(
         }
         return Ok(None);
     };
-    if acceleration
-        .upward_weight
-        .contains(&netweevil_core::CCH_WEIGHT_OVERFLOW)
-        || acceleration
-            .downward_weight
-            .contains(&netweevil_core::CCH_WEIGHT_OVERFLOW)
+    let (upward_weight, downward_weight) = match &weights {
+        Some((upward, downward)) => (upward.as_slice(), downward.as_slice()),
+        None => (
+            acceleration.upward_weight.as_slice(),
+            acceleration.downward_weight.as_slice(),
+        ),
+    };
+    if upward_weight.contains(&netweevil_core::CCH_WEIGHT_OVERFLOW)
+        || downward_weight.contains(&netweevil_core::CCH_WEIGHT_OVERFLOW)
     {
         return Ok(None);
     }
@@ -838,15 +870,12 @@ pub(crate) fn build_acceleration_graph(
         .last()
         .copied()
         .unwrap_or_default() as usize;
-    if topology_source.upward_head.len() != upward_len
-        || acceleration.upward_weight.len() != upward_len
-    {
+    if topology_source.upward_head.len() != upward_len || upward_weight.len() != upward_len {
         bail!(
             "acceleration upward arrays are inconsistent; re-import the dataset and recompile the profile"
         );
     }
-    if topology_source.downward_head.len() != downward_len
-        || acceleration.downward_weight.len() != downward_len
+    if topology_source.downward_head.len() != downward_len || downward_weight.len() != downward_len
     {
         bail!(
             "acceleration downward arrays are inconsistent; re-import the dataset and recompile the profile"
@@ -868,50 +897,15 @@ pub(crate) fn build_acceleration_graph(
         }
     }
 
-    let mut reverse_downward_first_out = vec![0_u32; edge_count + 1];
-    for &next_edge in &topology_source.downward_head {
-        reverse_downward_first_out[next_edge as usize + 1] += 1;
-    }
-    for edge_index in 0..edge_count {
-        reverse_downward_first_out[edge_index + 1] += reverse_downward_first_out[edge_index];
-    }
-    let mut reverse_downward_edge = vec![0_u32; downward_len];
-    let mut reverse_downward_arc = vec![0_u32; downward_len];
-    let mut downward_tail = vec![0_u32; downward_len];
-    let mut write_positions = reverse_downward_first_out[..edge_count].to_vec();
-    for edge_index in 0..edge_count {
-        for slot in topology_source.downward_first_out[edge_index] as usize
-            ..topology_source.downward_first_out[edge_index + 1] as usize
-        {
-            downward_tail[slot] = edge_index as u32;
-            let next_edge = topology_source.downward_head[slot] as usize;
-            let write_index = &mut write_positions[next_edge];
-            let target_slot = *write_index as usize;
-            reverse_downward_edge[target_slot] = edge_index as u32;
-            reverse_downward_arc[target_slot] = slot as u32;
-            *write_index += 1;
-        }
-    }
-
-    let mut upward_tail = vec![0_u32; upward_len];
-    for edge_index in 0..edge_count {
-        for slot in topology_source.upward_first_out[edge_index] as usize
-            ..topology_source.upward_first_out[edge_index + 1] as usize
-        {
-            upward_tail[slot] = edge_index as u32;
-        }
-    }
+    let ranked = RankedCch::build(&topology_source, upward_weight, downward_weight);
+    drop(weights);
     Ok(Some(AccelerationGraph {
         source: topology_source,
         metrics,
-        upward_tail,
-        downward_tail,
-        reverse_downward_first_out,
-        reverse_downward_edge,
-        reverse_downward_arc,
+        ranked,
+        downward_slots: std::sync::OnceLock::new(),
         deferred_metric_weights: None,
         unpack: UnpackTable::new(upward_len, downward_len),
-        ranked: RankedCchCell::default(),
         lower_bounds: std::sync::OnceLock::new(),
     }))
 }

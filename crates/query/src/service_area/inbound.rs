@@ -344,6 +344,7 @@ fn backward_phast(
         .metric_weights(metric_kind, topology)
         .expect("backward PHAST requires per-metric weights");
     let source = acceleration.source.as_ref();
+    let downward_slots = acceleration.downward_slots();
     let edge_count = routing_graph.edge_costs.len();
     let full_cost = |edge_index: usize| {
         service_area_edge_cost(topology, metrics, edge_index, metric_kind).unwrap_or(f64::INFINITY)
@@ -381,11 +382,11 @@ fn backward_phast(
         if cost > dist[edge_index] || cost > max_cost {
             continue;
         }
-        for slot in acceleration.reverse_downward_first_out[edge_index] as usize
-            ..acceleration.reverse_downward_first_out[edge_index + 1] as usize
-        {
-            let tail = acceleration.reverse_downward_edge[slot] as usize;
-            let arc = acceleration.reverse_downward_arc[slot] as usize;
+        let rank = source.edge_rank[edge_index] as usize;
+        for position in acceleration.ranked.downward_range(rank) {
+            let (tail_rank, _) = acceleration.ranked.downward_arc(position);
+            let tail = source.edge_order[tail_rank as usize] as usize;
+            let arc = downward_slots[position] as usize;
             let next_cost = cost + netweevil_core::decode_cch_weight(downward_weight[arc]);
             if next_cost < dist[tail] {
                 dist[tail] = next_cost;

@@ -44,11 +44,11 @@ impl UnpackTable {
 #[derive(Default)]
 pub(crate) struct BidirectionalAccelerationScratch {
     forward_dist: Vec<f64>,
-    forward_previous_arc: Vec<u32>,
+    forward_parent: Vec<u32>,
     forward_touched: Vec<u32>,
     forward_heap: BinaryHeap<State>,
     backward_dist: Vec<f64>,
-    backward_next_arc: Vec<u32>,
+    backward_parent: Vec<u32>,
     backward_touched: Vec<u32>,
     backward_heap: BinaryHeap<State>,
 }
@@ -57,18 +57,17 @@ impl BidirectionalAccelerationScratch {
     fn prepare(&mut self, edge_count: usize) {
         if self.forward_dist.len() < edge_count {
             self.forward_dist.resize(edge_count, f64::INFINITY);
-            self.forward_previous_arc
-                .resize(edge_count, NO_PREVIOUS_ARC);
+            self.forward_parent.resize(edge_count, NO_PREVIOUS_ARC);
             self.backward_dist.resize(edge_count, f64::INFINITY);
-            self.backward_next_arc.resize(edge_count, NO_PREVIOUS_ARC);
+            self.backward_parent.resize(edge_count, NO_PREVIOUS_ARC);
         }
         for &edge_index in &self.forward_touched {
             self.forward_dist[edge_index as usize] = f64::INFINITY;
-            self.forward_previous_arc[edge_index as usize] = NO_PREVIOUS_ARC;
+            self.forward_parent[edge_index as usize] = NO_PREVIOUS_ARC;
         }
         for &edge_index in &self.backward_touched {
             self.backward_dist[edge_index as usize] = f64::INFINITY;
-            self.backward_next_arc[edge_index as usize] = NO_PREVIOUS_ARC;
+            self.backward_parent[edge_index as usize] = NO_PREVIOUS_ARC;
         }
         self.forward_touched.clear();
         self.forward_heap.clear();
@@ -87,7 +86,7 @@ impl BidirectionalAccelerationScratch {
             self.forward_touched.push(edge_index as u32);
         }
         self.forward_dist[edge_index] = cost;
-        self.forward_previous_arc[edge_index] = previous_arc;
+        self.forward_parent[edge_index] = previous_arc;
         true
     }
 
@@ -102,10 +101,79 @@ impl BidirectionalAccelerationScratch {
             self.backward_touched.push(edge_index as u32);
         }
         self.backward_dist[edge_index] = cost;
-        self.backward_next_arc[edge_index] = next_arc;
+        self.backward_parent[edge_index] = next_arc;
         true
     }
 }
+
+/// One hierarchy arc: its bundle slot, direction and tail state. The ranked
+/// hierarchy keeps no per-arc tail, so unpacking carries it along.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct HierarchyArc {
+    pub(crate) is_upward: bool,
+    pub(crate) tail: u32,
+    pub(crate) slot: u32,
+}
+
+impl HierarchyArc {
+    pub(crate) fn upward(tail: u32, slot: usize) -> Self {
+        Self {
+            is_upward: true,
+            tail,
+            slot: slot as u32,
+        }
+    }
+
+    pub(crate) fn downward(tail: u32, slot: usize) -> Self {
+        Self {
+            is_upward: false,
+            tail,
+            slot: slot as u32,
+        }
+    }
+
+    /// Head state: the later state on the unpacked path.
+    pub(crate) fn head(self, acceleration: &AccelerationGraph) -> u32 {
+        if self.is_upward {
+            acceleration.source.upward_head[self.slot as usize]
+        } else {
+            acceleration.source.downward_head[self.slot as usize]
+        }
+    }
+
+    /// The two child arcs of a lower-triangle witness `(left, right)`:
+    /// `tail -> middle` downward, then `middle -> head` upward.
+    pub(crate) fn children(
+        self,
+        acceleration: &AccelerationGraph,
+        (left, right): (u32, u32),
+    ) -> (Self, Self) {
+        let middle = acceleration.source.downward_head[left as usize];
+        (
+            Self::downward(self.tail, left as usize),
+            Self::upward(middle, right as usize),
+        )
+    }
+}
+
+/// Tail of a stacked arc. A right child's tail is the head of its left
+/// sibling; it is only looked up when the arc's witness is not memoized.
+#[derive(Debug, Clone, Copy)]
+enum PendingTail {
+    State(u32),
+    HeadOfDownward(u32),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PendingArc {
+    is_upward: bool,
+    slot: u32,
+    tail: PendingTail,
+}
+
+/// Reusable stack of [`push_unpacked_arc`].
+#[derive(Debug, Default)]
+pub(crate) struct UnpackStack(Vec<PendingArc>);
 
 /// Unpacks arcs by finding a lower triangle with the same integer weight.
 /// Child endpoints have lower rank, so expansion terminates even with zero costs.
@@ -113,131 +181,117 @@ impl BidirectionalAccelerationScratch {
 /// only on the arc topology and customized weights that the graph owns.
 pub(crate) fn push_unpacked_arc(
     acceleration: &AccelerationGraph,
-    stack: &mut Vec<(bool, u32)>,
-    is_upward: bool,
-    arc_slot: u32,
+    stack: &mut UnpackStack,
+    arc: HierarchyArc,
     edge_indexes: &mut Vec<usize>,
 ) {
-    let compiled = acceleration
-        .metrics
-        .acceleration
-        .as_ref()
-        .expect("validated acceleration weights");
+    let stack = &mut stack.0;
     debug_assert!(stack.is_empty());
-    stack.push((is_upward, arc_slot));
-    while let Some((is_upward, slot)) = stack.pop() {
-        let Some((left, right)) = decode_unpack_witness(cached_unpack_witness(
-            acceleration,
-            compiled,
-            is_upward,
-            slot,
-        )) else {
-            edge_indexes.push(arc_head(acceleration, is_upward, slot) as usize);
+    stack.push(PendingArc {
+        is_upward: arc.is_upward,
+        slot: arc.slot,
+        tail: PendingTail::State(arc.tail),
+    });
+    while let Some(pending) = stack.pop() {
+        let witness =
+            memoized_witness(
+                acceleration,
+                pending.is_upward,
+                pending.slot,
+                || match pending.tail {
+                    PendingTail::State(tail) => tail,
+                    PendingTail::HeadOfDownward(left) => {
+                        acceleration.source.downward_head[left as usize]
+                    }
+                },
+            );
+        let Some((left, right)) = witness else {
+            let head = if pending.is_upward {
+                acceleration.source.upward_head[pending.slot as usize]
+            } else {
+                acceleration.source.downward_head[pending.slot as usize]
+            };
+            edge_indexes.push(head as usize);
             continue;
         };
         // Process left before right: LIFO stack, so push right first.
-        stack.push((true, right));
-        stack.push((false, left));
-    }
-}
-
-/// Head state of a hierarchy arc: the later state on the unpacked path.
-pub(crate) fn arc_head(acceleration: &AccelerationGraph, is_upward: bool, slot: u32) -> u32 {
-    if is_upward {
-        acceleration.source.upward_head[slot as usize]
-    } else {
-        acceleration.source.downward_head[slot as usize]
-    }
-}
-
-/// Tail state of a hierarchy arc: the earlier state on the unpacked path.
-pub(crate) fn arc_tail(acceleration: &AccelerationGraph, is_upward: bool, slot: u32) -> u32 {
-    if is_upward {
-        acceleration.upward_tail[slot as usize]
-    } else {
-        acceleration.downward_tail[slot as usize]
+        stack.push(PendingArc {
+            is_upward: true,
+            slot: right,
+            tail: PendingTail::HeadOfDownward(left),
+        });
+        stack.push(PendingArc {
+            is_upward: false,
+            slot: left,
+            tail: pending.tail,
+        });
     }
 }
 
 /// The lower triangle `tail -> middle -> head` that unpacks an arc: the first
 /// downward arc out of `tail`, in CSR order, whose middle state ranks below
-/// `head` and whose child weights sum exactly to the arc weight. `None` means
-/// the arc is a base transition. Every unpacking path reads the same
-/// memoized witness from the graph's [`UnpackTable`], so summaries and
-/// explicit paths agree on the chosen decomposition.
+/// `head` and whose child weights sum exactly to the arc weight, as bundle
+/// slots `(left, right)`. `None` means the arc is a base transition. Every
+/// unpacking path reads the same memoized witness from the graph's
+/// [`UnpackTable`], so summaries and explicit paths agree on the chosen
+/// decomposition.
 pub(crate) fn unpack_witness(
     acceleration: &AccelerationGraph,
-    is_upward: bool,
-    slot: u32,
+    arc: HierarchyArc,
 ) -> Option<(u32, u32)> {
-    let compiled = acceleration
-        .metrics
-        .acceleration
-        .as_ref()
-        .expect("validated acceleration weights");
-    decode_unpack_witness(cached_unpack_witness(
-        acceleration,
-        compiled,
-        is_upward,
-        slot,
-    ))
+    memoized_witness(acceleration, arc.is_upward, arc.slot, || arc.tail)
 }
 
-fn cached_unpack_witness(
+fn memoized_witness(
     acceleration: &AccelerationGraph,
-    compiled: &netweevil_core::CompiledAcceleration,
     is_upward: bool,
     slot: u32,
-) -> u64 {
-    let slot_index = slot as usize;
-    let entry = acceleration.unpack.entry(is_upward, slot_index);
+    tail: impl FnOnce() -> u32,
+) -> Option<(u32, u32)> {
+    let entry = acceleration.unpack.entry(is_upward, slot as usize);
     let mut witness = entry.load(AtomicOrdering::Relaxed);
     if witness == UNPACK_UNKNOWN {
-        witness = find_unpack_witness(acceleration, compiled, is_upward, slot_index);
+        let arc = HierarchyArc {
+            is_upward,
+            tail: tail(),
+            slot,
+        };
+        witness = find_unpack_witness(acceleration, arc);
         entry.store(witness, AtomicOrdering::Relaxed);
     }
-    witness
-}
-
-fn decode_unpack_witness(witness: u64) -> Option<(u32, u32)> {
     (witness != UNPACK_BASE_ARC).then(|| ((witness >> 32) as u32 - 1, witness as u32))
 }
 
-fn find_unpack_witness(
-    acceleration: &AccelerationGraph,
-    compiled: &netweevil_core::CompiledAcceleration,
-    is_upward: bool,
-    slot_index: usize,
-) -> u64 {
-    let source = &acceleration.source;
-    let (tail, head, weight) = if is_upward {
-        (
-            acceleration.upward_tail[slot_index] as usize,
-            source.upward_head[slot_index],
-            compiled.upward_weight[slot_index],
-        )
+fn find_unpack_witness(acceleration: &AccelerationGraph, arc: HierarchyArc) -> u64 {
+    let source = acceleration.source.as_ref();
+    let ranked = &acceleration.ranked;
+    let tail = arc.tail as usize;
+    let head = arc.head(acceleration) as usize;
+    let weight = if arc.is_upward {
+        ranked.upward_weight(source, tail, arc.slot as usize)
     } else {
-        (
-            acceleration.downward_tail[slot_index] as usize,
-            source.downward_head[slot_index],
-            compiled.downward_weight[slot_index],
-        )
+        ranked
+            .downward_weight(source, tail, head)
+            .expect("downward arc is in its head's ranked row")
     };
     assert!(
         weight < netweevil_core::CCH_WEIGHT_OVERFLOW,
         "only finite CCH arcs can be unpacked"
     );
-    let head_rank = source.edge_rank[head as usize];
+    let head_rank = source.edge_rank[head];
     (source.downward_first_out[tail] as usize..source.downward_first_out[tail + 1] as usize)
         .find_map(|left| {
             let middle = source.downward_head[left] as usize;
             if source.edge_rank[middle] >= head_rank {
                 return None;
             }
-            let right = acceleration.upward_arc_slot(middle, head)?;
+            let right = acceleration.upward_arc_slot(middle, head as u32)?;
+            let left_weight = ranked
+                .downward_weight(source, tail, middle)
+                .expect("downward arc is in its head's ranked row");
             (netweevil_core::add_cch_weights(
-                compiled.downward_weight[left],
-                compiled.upward_weight[right],
+                left_weight,
+                ranked.upward_weight(source, middle, right),
             ) == weight)
                 .then(|| ((left as u64 + 1) << 32) | right as u64)
         })
@@ -295,7 +349,8 @@ pub(crate) fn minimum_seed_cost(seeds: &[(usize, f64)]) -> f64 {
 pub(crate) struct CchSpaceEntry {
     pub(crate) edge_index: u32,
     pub(crate) cost: f64,
-    /// Predecessor upward arc (forward) or successor downward arc (backward).
+    /// Bundle slot of the predecessor upward arc (forward) or successor
+    /// downward arc (backward); `NO_PREVIOUS_ARC` at seeds.
     pub(crate) arc: u32,
     /// Entry position of the arc's other endpoint; `NO_PREVIOUS_ARC` at seeds.
     pub(crate) parent: u32,
@@ -313,16 +368,24 @@ pub(crate) struct CchSearchSpace {
 }
 
 impl CchSearchSpace {
-    fn from_unsorted(mut entries: Vec<CchSpaceEntry>, arc_parent: impl Fn(u32) -> u32) -> Self {
+    /// Sorts the settled states and resolves each state's neighbour edge,
+    /// held in `parent` until now, to its entry position and the arc slot
+    /// `arc_slot(state, neighbour)`.
+    fn from_unsorted(
+        mut entries: Vec<CchSpaceEntry>,
+        arc_slot: impl Fn(u32, u32) -> Option<usize>,
+    ) -> Self {
         entries.sort_unstable_by_key(|entry| entry.edge_index);
         for index in 0..entries.len() {
-            let arc = entries[index].arc;
-            if arc == NO_PREVIOUS_ARC {
+            let neighbour = entries[index].parent;
+            if neighbour == NO_PREVIOUS_ARC {
                 continue;
             }
-            let parent_edge = arc_parent(arc);
+            entries[index].arc = arc_slot(entries[index].edge_index, neighbour)
+                .expect("search-space parent is joined by a hierarchy arc")
+                as u32;
             entries[index].parent = entries
-                .binary_search_by_key(&parent_edge, |entry| entry.edge_index)
+                .binary_search_by_key(&neighbour, |entry| entry.edge_index)
                 .expect("search-space predecessor is settled")
                 as u32;
         }
@@ -335,10 +398,35 @@ impl CchSearchSpace {
             .ok()
     }
 
-    fn lookup(&self, edge_index: u32) -> Option<(f64, u32)> {
-        self.position(edge_index)
-            .map(|position| (self.entries[position].cost, self.entries[position].arc))
+    /// The arc that settled the entry at `position`, `None` at seeds. In a
+    /// forward space it is the predecessor's upward arc into the state; in a
+    /// backward space the state's downward arc to its successor.
+    pub(crate) fn arc(&self, position: usize, forward: bool) -> Option<HierarchyArc> {
+        let entry = self.entries[position];
+        if entry.arc == NO_PREVIOUS_ARC {
+            return None;
+        }
+        Some(if forward {
+            HierarchyArc::upward(
+                self.entries[entry.parent as usize].edge_index,
+                entry.arc as usize,
+            )
+        } else {
+            HierarchyArc::downward(entry.edge_index, entry.arc as usize)
+        })
     }
+}
+
+fn space_entries(dist: &[f64], parent: &[u32], touched: &[u32]) -> Vec<CchSpaceEntry> {
+    touched
+        .iter()
+        .map(|&edge_index| CchSpaceEntry {
+            edge_index,
+            cost: dist[edge_index as usize],
+            arc: NO_PREVIOUS_ARC,
+            parent: parent[edge_index as usize],
+        })
+        .collect()
 }
 
 pub(crate) fn build_forward_cch_space(
@@ -349,11 +437,7 @@ pub(crate) fn build_forward_cch_space(
         .acceleration
         .as_ref()
         .expect("many-to-many CCH space requires acceleration");
-    let compiled = acceleration
-        .metrics
-        .acceleration
-        .as_ref()
-        .expect("validated acceleration weights");
+    let source = acceleration.source.as_ref();
 
     ACCELERATION_SEARCH_SCRATCH.with(|scratch| {
         scratch.prepare(routing_graph.edge_costs.len());
@@ -377,13 +461,11 @@ pub(crate) fn build_forward_cch_space(
             if cost > scratch.forward_dist[edge_index] {
                 continue;
             }
-            for slot in acceleration.source.upward_first_out[edge_index] as usize
-                ..acceleration.source.upward_first_out[edge_index + 1] as usize
-            {
-                let next_edge = acceleration.source.upward_head[slot] as usize;
-                let next_cost =
-                    cost + netweevil_core::decode_cch_weight(compiled.upward_weight[slot]);
-                if !scratch.update_forward(next_edge, next_cost, slot as u32) {
+            let rank = source.edge_rank[edge_index] as usize;
+            for &(head_rank, weight) in acceleration.ranked.upward_row(rank) {
+                let next_edge = source.edge_order[head_rank as usize] as usize;
+                let next_cost = cost + netweevil_core::decode_cch_weight(weight);
+                if !scratch.update_forward(next_edge, next_cost, edge_index as u32) {
                     continue;
                 }
                 scratch.forward_heap.push(State {
@@ -395,17 +477,14 @@ pub(crate) fn build_forward_cch_space(
             }
         }
 
-        let entries = scratch
-            .forward_touched
-            .iter()
-            .map(|&edge_index| CchSpaceEntry {
-                edge_index,
-                cost: scratch.forward_dist[edge_index as usize],
-                arc: scratch.forward_previous_arc[edge_index as usize],
-                parent: NO_PREVIOUS_ARC,
-            })
-            .collect::<Vec<_>>();
-        CchSearchSpace::from_unsorted(entries, |arc| acceleration.upward_tail[arc as usize])
+        CchSearchSpace::from_unsorted(
+            space_entries(
+                &scratch.forward_dist,
+                &scratch.forward_parent,
+                &scratch.forward_touched,
+            ),
+            |edge, previous| acceleration.upward_arc_slot(previous as usize, edge),
+        )
     })
 }
 
@@ -417,11 +496,7 @@ pub(crate) fn build_backward_cch_space(
         .acceleration
         .as_ref()
         .expect("many-to-many CCH space requires acceleration");
-    let compiled = acceleration
-        .metrics
-        .acceleration
-        .as_ref()
-        .expect("validated acceleration weights");
+    let source = acceleration.source.as_ref();
 
     ACCELERATION_SEARCH_SCRATCH.with(|scratch| {
         scratch.prepare(routing_graph.edge_costs.len());
@@ -445,19 +520,11 @@ pub(crate) fn build_backward_cch_space(
             if cost > scratch.backward_dist[edge_index] {
                 continue;
             }
-            for slot in acceleration.reverse_downward_first_out[edge_index] as usize
-                ..acceleration.reverse_downward_first_out[edge_index + 1] as usize
-            {
-                let previous_edge = acceleration.reverse_downward_edge[slot] as usize;
-                let next_cost = cost
-                    + netweevil_core::decode_cch_weight(
-                        compiled.downward_weight[acceleration.reverse_downward_arc[slot] as usize],
-                    );
-                if !scratch.update_backward(
-                    previous_edge,
-                    next_cost,
-                    acceleration.reverse_downward_arc[slot],
-                ) {
+            let rank = source.edge_rank[edge_index] as usize;
+            for &(tail_rank, weight) in acceleration.ranked.downward_row(rank) {
+                let previous_edge = source.edge_order[tail_rank as usize] as usize;
+                let next_cost = cost + netweevil_core::decode_cch_weight(weight);
+                if !scratch.update_backward(previous_edge, next_cost, edge_index as u32) {
                     continue;
                 }
                 scratch.backward_heap.push(State {
@@ -469,19 +536,14 @@ pub(crate) fn build_backward_cch_space(
             }
         }
 
-        let entries = scratch
-            .backward_touched
-            .iter()
-            .map(|&edge_index| CchSpaceEntry {
-                edge_index,
-                cost: scratch.backward_dist[edge_index as usize],
-                arc: scratch.backward_next_arc[edge_index as usize],
-                parent: NO_PREVIOUS_ARC,
-            })
-            .collect::<Vec<_>>();
-        CchSearchSpace::from_unsorted(entries, |arc| {
-            acceleration.source.downward_head[arc as usize]
-        })
+        CchSearchSpace::from_unsorted(
+            space_entries(
+                &scratch.backward_dist,
+                &scratch.backward_parent,
+                &scratch.backward_touched,
+            ),
+            |edge, next| acceleration.downward_arc_slot(edge as usize, next),
+        )
     })
 }
 
@@ -513,8 +575,7 @@ pub(crate) fn join_cch_spaces(
 }
 
 /// Unpacks the up-down path through `meeting_edge` from two stored search
-/// spaces, mirroring `reconstruct_accelerated_route_path` on the pairwise
-/// scratch.
+/// spaces, mirroring `reconstruct_pairwise_path` on the pairwise scratch.
 pub(crate) fn reconstruct_cch_space_path(
     routing_graph: &RoutingGraph,
     forward: &CchSearchSpace,
@@ -527,47 +588,27 @@ pub(crate) fn reconstruct_cch_space_path(
         .as_ref()
         .expect("many-to-many CCH space requires acceleration");
 
-    let mut forward_arc_ids = Vec::new();
-    let mut cursor = meeting_edge;
-    loop {
-        let (_, arc) = forward
-            .lookup(cursor)
-            .expect("meeting edge chain settled in forward space");
-        if arc == NO_PREVIOUS_ARC {
-            break;
-        }
-        forward_arc_ids.push(arc);
-        cursor = acceleration.upward_tail[arc as usize];
+    let mut forward_arcs = Vec::new();
+    let mut position = forward
+        .position(meeting_edge)
+        .expect("meeting edge settled in forward space");
+    while let Some(arc) = forward.arc(position, true) {
+        forward_arcs.push(arc);
+        position = forward.entries[position].parent as usize;
     }
 
-    let mut edge_indexes = vec![cursor as usize];
-    let mut unpack_stack = Vec::new();
-    for arc_slot in forward_arc_ids.into_iter().rev() {
-        push_unpacked_arc(
-            acceleration,
-            &mut unpack_stack,
-            true,
-            arc_slot,
-            &mut edge_indexes,
-        );
+    let mut edge_indexes = vec![forward.entries[position].edge_index as usize];
+    let mut unpack_stack = UnpackStack::default();
+    for arc in forward_arcs.into_iter().rev() {
+        push_unpacked_arc(acceleration, &mut unpack_stack, arc, &mut edge_indexes);
     }
 
-    let mut cursor = meeting_edge;
-    loop {
-        let (_, arc) = backward
-            .lookup(cursor)
-            .expect("meeting edge chain settled in backward space");
-        if arc == NO_PREVIOUS_ARC {
-            break;
-        }
-        push_unpacked_arc(
-            acceleration,
-            &mut unpack_stack,
-            false,
-            arc,
-            &mut edge_indexes,
-        );
-        cursor = acceleration.source.downward_head[arc as usize];
+    let mut position = backward
+        .position(meeting_edge)
+        .expect("meeting edge settled in backward space");
+    while let Some(arc) = backward.arc(position, false) {
+        push_unpacked_arc(acceleration, &mut unpack_stack, arc, &mut edge_indexes);
+        position = backward.entries[position].parent as usize;
     }
 
     RoutePath {

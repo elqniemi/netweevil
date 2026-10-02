@@ -67,12 +67,15 @@ impl PreparedRoutingEngine {
         with_ignore_mode_graph: bool,
     ) -> Result<Self> {
         validate_execution_inputs(topology.as_ref(), metrics.as_ref())?;
-        let (metrics, customized_at_load) =
-            customize_loaded_metrics(topology.as_ref(), metrics, acceleration.as_deref());
-        let mut default_routing_graph = build_routing_graph_from_shared(
+        let weights =
+            customize_loaded_metrics(topology.as_ref(), metrics.as_ref(), acceleration.as_deref());
+        let customized_at_load = weights.is_some();
+        let mut default_routing_graph = build_routing_graph_with_weights(
             topology.as_ref(),
             metrics.clone(),
+            weights,
             acceleration.clone(),
+            RoutingGraphBuildOptions::default(),
         )?;
         if customized_at_load
             && let Some(acceleration) = default_routing_graph
@@ -81,11 +84,6 @@ impl PreparedRoutingEngine {
                 .and_then(Arc::get_mut)
         {
             acceleration.deferred_metric_weights = Some(Arc::default());
-        }
-        // Build the rank-ordered query arrays now rather than on the first
-        // route request (~40 ms on a province-sized graph).
-        if let Some(acceleration) = default_routing_graph.acceleration.as_ref() {
-            acceleration.ranked.get(acceleration);
         }
         // Route finalization and analysis read turn penalties from this
         // table once it exists; build it before the first request.
