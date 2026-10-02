@@ -1268,6 +1268,25 @@ fn single_route_restricted_fallback_matches_the_exact_engine() {
 }
 
 #[test]
+fn engines_with_restriction_sequences_customize_lower_bounds_in_the_background() {
+    let topology = multi_edge_restricted_topology();
+    let (bundle, compiled) = build_test_cch(&topology, &restricted_metrics());
+    let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(compiled), Some(bundle))
+        .expect("accelerated engine builds");
+    let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
+    let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while acceleration.lower_bounds.get().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "lower bounds were not customized in the background"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(crate::lower_bound_weights(graph).is_some());
+}
+
+#[test]
 fn graph_without_restriction_sequences_matches_an_ignoring_build() {
     let topology = multi_edge_restricted_topology();
     let metrics = restricted_metrics();

@@ -19,6 +19,7 @@ pub(crate) struct RoutePath {
 /// in their restriction automata
 /// ([`RoutingGraph::without_restriction_sequences`]) or only in edge costs
 /// (traffic bucket engines, [`RoutingGraph::with_metrics`]) share them.
+#[derive(Clone)]
 pub(crate) struct RoutingGraph {
     pub(crate) edge_spatial_index: Arc<crate::edge_spatial_index::EdgeSpatialIndex>,
     first_out: Arc<[u32]>,

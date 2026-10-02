@@ -54,7 +54,9 @@ impl PreparedRoutingEngine {
         metrics: Arc<CompiledProfileBundle>,
         acceleration: Option<Arc<DatasetAccelerationBundle>>,
     ) -> Result<Self> {
-        Self::build(topology, metrics, acceleration, true)
+        let engine = Self::build(topology, metrics, acceleration, true)?;
+        prepare_lower_bounds_in_background(&engine.default_routing_graph);
+        Ok(engine)
     }
 
     /// `with_ignore_mode_graph = false` skips the graph that serves

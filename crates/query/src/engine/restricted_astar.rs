@@ -40,6 +40,25 @@ pub(crate) fn lower_bound_weights(routing_graph: &RoutingGraph) -> Option<&Lower
         .as_ref()
 }
 
+/// Customizes the lower-bound weights of a graph with multi-edge
+/// restrictions on a background thread, so the first restricted fallback
+/// does not pay for them. A search that needs them sooner waits for the
+/// same customization rather than starting its own.
+pub(crate) fn prepare_lower_bounds_in_background(routing_graph: &RoutingGraph) {
+    if routing_graph.acceleration.is_none() || !routing_graph.has_restriction_sequences() {
+        return;
+    }
+    let graph = routing_graph.clone();
+    let spawned = std::thread::Builder::new()
+        .name("netweevil-lower-bounds".into())
+        .spawn(move || {
+            lower_bound_weights(&graph);
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "lower-bound customization runs on first use instead");
+    }
+}
+
 fn build_lower_bound_weights(
     routing_graph: &RoutingGraph,
     acceleration: &AccelerationGraph,
