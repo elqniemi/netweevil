@@ -1,67 +1,44 @@
-use std::cell::RefCell;
 use std::collections::BinaryHeap;
-use std::sync::{Arc, Weak};
+
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 use anyhow::Result;
 #[cfg(test)]
 use anyhow::bail;
-use netweevil_core::{CompiledProfileBundle, DatasetAccelerationBundle, TopologyBundle};
+use netweevil_core::TopologyBundle;
 
 use crate::*;
 
-// 512 KiB per routing thread. Collisions replace entries and only cause a
-// repeated lookup; they never substitute a different arc's decomposition.
-const UNPACK_CACHE_SLOTS: usize = 32_768;
-
-#[derive(Clone, Copy)]
-struct UnpackWitness {
-    key: u64,
-    left: u32,
-    right: u32,
+/// Lazily filled lower-triangle witnesses for every hierarchy arc of one
+/// customized metric, shared by all threads querying it.
+///
+/// Each entry is 0 until first unpacked, [`UNPACK_BASE_ARC`] for an arc
+/// without a lower triangle of equal weight, or `(left + 1) << 32 | right`.
+/// The arrays are zero-allocated, so only pages of arcs that some route has
+/// unpacked are ever committed.
+pub(crate) struct UnpackTable {
+    upward: Box<[AtomicU64]>,
+    downward: Box<[AtomicU64]>,
 }
 
-impl Default for UnpackWitness {
-    fn default() -> Self {
+const UNPACK_UNKNOWN: u64 = 0;
+const UNPACK_BASE_ARC: u64 = u64::MAX;
+
+impl UnpackTable {
+    pub(crate) fn new(upward_len: usize, downward_len: usize) -> Self {
         Self {
-            key: u64::MAX,
-            left: u32::MAX,
-            right: u32::MAX,
-        }
-    }
-}
-
-#[derive(Default)]
-struct UnpackCache {
-    source: Weak<DatasetAccelerationBundle>,
-    metrics: Weak<CompiledProfileBundle>,
-    entries: Vec<UnpackWitness>,
-}
-
-impl UnpackCache {
-    fn prepare(&mut self, graph: &AccelerationGraph) {
-        if self.source.as_ptr() != Arc::as_ptr(&graph.source)
-            || self.metrics.as_ptr() != Arc::as_ptr(&graph.metrics)
-        {
-            // Weak owners keep allocations distinct even after the last
-            // engine is dropped. A reused address cannot revive stale weights.
-            self.source = Arc::downgrade(&graph.source);
-            self.metrics = Arc::downgrade(&graph.metrics);
-            self.entries
-                .resize(UNPACK_CACHE_SLOTS, UnpackWitness::default());
-            self.entries.fill(UnpackWitness::default());
+            upward: bytemuck::zeroed_slice_box(upward_len),
+            downward: bytemuck::zeroed_slice_box(downward_len),
         }
     }
 
-    fn slot(&mut self, upward: bool, arc: u32) -> (&mut UnpackWitness, u64) {
-        let key = (u64::from(arc) << 1) | u64::from(upward);
-        let mixed = key ^ (key >> 17);
-        let index = mixed.wrapping_mul(0x9e37_79b9) as usize & (UNPACK_CACHE_SLOTS - 1);
-        (&mut self.entries[index], key)
+    fn entry(&self, is_upward: bool, slot: usize) -> &AtomicU64 {
+        if is_upward {
+            &self.upward[slot]
+        } else {
+            &self.downward[slot]
+        }
     }
-}
-
-thread_local! {
-    static UNPACK_CACHE: RefCell<UnpackCache> = RefCell::new(UnpackCache::default());
 }
 
 #[derive(Default)]
@@ -133,6 +110,8 @@ impl BidirectionalAccelerationScratch {
 
 /// Unpacks arcs by finding a lower triangle with the same integer weight.
 /// Child endpoints have lower rank, so expansion terminates even with zero costs.
+/// Witnesses are memoized in the graph's [`UnpackTable`]; a witness depends
+/// only on the arc topology and customized weights that the graph owns.
 fn push_unpacked_arc(
     acceleration: &AccelerationGraph,
     stack: &mut Vec<(bool, u32)>,
@@ -140,88 +119,77 @@ fn push_unpacked_arc(
     arc_slot: u32,
     edge_indexes: &mut Vec<usize>,
 ) {
-    UNPACK_CACHE.with(|cache| {
-        let mut cache = cache.borrow_mut();
-        cache.prepare(acceleration);
-        push_unpacked_arc_cached(
-            acceleration,
-            stack,
-            is_upward,
-            arc_slot,
-            edge_indexes,
-            &mut cache,
-        );
-    });
-}
-
-fn push_unpacked_arc_cached(
-    acceleration: &AccelerationGraph,
-    stack: &mut Vec<(bool, u32)>,
-    is_upward: bool,
-    arc_slot: u32,
-    edge_indexes: &mut Vec<usize>,
-    cache: &mut UnpackCache,
-) {
     let compiled = acceleration
         .metrics
         .acceleration
         .as_ref()
         .expect("validated acceleration weights");
+    let source = &acceleration.source;
     debug_assert!(stack.is_empty());
     stack.push((is_upward, arc_slot));
     while let Some((is_upward, slot)) = stack.pop() {
         let slot_index = slot as usize;
-        let (tail, head, weight) = if is_upward {
-            (
-                acceleration.upward_tail[slot_index] as usize,
-                acceleration.source.upward_head[slot_index],
-                compiled.upward_weight[slot_index],
-            )
-        } else {
-            (
-                acceleration.downward_tail[slot_index] as usize,
-                acceleration.source.downward_head[slot_index],
-                compiled.downward_weight[slot_index],
-            )
-        };
-        assert!(
-            weight < netweevil_core::CCH_WEIGHT_OVERFLOW,
-            "only finite CCH arcs can be unpacked"
-        );
-        let source = &acceleration.source;
-        let (entry, key) = cache.slot(is_upward, slot);
-        let triangle = if entry.key == key {
-            (entry.left != u32::MAX).then_some((entry.left as usize, entry.right as usize))
-        } else {
-            let triangle = (source.downward_first_out[tail] as usize
-                ..source.downward_first_out[tail + 1] as usize)
-                .find_map(|left| {
-                    let middle = source.downward_head[left] as usize;
-                    if source.edge_rank[middle] >= source.edge_rank[head as usize] {
-                        return None;
-                    }
-                    let right = acceleration.upward_arc_slot(middle, head)?;
-                    (netweevil_core::add_cch_weights(
-                        compiled.downward_weight[left],
-                        compiled.upward_weight[right],
-                    ) == weight)
-                        .then_some((left, right))
-                });
-            *entry = UnpackWitness {
-                key,
-                left: triangle.map_or(u32::MAX, |(left, _)| left as u32),
-                right: triangle.map_or(u32::MAX, |(_, right)| right as u32),
-            };
-            triangle
-        };
-        let Some((left, right)) = triangle else {
-            edge_indexes.push(head as usize);
+        let entry = acceleration.unpack.entry(is_upward, slot_index);
+        let mut witness = entry.load(AtomicOrdering::Relaxed);
+        if witness == UNPACK_UNKNOWN {
+            witness = find_unpack_witness(acceleration, compiled, is_upward, slot_index);
+            entry.store(witness, AtomicOrdering::Relaxed);
+        }
+        if witness == UNPACK_BASE_ARC {
+            edge_indexes.push(if is_upward {
+                source.upward_head[slot_index]
+            } else {
+                source.downward_head[slot_index]
+            } as usize);
             continue;
-        };
+        }
+        let left = (witness >> 32) as u32 - 1;
+        let right = witness as u32;
         // Process left before right: LIFO stack, so push right first.
-        stack.push((true, right as u32));
-        stack.push((false, left as u32));
+        stack.push((true, right));
+        stack.push((false, left));
     }
+}
+
+fn find_unpack_witness(
+    acceleration: &AccelerationGraph,
+    compiled: &netweevil_core::CompiledAcceleration,
+    is_upward: bool,
+    slot_index: usize,
+) -> u64 {
+    let source = &acceleration.source;
+    let (tail, head, weight) = if is_upward {
+        (
+            acceleration.upward_tail[slot_index] as usize,
+            source.upward_head[slot_index],
+            compiled.upward_weight[slot_index],
+        )
+    } else {
+        (
+            acceleration.downward_tail[slot_index] as usize,
+            source.downward_head[slot_index],
+            compiled.downward_weight[slot_index],
+        )
+    };
+    assert!(
+        weight < netweevil_core::CCH_WEIGHT_OVERFLOW,
+        "only finite CCH arcs can be unpacked"
+    );
+    let head_rank = source.edge_rank[head as usize];
+    (source.downward_first_out[tail] as usize..source.downward_first_out[tail + 1] as usize)
+        .find_map(|left| {
+            let middle = source.downward_head[left] as usize;
+            if source.edge_rank[middle] >= head_rank {
+                return None;
+            }
+            let right = acceleration.upward_arc_slot(middle, head)?;
+            (netweevil_core::add_cch_weights(
+                compiled.downward_weight[left],
+                compiled.upward_weight[right],
+            ) == weight)
+                .then(|| ((left as u64 + 1) << 32) | right as u64)
+        })
+        .unwrap_or(UNPACK_BASE_ARC)
 }
 
 fn reconstruct_accelerated_route_path(
@@ -914,7 +882,11 @@ pub(crate) fn seeded_bidirectional_dijkstra_on_edge_transitions(
 #[cfg(test)]
 mod unpack_tests {
     use super::*;
-    use netweevil_core::{CacheBundleId, CompiledAcceleration, TravelMode};
+    use netweevil_core::{
+        CacheBundleId, CompiledAcceleration, CompiledProfileBundle, DatasetAccelerationBundle,
+        TravelMode,
+    };
+    use std::sync::Arc;
 
     fn graph(direct_weight: u32) -> AccelerationGraph {
         AccelerationGraph {
@@ -957,6 +929,7 @@ mod unpack_tests {
             reverse_downward_first_out: vec![0, 1, 1, 1],
             reverse_downward_edge: vec![1],
             reverse_downward_arc: vec![0],
+            unpack: UnpackTable::new(2, 1),
         }
     }
 
