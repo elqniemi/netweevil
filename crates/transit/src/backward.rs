@@ -9,6 +9,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::Result;
 
@@ -34,13 +35,19 @@ const BACKWARD_WINDOW_TAIL_S: u32 = 6 * 60 * 60;
 /// are referenced by index into `TransitBundle::connections`, so the forward
 /// scan's arrays and the bundle itself are never duplicated.
 pub(crate) struct BackwardIndex {
+    timetable: Arc<BackwardTimetable>,
+    /// Per stop, the transfers that end there. Transfer tables are directed,
+    /// so the reverse scan cannot read the forward adjacency.
+    reverse_transfers: Vec<Vec<ReverseTransfer>>,
+}
+
+/// The transfer-independent half of [`BackwardIndex`], shared by the indexes
+/// of every transfer profile.
+pub(crate) struct BackwardTimetable {
     /// Per stop, connections ending there, ordered by arrival time.
     arrivals_by_stop: Vec<Vec<u32>>,
     /// Previous connection on the same vehicle, or u32::MAX at its first stop.
     previous_connection: Vec<u32>,
-    /// Per stop, the transfers that end there. Transfer tables are directed,
-    /// so the reverse scan cannot read the forward adjacency.
-    reverse_transfers: Vec<Vec<ReverseTransfer>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -52,11 +59,8 @@ struct ReverseTransfer {
     distance_m: f64,
 }
 
-impl BackwardIndex {
-    pub(crate) fn build(
-        bundle: &TransitBundle,
-        transfer_candidates: &[Vec<StopCandidate>],
-    ) -> Self {
+impl BackwardTimetable {
+    pub(crate) fn build(bundle: &TransitBundle) -> Self {
         let mut arrivals_by_stop = vec![Vec::<u32>::new(); bundle.stops.len()];
         for (connection_index, connection) in bundle.connections.iter().enumerate() {
             let connection_index = connection_index as u32;
@@ -67,10 +71,30 @@ impl BackwardIndex {
         for arrivals in &mut arrivals_by_stop {
             arrivals.sort_unstable_by_key(|index| bundle.connections[*index as usize].arrival_s);
         }
-        let previous_connection = build_run_links(bundle).0;
         Self {
             arrivals_by_stop,
-            previous_connection,
+            previous_connection: build_run_links(bundle).0,
+        }
+    }
+}
+
+impl BackwardIndex {
+    pub(crate) fn build(
+        bundle: &TransitBundle,
+        transfer_candidates: &[Vec<StopCandidate>],
+    ) -> Self {
+        Self::with_timetable(
+            Arc::new(BackwardTimetable::build(bundle)),
+            transfer_candidates,
+        )
+    }
+
+    pub(crate) fn with_timetable(
+        timetable: Arc<BackwardTimetable>,
+        transfer_candidates: &[Vec<StopCandidate>],
+    ) -> Self {
+        Self {
+            timetable,
             reverse_transfers: build_reverse_transfers(transfer_candidates),
         }
     }
@@ -193,6 +217,7 @@ pub(crate) fn arrivals_at_or_before<'a>(
     limit_s: u32,
 ) -> impl Iterator<Item = (u32, &'a TransitConnection)> {
     let arrivals = index
+        .timetable
         .arrivals_by_stop
         .get(stop_index as usize)
         .map(Vec::as_slice)
@@ -211,7 +236,10 @@ pub(crate) fn previous_run_connection<'a>(
     bundle: &'a TransitBundle,
     connection_index: u32,
 ) -> Option<(u32, &'a TransitConnection)> {
-    let previous = *index.previous_connection.get(connection_index as usize)?;
+    let previous = *index
+        .timetable
+        .previous_connection
+        .get(connection_index as usize)?;
     bundle
         .connections
         .get(previous as usize)

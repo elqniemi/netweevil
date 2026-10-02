@@ -1,9 +1,9 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::Result;
 
-use crate::backward::{BackwardIndex, execute_transit_route_arrive_by};
+use crate::backward::{BackwardIndex, BackwardTimetable, execute_transit_route_arrive_by};
 use crate::fusion::index_transit_transfer_table;
 use crate::legs::{
     build_transit_route_stop_segments, build_transit_route_stops, coalesce_transit_legs,
@@ -74,6 +74,8 @@ pub struct PreparedTransitRouter {
     /// Reverse indexes per transfer profile, built on the first arrive-by
     /// request that needs them and shared by every later request.
     backward_indexes: Mutex<HashMap<(Option<String>, u64), Arc<BackwardIndex>>>,
+    /// Timetable half of the reverse indexes, shared across transfer profiles.
+    backward_timetable: OnceLock<Arc<BackwardTimetable>>,
 }
 
 impl PreparedTransitRouter {
@@ -87,6 +89,7 @@ impl PreparedTransitRouter {
             transfer_candidates: Mutex::new(None),
             network_transfers: HashMap::new(),
             backward_indexes: Mutex::new(HashMap::new()),
+            backward_timetable: OnceLock::new(),
         }
     }
 
@@ -133,6 +136,7 @@ impl PreparedTransitRouter {
             transfer_candidates: Mutex::new(None),
             network_transfers,
             backward_indexes: Mutex::new(HashMap::new()),
+            backward_timetable: OnceLock::new(),
         })
     }
 
@@ -169,7 +173,13 @@ impl PreparedTransitRouter {
         {
             return Ok(Arc::clone(index));
         }
-        let index = Arc::new(BackwardIndex::build(self.bundle.as_ref(), transfers));
+        let timetable = self
+            .backward_timetable
+            .get_or_init(|| Arc::new(BackwardTimetable::build(self.bundle.as_ref())));
+        let index = Arc::new(BackwardIndex::with_timetable(
+            Arc::clone(timetable),
+            transfers,
+        ));
         let mut indexes = self
             .backward_indexes
             .lock()
