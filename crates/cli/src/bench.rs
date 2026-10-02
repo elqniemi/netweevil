@@ -160,9 +160,30 @@ pub(crate) struct BenchRunArgs {
     /// Travel-time cutoff of the `service-area` workload, in seconds.
     #[arg(long, default_value_t = 900.0)]
     threshold_s: f64,
+    /// Output of the `service-area` workload: reachable network segments
+    /// only, or traced isochrone polygons with geometry.
+    #[arg(long, value_enum, default_value_t = ServiceAreaBenchOutput::Network)]
+    service_area_output: ServiceAreaBenchOutput,
     /// Write the machine-readable report here.
     #[arg(long)]
     json: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum ServiceAreaBenchOutput {
+    /// Reachable network summary without geometry.
+    Network,
+    /// Isochrone polygons with geometry.
+    Polygon,
+}
+
+impl ServiceAreaBenchOutput {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Network => "network",
+            Self::Polygon => "polygon",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -711,6 +732,8 @@ struct BenchSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     threshold_s: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    service_area_output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     backend: Option<String>,
@@ -1186,7 +1209,11 @@ fn point_set(points: Vec<LabeledPoint>) -> PointSetDocument {
     }
 }
 
-fn service_area_request(row: &CorpusRow, threshold_s: f64) -> ServiceAreaRequest {
+fn service_area_request(
+    row: &CorpusRow,
+    threshold_s: f64,
+    output: ServiceAreaBenchOutput,
+) -> ServiceAreaRequest {
     ServiceAreaRequest {
         analysis_id: row.id.clone(),
         origins: vec![LabeledPoint {
@@ -1203,13 +1230,16 @@ fn service_area_request(row: &CorpusRow, threshold_s: f64) -> ServiceAreaRequest
         snap: snap_options(),
         connectivity: ConnectivityPolicy::default(),
         fallback: FallbackPolicy::default(),
-        output_mode: ServiceAreaOutputMode::Network,
+        output_mode: match output {
+            ServiceAreaBenchOutput::Network => ServiceAreaOutputMode::Network,
+            ServiceAreaBenchOutput::Polygon => ServiceAreaOutputMode::Polygon,
+        },
         band_mode: ServiceAreaBandMode::default(),
         boundary_mode: ServiceAreaBoundaryMode::default(),
         multi_origin_mode: ServiceAreaMultiOriginMode::default(),
         polygon: ServiceAreaPolygonOptions::default(),
         returns: ServiceAreaReturnOptions {
-            geometry: false,
+            geometry: output == ServiceAreaBenchOutput::Polygon,
             attributes: false,
             per_threshold_summary: true,
             diagnostics: false,
@@ -1339,7 +1369,7 @@ fn build_tasks(rows: &[CorpusRow], args: &BenchRunArgs) -> Result<Vec<Task>> {
             .map(|row| Task::ServiceArea {
                 id: row.id.clone(),
                 bucket: row.bucket,
-                request: service_area_request(row, args.threshold_s),
+                request: service_area_request(row, args.threshold_s, args.service_area_output),
             })
             .collect()),
     }
@@ -1542,6 +1572,9 @@ fn render_report(report: &BenchReport) {
     if let Some(threshold_s) = report.settings.threshold_s {
         println!("  threshold      {threshold_s} s");
     }
+    if let Some(output) = &report.settings.service_area_output {
+        println!("  output         {output}");
+    }
 
     let summary = &report.summary;
     println!();
@@ -1705,6 +1738,8 @@ pub(crate) fn bench_run(paths: &WorkspacePaths, args: BenchRunArgs) -> Result<()
             matrix_size: (args.workload == Workload::Matrix)
                 .then_some(args.matrix_size.min(rows.len())),
             threshold_s: (args.workload == Workload::ServiceArea).then_some(args.threshold_s),
+            service_area_output: (args.workload == Workload::ServiceArea)
+                .then(|| args.service_area_output.as_str().to_string()),
             ..BenchSettings::default()
         },
         summary,
@@ -2036,6 +2071,7 @@ fn validate_comparison(baseline: &BenchSettings, candidate: &BenchSettings) -> R
     if baseline.workload != candidate.workload
         || baseline.matrix_size != candidate.matrix_size
         || baseline.threshold_s != candidate.threshold_s
+        || baseline.service_area_output != candidate.service_area_output
         || baseline.snap_distance_m != candidate.snap_distance_m
     {
         bail!("reports must use the same workload, matrix size, threshold, and snap distance");

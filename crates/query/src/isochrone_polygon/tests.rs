@@ -72,3 +72,28 @@ fn disconnected_segments_produce_separate_polygons() {
     let far = (offset(5_000.0, 0.0), offset(5_200.0, 0.0));
     assert_eq!(trace_reachable_polygons(&[near, far], 25.0, 0.0).len(), 2);
 }
+
+#[test]
+fn thin_cavities_become_holes_regardless_of_ring_start() {
+    // Two parallel roads 110 m apart, closed at both ends, leave a
+    // one-cell-wide cavity. Varying its height yields both odd and even
+    // long boundary edges; the hole test point must stay inside it.
+    for height_m in [310.0, 335.0, 360.0, 385.0] {
+        let corners = [
+            offset(0.0, 0.0),
+            offset(110.0, 0.0),
+            offset(110.0, height_m),
+            offset(0.0, height_m),
+        ];
+        let segments = (0..4)
+            .map(|side| (corners[side], corners[(side + 1) % 4]))
+            .collect::<Vec<_>>();
+        let polygons = trace_reachable_polygons(&segments, 25.0, 0.0);
+        assert_eq!(polygons.len(), 1);
+        assert_eq!(
+            polygons[0].holes.len(),
+            1,
+            "the thin cavity of a {height_m} m loop must be a hole"
+        );
+    }
+}

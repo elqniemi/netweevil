@@ -51,6 +51,7 @@ fn graph(direct_weight: u32) -> AccelerationGraph {
         deferred_metric_weights: None,
         unpack: UnpackTable::new(2, 1),
         ranked: Default::default(),
+        lower_bounds: Default::default(),
     }
 }
 

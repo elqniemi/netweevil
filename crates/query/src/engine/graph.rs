@@ -36,9 +36,60 @@ pub(crate) struct RoutingGraph {
     pub(crate) reverse_automaton: RestrictionAutomaton,
     pub(crate) virtual_reverse_of: Vec<Option<usize>>,
     pub(crate) includes_temporal_materialized_directions: bool,
+    /// Turn penalty seconds per forward transition, computed on first use.
+    turn_seconds: std::sync::OnceLock<Option<TransitionTurnSeconds>>,
+}
+
+/// Turn penalty seconds per forward transition as an index into the few
+/// distinct penalty values, so searches avoid recomputing turn geometry.
+pub(crate) struct TransitionTurnSeconds {
+    values: Vec<f64>,
+    classes: Vec<u8>,
+}
+
+impl TransitionTurnSeconds {
+    pub(crate) fn get(&self, transition_index: usize) -> f64 {
+        self.values[self.classes[transition_index] as usize]
+    }
 }
 
 impl RoutingGraph {
+    /// Exact `turn_penalty_seconds` for every forward transition. `None`
+    /// when more than 256 distinct values occur; callers then compute turns
+    /// directly. `topology` and `metrics` must be the ones the graph was
+    /// built from.
+    pub(crate) fn transition_turn_seconds(
+        &self,
+        topology: &TopologyBundle,
+        metrics: &CompiledProfileBundle,
+    ) -> Option<&TransitionTurnSeconds> {
+        self.turn_seconds
+            .get_or_init(|| {
+                let mut values = Vec::<f64>::new();
+                let mut classes = vec![0_u8; self.transition_edges.len()];
+                for edge_index in 0..self.edge_costs.len() {
+                    for transition_index in self.transition_range(edge_index) {
+                        let next_edge = self.transition_edges[transition_index] as usize;
+                        let seconds =
+                            turn_penalty_seconds(topology, metrics, edge_index, next_edge);
+                        let class = match values
+                            .iter()
+                            .position(|known| known.to_bits() == seconds.to_bits())
+                        {
+                            Some(class) => class,
+                            None => {
+                                values.push(seconds);
+                                values.len() - 1
+                            }
+                        };
+                        classes[transition_index] = u8::try_from(class).ok()?;
+                    }
+                }
+                Some(TransitionTurnSeconds { values, classes })
+            })
+            .as_ref()
+    }
+
     pub(crate) fn outgoing_edges(&self, node_index: usize) -> &[u32] {
         let start = self.first_out[node_index] as usize;
         let end = self.first_out[node_index + 1] as usize;
@@ -87,6 +138,9 @@ pub(crate) struct AccelerationGraph {
     pub(crate) deferred_metric_weights: Option<Arc<DeferredMetricWeights>>,
     pub(crate) unpack: UnpackTable,
     pub(crate) ranked: RankedCchCell,
+    /// Lower-bound customization for restriction-aware A* potentials,
+    /// built on first use.
+    pub(crate) lower_bounds: std::sync::OnceLock<Option<LowerBoundWeights>>,
 }
 
 type ArcWeights = Option<(Vec<u32>, Vec<u32>)>;
@@ -593,6 +647,7 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
         reverse_automaton: RestrictionAutomaton::build(&reverse_restricted_sequences),
         virtual_reverse_of: vec![None; edge_count],
         includes_temporal_materialized_directions: options.include_temporal_materialized_directions,
+        turn_seconds: std::sync::OnceLock::new(),
     })
 }
 
@@ -781,5 +836,6 @@ pub(crate) fn build_acceleration_graph(
         deferred_metric_weights: None,
         unpack: UnpackTable::new(upward_len, downward_len),
         ranked: RankedCchCell::default(),
+        lower_bounds: std::sync::OnceLock::new(),
     }))
 }
