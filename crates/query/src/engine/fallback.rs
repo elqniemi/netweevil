@@ -2,7 +2,6 @@ use netweevil_core::{
     CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, add_cch_weights, encode_cch_weight,
 };
 use rustc_hash::FxHashMap;
-use std::collections::{BinaryHeap, HashMap};
 
 use anyhow::{Context, Result};
 use netweevil_core::{CompiledProfileBundle, TopologyBundle};
@@ -14,7 +13,7 @@ pub(crate) struct RestrictedSearchScratch {
     dist: FxHashMap<SearchStateKey, f64>,
     previous: FxHashMap<SearchStateKey, Option<SearchStateKey>>,
     settled_edges: FxHashMap<usize, SearchStateKey>,
-    heap: BinaryHeap<State>,
+    heap: StateHeap,
 }
 
 impl RestrictedSearchScratch {
@@ -43,12 +42,7 @@ impl RestrictedSearchScratch {
             }
             self.dist.insert(key, cost);
             self.previous.insert(key, None);
-            self.heap.push(State {
-                edge_index,
-                automaton_state,
-                cost,
-                score: cost,
-            });
+            self.heap.push(edge_index, automaton_state, cost);
         }
     }
 
@@ -69,18 +63,28 @@ impl RestrictedSearchScratch {
             .map(|path| path.total_generalized_cost)
             .unwrap_or(f64::INFINITY);
         let mut best_state = None;
-        let mut destination_adjustments = HashMap::<usize, f64>::new();
+        // Destination seeds are the few directed edges at one snapped point.
+        let mut destination_adjustments = Vec::<(usize, f64)>::new();
         for &(edge, adjustment) in destination_seeds {
-            destination_adjustments
-                .entry(edge)
-                .and_modify(|known| *known = known.min(adjustment))
-                .or_insert(adjustment);
+            match destination_adjustments
+                .iter_mut()
+                .find(|(known_edge, _)| *known_edge == edge)
+            {
+                Some((_, known)) => *known = known.min(adjustment),
+                None => destination_adjustments.push((edge, adjustment)),
+            }
         }
+        let adjustment_for = |edge_index: usize| {
+            destination_adjustments
+                .iter()
+                .find(|(edge, _)| *edge == edge_index)
+                .map(|&(_, adjustment)| adjustment)
+        };
         let minimum_adjustment = destination_adjustments
-            .values()
-            .copied()
+            .iter()
+            .map(|&(_, adjustment)| adjustment)
             .fold(0.0, f64::min);
-        for (&edge, &adjustment) in &destination_adjustments {
+        for &(edge, adjustment) in &destination_adjustments {
             if let Some(&key) = self.settled_edges.get(&edge) {
                 let cost = self.dist[&key] + adjustment;
                 if cost < best_cost {
@@ -91,17 +95,8 @@ impl RestrictedSearchScratch {
         }
         // Preserve the unexpanded frontier for later destinations. Destination
         // offsets may be negative, so queue cost alone cannot bound a route.
-        while self
-            .heap
-            .peek()
-            .is_some_and(|state| state.cost + minimum_adjustment < best_cost)
-        {
-            let State {
-                edge_index,
-                automaton_state,
-                cost,
-                ..
-            } = self.heap.pop().unwrap();
+        while self.heap.peek_cost() + minimum_adjustment < best_cost {
+            let (edge_index, automaton_state, cost) = self.heap.pop().unwrap();
             let key = SearchStateKey {
                 edge_index,
                 automaton_state,
@@ -110,7 +105,7 @@ impl RestrictedSearchScratch {
                 continue;
             }
             self.settled_edges.entry(edge_index).or_insert(key);
-            if let Some(&adjustment) = destination_adjustments.get(&edge_index) {
+            if let Some(adjustment) = adjustment_for(edge_index) {
                 let candidate_cost = cost + adjustment;
                 if candidate_cost < best_cost {
                     best_cost = candidate_cost;
@@ -142,12 +137,7 @@ impl RestrictedSearchScratch {
                 if next_cost + f64::EPSILON < *self.dist.get(&next_key).unwrap_or(&f64::INFINITY) {
                     self.dist.insert(next_key, next_cost);
                     self.previous.insert(next_key, Some(key));
-                    self.heap.push(State {
-                        edge_index: next_edge,
-                        automaton_state: next_automaton_state,
-                        cost: next_cost,
-                        score: next_cost,
-                    });
+                    self.heap.push(next_edge, next_automaton_state, next_cost);
                 }
             }
         }

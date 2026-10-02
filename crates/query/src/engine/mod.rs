@@ -4,6 +4,7 @@ mod cch_query;
 mod exact;
 mod fallback;
 mod graph;
+mod state_heap;
 
 pub(crate) use acceleration::*;
 pub(crate) use automaton::*;
@@ -11,6 +12,7 @@ pub(crate) use cch_query::*;
 pub(crate) use exact::*;
 pub(crate) use fallback::*;
 pub(crate) use graph::*;
+pub(crate) use state_heap::*;
 
 use std::cmp::Ordering;
 use std::sync::Arc;

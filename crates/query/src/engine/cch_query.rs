@@ -3,7 +3,7 @@
 //! The search state is laid out for cache locality: one 24-byte label per
 //! edge state holds both directions' tentative costs and parent arcs, so a
 //! relaxation or meeting check touches a single cache line, and both queues
-//! are 4-ary heaps of 16-byte entries.
+//! are 4-ary [`StateHeap`]s of 16-byte entries.
 
 use std::cell::RefCell;
 
@@ -38,8 +38,8 @@ impl CchLabel {
 struct PairwiseCchScratch {
     labels: Vec<CchLabel>,
     touched: Vec<u32>,
-    forward_heap: CchHeap,
-    backward_heap: CchHeap,
+    forward_heap: StateHeap,
+    backward_heap: StateHeap,
     forward_arcs: Vec<u32>,
     unpack_stack: Vec<(bool, u32)>,
 }
@@ -90,104 +90,6 @@ impl PairwiseCchScratch {
     }
 }
 
-/// Min-queue of `(cost, edge)` popping the lowest cost first and, among equal
-/// costs, the highest edge index, which is the pop order of
-/// `BinaryHeap<State>` for CCH states. Lazy deletion leaves at most one entry
-/// per strict improvement, so entries are distinct and the pop sequence is
-/// fully determined by that order.
-#[derive(Default)]
-struct CchHeap {
-    entries: Vec<CchHeapEntry>,
-}
-
-#[derive(Clone, Copy)]
-struct CchHeapEntry {
-    key: u64,
-    edge: u32,
-}
-
-impl CchHeapEntry {
-    fn new(cost: f64, edge: u32) -> Self {
-        // Order-preserving map of `f64::total_cmp` onto unsigned integers.
-        let bits = cost.to_bits();
-        let key = if bits >> 63 == 1 {
-            !bits
-        } else {
-            bits | (1 << 63)
-        };
-        Self { key, edge }
-    }
-
-    fn cost(self) -> f64 {
-        f64::from_bits(if self.key >> 63 == 1 {
-            self.key & !(1 << 63)
-        } else {
-            !self.key
-        })
-    }
-
-    fn precedes(self, other: Self) -> bool {
-        self.key < other.key || (self.key == other.key && self.edge > other.edge)
-    }
-}
-
-impl CchHeap {
-    const ARITY: usize = 4;
-
-    fn clear(&mut self) {
-        self.entries.clear();
-    }
-
-    fn peek_cost(&self) -> f64 {
-        self.entries
-            .first()
-            .map_or(f64::INFINITY, |entry| entry.cost())
-    }
-
-    fn push(&mut self, edge: usize, cost: f64) {
-        let entry = CchHeapEntry::new(cost, edge as u32);
-        let mut position = self.entries.len();
-        self.entries.push(entry);
-        while position > 0 {
-            let parent = (position - 1) / Self::ARITY;
-            if !entry.precedes(self.entries[parent]) {
-                break;
-            }
-            self.entries[position] = self.entries[parent];
-            position = parent;
-        }
-        self.entries[position] = entry;
-    }
-
-    fn pop(&mut self) -> Option<(usize, f64)> {
-        let top = *self.entries.first()?;
-        let last = self.entries.pop().expect("non-empty heap");
-        let len = self.entries.len();
-        if len > 0 {
-            let mut position = 0;
-            loop {
-                let first_child = position * Self::ARITY + 1;
-                if first_child >= len {
-                    break;
-                }
-                let mut best = first_child;
-                for child in first_child + 1..(first_child + Self::ARITY).min(len) {
-                    if self.entries[child].precedes(self.entries[best]) {
-                        best = child;
-                    }
-                }
-                if !self.entries[best].precedes(last) {
-                    break;
-                }
-                self.entries[position] = self.entries[best];
-                position = best;
-            }
-            self.entries[position] = last;
-        }
-        Some((top.edge as usize, top.cost()))
-    }
-}
-
 /// Point-to-point query that minimizes the quantized CCH metric.
 ///
 /// Forward search relaxes upward arcs from the origin seeds; backward search
@@ -229,12 +131,12 @@ pub(crate) fn accelerated_route_query_seeded(
 
         for &(edge_index, cost) in origin_seeds {
             if scratch.update_forward(edge_index, cost, NO_PREVIOUS_ARC) {
-                scratch.forward_heap.push(edge_index, cost);
+                scratch.forward_heap.push(edge_index, 0, cost);
             }
         }
         for &(edge_index, cost) in destination_seeds {
             if scratch.update_backward(edge_index, cost, NO_PREVIOUS_ARC) {
-                scratch.backward_heap.push(edge_index, cost);
+                scratch.backward_heap.push(edge_index, 0, cost);
             }
         }
 
@@ -254,7 +156,7 @@ pub(crate) fn accelerated_route_query_seeded(
             }
 
             if forward_active && (next_forward_cost <= next_backward_cost || !backward_active) {
-                let Some((edge_index, cost)) = scratch.forward_heap.pop() else {
+                let Some((edge_index, _, cost)) = scratch.forward_heap.pop() else {
                     break;
                 };
                 let label = scratch.labels[edge_index];
@@ -275,11 +177,11 @@ pub(crate) fn accelerated_route_query_seeded(
                     let next_edge = source.upward_head[slot] as usize;
                     let next_cost = cost + decode_cch_weight(compiled.upward_weight[slot]);
                     if scratch.update_forward(next_edge, next_cost, slot as u32) {
-                        scratch.forward_heap.push(next_edge, next_cost);
+                        scratch.forward_heap.push(next_edge, 0, next_cost);
                     }
                 }
             } else {
-                let Some((edge_index, cost)) = scratch.backward_heap.pop() else {
+                let Some((edge_index, _, cost)) = scratch.backward_heap.pop() else {
                     break;
                 };
                 let label = scratch.labels[edge_index];
@@ -302,7 +204,7 @@ pub(crate) fn accelerated_route_query_seeded(
                     let next_cost =
                         cost + decode_cch_weight(compiled.downward_weight[arc as usize]);
                     if scratch.update_backward(previous_edge, next_cost, arc) {
-                        scratch.backward_heap.push(previous_edge, next_cost);
+                        scratch.backward_heap.push(previous_edge, 0, next_cost);
                     }
                 }
             }
@@ -370,62 +272,5 @@ fn reconstruct_pairwise_path(
     RoutePath {
         edge_indexes,
         total_generalized_cost,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BinaryHeap;
-
-    /// The 4-ary heap must pop in exactly the order of `BinaryHeap<State>`,
-    /// so accelerated paths keep their tie-breaking.
-    #[test]
-    fn heap_pops_in_binary_heap_state_order() {
-        let mut state = 0x2545_f491_4f6c_dd1d_u64;
-        let mut next = || {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state
-        };
-        let mut heap = CchHeap::default();
-        let mut reference = BinaryHeap::new();
-        for round in 0..2_000 {
-            if next() % 3 != 0 {
-                // Few distinct costs and edges force ties, including -0.0.
-                let cost = match next() % 6 {
-                    0 => -0.0,
-                    1 => -((next() % 5) as f64) * 0.25,
-                    _ => (next() % 9) as f64 * 0.5,
-                };
-                let edge = (next() % 40) as usize;
-                if reference.iter().any(|item: &State| {
-                    item.edge_index == edge && item.cost.to_bits() == cost.to_bits()
-                }) {
-                    continue;
-                }
-                heap.push(edge, cost);
-                reference.push(State {
-                    edge_index: edge,
-                    automaton_state: 0,
-                    cost,
-                    score: cost,
-                });
-            } else {
-                let expected = reference
-                    .pop()
-                    .map(|item| (item.edge_index, item.cost.to_bits()));
-                let actual = heap.pop().map(|(edge, cost)| (edge, cost.to_bits()));
-                assert_eq!(actual, expected, "round {round}");
-            }
-            assert_eq!(
-                heap.peek_cost().to_bits(),
-                reference
-                    .peek()
-                    .map_or(f64::INFINITY, |item| item.cost)
-                    .to_bits()
-            );
-        }
     }
 }

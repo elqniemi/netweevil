@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 #[derive(Default)]
 pub(crate) struct RestrictionAutomaton {
@@ -7,10 +7,10 @@ pub(crate) struct RestrictionAutomaton {
 
 #[derive(Default)]
 struct AutomatonState {
-    transitions: HashMap<usize, usize>,
+    transitions: FxHashMap<usize, usize>,
     failure: usize,
     prohibited_next: Vec<usize>,
-    prohibited_meta: HashMap<usize, usize>,
+    prohibited_meta: FxHashMap<usize, usize>,
 }
 
 impl RestrictionAutomaton {
