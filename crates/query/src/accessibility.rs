@@ -465,6 +465,14 @@ pub fn execute_accessibility(
     metrics: &CompiledProfileBundle,
     request: &AccessibilityRequest,
 ) -> Result<AccessibilityResult> {
+    ensure_no_avoid(
+        std::iter::once(&request.origins.temporal.avoid).chain(
+            request
+                .categories
+                .iter()
+                .map(|category| &category.destinations.temporal.avoid),
+        ),
+    )?;
     if has_failure_modes(&request.origins.fallback) {
         validate_execution_inputs(topology, metrics)?;
         let degraded =

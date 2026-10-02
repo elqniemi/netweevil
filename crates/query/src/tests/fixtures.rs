@@ -492,6 +492,18 @@ pub(super) fn write_temp_file(name: &str, contents: &str) -> PathBuf {
 
 // Derived topology state.
 
+/// A temporal overlay parsed from CSV text through the CLI file loader.
+pub(super) fn overlay_csv(name: &str, contents: &str) -> crate::TemporalOverlayDocument {
+    let path = write_temp_file(name, contents);
+    let overlay = crate::load_temporal_overlay(&path).expect("temporal overlay CSV loads");
+    let _ = std::fs::remove_file(path);
+    overlay
+}
+
+pub(super) fn scenario_yaml(contents: &str) -> crate::ScenarioOverlay {
+    serde_yaml::from_str(contents).expect("scenario overlay YAML parses")
+}
+
 pub(super) fn with_edge_based_topology(mut topology: TopologyBundle) -> TopologyBundle {
     topology.edge_based_topology = crate::build_edge_based_topology_fallback(&topology);
     if topology.node_component_ids.len() != topology.nodes.len()

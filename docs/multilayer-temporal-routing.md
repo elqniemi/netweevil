@@ -216,19 +216,32 @@ exclude_rules:
 
 ## Temporal requests, scenarios, and overlays
 
-Route, OD, matrix, service-area, accessibility, and betweenness documents can
-carry flattened temporal fields:
+Route, OD, matrix, service-area, accessibility, and betweenness requests can
+carry flattened temporal fields. Requests carry content only; neither the API
+nor the engine opens a file named by a request:
 
 - `departure_time` or `arrive_by`: RFC 3339 with an explicit offset;
-- `scenario`: one YAML or JSON feature-state overlay;
-- `holiday_calendar`: a YAML or JSON date list;
-- `overlay`: a list of continuous CSV or Parquet series;
+- `scenario`: one inline feature-state overlay
+  (`{id, features: [{source_feature_id, force_closed, rules, ...}]}`);
+- `holidays`: a list of `YYYY-MM-DD` public-holiday dates;
+- `overlays`: a list of inline continuous series, each
+  `{id?, rows: [{feature_id, t_start, t_end, <value_name>: number, ...}]}`;
 - `max_labels_per_state` and `arrive_by_lookback_s`: exact-search guards.
+
+Request documents read by the CLI may instead reference local files, which the
+CLI loads and inlines before execution. Relative paths resolve against the
+referencing document's directory:
+
+- `scenario_file`: a YAML or JSON scenario overlay, inlined as `scenario`;
+- `holiday_calendar_file`: a YAML or JSON date list (bare or `{dates: [...]}`),
+  appended to `holidays`;
+- `overlay_files`: CSV or Parquet series, appended to `overlays`.
 
 The corresponding street-analysis CLI commands (`route`, `route-batch`, `od`,
 `matrix`, `accessibility`, `service-area`, `service-area-sequence`, and
 `betweenness`) also accept `--departure-time`, `--scenario`,
-`--holiday-calendar`, and repeatable `--overlay` flags. Optional scalar flags
+`--holiday-calendar`, and repeatable `--overlay` flags, which read local files
+on the CLI side. Optional scalar flags
 replace only their matching request-file value; unspecified fields remain
 unchanged. CLI overlays are appended after request-file overlays, preserving
 both sets and giving later CLI entries their normal overlay precedence. An
@@ -366,7 +379,10 @@ curl -X POST \
       "analysis_id": "boundary_area",
       "origins": [{"id":"origin","lon":114.1517,"lat":22.2839,"z":34.0}],
       "thresholds": [{"id":"ten_minutes","limit":600,"metric":"travel_time_s"}],
-      "scenario": "examples/scenarios/hong_kong_central_escalator_example.yml"
+      "scenario": {
+        "id": "central_escalator_direction",
+        "features": [{"source_feature_id": 250009423, "force_closed": true}]
+      }
     },
     "start_time": "2026-07-10T09:40:00+08:00",
     "end_time": "2026-07-10T10:20:00+08:00",
@@ -464,21 +480,22 @@ The document accepts embedded `routes`, `service_areas`, `accessibility`, `od`,
 `BetweennessRequest` shape. The supplied fixture exercises routes, OD, matrix,
 and weighted betweenness under both scenario cases.
 
-Each scenario must select exactly one source: an explicit `overlay`, a `top_k`
-ranking, or a retained-attribute `group`. Explicit overlays are parsed and every
-referenced source feature id is checked against the active topology before the
-baseline runs; ranked source feature ids receive the same check. Missing files
-and selectors produced for an older topology therefore fail clearly instead of
-creating an ineffective closure.
+Each scenario must select exactly one source: an inline `overlay`, a `top_k`
+ranking (`ranking: [{source_feature_id, score}]`), or a retained-attribute
+`group`. Every source feature id an overlay references is checked against the
+active topology before the baseline runs; ranked source feature ids receive the
+same check. Selectors produced for an older topology therefore fail clearly
+instead of creating an ineffective closure. In a batch document read by the
+CLI, `overlay_file` and `top_k.ranking_file` name local files to inline.
 For example:
 
 ```yaml
 scenarios:
   - id: explicit_failure
-    overlay: failures/lift.yml
+    overlay_file: failures/lift.yml
   - id: top_10_critical
     top_k:
-      ranking: outputs/betweenness.json
+      ranking_file: outputs/betweenness.json
       count: 10
   - id: close_one_mall
     group:
@@ -486,7 +503,8 @@ scenarios:
       value: "1234"
 ```
 
-`top_k.ranking` accepts CSV, JSON, YAML, or a prior betweenness-result JSON.
+`top_k.ranking_file` accepts CSV, JSON, YAML, or a prior betweenness-result
+JSON.
 Generated `top_k` and `group` cases return their resolved
 `closed_source_feature_ids` so the exact closure set remains auditable.
 
@@ -497,10 +515,9 @@ service-area network loss, and reachable-destination loss. Betweenness losses
 are matched by baseline origin/destination indexes, so newly reachable demand
 cannot hide a different pair that became disconnected. Scenario snapshots
 include these compact pair outcomes; ordinary betweenness edge exports omit
-them. Paths inside a scenario-batch document—including temporal paths in OD,
-matrix, and betweenness inputs—are resolved relative to that document; paths in
-ordinary route or betweenness fixtures are interpreted from the process
-working directory.
+them. File references anywhere in a request document read by the CLI, including
+the temporal files of OD, matrix, and betweenness inputs inside a scenario
+batch, resolve relative to that document.
 
 ## Bind transit stops and build network transfers
 

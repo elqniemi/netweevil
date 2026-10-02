@@ -1,3 +1,4 @@
+mod avoid;
 mod fixtures;
 mod many_to_many;
 mod navigation;

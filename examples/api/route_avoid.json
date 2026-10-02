@@ -1,0 +1,19 @@
+{
+  "profile_id": "car_research_v1",
+  "request": {
+    "route_id": "groningen_avoid_east",
+    "origin": {"id": "origin", "lon": 6.5665, "lat": 53.2194},
+    "destination": {"id": "destination", "lon": 6.5716, "lat": 53.2148},
+    "snap": {"max_distance_m": 500.0},
+    "returns": {"geometry": "full"},
+    "avoid": {
+      "points": [{"lon": 6.58006, "lat": 53.21535, "radius_m": 30.0}],
+      "polygons": [
+        {
+          "rings": [[[6.5720, 53.2168], [6.5745, 53.2168], [6.5745, 53.2185], [6.5720, 53.2185]]],
+          "penalty_factor": 4.0
+        }
+      ]
+    }
+  }
+}

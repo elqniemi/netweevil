@@ -4,8 +4,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{
-    ScenarioAnalysisSnapshot, ScenarioBatchRequest, ScenarioBatchSelector, ScenarioGroupSelector,
-    ScenarioTopKSelector, diff_snapshots, load_ranked_source_features, load_scenario_batch_request,
+    ScenarioAnalysisSnapshot, ScenarioBatchRequest, ScenarioBatchSelector, ScenarioFeatureScore,
+    ScenarioGroupSelector, ScenarioTopKSelector, diff_snapshots, load_scenario_batch_request,
+    load_scenario_feature_ranking, rank_source_features,
 };
 use crate::{
     AccessibilityCategoryResult, AccessibilityResult, AnalysisOutcome, BatchItemStatus,
@@ -91,99 +92,105 @@ fn exact_betweenness_diff_tracks_lost_baseline_pairs() {
     assert_eq!(diff.weighted_disconnected_demand, 5.0);
 }
 
+/// File references in a batch document are inlined relative to the
+/// document; the executed request carries content only.
 #[test]
-fn loader_resolves_relative_scenario_and_temporal_paths() {
+fn loader_inlines_files_referenced_relative_to_the_document() {
     let directory = temp_path("netweevil-scenario-batch");
-    fs::create_dir_all(&directory).expect("temporary scenario directory");
+    for (file, contents) in [
+        (
+            "scenarios/closure.yml",
+            "id: closure\nfeatures:\n  - source_feature_id: 10\n    force_closed: true\n",
+        ),
+        (
+            "rankings/usage.csv",
+            "source_feature_id,score\n10,2.5\n11,1\n",
+        ),
+        ("calendars/holidays.yml", "- 2026-12-25\n"),
+        (
+            "weather/shade.csv",
+            "feature_id,t_start,t_end,shade\n10,2026-07-10T08:00:00Z,2026-07-10T09:00:00Z,0.4\n",
+        ),
+    ] {
+        let path = directory.join(file);
+        fs::create_dir_all(path.parent().unwrap()).expect("fixture directory");
+        fs::write(path, contents).expect("fixture file");
+    }
     let request_path = directory.join("batch.yml");
     fs::write(
         &request_path,
         r#"batch_id: relative_paths
 scenarios:
   - id: closure
-    overlay: scenarios/closure.yml
+    overlay_file: scenarios/closure.yml
   - id: top_usage
-    top_k: {ranking: rankings/usage.json, count: 2}
+    top_k: {ranking_file: rankings/usage.csv, count: 2}
   - id: mall
     group: {attribute: asset_group, value: mall}
 routes:
   - route_id: example
     origin: {id: a, lon: 1.0, lat: 2.0}
     destination: {id: b, lon: 1.1, lat: 2.1}
-    holiday_calendar: calendars/holidays.yml
-    overlay: [weather/shade.csv]
-od:
-  - analysis_id: od
-    request:
-      pairs:
-        - pair_id: a_b
-          origin: {id: a, lon: 1.0, lat: 2.0}
-          destination: {id: b, lon: 1.1, lat: 2.1}
-      holiday_calendar: calendars/od.yml
+    holiday_calendar_file: calendars/holidays.yml
+    overlay_files: [weather/shade.csv]
 matrices:
   - analysis_id: matrix
     origins:
       points: [{id: a, lon: 1.0, lat: 2.0}]
-      overlay: [weather/matrix.csv]
+      scenario_file: scenarios/closure.yml
     destinations:
       points: [{id: b, lon: 1.1, lat: 2.1}]
-betweenness:
-  - analysis_id: usage
-    origins: [{id: a, lon: 1.0, lat: 2.0, weight: 2.0}]
-    destinations: [{id: b, lon: 1.1, lat: 2.1, weight: 3.0}]
-    holiday_calendar: calendars/usage.yml
 "#,
     )
     .expect("scenario request fixture");
 
-    let request = load_scenario_batch_request(&request_path).expect("loaded scenario batch");
+    let request = load_scenario_batch_request(&request_path);
     let _ = fs::remove_dir_all(&directory);
+    let request = request.expect("loaded scenario batch");
 
-    let selectors = request
-        .scenarios
-        .iter()
-        .map(|scenario| scenario.selector.clone())
-        .collect::<Vec<_>>();
+    let ScenarioBatchSelector::Overlay { overlay } = &request.scenarios[0].selector else {
+        panic!("expected an inline overlay");
+    };
+    assert_eq!(overlay.id.as_deref(), Some("closure"));
+    assert!(overlay.features[0].force_closed);
     assert_eq!(
-        selectors,
-        vec![
-            ScenarioBatchSelector::Overlay {
-                overlay: directory.join("scenarios/closure.yml")
-            },
-            ScenarioBatchSelector::TopK {
-                top_k: ScenarioTopKSelector {
-                    ranking: directory.join("rankings/usage.json"),
-                    count: 2,
-                }
-            },
-            // Group selectors carry no path and must pass through untouched.
-            ScenarioBatchSelector::Group {
-                group: ScenarioGroupSelector {
-                    attribute: "asset_group".to_string(),
-                    value: "mall".to_string(),
-                }
-            },
-        ]
+        request.scenarios[1].selector,
+        ScenarioBatchSelector::TopK {
+            top_k: ScenarioTopKSelector {
+                ranking: vec![
+                    ScenarioFeatureScore {
+                        source_feature_id: 10,
+                        score: 2.5
+                    },
+                    ScenarioFeatureScore {
+                        source_feature_id: 11,
+                        score: 1.0
+                    },
+                ],
+                count: 2,
+            }
+        }
     );
     assert_eq!(
-        request.routes[0].temporal.holiday_calendar,
-        Some(directory.join("calendars/holidays.yml"))
+        request.scenarios[2].selector,
+        ScenarioBatchSelector::Group {
+            group: ScenarioGroupSelector {
+                attribute: "asset_group".to_string(),
+                value: "mall".to_string(),
+            }
+        }
     );
+    let route = &request.routes[0].temporal;
+    assert_eq!(route.holidays, ["2026-12-25"]);
+    assert_eq!(route.overlays[0].rows[0].values["shade"], 0.4);
     assert_eq!(
-        request.routes[0].temporal.overlays,
-        vec![directory.join("weather/shade.csv")]
-    );
-    assert_eq!(
-        request.od[0].request.temporal.holiday_calendar,
-        Some(directory.join("calendars/od.yml"))
-    );
-    assert_eq!(
-        request.matrices[0].origins.temporal.overlays,
-        vec![directory.join("weather/matrix.csv")]
-    );
-    assert_eq!(
-        request.betweenness[0].temporal.holiday_calendar,
-        Some(directory.join("calendars/usage.yml"))
+        request.matrices[0]
+            .origins
+            .temporal
+            .scenario
+            .as_ref()
+            .and_then(|scenario| scenario.id.as_deref()),
+        Some("closure")
     );
 }
 
@@ -193,8 +200,8 @@ fn scenario_selector_rejects_multiple_sources() {
         r#"batch_id: ambiguous
 scenarios:
   - id: ambiguous
-    overlay: closure.yml
-    top_k: {ranking: usage.csv, count: 1}
+    overlay: {id: closure}
+    top_k: {ranking: [], count: 1}
 routes: []
 "#,
     )
@@ -211,8 +218,9 @@ fn ranks_source_features_from_prior_betweenness_result() {
     let prior = betweenness_result(1, 0, 1.0, vec![(0, 10, 3.0), (1, 10, 4.0), (2, 11, 6.0)]);
     fs::write(&path, serde_json::to_vec(&prior).unwrap()).expect("write betweenness ranking");
 
-    let ranked = load_ranked_source_features(&path, 2);
+    let scores = load_scenario_feature_ranking(&path);
     let _ = fs::remove_file(&path);
+    let ranked = rank_source_features(&scores.expect("ranking loads"), 2);
     // Way 10 sums to 7.0 across its two edges and outranks way 11.
     assert_eq!(ranked.expect("ranked source features"), vec![10, 11]);
 }

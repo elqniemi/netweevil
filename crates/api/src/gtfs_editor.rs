@@ -89,7 +89,26 @@ fn validate_scenario_id(scenario_id: &str) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// Feed ids name files under `.netweevil/transit_feeds/`, so they must be a
+/// single safe path component.
+fn validate_feed_ids(scenario: &GtfsScenario) -> Result<(), ApiError> {
+    for feed_id in scenario
+        .base_feed_id
+        .as_deref()
+        .into_iter()
+        .chain([scenario.output_feed_id()])
+    {
+        if !crate::workspace::is_identifier(feed_id) {
+            return Err(ApiError::bad_request(format!(
+                "'{feed_id}' is not a valid feed id; use letters, digits, '_' and '-'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn read_scenario(paths: &WorkspacePaths, scenario_id: &str) -> Result<GtfsScenario, ApiError> {
+    validate_scenario_id(scenario_id)?;
     let path = scenario_path(paths, scenario_id);
     if !path.is_file() {
         return Err(ApiError::not_found(format!(
@@ -130,6 +149,9 @@ fn base_stops(
 }
 
 fn base_bundle(paths: &WorkspacePaths, feed_id: &str) -> Result<TransitBundle> {
+    if !crate::workspace::is_identifier(feed_id) {
+        anyhow::bail!("'{feed_id}' is not a valid feed id");
+    }
     let manifest_path = paths.transit_feeds_dir.join(format!("{feed_id}.json"));
     let manifest: TransitFeedManifest = read_json(&manifest_path)
         .with_context(|| format!("base feed '{feed_id}' is not imported"))?;
@@ -215,6 +237,7 @@ pub(crate) async fn create_scenario(
     Json(mut scenario): Json<GtfsScenario>,
 ) -> Result<Json<ScenarioResponse>, ApiError> {
     validate_scenario_id(&scenario.scenario_id)?;
+    validate_feed_ids(&scenario)?;
     let paths = &state.workspace.paths;
     let path = scenario_path(paths, &scenario.scenario_id);
     if path.exists() {
@@ -331,6 +354,7 @@ pub(crate) async fn update_scenario(
     Json(mut scenario): Json<GtfsScenario>,
 ) -> Result<Json<ScenarioResponse>, ApiError> {
     let existing = read_scenario(&state.workspace.paths, &scenario_id)?;
+    validate_feed_ids(&scenario)?;
     if scenario.scenario_id != scenario_id {
         return Err(ApiError::bad_request(
             "scenario_id cannot be changed; create a new scenario instead",

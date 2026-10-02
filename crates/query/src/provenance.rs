@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::{TemporalRequestOptions, load_scenario_overlay};
+use crate::TemporalRequestOptions;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TemporalResultProvenance {
@@ -15,9 +15,7 @@ pub(crate) fn temporal_result_provenance(
     let scenario_id = temporal
         .scenario
         .as_ref()
-        .map(load_scenario_overlay)
-        .transpose()?
-        .and_then(|scenario| scenario.id);
+        .and_then(|scenario| scenario.id.clone());
     Ok(TemporalResultProvenance {
         departure_time: temporal.departure_time.clone(),
         arrive_by: temporal.arrive_by.clone(),
