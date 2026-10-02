@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Directions: `POST /v1/directions` takes `directions_options` (`language`,
+  `units`, `driving_side`, `facility_attribute`) and returns maneuvers in
+  English, Dutch, German, French, Finnish or Traditional Chinese (Hong Kong)
+  with forks, ramps, exits, merges, U-turns, ferries, stairs, escalators and
+  lifts, arrival side, lane guidance from `turn:lanes`, signposts from
+  `destination*`, `junction:ref` and `exit_to`, and verbal pre-alert, alert and
+  post-transition text. Time-dependent routes are supported. The edge-name
+  bundle now uses the sectioned format and carries these tags, so datasets
+  must be re-imported.
 - `netweevil bootstrap` and argument-less `api serve` start in setup mode and
   serve the web console, which is embedded in the executable when
   `frontend/dist` exists at build time. `bootstrap` opens the browser

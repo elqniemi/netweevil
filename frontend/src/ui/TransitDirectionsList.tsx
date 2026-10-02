@@ -8,8 +8,7 @@ interface WalkingManeuver {
   location?: number[];
   distance_m?: number;
   edge_time_s?: number;
-  from_elevation_m?: number;
-  to_elevation_m?: number;
+  level_change_m?: number;
 }
 
 interface TransitDirection {
@@ -73,7 +72,7 @@ export function TransitDirectionsList({ run }: { run: RunRecord }) {
           <ol>{step.walking_maneuvers.map((maneuver, i) => <li key={i}>
             <button type="button" className="btn btn-ghost btn-small" onClick={() => focus(maneuver.location)} title={maneuver.location ? "Show on map" : undefined}>{maneuver.instruction}</button>
             <span className="step-meta">{typeof maneuver.distance_m === "number" && fmtDistance(maneuver.distance_m)}{typeof maneuver.edge_time_s === "number" && ` · ${fmtDuration(maneuver.edge_time_s)}`}</span>
-            {typeof maneuver.from_elevation_m === "number" && typeof maneuver.to_elevation_m === "number" && <span className="step-meta"> · Source elevation {maneuver.from_elevation_m.toFixed(2)} → {maneuver.to_elevation_m.toFixed(2)} m</span>}
+            {typeof maneuver.level_change_m === "number" && <span className="step-meta"> · {maneuver.level_change_m > 0 ? "+" : ""}{maneuver.level_change_m.toFixed(1)} m level change</span>}
           </li>)}</ol>
         </details>}
       </li>)}

@@ -3,6 +3,19 @@ import { PALETTE, routeColor } from "../geo/features";
 import { flyTo, useStore, type ResultRecord, type RunRecord } from "../state/store";
 import { fmtDistance, fmtDuration } from "./format";
 
+export interface Lane {
+  indications: string[];
+  valid: boolean;
+  active: boolean;
+}
+
+export interface Signs {
+  exit_number?: string[];
+  branch?: string[];
+  toward?: string[];
+  name?: string[];
+}
+
 interface Maneuver {
   kind: string;
   instruction: string;
@@ -11,6 +24,8 @@ interface Maneuver {
   distance_m: number;
   edge_time_s: number;
   roundabout_exit_count: number | null;
+  lanes: Lane[];
+  signs: Signs | null;
 }
 
 interface Summary {
@@ -23,7 +38,7 @@ function isObject(v: unknown): v is Record<string, unknown> {
 }
 
 /** Pulls the maneuver list and route summary out of a directions response. */
-export function extractDirections(response: unknown): { maneuvers: Maneuver[]; summary: Summary } | null {
+export function extractDirections(response: unknown): { maneuvers: Maneuver[]; summary: Summary; language: string | null } | null {
   if (!isObject(response) || !isObject(response.result)) return null;
   const result = response.result;
   if (!Array.isArray(result.maneuvers)) return null;
@@ -35,10 +50,12 @@ export function extractDirections(response: unknown): { maneuvers: Maneuver[]; s
     distance_m: typeof m.distance_m === "number" ? m.distance_m : 0,
     edge_time_s: typeof m.edge_time_s === "number" ? m.edge_time_s : 0,
     roundabout_exit_count: typeof m.roundabout_exit_count === "number" ? m.roundabout_exit_count : null,
+    lanes: Array.isArray(m.lanes) ? (m.lanes as Lane[]).filter((lane) => isObject(lane) && Array.isArray(lane.indications)) : [],
+    signs: isObject(m.signs) ? (m.signs as Signs) : null,
   }));
   const route = isObject(result.route) ? result.route : {};
   const summary = isObject(route.summary) ? (route.summary as Summary) : {};
-  return { maneuvers, summary };
+  return { maneuvers, summary, language: typeof result.language === "string" ? result.language : null };
 }
 
 /** Rotation (degrees, clockwise) of the arrow glyph for a maneuver kind. */
@@ -51,15 +68,59 @@ const TURN_ANGLE: Record<string, number> = {
   right: 90,
   sharp_left: -135,
   sharp_right: 135,
+  merge: 0,
   merge_left: -30,
   merge_right: 30,
-  fork_left: -30,
-  fork_right: 30,
   ramp_left: -45,
   ramp_right: 45,
+  ramp_straight: 0,
+  exit_left: -45,
+  exit_right: 45,
   keep_left: -20,
   keep_right: 20,
+  keep_straight: 0,
 };
+
+/** Arrow rotation (degrees) for an OSM lane indication. */
+const LANE_ANGLE: Record<string, number> = {
+  none: 0,
+  through: 0,
+  slight_left: -40,
+  left: -90,
+  sharp_left: -135,
+  slight_right: 40,
+  right: 90,
+  sharp_right: 135,
+  reverse: -180,
+  merge_to_left: -30,
+  merge_to_right: 30,
+};
+
+/** Lane arrows for a maneuver approach, left to right; active lanes are highlighted. */
+function LaneStrip({ lanes }: { lanes: Lane[] }) {
+  return (
+    <span className="lane-strip" aria-label={`${lanes.filter((lane) => lane.active).length} of ${lanes.length} lanes`}>
+      {lanes.map((lane, i) => (
+        <span key={i} className={`lane${lane.active ? " is-active" : lane.valid ? " is-valid" : ""}`}>
+          {lane.indications.map((indication, j) => (
+            <svg key={j} viewBox="0 0 24 24" className="lane-arrow" aria-hidden="true" style={{ transform: `rotate(${LANE_ANGLE[indication] ?? 0}deg)` }}>
+              <path d="M12 21V6M7 11l5-5 5 5" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ))}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+/** Signpost text: exit number, route numbers and destinations. */
+export function signText(signs: Signs): string {
+  const parts: string[] = [];
+  if (signs.exit_number?.length) parts.push(`Exit ${signs.exit_number.join("/")}`);
+  const toward = [...(signs.branch ?? []), ...(signs.toward ?? [])];
+  if (toward.length) parts.push(toward.join(", "));
+  return parts.join(" · ");
+}
 
 function ManeuverIcon({ kind, exit }: { kind: string; exit: number | null }) {
   if (kind === "depart") {
@@ -85,7 +146,7 @@ function ManeuverIcon({ kind, exit }: { kind: string; exit: number | null }) {
       </svg>
     );
   }
-  if (kind.startsWith("roundabout") || kind.startsWith("rotary")) {
+  if (kind.endsWith("roundabout")) {
     return (
       <svg viewBox="0 0 24 24" className="step-icon" aria-hidden="true">
         <circle cx="12" cy="13" r="5.5" fill="none" stroke="currentColor" strokeWidth="2.2" />
@@ -168,6 +229,8 @@ export function DirectionsList({ result }: { result: ResultRecord }) {
                 </span>
                 <span className="step-body">
                   <span className="step-text">{m.instruction || m.kind.replace(/_/g, " ")}</span>
+                  {m.signs && signText(m.signs) && <span className="step-sign">{signText(m.signs)}</span>}
+                  {m.lanes.length > 0 && <LaneStrip lanes={m.lanes} />}
                   {!last && (
                     <span className="step-meta">
                       {fmtDistance(m.distance_m)} · {fmtDuration(m.edge_time_s)}

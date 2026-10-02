@@ -653,16 +653,60 @@ curl -X POST 'http://127.0.0.1:8080/v1/route?format=geojson' \
   --data @examples/api/ile_de_france_route_car.json
 ```
 
-`POST /v1/directions` accepts the same payload and dynamic profiles as `route`.
-It returns `{service, result: {language, route, maneuvers}}`, with full geometry
-and segments. English maneuvers include departures, turns, name changes,
-roundabout entries/exits and arrival. Each maneuver identifies a half-open
-range in `route.edge_path`; distance and edge time sum those segments. Turn
-penalties remain in the route summary. Roundabout exit counts include legal
-exit junctions, including the chosen exit. No exit number is inferred when
-starting or ending inside a roundabout. Directions require a static legal
-street route with all turn restrictions enforced. Lane, signpost, localized
-voice and alternative-route instructions are not implemented.
+`POST /v1/directions` accepts the same payload and dynamic profiles as `route`,
+plus optional `directions_options`:
+
+```json
+"directions_options": {
+  "language": "nl",
+  "units": "metric",
+  "driving_side": "right",
+  "facility_attribute": "feature_type"
+}
+```
+
+`language` is a BCP 47 tag. Phrase tables exist for `en`, `nl`, `de`, `fr`,
+`fi` and `zh-Hant` (also `zh-HK`, `zh-TW`, `zh`). Subtags are dropped until a
+table matches (`nl-BE` uses `nl`). Unknown languages fall back to English and
+add a warning. `units` is `metric` or `imperial`. `driving_side` overrides the
+dataset; without it, right-hand traffic is assumed. `facility_attribute` names
+the attribute that marks stairs, escalators, lifts and moving walkways. It
+defaults to the profile's `facilities.attribute`. `GET /v1/service` lists the
+languages under `capabilities.directions_languages`.
+
+The response is `{service, result: {language, units, driving_side,
+driving_side_origin, warnings?, route, maneuvers}}`, with full geometry and
+segments. Each maneuver has a `kind`, a written `instruction` and `verbal`
+text. `verbal.pre_alert` is announced `pre_alert_distance_m` before the
+maneuver; `alert` is announced at it and includes the next maneuver when it
+follows closely. `post_transition` gives the distance to keep going. The
+`kind`s are:
+
+- `depart`, `continue`, turns from `slight_left` to `sharp_right`, and
+  `uturn_left`/`uturn_right` (dual-carriageway crossings become one U-turn)
+- `ramp_*`, `exit_*` and `merge*` for link roads; `keep_*` at forks
+- `enter_roundabout` with `roundabout_exit_count`, `exit_roundabout`
+- `ferry_enter`/`ferry_exit`; `stairs`, `escalator`, `elevator` and
+  `travelator` with `level_change_m`
+- `arrive` with `arrival_side`
+
+`street_name` and `street_ref` name the road entered. Name changes are announced
+only when no name or route number carries over. `signs` holds `exit_number`
+(from `junction:ref` or the motorway junction node), `branch`
+(`destination:ref`), `toward` (`destination`, `destination:street`, `exit_to`)
+and the junction `name`. `lanes` lists the approach lanes from `turn:lanes`,
+left to right, with their `indications` and `valid`/`active` flags. Walking and
+cycling routes get plain turns: no ramps, exits, lanes or U-turn collapsing.
+
+Each maneuver identifies a half-open range in `route.edge_path`; distance and
+edge time sum those segments. Turn penalties remain in the route summary.
+Roundabout exit counts include the legal exits passed, including the chosen
+exit. No exit number is inferred when starting or ending inside a roundabout.
+Time-dependent requests (`departure_time`, `arrive_by`, scenarios) are
+supported; their maneuvers add `begin_time` and `waiting_time_s`. Directions
+require a legal street route with all turn restrictions enforced.
+`/v1/transit-directions` takes the same `directions_options` for its journey
+steps and walking instructions.
 
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/directions \
