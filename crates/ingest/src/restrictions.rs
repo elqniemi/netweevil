@@ -5,17 +5,18 @@ use osmpbfreader::{OsmId, Relation, Tags};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 
 use crate::classify::tag;
 use crate::scan::PendingWay;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum RestrictionKind {
     NoTurn,
     OnlyTurn,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) struct TurnRestrictionCandidate {
     pub(crate) relation_id: i64,
     pub(crate) from_way_id: i64,
@@ -25,7 +26,7 @@ pub(crate) struct TurnRestrictionCandidate {
     pub(crate) mode_mask: AccessMask,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub(crate) enum ViaSpec {
     Node(i64),
     Ways(Vec<i64>),

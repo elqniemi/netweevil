@@ -15,7 +15,10 @@ use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query, State};
 use futures_util::StreamExt;
 use netweevil_core::SourceFormat;
-use netweevil_ingest::{DatasetImportOptions, import_dataset};
+use netweevil_ingest::{
+    DEFAULT_MAX_FILL_GROWTH, DatasetImportOptions, DatasetUpdateInput, DatasetUpdateOptions,
+    ReorderPolicy, import_dataset, update_dataset,
+};
 use netweevil_manifest::now_rfc3339;
 use netweevil_persist::{
     WorkspaceConfig, WorkspaceLocation, WorkspacePaths, list_json_files,
@@ -1071,9 +1074,7 @@ pub(crate) async fn activate(
             )));
         }
     }
-    if state.workspace.jobs.is_running("activate") {
-        return Err(ApiError::conflict("another activation is still running"));
-    }
+    ensure_no_runtime_job(&state.workspace)?;
     let selection = WorkspaceConfig {
         dataset_id: payload.dataset_id.clone(),
         default_profile,
@@ -1088,22 +1089,191 @@ pub(crate) async fn activate(
         "activate",
         &label,
         move |job| {
-            let runtime = load_service_runtime(&paths, &selection, |message| {
+            let mut summary = reload_runtime(&workspace, &selection, |message| {
                 job.progress("Load", message, None)
             })?;
             let mut saved = selection.clone();
             saved.updated_at = now_rfc3339().ok();
             write_workspace_config(&paths, &saved)?;
-            let summary = json!({
-                "dataset_id": runtime.dataset_manifest.dataset_id.0,
-                "default_profile_id": runtime.default_profile_id,
-                "profile_ids": runtime.profiles.keys().cloned().collect::<Vec<_>>(),
-                "transit_feed_ids": runtime.transit_feed_ids(),
-                "config_path": paths.workspace_config_path.display().to_string(),
-            });
-            workspace.set_runtime(Some(Arc::new(runtime)));
+            summary["config_path"] = json!(paths.workspace_config_path.display().to_string());
             info!("workspace activated");
             Ok(summary)
+        },
+    );
+    Ok(Json(JobStarted { job_id }))
+}
+
+// --- Reload and dataset updates ----------------------------------------------
+
+/// Job kinds that replace the loaded runtime; only one runs at a time.
+const RUNTIME_JOB_KINDS: [&str; 2] = ["activate", "dataset-update"];
+
+fn ensure_no_runtime_job(workspace: &Workspace) -> Result<(), ApiError> {
+    if RUNTIME_JOB_KINDS
+        .iter()
+        .any(|kind| workspace.jobs.is_running(kind))
+    {
+        return Err(ApiError::conflict(
+            "another activation, reload or dataset update is still running",
+        ));
+    }
+    Ok(())
+}
+
+/// Loads `selection` from disk while the current runtime keeps serving,
+/// then swaps the new runtime in. Requests that already hold the previous
+/// runtime finish on it; profiles compiled for an older topology are
+/// recompiled during the load.
+pub(crate) fn reload_runtime(
+    workspace: &Workspace,
+    selection: &WorkspaceConfig,
+    progress: impl FnMut(&str),
+) -> Result<Value> {
+    let runtime = load_service_runtime(&workspace.paths, selection, progress)?;
+    let manifest = &runtime.dataset_manifest;
+    let summary = json!({
+        "dataset_id": manifest.dataset_id.0,
+        "source_sha256": manifest.source_sha256,
+        "topology_bundle_id": manifest.topology_bundle.as_ref().map(|bundle| bundle.bundle_id.0.clone()),
+        "default_profile_id": runtime.default_profile_id,
+        "profile_ids": runtime.profiles.keys().cloned().collect::<Vec<_>>(),
+        "transit_feed_ids": runtime.transit_feed_ids(),
+    });
+    workspace.set_runtime(Some(Arc::new(runtime)));
+    info!(dataset_id = %selection.dataset_id, "runtime swapped in");
+    Ok(summary)
+}
+
+/// Reloads the loaded selection (or the saved one) from disk, picking up a
+/// dataset that `netweevil dataset update` changed while the API runs.
+pub(crate) async fn reload(State(state): State<ApiState>) -> Result<Json<JobStarted>, ApiError> {
+    let selection = match state.workspace.runtime() {
+        Some(runtime) => runtime.active.clone(),
+        None => read_workspace_config(&state.workspace.paths)
+            .map_err(|error| ApiError::internal(error.to_string()))?
+            .ok_or_else(|| {
+                ApiError::bad_request(
+                    "no dataset is loaded or saved; POST /v1/workspace/activate first",
+                )
+            })?,
+    };
+    ensure_no_runtime_job(&state.workspace)?;
+    let workspace = Arc::clone(&state.workspace);
+    let label = format!("Reload dataset '{}'", selection.dataset_id);
+    let job_id = spawn_job(
+        Arc::clone(&state.workspace),
+        "activate",
+        &label,
+        move |job| {
+            reload_runtime(&workspace, &selection, |message| {
+                job.progress("Load", message, None)
+            })
+        },
+    );
+    Ok(Json(JobStarted { job_id }))
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReorderMode {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DatasetUpdateRequest {
+    /// osmChange files, as upload names in `.netweevil/uploads/`, applied in order.
+    #[serde(default)]
+    pub(crate) diffs: Vec<String>,
+    /// A newer OSM PBF extract (an upload name), instead of change files.
+    #[serde(default)]
+    pub(crate) source: Option<String>,
+    #[serde(default)]
+    pub(crate) reorder: ReorderMode,
+    #[serde(default)]
+    pub(crate) max_fill_growth: Option<f64>,
+}
+
+/// Applies change files (or a newer extract) to an OSM dataset in the
+/// background. When the dataset is the loaded one, the updated build is
+/// loaded next to the running one and swapped in once ready.
+pub(crate) async fn update_dataset_handler(
+    State(state): State<ApiState>,
+    AxumPath(dataset_id): AxumPath<String>,
+    Json(payload): Json<DatasetUpdateRequest>,
+) -> Result<Json<JobStarted>, ApiError> {
+    validate_identifier(&dataset_id)?;
+    let paths = state.workspace.paths.clone();
+    if !paths
+        .datasets_dir
+        .join(format!("{dataset_id}.json"))
+        .exists()
+    {
+        return Err(ApiError::not_found(format!(
+            "dataset '{dataset_id}' does not exist"
+        )));
+    }
+    let resolve = |raw: &str| {
+        resolve_upload(&paths, raw).map_err(|error| ApiError::bad_request(error.to_string()))
+    };
+    let input = match (payload.source.as_deref(), payload.diffs.is_empty()) {
+        (Some(source), true) => DatasetUpdateInput::Source(resolve(source)?),
+        (None, false) => DatasetUpdateInput::OsmChanges(
+            payload
+                .diffs
+                .iter()
+                .map(|diff| resolve(diff))
+                .collect::<Result<_, _>>()?,
+        ),
+        _ => {
+            return Err(ApiError::bad_request(
+                "give either `diffs` (osmChange files) or `source` (an OSM PBF extract)",
+            ));
+        }
+    };
+    let reorder = match payload.reorder {
+        ReorderMode::Auto => ReorderPolicy::Auto {
+            max_fill_growth: payload.max_fill_growth.unwrap_or(DEFAULT_MAX_FILL_GROWTH),
+        },
+        ReorderMode::Always => ReorderPolicy::Always,
+        ReorderMode::Never => ReorderPolicy::Never,
+    };
+    ensure_no_runtime_job(&state.workspace)?;
+    let workspace = Arc::clone(&state.workspace);
+    let label = format!("Update dataset '{dataset_id}'");
+    let job_id = spawn_job(
+        Arc::clone(&state.workspace),
+        "dataset-update",
+        &label,
+        move |job| {
+            let report = update_dataset(
+                &workspace.paths,
+                DatasetUpdateOptions {
+                    dataset_id: dataset_id.clone(),
+                    input,
+                    reorder,
+                },
+                |event| job.progress(event.stage.label(), &event.message, event.stage_percent),
+            )?;
+            let loaded_selection = workspace
+                .runtime()
+                .map(|runtime| runtime.active.clone())
+                .filter(|active| active.dataset_id == dataset_id);
+            let reloaded = match loaded_selection {
+                Some(selection) => Some(reload_runtime(&workspace, &selection, |message| {
+                    job.progress("Reload", message, None)
+                })?),
+                None => None,
+            };
+            Ok(json!({
+                "dataset_id": dataset_id,
+                "source_sha256": report.manifest.source_sha256,
+                "last_update": report.manifest.last_update,
+                "stage_seconds": report.stage_seconds,
+                "reloaded": reloaded,
+            }))
         },
     );
     Ok(Json(JobStarted { job_id }))

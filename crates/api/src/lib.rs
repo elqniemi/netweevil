@@ -216,6 +216,10 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
             axum::routing::delete(workspace::delete_dataset),
         )
         .route(
+            "/v1/workspace/datasets/{dataset_id}/update",
+            post(workspace::update_dataset_handler),
+        )
+        .route(
             "/v1/workspace/profile-templates",
             get(workspace::profile_templates),
         )
@@ -233,6 +237,7 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
             axum::routing::delete(workspace::delete_transit_feed),
         )
         .route("/v1/workspace/activate", post(workspace::activate))
+        .route("/v1/workspace/reload", post(workspace::reload))
         // GTFS editor: scenarios on top of a feed or from scratch.
         .route(
             "/v1/gtfs-editor/scenarios",

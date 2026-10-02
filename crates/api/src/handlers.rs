@@ -596,6 +596,11 @@ pub(crate) fn build_service_info(service: &ServiceRuntime) -> ServiceInfoRespons
             source_path: service.dataset_manifest.source_path.clone(),
             source_sha256: service.dataset_manifest.source_sha256.clone(),
             imported_at: service.dataset_manifest.imported_at.clone(),
+            updated_at: service
+                .dataset_manifest
+                .last_update
+                .as_ref()
+                .map(|update| update.updated_at.clone()),
             topology_bounds,
             node_count: topology_meta.map(|meta| meta.node_count),
             edge_count: topology_meta.map(|meta| meta.edge_count),

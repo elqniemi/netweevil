@@ -327,6 +327,7 @@ All CLI and API state is under `.netweevil/` in the current workspace:
 - `.netweevil/bundles/topology`: topology bundles
 - `.netweevil/bundles/names`: cold edge-name bundles
 - `.netweevil/bundles/acceleration`: dataset acceleration bundles
+- `.netweevil/bundles/source`: retained OSM source objects that `dataset update` applies change files to (OSM PBF imports only)
 - `.netweevil/bundles/metrics`: compiled profile metric bundles (per-edge metrics only; CCH weights are customized when an engine loads the profile)
 - `.netweevil/bundles/transit`: transit bundles
 - `.netweevil/runs`: route, OD, matrix, service-area, experiment, and simulation outputs
@@ -346,7 +347,7 @@ cargo run -p netweevil-cli -- api serve --help
 
 Top-level commands:
 
-- `dataset import|audit|list`
+- `dataset import|update|audit|list`
 - `transit import|bindings apply|transfers build|list`
 - `profile validate|compile`
 - `analyze route|route-batch|od|matrix|accessibility|service-area|service-area-sequence|betweenness|scenario-batch|transit-route|transit-batch`
@@ -655,6 +656,8 @@ stays under `.netweevil/`):
 - `GET /v1/workspace/profile-templates`; `POST /v1/workspace/profiles` `{yaml, file_name?}`; `GET|DELETE /v1/workspace/profiles/{file}`
 - `POST /v1/workspace/transit/import` `{source, name, service_start, service_days}` → job; `source` is an upload name; `DELETE /v1/workspace/transit-feeds/{id}`
 - `POST /v1/workspace/activate` `{dataset_id, default_profile, profiles, transit_feeds}` → job that compiles missing profiles, swaps the loaded runtime, and writes `workspace.json`; profiles are files in `.netweevil/profiles/` or `examples/profiles/` (by name, `examples/<file>`, or the path `/v1/workspace` lists)
+- `POST /v1/workspace/datasets/{id}/update` `{diffs: [osc, ...]}` or `{source: pbf}` (upload names), optional `reorder` (`auto`, `always`, `never`) and `max_fill_growth` → job that runs `dataset update` and, when the dataset is loaded, swaps in the updated build
+- `POST /v1/workspace/reload` → job that reloads the loaded selection from disk (for example after a CLI `dataset update`) and swaps it in; profiles compiled for the previous topology are recompiled. The previous runtime serves requests until the swap.
 - `GET /v1/workspace/jobs`, `GET /v1/workspace/jobs/{id}`
 
 Until a dataset is loaded, `/readyz`, `/v1/service` and the analysis endpoints
@@ -967,6 +970,32 @@ osmium tags-filter \
 ```
 
 Do not pass `-R` or `--omit-referenced`; netweevil needs referenced topology objects.
+
+## Updating OSM Datasets
+
+An OSM PBF import keeps the source objects it needs for updates. Apply OSM
+change files (Geofabrik daily diffs, OSM replication diffs) instead of
+re-importing:
+
+```bash
+cargo run -p netweevil-cli -- dataset update \
+  --dataset groningen_2026_05 \
+  --diff groningen-updates/000/002/735.osc.gz groningen-updates/000/002/736.osc.gz
+
+# Or rebuild from a newer extract of the same area, reusing the CCH order:
+# cargo run -p netweevil-cli -- dataset update \
+#   --dataset groningen_2026_05 --source groningen-latest-routing.osm.pbf
+```
+
+The update builds the topology a full import of the changed extract would
+build and contracts the CCH with the previous elimination order, so it skips
+nested dissection. Routing results equal a full import's. Repeated updates
+let the shortcut count drift; each update reports its fill growth against the
+last full ordering, and `--reorder auto` (default) runs a full ordering when
+it exceeds `--max-fill-growth` (default 1.10). Use `--reorder always` for a
+scheduled full ordering. Recompile profiles afterwards, or
+`POST /v1/workspace/reload` a running API. See
+[Incremental dataset updates](docs/incremental-updates.md) for measurements.
 
 ## Importing Overture Maps Data
 

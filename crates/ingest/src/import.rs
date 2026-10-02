@@ -7,15 +7,19 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result, bail};
-use netweevil_core::{BuildStage, CacheBundleId, DatasetId, SourceFormat};
-use netweevil_manifest::{BundleRef, DatasetManifest, now_rfc3339};
+use netweevil_core::{
+    BuildStage, CacheBundleId, DatasetAccelerationBundle, DatasetId, EdgeNameBundle, SourceFormat,
+    TopologyBundle,
+};
+use netweevil_manifest::{AccelerationOrdering, BundleRef, DatasetManifest, now_rfc3339};
 use netweevil_persist::{
     WorkspacePaths, write_acceleration_bundle, write_dataset_manifest, write_edge_name_bundle,
-    write_topology_bundle,
+    write_source_snapshot_bundle, write_topology_bundle,
 };
 use sha2::{Digest, Sha256};
 
 use crate::acceleration::build_dataset_acceleration_bundle_with_progress;
+use crate::source::OsmSourceSnapshot;
 use crate::topology::build_topology_bundle;
 
 #[derive(Debug, Clone)]
@@ -50,8 +54,9 @@ pub fn detect_source_format(source_path: &Path) -> SourceFormat {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatasetImportStage {
     HashSource,
+    LoadPreviousBuild,
+    ApplyChanges,
     ScanRoutableObjects,
-    LoadNodeCoords,
     BuildTopology,
     BuildAcceleration,
     WriteTopologyBundle,
@@ -63,8 +68,9 @@ impl DatasetImportStage {
     pub const fn label(self) -> &'static str {
         match self {
             Self::HashSource => "Hash Source",
+            Self::LoadPreviousBuild => "Load Previous Build",
+            Self::ApplyChanges => "Apply Changes",
             Self::ScanRoutableObjects => "Scan Routable Objects",
-            Self::LoadNodeCoords => "Load Node Coords",
             Self::BuildTopology => "Build Topology",
             Self::BuildAcceleration => "Build Acceleration",
             Self::WriteTopologyBundle => "Write Topology Bundle",
@@ -127,21 +133,8 @@ where
     );
     let (sha256, size) = sha256_sources(source_paths, &mut progress)?;
     let dataset_id = DatasetId::new(options.name);
-    let bundle_id = CacheBundleId::new(format!("topology-{}-{}", dataset_id.0, &sha256[..12]));
-    let bundle_path = paths
-        .topology_bundles_dir
-        .join(format!("{}.bin", bundle_id.0));
-    let edge_name_bundle_id =
-        CacheBundleId::new(format!("edge-names-{}-{}", dataset_id.0, &sha256[..12]));
-    let edge_name_bundle_path = paths
-        .edge_name_bundles_dir
-        .join(format!("{}.bin", edge_name_bundle_id.0));
-    let acceleration_bundle_id =
-        CacheBundleId::new(format!("acceleration-{}-{}", dataset_id.0, &sha256[..12]));
-    let acceleration_bundle_path = paths
-        .acceleration_bundles_dir
-        .join(format!("{}.bin", acceleration_bundle_id.0));
-    let (bundle, edge_name_bundle, topology_meta) = build_topology_bundle(
+    let bundles = DatasetBundleRefs::new(paths, &dataset_id, &sha256);
+    let built = build_topology_bundle(
         source_paths,
         size,
         &sha256,
@@ -149,35 +142,23 @@ where
         mapping.as_ref(),
         &mut progress,
     )?;
-    let acceleration_bundle =
-        build_dataset_acceleration_bundle_with_progress(&bundle, bundle_id.clone(), &mut progress);
-    emit_progress(
+    let acceleration_bundle = build_dataset_acceleration_bundle_with_progress(
+        &built.bundle,
+        bundles.topology.bundle_id.clone(),
         &mut progress,
-        DatasetImportStage::WriteTopologyBundle,
-        None,
-        format!("Writing topology bundle {}", bundle_path.display()),
     );
-    write_topology_bundle(&bundle_path, &bundle)?;
-    emit_progress(
+    let snapshot = built.osm_source.as_ref().map(|(state, topology_node_ids)| {
+        state.to_snapshot(bundles.topology.bundle_id.clone(), topology_node_ids)
+    });
+    write_dataset_bundles(
+        &bundles,
+        &built.bundle,
+        &built.names,
+        &acceleration_bundle,
+        snapshot.as_ref(),
         &mut progress,
-        DatasetImportStage::WriteTopologyBundle,
-        None,
-        format!(
-            "Writing edge-name bundle {}",
-            edge_name_bundle_path.display()
-        ),
-    );
-    write_edge_name_bundle(&edge_name_bundle_path, &edge_name_bundle)?;
-    emit_progress(
-        &mut progress,
-        DatasetImportStage::WriteTopologyBundle,
-        None,
-        format!(
-            "Writing acceleration bundle {}",
-            acceleration_bundle_path.display()
-        ),
-    );
-    write_acceleration_bundle(&acceleration_bundle_path, &acceleration_bundle)?;
+    )?;
+    let imported_at = now_rfc3339()?;
 
     let manifest = DatasetManifest {
         dataset_id,
@@ -190,22 +171,21 @@ where
         source_sha256: sha256,
         source_size_bytes: size,
         source_format,
-        imported_at: now_rfc3339()?,
         build_stage: BuildStage::TopologyReady,
-        topology_bundle: Some(BundleRef {
-            bundle_id,
-            path: bundle_path.display().to_string(),
+        topology_bundle: Some(bundles.topology),
+        edge_name_bundle: Some(bundles.edge_names),
+        acceleration_bundle: Some(bundles.acceleration),
+        source_snapshot_bundle: snapshot.is_some().then_some(bundles.source),
+        topology_meta: Some(built.meta),
+        acceleration_ordering: Some(AccelerationOrdering {
+            ordered_at: imported_at.clone(),
+            edge_count: built.bundle.edge_count() as u64,
+            shortcut_arc_count: acceleration_bundle.stats.shortcut_arc_count,
+            patched_updates: 0,
         }),
-        edge_name_bundle: Some(BundleRef {
-            bundle_id: edge_name_bundle_id,
-            path: edge_name_bundle_path.display().to_string(),
-        }),
-        acceleration_bundle: Some(BundleRef {
-            bundle_id: acceleration_bundle_id,
-            path: acceleration_bundle_path.display().to_string(),
-        }),
-        topology_meta: Some(topology_meta),
         acceleration_stats: Some(acceleration_bundle.stats.clone()),
+        imported_at,
+        last_update: None,
     };
 
     emit_progress(
@@ -235,6 +215,67 @@ where
         ),
     );
     Ok(manifest)
+}
+
+/// Ids and paths of the bundles one build of a dataset writes. Ids embed the
+/// source hash, so an update writes new files next to the ones a running
+/// API may still be reading.
+pub(crate) struct DatasetBundleRefs {
+    pub(crate) topology: BundleRef,
+    pub(crate) edge_names: BundleRef,
+    pub(crate) acceleration: BundleRef,
+    pub(crate) source: BundleRef,
+}
+
+impl DatasetBundleRefs {
+    pub(crate) fn new(paths: &WorkspacePaths, dataset_id: &DatasetId, source_sha256: &str) -> Self {
+        let bundle = |dir: &Path, kind: &str| {
+            let bundle_id =
+                CacheBundleId::new(format!("{kind}-{}-{}", dataset_id.0, &source_sha256[..12]));
+            let path = dir.join(format!("{}.bin", bundle_id.0));
+            BundleRef {
+                bundle_id,
+                path: path.display().to_string(),
+            }
+        };
+        Self {
+            topology: bundle(&paths.topology_bundles_dir, "topology"),
+            edge_names: bundle(&paths.edge_name_bundles_dir, "edge-names"),
+            acceleration: bundle(&paths.acceleration_bundles_dir, "acceleration"),
+            source: bundle(&paths.source_bundles_dir, "source"),
+        }
+    }
+}
+
+/// Writes the bundles of one dataset build; the snapshot only for OSM
+/// sources.
+pub(crate) fn write_dataset_bundles(
+    refs: &DatasetBundleRefs,
+    topology: &TopologyBundle,
+    names: &EdgeNameBundle,
+    acceleration: &DatasetAccelerationBundle,
+    snapshot: Option<&OsmSourceSnapshot>,
+    progress: &mut impl FnMut(DatasetImportProgress),
+) -> Result<()> {
+    let mut announce = |what: &str, bundle: &BundleRef| {
+        emit_progress(
+            progress,
+            DatasetImportStage::WriteTopologyBundle,
+            None,
+            format!("Writing {what} bundle {}", bundle.path),
+        )
+    };
+    announce("topology", &refs.topology);
+    write_topology_bundle(&refs.topology.path, topology)?;
+    announce("edge-name", &refs.edge_names);
+    write_edge_name_bundle(&refs.edge_names.path, names)?;
+    announce("acceleration", &refs.acceleration);
+    write_acceleration_bundle(&refs.acceleration.path, acceleration)?;
+    if let Some(snapshot) = snapshot {
+        announce("source snapshot", &refs.source);
+        write_source_snapshot_bundle(&refs.source.path, snapshot)?;
+    }
+    Ok(())
 }
 
 fn sha256_sources<F>(source_paths: &[PathBuf], progress: &mut F) -> Result<(String, u64)>
@@ -268,7 +309,7 @@ where
 /// Hashes the dataset source: a single file directly, or every parquet file
 /// of a directory source (sorted by relative path, with the path mixed into
 /// the digest) so renames and content changes both change the hash.
-fn sha256_source<F>(source_path: &Path, progress: &mut F) -> Result<(String, u64)>
+pub(crate) fn sha256_source<F>(source_path: &Path, progress: &mut F) -> Result<(String, u64)>
 where
     F: FnMut(DatasetImportProgress),
 {
@@ -380,10 +421,6 @@ pub(crate) struct PercentReporter {
 }
 
 impl PercentReporter {
-    pub(crate) fn new() -> Self {
-        Self { last_bucket: None }
-    }
-
     pub(crate) fn starting_at_zero() -> Self {
         Self {
             last_bucket: Some(0),

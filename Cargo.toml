@@ -42,6 +42,7 @@ memmap2 = "0.9.8"
 mime_guess = "2.0.5"
 mvt = "0.15.0"
 osmpbfreader = "0.17.0"
+quick-xml = "0.42.0"
 parquet = { version = "56.2.0", default-features = false, features = ["arrow"] }
 rayon = "1.10.0"
 rustc-hash = "2.1.1"

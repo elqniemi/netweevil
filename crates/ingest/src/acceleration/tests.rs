@@ -1,4 +1,7 @@
-use super::{Cell, build_dataset_acceleration_bundle_with_progress, inertial_flow_split};
+use super::{
+    Cell, build_dataset_acceleration_bundle_with_progress, build_with_order, inertial_flow_split,
+    patch_edge_order,
+};
 use crate::test_util::{edge, topology};
 use netweevil_core::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, CCH_ALGORITHM, CacheBundleId, DatasetAccelerationBundle,
@@ -221,32 +224,144 @@ fn edge_ordering_preserves_every_transition_including_uturns() {
     assert!(uturns > 0);
 }
 
-#[test]
-fn contraction_is_complete_on_a_grid() {
-    let topology = grid_topology(4);
-    let edge_count = topology.edge_count();
-    let bundle = build(&topology);
-
+/// Lower-triangle completeness: for every state v, every incoming arc from
+/// a higher-ranked x and outgoing arc to a higher-ranked y must be closed by
+/// an arc between x and y. This is the invariant that makes CCH queries
+/// exact with no follow-up search.
+fn assert_contraction_complete(bundle: &DatasetAccelerationBundle) {
+    let edge_count = bundle.edge_order.len();
     // Reverse index of downward arcs: incoming higher-ranked tails per state.
     let mut incoming_from_higher: Vec<Vec<u32>> = vec![Vec::new(); edge_count];
     for tail in 0..edge_count {
-        for &head in downward(&bundle, tail) {
+        for &head in downward(bundle, tail) {
             incoming_from_higher[head as usize].push(tail as u32);
         }
     }
-
-    // Lower-triangle completeness: for every state v, every incoming arc
-    // from a higher-ranked x and outgoing arc to a higher-ranked y must
-    // be closed by an arc between x and y. This is the invariant that
-    // makes CCH queries exact with no follow-up search.
     for (v, incoming) in incoming_from_higher.iter().enumerate() {
         for &x in incoming {
-            for &y in upward(&bundle, v) {
+            for &y in upward(bundle, v) {
                 assert!(
-                    x == y || has_arc(&bundle, x as usize, y),
+                    x == y || has_arc(bundle, x as usize, y),
                     "missing closure arc {x} -> {y} for contracted state {v}"
                 );
             }
         }
     }
+}
+
+#[test]
+fn contraction_is_complete_on_a_grid() {
+    assert_contraction_complete(&build(&grid_topology(4)));
+}
+
+/// `grid_topology(6)` without the edges between nodes 0 and 1, plus a
+/// diagonal two-way road between nodes 7 and 14 and a separate two-node
+/// component. Returns the topology and every edge's index in the grid.
+fn edited_grid(before: &TopologyBundle) -> (TopologyBundle, Vec<Option<usize>>) {
+    let mut edges = Vec::new();
+    let mut origin = Vec::new();
+    for index in 0..before.edge_count() {
+        let edge = before.edge(index);
+        if (edge.from.0, edge.to.0) == (0, 1) || (edge.from.0, edge.to.0) == (1, 0) {
+            continue;
+        }
+        edges.push(edge);
+        origin.push(Some(index));
+    }
+    let mut nodes = before
+        .nodes
+        .iter()
+        .map(|node| (node.lon, node.lat, node.z))
+        .collect::<Vec<_>>();
+    nodes.extend([(0.5, 0.5, 0.0), (0.501, 0.5, 0.0)]);
+    for (from, to) in [(7, 14), (14, 7), (36, 37), (37, 36)] {
+        edges.push(edge(0, from, to, 9_000 + i64::from(from)));
+        origin.push(None);
+    }
+    for (index, edge) in edges.iter_mut().enumerate() {
+        edge.edge_id = netweevil_core::EdgeId(index as u32);
+    }
+    (topology(&nodes, &edges), origin)
+}
+
+#[test]
+fn patched_order_keeps_previous_ranks_and_places_new_states_by_neighbours() {
+    let before = grid_topology(6);
+    let previous = build(&before);
+    let (after, origin) = edited_grid(&before);
+    let previous_rank = origin
+        .iter()
+        .map(|index| index.map(|index| previous.edge_rank[index]))
+        .collect::<Vec<_>>();
+
+    let patched = patch_edge_order(&after, &previous_rank);
+
+    let edge_count = after.edge_count();
+    assert_eq!(patched.reused + patched.inserted, edge_count);
+    assert_eq!(patched.inserted, 4);
+    let mut sorted = patched.order.clone();
+    sorted.sort_unstable();
+    assert!(sorted.into_iter().eq(0..edge_count as u32));
+    // Reused states keep their relative order.
+    let reused_ranks = patched
+        .order
+        .iter()
+        .filter_map(|&edge| previous_rank[edge as usize])
+        .collect::<Vec<_>>();
+    assert!(reused_ranks.is_sorted_by(|a, b| a < b));
+    // The separate component goes first.
+    let isolated = (edge_count as u32 - 2..edge_count as u32).collect::<Vec<_>>();
+    let mut first = patched.order[..2].to_vec();
+    first.sort_unstable();
+    assert_eq!(first, isolated);
+    // A new grid edge follows its highest-ranked neighbour directly: every
+    // reused state up to that rank precedes it, every later one follows.
+    let position = |edge: u32| patched.order.iter().position(|&e| e == edge).unwrap();
+    for new_edge in [edge_count as u32 - 4, edge_count as u32 - 3] {
+        let routing = after.routing_edge(new_edge as usize);
+        let anchor = (0..edge_count)
+            .filter(|&other| {
+                let other_edge = after.routing_edge(other);
+                other_edge.from == routing.to || other_edge.to == routing.from
+            })
+            .filter_map(|other| previous_rank[other])
+            .max()
+            .expect("the diagonal touches the grid");
+        for (other, rank) in previous_rank.iter().enumerate() {
+            let Some(rank) = rank else { continue };
+            assert_eq!(
+                position(other as u32) < position(new_edge),
+                *rank <= anchor,
+                "state {other} with rank {rank} around anchor {anchor}"
+            );
+        }
+    }
+
+    let bundle = build_with_order(
+        &after,
+        CacheBundleId::new("topology-test"),
+        patched.order,
+        &mut |_| {},
+    );
+    assert_contraction_complete(&bundle);
+}
+
+#[test]
+fn patched_order_without_changes_is_the_previous_order() {
+    let topology = grid_topology(6);
+    let previous = build(&topology);
+    let previous_rank = previous
+        .edge_rank
+        .iter()
+        .copied()
+        .map(Some)
+        .collect::<Vec<_>>();
+
+    let patched = patch_edge_order(&topology, &previous_rank);
+
+    assert_eq!(patched.order, previous.edge_order);
+    assert_eq!(
+        (patched.reused, patched.inserted),
+        (topology.edge_count(), 0)
+    );
 }
