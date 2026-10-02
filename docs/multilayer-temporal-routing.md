@@ -272,13 +272,49 @@ Temporal searches evaluate each rule and overlay at edge-entry time and use the
 exact label-setting engine; ordinary static requests remain eligible for CCH.
 Waiting at a closed edge is allowed only when the compiled profile sets
 `temporal.allow_wait: true`, and is capped by `max_wait_s`.
-Time-varying `SpeedFactor` rules require that positive wait policy: the exact
+Time-varying `SpeedFactor` rules work with or without a wait policy. The exact
 engine takes the earliest-exit lower envelope across the current and future
-minute regimes, including a bounded voluntary wait when it arrives sooner.
+minute regimes. With `allow_wait` that includes a voluntary wait of up to
+`max_wait_s` when it arrives sooner. Without it, a later entry is admitted only
+when it exits no later than entering at once (the vehicle approaches the edge
+more slowly), which keeps each edge FIFO without ever waiting at a closed one.
+Conditional speed limits (`maxspeed:conditional`) therefore work in
+departure-time routing for every profile.
 If an overlay-backed component is nonzero on the same speed-varying feature
 and the loaded series defines that component there, the request fails clearly
 because fastest exit and lowest exposure can be nondominated traversal choices;
 model those alternatives explicitly instead of returning a heuristic frontier.
+
+### OSM conditional tags
+
+OSM imports turn `:conditional` tags with an `opening_hours` time domain into
+temporal rules scoped to the travel modes they name. Rules are read on the
+local clock of the edge's timezone.
+
+- Conditional access (`motor_vehicle:conditional=no @ (Mo-Fr 07:00-09:00)`)
+  closes the edge for those modes in that window. An edge that a mode may use
+  only under a condition (`access=no` plus `...:conditional=yes @ (...)`) is
+  left out of static routing and the hierarchy, and opens in time-dependent
+  searches when the condition holds.
+- `maxspeed:conditional` becomes a posted-speed rule that each profile
+  compiles into its own speed factor, using the same posted-limit policy as
+  the static speed.
+- `restriction:conditional` and its mode-specific forms make turn
+  restrictions time-conditional. A restriction tagged only under a condition
+  is ignored by static routing; an unconditional `restriction` that a
+  condition lifts (`restriction:conditional=none @ (Sa,Su)`) stays in static
+  routing. Time-dependent searches (departure and arrive-by routes,
+  component-constrained routes, service areas, accessibility, and the
+  temporal OD, matrix, sequence and betweenness paths built on them) check
+  turn restrictions between two edges (via a node) at the moment the vehicle
+  reaches the junction, on the local clock of the incoming edge. A vehicle
+  does not wait at a junction for a turn restriction to lift. Arrive-by
+  searches split their exit windows at the minutes a restriction starts and
+  ends, so the latest departure stays exact. Restrictions over a via way keep
+  their static treatment in every search.
+- Conditions on vehicle properties (`no @ (weight>7.5)`) become vehicle
+  restrictions and are checked against the profile's or request's `vehicle`
+  block, not against the clock.
 
 A scenario addresses source features, not internal edge ids:
 

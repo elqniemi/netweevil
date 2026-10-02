@@ -7,6 +7,12 @@ See [trace matching](../../docs/trace-matching.md) for scoring, gaps and limits.
 near a point and penalizing a block; see "Avoid locations, areas and features"
 in the top-level README.
 
+`route_truck_vehicle.json` routes a 3.5 t van on the truck template
+(`examples/profiles/truck_hgv_v1.yml`, loaded as `truck_hgv_v1`): its request
+`vehicle` block passes the height, weight and length limits that exclude the
+40 t truck, so the route is 8.3 km instead of 14.7 km. See "Vehicle
+dimensions, weight and hazardous goods" in the top-level README.
+
 `route_profile_overrides.json` demonstrates request-defined street routing on
 the North Netherlands dataset. Send it to `/v1/route`; the first request compiles
 the effective profile and subsequent identical profiles reuse the cached engine.

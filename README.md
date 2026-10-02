@@ -814,6 +814,51 @@ touches no avoided edge it is also optimal with the edges avoided (removing or
 penalizing edges never makes a path cheaper), so no re-customization happens.
 See `examples/api/route_avoid.json`.
 
+### Vehicle dimensions, weight and hazardous goods
+
+OSM imports keep `maxheight`, `maxwidth`, `maxlength`, `maxweight`,
+`maxaxleload`, `hazmat`, `hazmat:water`, `hazmat:adr_tunnel_cat`, `trailer`
+and `hgv_articulated` restrictions, and weight or similar conditions such as
+`hgv:conditional=no @ (weight>7.5)`. A profile's `vehicle` block excludes the
+edges whose restrictions its vehicle violates:
+
+```yaml
+vehicle:
+  height_m: 4.0
+  width_m: 2.55
+  length_m: 16.5
+  weight_t: 40.0        # actual gross weight, metric tonnes
+  axle_load_t: 11.5
+  hazmat: false         # dangerous goods; adr_tunnel_code (B-E) implies it
+  hazmat_water: false   # water-polluting goods
+  trailers: 1           # excluded by trailer=no and hgv_articulated=no
+```
+
+Every field is optional; unset fields never violate a restriction. Route,
+directions, waypoints, trip, OD, matrix, accessibility, service-area,
+service-area-sequence, betweenness and trace-match requests accept the same
+block as `vehicle` next to `avoid`. Its fields override the profile's fields
+one by one, so a request can describe a lower, lighter or hazmat-carrying
+vehicle without a profile per vehicle:
+
+```json
+"vehicle": {"height_m": 3.4, "weight_t": 12.0, "hazmat": true}
+```
+
+Results stay exact. A request vehicle resolves to the set of edges it
+excludes. When that set equals the profile's, the request runs on the
+prepared CCH engine. When it only adds exclusions, they join the request's
+avoid set (and its cached engines and single-route fast path). Otherwise,
+for example a lower vehicle that passes bridges the profile's vehicle cannot,
+the edges the profile excluded get back the metrics the profile compiled for
+them, and the prepared engine keeps one re-customized engine for each of the
+four most recent exclusion sets. Every case matches a profile compiled with
+the merged vehicle. For matrices and accessibility, every point set that
+names a vehicle must name the same one. See
+`examples/api/route_truck_vehicle.json` and the truck, bus, taxi, motorcycle
+and moped templates in `examples/profiles/` (also offered by
+`GET /v1/workspace/profile-templates`).
+
 Performance notes:
 
 - JSON is the warmest response path.

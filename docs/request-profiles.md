@@ -65,6 +65,64 @@ analyses, transit bindings, simulation and the QGIS profile selector continue
 to use loaded profiles. Existing route options, including GeoJSON output,
 retain their normal behavior after profile resolution.
 
+## Vehicle parameters
+
+A profile's `vehicle` block describes the physical vehicle: `height_m`,
+`width_m`, `length_m`, `weight_t` (actual gross weight), `axle_load_t`,
+`hazmat`, `hazmat_water`, `adr_tunnel_code` (`B` to `E`, implies `hazmat`) and
+`trailers`. Compilation excludes every edge whose imported restriction the
+vehicle violates (`maxheight`, `maxweight`, `hazmat=no`, an ADR tunnel
+category, `trailer=no`, `hgv_articulated=no`, and vehicle-property conditions
+such as `hgv:conditional=no @ (weight>7.5)`). Unset fields never violate a
+restriction. The truck and bus templates in `examples/profiles/` carry one.
+
+To route a different vehicle, prefer the request's own `vehicle` block over
+`profile_overrides`. It is accepted by every street analysis (route,
+directions, waypoints, trip, OD, matrix, accessibility, service areas and
+sequences, betweenness, trace matching), not only `/v1/route`, and it
+overrides the profile's fields one by one without compiling a profile:
+
+```json
+{
+  "profile_id": "truck_hgv_v1",
+  "request": {
+    "route_id": "low_truck",
+    "origin": {"id": "o", "lon": 6.5665, "lat": 53.2194},
+    "destination": {"id": "d", "lon": 6.5716, "lat": 53.2148},
+    "vehicle": {"height_m": 3.4, "weight_t": 12.0}
+  }
+}
+```
+
+The engine resolves the merged vehicle to the set of edges it excludes:
+
+- The profile's own set: the request runs on the prepared engine.
+- A superset (a taller, heavier or hazmat vehicle): the extra edges join the
+  request's avoid set, using the avoid engines and their exact single-route
+  fast path (see "Avoid locations, areas and features" in the README).
+- Any other set (a vehicle that passes edges the profile's vehicle cannot):
+  compiled profiles keep the metrics of the edges their vehicle excludes, so
+  the engine restores those, removes the new ones and re-customizes the CCH
+  for the result. The prepared engine keeps such engines for the four most
+  recent exclusion sets; vehicles that exclude the same edges share one.
+
+Each case returns what a profile compiled with the merged vehicle returns;
+tests compare routes, OD pairs, matrices, service areas and trips against
+fresh compiles on exact and CCH engines. Under traffic, the departure-bucket
+engines apply the vehicle the same way, with traffic speeds on restored
+edges.
+
+On the Groningen routing extract (495,143 nodes, 1,021,914 directed edges,
+release build, 2026-10-02) with the truck template loaded, the first request
+for a new exclusion set prepared its engine in 325 to 375 ms (a 3.5 t van:
+6,811 excluded edges instead of the profile's; a lower truck: 186). An
+avoid-style superset (hazmat, 80 extra edges) took 338 ms. Later requests
+with that set routed in about 1 ms, like the prepared profile. The same
+vehicle as `profile_overrides` compiled a request profile in about 490 ms.
+Across 200 OD pairs and two vehicles, routes with a request vehicle matched
+the request profile compiled with that vehicle exactly (generalized cost and
+distance).
+
 ## Cache and resource use
 
 The cache retains two engines by default. Set
