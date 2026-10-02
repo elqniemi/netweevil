@@ -190,14 +190,3 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     serde_json::to_writer_pretty(BufWriter::new(file), value).context("serializing JSON")?;
     Ok(())
 }
-
-#[cfg(test)]
-fn temp_path(name: &str) -> std::path::PathBuf {
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let unique = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("time works")
-        .as_nanos();
-    std::env::temp_dir().join(format!("netweevil-report-{unique}-{name}"))
-}
