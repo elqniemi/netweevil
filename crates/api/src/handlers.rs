@@ -70,7 +70,7 @@ pub(crate) async fn get_profile(
 
 /// Runs one analysis on the routing worker pool, logging and translating a
 /// failure the way every analysis endpoint does.
-async fn run_analysis<T>(
+pub(crate) async fn run_analysis<T>(
     state: &ApiState,
     endpoint: &'static str,
     analysis_id: Option<&str>,
@@ -86,7 +86,7 @@ where
 
 /// [`run_analysis`] for single-route work, executed on the request's own
 /// thread (see [`execute_inline_on_routing_worker`]).
-async fn run_inline_analysis<T>(
+pub(crate) async fn run_inline_analysis<T>(
     state: &ApiState,
     endpoint: &'static str,
     analysis_id: Option<&str>,
@@ -210,6 +210,20 @@ async fn execute_route_response(
     } else {
         None
     };
+    if directions.is_none()
+        && dynamic.is_none()
+        && let Some(router) = crate::traffic::router_for(
+            runtime.as_ref(),
+            &engine.metrics().profile_id,
+            &request.temporal,
+            engine_mode,
+        )?
+    {
+        return crate::traffic::route_response(
+            &state, runtime, router, &query, request, edge_names,
+        )
+        .await;
+    }
     let result = run_inline_analysis(&state, "route", Some(&route_id), move || {
         if let Some(mut options) = directions {
             if options.facility_attribute.is_none() {
@@ -302,6 +316,15 @@ pub(crate) async fn od_handler(
     if wants_geojson(&query) {
         request.returns.geometry = ReturnGeometry::Full;
     }
+    if let Some(router) = crate::traffic::router_for(
+        runtime.as_ref(),
+        &profile.document.profile.id,
+        &request.temporal,
+        engine_mode,
+    )? {
+        return crate::traffic::od_response(&state, Arc::clone(&runtime), router, &query, request)
+            .await;
+    }
     let effective_engine = effective_engine_for_temporal_options(
         profile.engine.effective_engine_description(engine_mode),
         &request.temporal,
@@ -354,6 +377,22 @@ pub(crate) async fn matrix_handler(
     } else {
         &request.destinations.temporal
     };
+    if let Some(router) = crate::traffic::router_for(
+        runtime.as_ref(),
+        &profile.document.profile.id,
+        temporal,
+        engine_mode,
+    )? {
+        return crate::traffic::matrix_response(
+            &state,
+            Arc::clone(&runtime),
+            router,
+            &query,
+            request.origins,
+            request.destinations,
+        )
+        .await;
+    }
     let effective_engine = effective_engine_for_temporal_options(
         profile.engine.effective_engine_description(engine_mode),
         temporal,
@@ -434,6 +473,21 @@ pub(crate) async fn service_area_handler(
     let mut request = payload.request;
     if wants_geojson(&query) {
         request.returns.geometry = true;
+    }
+    if let Some(router) = crate::traffic::router_for(
+        runtime.as_ref(),
+        &profile.document.profile.id,
+        &request.temporal,
+        EngineMode::Auto,
+    )? {
+        return crate::traffic::service_area_response(
+            &state,
+            Arc::clone(&runtime),
+            router,
+            &query,
+            request,
+        )
+        .await;
     }
     let effective_engine = effective_engine_for_temporal_options(
         profile
@@ -690,7 +744,7 @@ fn profile_info(profile: &LoadedProfile) -> ProfileInfo {
     }
 }
 
-fn execution_context(
+pub(crate) fn execution_context(
     service: &ServiceRuntime,
     profile: &LoadedProfile,
     engine: EffectiveEngineDescription,

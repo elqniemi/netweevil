@@ -11,10 +11,11 @@ pub(crate) struct RoutePath {
     pub(crate) total_generalized_cost: f64,
 }
 
-/// Search graph of one profile. The adjacency arrays, hierarchy and lazily
-/// built tables are reference counted so graphs that differ only in their
-/// restriction automata share them (see
-/// [`RoutingGraph::without_restriction_sequences`]).
+/// Search graph of one profile. The adjacency arrays, hierarchy, automata
+/// and lazily built tables are reference counted, so graphs that differ only
+/// in their restriction automata
+/// ([`RoutingGraph::without_restriction_sequences`]) or only in edge costs
+/// (traffic bucket engines, [`RoutingGraph::with_metrics`]) share them.
 pub(crate) struct RoutingGraph {
     pub(crate) edge_spatial_index: Arc<crate::edge_spatial_index::EdgeSpatialIndex>,
     first_out: Arc<[u32]>,
@@ -33,11 +34,11 @@ pub(crate) struct RoutingGraph {
     /// request's failure-mode penalties baked in (degraded graphs only);
     /// plain acceleration weights must never serve failure-mode searches.
     pub(crate) acceleration_includes_failure_penalties: bool,
-    pub(crate) automaton: RestrictionAutomaton,
-    pub(crate) reverse_automaton: RestrictionAutomaton,
+    pub(crate) automaton: Arc<RestrictionAutomaton>,
+    pub(crate) reverse_automaton: Arc<RestrictionAutomaton>,
     /// Original edge of each virtual reverse edge, indexed by edge. Empty
     /// for graphs without virtual edges.
-    pub(crate) virtual_reverse_of: Vec<Option<usize>>,
+    pub(crate) virtual_reverse_of: Arc<[Option<usize>]>,
     pub(crate) includes_temporal_materialized_directions: bool,
     /// Turn penalty seconds per forward transition, computed on first use.
     turn_seconds: Arc<std::sync::OnceLock<Option<TransitionTurnSeconds>>>,
@@ -167,11 +168,11 @@ impl RoutingGraph {
 pub(crate) struct AccelerationGraph {
     pub(crate) source: Arc<DatasetAccelerationBundle>,
     pub(crate) metrics: Arc<CompiledProfileBundle>,
-    pub(crate) upward_tail: Vec<u32>,
-    pub(crate) downward_tail: Vec<u32>,
-    pub(crate) reverse_downward_first_out: Vec<u32>,
-    pub(crate) reverse_downward_edge: Vec<u32>,
-    pub(crate) reverse_downward_arc: Vec<u32>,
+    pub(crate) upward_tail: Arc<[u32]>,
+    pub(crate) downward_tail: Arc<[u32]>,
+    pub(crate) reverse_downward_first_out: Arc<[u32]>,
+    pub(crate) reverse_downward_edge: Arc<[u32]>,
+    pub(crate) reverse_downward_arc: Arc<[u32]>,
     /// Service-area weight sets customized on first use when the compiled
     /// profile was loaded without them. `None` for graphs whose weights
     /// carry request-specific penalties (failure modes), which must never
@@ -684,9 +685,9 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
             build_acceleration_graph(metrics, acceleration, edge_count)?.map(Arc::new)
         },
         acceleration_includes_failure_penalties: false,
-        automaton: RestrictionAutomaton::build(&restricted_sequences),
-        reverse_automaton: RestrictionAutomaton::build(&reverse_restricted_sequences),
-        virtual_reverse_of: Vec::new(),
+        automaton: Arc::new(RestrictionAutomaton::build(&restricted_sequences)),
+        reverse_automaton: Arc::new(RestrictionAutomaton::build(&reverse_restricted_sequences)),
+        virtual_reverse_of: Arc::default(),
         includes_temporal_materialized_directions: options.include_temporal_materialized_directions,
         turn_seconds: Arc::default(),
     })
@@ -714,13 +715,155 @@ impl RoutingGraph {
             reverse_transition_costs: self.reverse_transition_costs.clone(),
             acceleration: self.acceleration.clone(),
             acceleration_includes_failure_penalties: self.acceleration_includes_failure_penalties,
-            automaton: RestrictionAutomaton::build(&[]),
-            reverse_automaton: RestrictionAutomaton::build(&[]),
+            automaton: Arc::new(RestrictionAutomaton::build(&[])),
+            reverse_automaton: Arc::new(RestrictionAutomaton::build(&[])),
             virtual_reverse_of: self.virtual_reverse_of.clone(),
             includes_temporal_materialized_directions: self
                 .includes_temporal_materialized_directions,
             turn_seconds: self.turn_seconds.clone(),
         }
+    }
+
+    /// This graph re-costed for `metrics`, sharing every metric-independent
+    /// array. Returns `None` when `metrics` changes which edges are
+    /// traversable (a closure), the turn costs or the mode, all of which
+    /// change the adjacency; callers then build a fresh graph. `base_metrics`
+    /// must be the metrics this graph was built from, and `metrics` must
+    /// carry customized weights for the shared hierarchy.
+    pub(crate) fn with_metrics(
+        &self,
+        topology: &TopologyBundle,
+        base_metrics: &CompiledProfileBundle,
+        metrics: Arc<CompiledProfileBundle>,
+    ) -> Option<Self> {
+        let turns = |metrics: &CompiledProfileBundle| {
+            let turns = metrics.turn_costs;
+            [
+                turns.left_penalty_s,
+                turns.right_penalty_s,
+                turns.uturn_penalty_s,
+                turns.traffic_signal_penalty_s,
+                turns.roundabout_entry_penalty_s,
+                turns.cost_time_weight,
+                turns.destination_only_penalty_s,
+            ]
+            .map(f64::to_bits)
+        };
+        if self.includes_temporal_materialized_directions
+            || self.acceleration_includes_failure_penalties
+            || metrics.mode != base_metrics.mode
+            || turns(&metrics) != turns(base_metrics)
+            || metrics.edge_metrics.len() != self.edge_costs.len()
+        {
+            return None;
+        }
+        let mode_bit = metrics.mode.access_bit();
+        let mut edge_costs = vec![f64::INFINITY; self.edge_costs.len()];
+        for (edge_index, metric) in metrics.edge_metrics.iter().enumerate() {
+            // The builder's static usability: no scenario-materialized
+            // direction and no access that holds only under a time condition.
+            let traversable =
+                netweevil_profile::is_statically_usable(topology, edge_index, mode_bit)
+                    && metric.travel_time_s.is_some();
+            let cost = metric.generalized_cost.filter(|_| traversable);
+            if cost.is_some() != self.edge_costs[edge_index].is_finite() {
+                return None;
+            }
+            if let Some(cost) = cost {
+                edge_costs[edge_index] = cost;
+            }
+        }
+        // The builder's arithmetic: head cost plus turn seconds times the
+        // time weight plus the destination-only entry cost, so the costs
+        // equal those of a fresh build bit for bit.
+        let turn_seconds = self.transition_turn_seconds(topology, base_metrics);
+        let weight = metrics.turn_costs.cost_time_weight;
+        let mut transition_costs = vec![0.0_f64; self.transition_edges.len()];
+        for edge_index in 0..edge_costs.len() {
+            for transition_index in self.transition_range(edge_index) {
+                let next_edge = self.transition_edges[transition_index] as usize;
+                let seconds = match turn_seconds {
+                    Some(turn_seconds) => turn_seconds.get(transition_index),
+                    None => turn_penalty_seconds(topology, base_metrics, edge_index, next_edge),
+                };
+                transition_costs[transition_index] = edge_costs[next_edge]
+                    + (seconds * weight
+                        + transition_access_cost(topology, base_metrics, edge_index, next_edge));
+            }
+        }
+        let mut reverse_transition_costs = vec![0.0_f64; transition_costs.len()];
+        let mut reverse_write_positions =
+            self.reverse_transition_first_out[..edge_costs.len()].to_vec();
+        for edge_index in 0..edge_costs.len() {
+            for transition_index in self.transition_range(edge_index) {
+                let next_edge = self.transition_edges[transition_index] as usize;
+                let slot = &mut reverse_write_positions[next_edge];
+                reverse_transition_costs[*slot as usize] = transition_costs[transition_index];
+                *slot += 1;
+            }
+        }
+        let acceleration = match &self.acceleration {
+            Some(base) => Some(Arc::new(base.with_metrics(metrics)?)),
+            None => None,
+        };
+        Some(Self {
+            edge_spatial_index: self.edge_spatial_index.clone(),
+            first_out: self.first_out.clone(),
+            edge_order: self.edge_order.clone(),
+            incoming_first_out: self.incoming_first_out.clone(),
+            incoming_edge_order: self.incoming_edge_order.clone(),
+            edge_costs: edge_costs.into(),
+            transition_first_out: self.transition_first_out.clone(),
+            transition_edges: self.transition_edges.clone(),
+            transition_costs: transition_costs.into(),
+            reverse_transition_first_out: self.reverse_transition_first_out.clone(),
+            reverse_transition_edges: self.reverse_transition_edges.clone(),
+            reverse_transition_costs: reverse_transition_costs.into(),
+            acceleration,
+            acceleration_includes_failure_penalties: false,
+            automaton: self.automaton.clone(),
+            reverse_automaton: self.reverse_automaton.clone(),
+            virtual_reverse_of: self.virtual_reverse_of.clone(),
+            includes_temporal_materialized_directions: false,
+            // Turn seconds depend only on the topology and the turn costs,
+            // which `with_metrics` requires to be unchanged.
+            turn_seconds: self.turn_seconds.clone(),
+        })
+    }
+}
+
+impl AccelerationGraph {
+    /// The same hierarchy with the customized weights of `metrics`. `None`
+    /// when the weights do not fit the hierarchy or overflow, in which case
+    /// a fresh build falls back to exact search.
+    fn with_metrics(&self, metrics: Arc<CompiledProfileBundle>) -> Option<Self> {
+        let weights = metrics.acceleration.as_ref()?;
+        if weights.upward_weight.len() != self.source.upward_head.len()
+            || weights.downward_weight.len() != self.source.downward_head.len()
+            || weights
+                .upward_weight
+                .iter()
+                .chain(&weights.downward_weight)
+                .any(|weight| *weight == netweevil_core::CCH_WEIGHT_OVERFLOW)
+        {
+            return None;
+        }
+        Some(Self {
+            source: self.source.clone(),
+            metrics,
+            upward_tail: self.upward_tail.clone(),
+            downward_tail: self.downward_tail.clone(),
+            reverse_downward_first_out: self.reverse_downward_first_out.clone(),
+            reverse_downward_edge: self.reverse_downward_edge.clone(),
+            reverse_downward_arc: self.reverse_downward_arc.clone(),
+            deferred_metric_weights: None,
+            unpack: UnpackTable::new(
+                self.source.upward_head.len(),
+                self.source.downward_head.len(),
+            ),
+            ranked: RankedCchCell::default(),
+            lower_bounds: std::sync::OnceLock::new(),
+        })
     }
 }
 
@@ -901,11 +1044,11 @@ pub(crate) fn build_acceleration_graph(
     Ok(Some(AccelerationGraph {
         source: topology_source,
         metrics,
-        upward_tail,
-        downward_tail,
-        reverse_downward_first_out,
-        reverse_downward_edge,
-        reverse_downward_arc,
+        upward_tail: upward_tail.into(),
+        downward_tail: downward_tail.into(),
+        reverse_downward_first_out: reverse_downward_first_out.into(),
+        reverse_downward_edge: reverse_downward_edge.into(),
+        reverse_downward_arc: reverse_downward_arc.into(),
         deferred_metric_weights: None,
         unpack: UnpackTable::new(upward_len, downward_len),
         ranked: RankedCchCell::default(),

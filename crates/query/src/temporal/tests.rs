@@ -23,8 +23,16 @@ fn open_only_waits_across_a_direction_flip_boundary() {
             &HashSet::new(),
         )
     };
-    let (entry, _) =
-        best_available_entry(timestamp, true, 120.0, 10.0, true, false, &evaluate).unwrap();
+    let (entry, _) = best_available_entry(
+        timestamp,
+        true,
+        120.0,
+        true,
+        false,
+        &evaluate,
+        &|_, factor| 10.0 / f64::from(factor),
+    )
+    .unwrap();
     assert_eq!(entry, at("2026-07-10T10:00:00+08:00"));
 }
 
@@ -32,10 +40,18 @@ fn open_only_waits_across_a_direction_flip_boundary() {
 fn constant_edges_do_not_scan_the_voluntary_wait_horizon() {
     let timestamp = at("2026-07-10T09:59:30+08:00");
     let evaluations = std::cell::Cell::new(0_u32);
-    let result = best_available_entry(timestamp, true, 86_400.0, 10.0, false, false, &|_| {
-        evaluations.set(evaluations.get() + 1);
-        RuleEvaluation::Available { speed_factor: 1.0 }
-    })
+    let result = best_available_entry(
+        timestamp,
+        true,
+        86_400.0,
+        false,
+        false,
+        &|_| {
+            evaluations.set(evaluations.get() + 1);
+            RuleEvaluation::Available { speed_factor: 1.0 }
+        },
+        &|_, factor| 10.0 / f64::from(factor),
+    )
     .expect("constant edge is immediately available");
     assert_eq!(result, (timestamp, 1.0));
     assert_eq!(evaluations.get(), 1);

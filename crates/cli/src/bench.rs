@@ -76,6 +76,8 @@ pub(crate) enum BenchCommand {
     Compare(BenchCompareArgs),
     /// Measure trip optimization quality and latency on real stop matrices.
     Trip(BenchTripArgs),
+    /// Bucket customization, live swap and route latency with traffic.
+    Traffic(traffic::BenchTrafficArgs),
 }
 
 #[derive(Args, Debug)]
@@ -2137,6 +2139,9 @@ fn validate_comparison(baseline: &BenchSettings, candidate: &BenchSettings) -> R
     }
     Ok(())
 }
+
+mod traffic;
+pub(crate) use traffic::bench_traffic;
 
 #[cfg(test)]
 mod tests;

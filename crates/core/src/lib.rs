@@ -16,6 +16,7 @@ pub mod guidance;
 pub mod metrics;
 pub mod regions;
 pub mod temporal;
+pub mod traffic;
 pub mod vehicle;
 
 pub use acceleration::{
@@ -58,6 +59,10 @@ pub use temporal::{
     ALL_WEEKDAYS, CalendarDate, DateRange, EVERY_DAY, FRIDAY, MONDAY, MinuteInterval,
     PUBLIC_HOLIDAY, SATURDAY, SUNDAY, THURSDAY, TUESDAY, TemporalEffect, TemporalRule,
     TemporalRuleSet, WEDNESDAY,
+};
+pub use traffic::{
+    TRAFFIC_BACKWARD, TRAFFIC_BUNDLE_SCHEMA_VERSION, TRAFFIC_FORWARD, TRAFFIC_SPEED_NO_DATA,
+    TRAFFIC_SPEED_UNITS_PER_KPH, TrafficSpeedBundle,
 };
 pub use vehicle::{
     AdrTunnelCategory, VehicleParams, VehicleRestriction, VehicleRestrictionKind,

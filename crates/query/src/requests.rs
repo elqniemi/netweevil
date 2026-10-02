@@ -78,6 +78,35 @@ pub struct TemporalRequestOptions {
     /// Optional generalized-cost/component Pareto frontier.
     #[serde(default)]
     pub pareto: Option<ParetoRouteOptions>,
+    /// How loaded traffic speeds apply to timed requests.
+    #[serde(default, skip_serializing_if = "TrafficMode::is_auto")]
+    pub traffic: TrafficMode,
+}
+
+/// Traffic semantics of a request with `departure_time` or `arrive_by`.
+/// Without loaded traffic data every mode behaves like `off`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TrafficMode {
+    /// Route on the CCH customized for the departure time-of-week bucket
+    /// plus live updates valid at departure, then integrate the arrival time
+    /// along the chosen path. Requests that need exact labels (`arrive_by`,
+    /// scenarios, overlays) use `time_dependent` routing instead.
+    #[default]
+    Auto,
+    /// Like `auto` without live updates.
+    Historical,
+    /// Exact time-dependent label-setting with traffic speeds integrated
+    /// along every edge (routes only).
+    TimeDependent,
+    /// Ignore traffic data.
+    Off,
+}
+
+impl TrafficMode {
+    pub fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
 }
 
 impl Default for TemporalRequestOptions {
@@ -93,6 +122,7 @@ impl Default for TemporalRequestOptions {
             arrive_by_lookback_s: default_arrive_by_lookback_s(),
             constraints: Vec::new(),
             pareto: None,
+            traffic: TrafficMode::Auto,
         }
     }
 }

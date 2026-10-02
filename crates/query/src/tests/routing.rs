@@ -1115,6 +1115,47 @@ fn destination_only_entry_penalty_diverts_through_routes_in_every_engine() {
 }
 
 #[test]
+fn recosted_graphs_keep_destination_only_entry_costs_bit_identical() {
+    let mut topology = test_topology();
+    topology.edge_layers.profile[1].destination_only = AccessMask::new(AccessMask::CAR);
+    let mut base = test_metrics();
+    base.turn_costs.cost_time_weight = 1.0;
+    base.turn_costs.destination_only_penalty_s = 600.0;
+    let graph = crate::build_routing_graph(&topology, &base).expect("graph builds");
+    let mut slower = base.clone();
+    for metric in &mut slower.edge_metrics {
+        metric.generalized_cost = metric.generalized_cost.map(|cost| cost * 1.7);
+        metric.travel_time_s = metric.travel_time_s.map(|time| time * 1.7);
+    }
+
+    let recosted = graph
+        .with_metrics(&topology, &base, Arc::new(slower.clone()))
+        .expect("same adjacency");
+    let fresh = crate::build_routing_graph(&topology, &slower).expect("graph builds");
+    let bits = |costs: &[f64]| costs.iter().map(|cost| cost.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&recosted.transition_costs), bits(&fresh.transition_costs));
+    assert_eq!(
+        bits(&recosted.reverse_transition_costs),
+        bits(&fresh.reverse_transition_costs)
+    );
+    assert!(
+        fresh
+            .transition_costs
+            .iter()
+            .any(|cost| *cost >= 600.0)
+    );
+
+    // A different entry penalty changes the transitions: no reuse.
+    let mut penalized = slower;
+    penalized.turn_costs.destination_only_penalty_s = 300.0;
+    assert!(
+        graph
+            .with_metrics(&topology, &base, Arc::new(penalized))
+            .is_none()
+    );
+}
+
+#[test]
 fn accelerated_engine_excludes_profile_pruned_edges() {
     let mut sparse_metrics = test_metrics();
     set_edge_cost(&mut sparse_metrics, 2, None);

@@ -132,12 +132,12 @@ fn inflate_chunked(payload: &[u8]) -> Result<Vec<u8>> {
 
 /// Collects encoded sections and writes them, deflating large sections in
 /// parallel when that saves at least a tenth of their size.
-struct SectionWriter {
+pub(crate) struct SectionWriter {
     sections: Vec<Vec<u8>>,
 }
 
 impl SectionWriter {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             sections: Vec::new(),
         }
@@ -148,16 +148,16 @@ impl SectionWriter {
         Ok(())
     }
 
-    fn write_bincode<T: Serialize>(&mut self, value: &T) -> Result<()> {
+    pub(crate) fn write_bincode<T: Serialize>(&mut self, value: &T) -> Result<()> {
         let bytes = bincode::serialize(value).context("serializing bundle header section")?;
         self.write_section(bytes)
     }
 
-    fn write_u32s(&mut self, values: &[u32]) -> Result<()> {
+    pub(crate) fn write_u32s(&mut self, values: &[u32]) -> Result<()> {
         self.write_section(codec::encode_u32s(values))
     }
 
-    fn write_i64s(&mut self, values: &[i64]) -> Result<()> {
+    pub(crate) fn write_i64s(&mut self, values: &[i64]) -> Result<()> {
         self.write_section(codec::encode_i64s(values))
     }
 
@@ -227,14 +227,14 @@ impl SectionWriter {
         writer.flush().context("flushing bundle")
     }
 
-    fn finish(self, path: &Path) -> Result<()> {
+    pub(crate) fn finish(self, path: &Path) -> Result<()> {
         crate::write_atomically(path, |writer| self.finish_into(writer))
     }
 }
 
 /// Reads sections in order. Deflated sections are all inflated up front,
 /// in parallel, and each buffer is released once its section is consumed.
-struct SectionReader<'a> {
+pub(crate) struct SectionReader<'a> {
     sections: std::vec::IntoIter<Cow<'a, [u8]>>,
 }
 
@@ -266,7 +266,7 @@ fn frame_sections<'a>(bytes: &'a [u8], path: &Path) -> Result<Vec<(bool, &'a [u8
 }
 
 impl<'a> SectionReader<'a> {
-    fn new(bytes: &'a [u8], path: &Path) -> Result<Self> {
+    pub(crate) fn new(bytes: &'a [u8], path: &Path) -> Result<Self> {
         let framed = frame_sections(bytes, path)?;
         let sections = framed
             .into_par_iter()
@@ -300,15 +300,15 @@ impl<'a> SectionReader<'a> {
             .context("truncated bundle: missing section")
     }
 
-    fn read_bincode<T: DeserializeOwned>(&mut self) -> Result<T> {
+    pub(crate) fn read_bincode<T: DeserializeOwned>(&mut self) -> Result<T> {
         bincode::deserialize(&self.next_section()?).context("parsing bundle header section")
     }
 
-    fn read_u32s(&mut self) -> Result<Vec<u32>> {
+    pub(crate) fn read_u32s(&mut self) -> Result<Vec<u32>> {
         codec::decode_u32s(&self.next_section()?)
     }
 
-    fn read_i64s(&mut self) -> Result<Vec<i64>> {
+    pub(crate) fn read_i64s(&mut self) -> Result<Vec<i64>> {
         codec::decode_i64s(&self.next_section()?)
     }
 

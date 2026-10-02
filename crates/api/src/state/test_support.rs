@@ -22,6 +22,11 @@ pub(crate) fn test_service(
     topology: TopologyBundle,
     document: ProfileDocument,
 ) -> Arc<ServiceRuntime> {
+    Arc::new(test_runtime(topology, document))
+}
+
+/// [`test_service`] before it is shared, so tests can attach traffic.
+pub(crate) fn test_runtime(topology: TopologyBundle, document: ProfileDocument) -> ServiceRuntime {
     let topology = Arc::new(topology);
     let metrics = netweevil_profile::compile_profile_bundle(
         &document,
@@ -34,7 +39,7 @@ pub(crate) fn test_service(
     let engine = Arc::new(
         PreparedRoutingEngine::new(Arc::clone(&topology), Arc::new(metrics), None).unwrap(),
     );
-    Arc::new(ServiceRuntime {
+    ServiceRuntime {
         workspace_root: PathBuf::new(),
         active: WorkspaceConfig::default(),
         dataset_manifest: serde_json::from_value(serde_json::json!({
@@ -75,5 +80,6 @@ pub(crate) fn test_service(
         transit_feeds: RwLock::new(BTreeMap::new()),
         capabilities: service_capabilities(),
         elevation: OnceLock::new(),
-    })
+        traffic: None,
+    }
 }

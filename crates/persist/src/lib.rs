@@ -6,6 +6,7 @@
 
 mod codec;
 mod sectioned;
+mod traffic;
 
 use std::ffi::OsStr;
 use std::fs::{self, File};
@@ -20,6 +21,11 @@ use netweevil_core::{
 use netweevil_manifest::{CompiledProfileManifest, DatasetManifest, RunManifest};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+
+pub use traffic::{
+    TrafficManifest, read_traffic_bundle, read_traffic_manifest, read_traffic_manifests,
+    traffic_bundle_path, traffic_manifest_dir, write_traffic_bundle, write_traffic_manifest,
+};
 
 #[derive(Debug, Clone)]
 pub struct WorkspacePaths {
@@ -190,6 +196,9 @@ pub struct WorkspaceConfig {
     pub profiles: Vec<String>,
     #[serde(default)]
     pub transit_feeds: Vec<String>,
+    /// Imported historical traffic set (`netweevil traffic import`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
 }
