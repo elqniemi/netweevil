@@ -56,7 +56,13 @@ pub fn projected_delta_y(from_lat: f64, to_lat: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ascent_descent_meters, distance_3d_meters};
+    use super::{ascent_descent_meters, distance_3d_meters, haversine_meters};
+
+    #[test]
+    fn computes_reasonable_segment_length() {
+        let meters = haversine_meters(6.5665, 53.2194, 6.5675, 53.2204);
+        assert!((100.0..200.0).contains(&meters));
+    }
 
     #[test]
     fn combines_horizontal_and_vertical_distance() {
