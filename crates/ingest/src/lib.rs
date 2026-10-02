@@ -14,6 +14,7 @@ mod overture;
 mod restrictions;
 mod scan;
 mod topology;
+mod traffic;
 mod wkb;
 
 pub use audit::{
@@ -29,6 +30,11 @@ pub use mapping::{
     GeoPackageLayerMapping, GeoPackageMapping, LayerDefaults, RetainMode, load_gpkg_mapping,
 };
 pub use opening_hours::parse_access_schedule;
+pub use traffic::{
+    ImportedTraffic, TrafficAssignmentSource, TrafficBindingStats, TrafficPatternSource,
+    TrafficSourceDirection, TrafficSourceDocument, TrafficSynthesisOptions, build_traffic_bundle,
+    read_traffic_source, synthesize_traffic_source, traffic_binding_stats,
+};
 
 #[cfg(test)]
 mod test_util;
