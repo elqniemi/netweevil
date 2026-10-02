@@ -400,6 +400,7 @@ pub enum ServiceAreaDirection {
 pub struct ServiceAreaPolygonOptions {
     #[serde(default = "default_hull_aggressiveness")]
     pub hull_aggressiveness: f64,
+    /// Douglas-Peucker tolerance applied to every traced ring, in metres.
     #[serde(default)]
     pub simplification_tolerance_m: Option<f64>,
     /// Grid cell size used to trace the concave polygon boundary. Smaller
@@ -407,6 +408,16 @@ pub struct ServiceAreaPolygonOptions {
     /// 25m x hull_aggressiveness (minimum 10m).
     #[serde(default)]
     pub cell_size_m: Option<f64>,
+    /// Drop polygon parts whose exterior area is below this fraction (0..=1)
+    /// of the band's largest part; 1 keeps only the largest part.
+    #[serde(default)]
+    pub denoise: Option<f64>,
+    /// Drop polygon parts whose exterior area is below this many m2.
+    #[serde(default)]
+    pub min_part_area_m2: Option<f64>,
+    /// Fill holes smaller than this many m2.
+    #[serde(default)]
+    pub min_hole_area_m2: Option<f64>,
 }
 
 impl Default for ServiceAreaPolygonOptions {
@@ -415,6 +426,9 @@ impl Default for ServiceAreaPolygonOptions {
             hull_aggressiveness: default_hull_aggressiveness(),
             simplification_tolerance_m: None,
             cell_size_m: None,
+            denoise: None,
+            min_part_area_m2: None,
+            min_hole_area_m2: None,
         }
     }
 }

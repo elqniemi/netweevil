@@ -2292,7 +2292,12 @@ fn service_area_polygon_geometry(
         .cell_size_m
         .unwrap_or(25.0 * options.hull_aggressiveness.max(0.25))
         .max(10.0);
-    let tolerance = options.simplification_tolerance_m.unwrap_or(0.0);
+    let cleanup = crate::isochrone_polygon::RingCleanup {
+        simplification_tolerance_m: options.simplification_tolerance_m.unwrap_or(0.0),
+        denoise: options.denoise.unwrap_or(0.0),
+        min_part_area_m2: options.min_part_area_m2.unwrap_or(0.0),
+        min_hole_area_m2: options.min_hole_area_m2.unwrap_or(0.0),
+    };
 
     let subsegments = segments
         .iter()
@@ -2302,7 +2307,7 @@ fn service_area_polygon_geometry(
         })
         .collect::<Vec<_>>();
     let polygons =
-        crate::isochrone_polygon::trace_reachable_polygons(&subsegments, cell_size_m, tolerance);
+        crate::isochrone_polygon::trace_reachable_polygons(&subsegments, cell_size_m, &cleanup);
 
     if polygons.is_empty() {
         return serde_json::json!({
