@@ -1123,6 +1123,38 @@ fn accelerated_engine_matches_exact_engine_on_small_topology() {
 }
 
 #[test]
+fn destination_only_entry_penalty_diverts_through_routes_in_every_engine() {
+    // b -> c is destination-only for cars; entering it costs 600 s of
+    // generalized cost, so a -> c takes the slow direct service road.
+    let mut topology = test_topology();
+    topology.edge_layers.profile[1].destination_only = AccessMask::new(AccessMask::CAR);
+    let mut metrics = test_metrics();
+    metrics.turn_costs.cost_time_weight = 1.0;
+    metrics.turn_costs.destination_only_penalty_s = 600.0;
+    let exact = exact_engine(topology.clone(), metrics.clone());
+    let accelerated = cch_engine(topology.clone(), &metrics);
+    let through = RouteRequest {
+        returns: full_geometry(),
+        ..a_to_c("through")
+    };
+    let exact_route = exact.execute_route(&through).expect("exact route");
+    let accelerated_route = accelerated.execute_route(&through).expect("cch route");
+    assert_eq!(exact_route.edge_path, vec![2]);
+    assert_eq!(accelerated_route.edge_path, exact_route.edge_path);
+    assert_eq!(
+        accelerated_route.summary.total_generalized_cost,
+        exact_route.summary.total_generalized_cost
+    );
+
+    // Without the penalty the shorter path through b wins again.
+    metrics.turn_costs.destination_only_penalty_s = 0.0;
+    let open = exact_engine(topology, metrics)
+        .execute_route(&through)
+        .expect("route");
+    assert_eq!(open.edge_path, vec![0, 1]);
+}
+
+#[test]
 fn accelerated_engine_excludes_profile_pruned_edges() {
     let mut sparse_metrics = test_metrics();
     set_edge_cost(&mut sparse_metrics, 2, None);

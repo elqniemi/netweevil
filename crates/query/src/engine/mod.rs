@@ -533,8 +533,7 @@ pub(crate) fn finalize_route_path(
         total_generalized_cost += metric.generalized_cost.unwrap_or_default() * factor;
         if let Some(previous_edge_index) = previous_edge_index {
             total_generalized_cost +=
-                turn_penalty_seconds(topology, metrics, previous_edge_index, edge_index)
-                    * metrics.turn_costs.cost_time_weight;
+                turn_penalty_cost(metrics, topology, previous_edge_index, edge_index);
         }
         previous_edge_index = Some(edge_index);
     }
@@ -619,6 +618,25 @@ pub(crate) fn turn_penalty_cost(
 ) -> f64 {
     turn_penalty_seconds(topology, metrics, previous_edge_index, next_edge_index)
         * metrics.turn_costs.cost_time_weight
+        + transition_access_cost(topology, metrics, previous_edge_index, next_edge_index)
+}
+
+/// Generalized cost of a transition beyond its turn time: the profile's
+/// penalty for entering a destination-only edge. Every search that prices
+/// transitions itself adds it, so all engines agree with the hierarchy.
+pub(crate) fn transition_access_cost(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    previous_edge_index: usize,
+    next_edge_index: usize,
+) -> f64 {
+    netweevil_profile::destination_only_entry_cost(
+        topology,
+        &metrics.turn_costs,
+        metrics.mode.access_bit(),
+        previous_edge_index,
+        next_edge_index,
+    )
 }
 
 pub(crate) fn turn_penalty_seconds(

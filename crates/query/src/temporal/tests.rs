@@ -12,7 +12,16 @@ fn open_only_waits_across_a_direction_flip_boundary() {
     let rules = TemporalRuleSet {
         rules: vec![every_day(10 * 60, 24 * 60, TemporalEffect::OpenOnly)],
     };
-    let evaluate = |candidate| evaluate_rules(Some(&rules), None, 1, candidate, &HashSet::new());
+    let evaluate = |candidate| {
+        evaluate_rules(
+            Some(&rules),
+            None,
+            AccessMask::FOOT,
+            1,
+            candidate,
+            &HashSet::new(),
+        )
+    };
     let (entry, _) =
         best_available_entry(timestamp, true, 120.0, 10.0, true, false, &evaluate).unwrap();
     assert_eq!(entry, at("2026-07-10T10:00:00+08:00"));
@@ -146,27 +155,51 @@ fn exact_route_voluntarily_waits_for_a_faster_speed_factor_regime() {
 }
 
 #[test]
-fn speed_factor_rules_without_a_wait_policy_are_rejected_before_search() {
+fn speed_factor_rules_without_a_wait_policy_keep_the_fifo_envelope() {
     let mut topology = test_topology();
-    set_rules(
-        &mut topology,
-        &[0],
-        vec![every_day(
-            10 * 60,
-            24 * 60,
-            TemporalEffect::SpeedFactor(2.0),
-        )],
-    );
-    let error = crate::execute_route(
+    set_rules(&mut topology, &[0], slow_until_ten_then_fast());
+    // Approaching the open edge more slowly to enter the faster regime is
+    // available without a wait policy, so arrival stays FIFO.
+    let route = crate::execute_route(
         &topology,
         &test_metrics(false),
         &depart_at("2026-07-10T09:59:50+08:00"),
     )
-    .expect_err("non-FIFO speed changes require an explicit wait policy");
-    assert!(
-        error.to_string().contains("temporal.allow_wait=true"),
-        "{error}"
+    .expect("the FIFO envelope routes without a wait policy");
+    assert_eq!(route.edge_path, vec![0, 1]);
+    assert_eq!(route.summary.waiting_time_s, 10.0);
+    assert_eq!(
+        route.summary.arrival_time.as_deref(),
+        Some("2026-07-10T10:00:21+08:00")
     );
+
+    // A faster regime starting after the immediate exit is not waited for.
+    let requested = at("2026-07-10T09:58:00+08:00");
+    let later = evaluate_edge_at(
+        &topology,
+        &test_metrics(false),
+        &TemporalContext::default(),
+        0,
+        requested,
+        1.0,
+    )
+    .expect("open edge");
+    assert_eq!(later.entry_time, requested);
+    assert!(((later.exit_time - requested).as_seconds_f64() - 100.0).abs() < 1e-3);
+
+    // Closed edges are still never waited for.
+    set_rules(
+        &mut topology,
+        &[0],
+        vec![every_day(10 * 60, 24 * 60, TemporalEffect::OpenOnly)],
+    );
+    let route = crate::execute_route(
+        &topology,
+        &test_metrics(false),
+        &depart_at("2026-07-10T09:59:50+08:00"),
+    )
+    .expect("the direct edge remains");
+    assert_eq!(route.edge_path, vec![2]);
 }
 
 #[test]
@@ -190,9 +223,13 @@ fn speed_factor_waiting_rejects_an_overlay_component_with_nondominated_choices()
     let requested = at("2026-07-10T09:59:50+08:00");
     let waited = evaluate_edge_at(&topology, &metrics, &context, 0, requested, 1.0)
         .expect("voluntary wait option exists");
-    let mut immediate_metrics = metrics.clone();
-    immediate_metrics.temporal.allow_wait = false;
-    let immediate = evaluate_edge_at(&topology, &immediate_metrics, &context, 0, requested, 1.0)
+    let mut slow_only = topology.clone();
+    set_rules(
+        &mut slow_only,
+        &[0],
+        vec![every_day(0, 24 * 60, TemporalEffect::SpeedFactor(0.1))],
+    );
+    let immediate = evaluate_edge_at(&slow_only, &metrics, &context, 0, requested, 1.0)
         .expect("immediate slow traversal exists");
     assert!(waited.exit_time < immediate.exit_time);
     assert!(waited.generalized_cost > immediate.generalized_cost);
@@ -219,17 +256,25 @@ fn speed_factor_waiting_rejects_an_overlay_component_with_nondominated_choices()
 fn reverse_segments_match_forward_voluntary_speed_factor_waiting() {
     let mut topology = test_topology();
     set_rules(&mut topology, &[0], slow_until_ten_then_fast());
-    let metrics = test_metrics(true);
+    for allow_wait in [true, false] {
+        assert_reverse_segments_match_forward(&topology, &test_metrics(allow_wait));
+    }
+}
+
+fn assert_reverse_segments_match_forward(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+) {
     let context = TemporalContext::default();
     let range = TimeWindow {
         start: at("2026-07-10T09:58:00+08:00"),
         end: at("2026-07-10T10:01:00+08:00"),
     };
-    let segments = build_edge_arrival_segments(&topology, &metrics, &context, 0, 1.0, range);
+    let segments = build_edge_arrival_segments(topology, metrics, &context, 0, 1.0, range);
 
     let mut requested = range.start;
     while requested <= range.end {
-        let forward = evaluate_edge_at(&topology, &metrics, &context, 0, requested, 1.0)
+        let forward = evaluate_edge_at(topology, metrics, &context, 0, requested, 1.0)
             .expect("edge is traversable");
         let segment = segments
             .iter()
