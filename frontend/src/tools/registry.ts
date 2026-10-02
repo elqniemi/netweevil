@@ -214,6 +214,29 @@ const avoidFields: Field[] = [
   },
 ];
 
+const VEHICLE_HINT = "Overrides this field of the profile's vehicle; leave empty to keep it.";
+
+const vehicleFields: Field[] = [
+  { key: "vehicle_height_m", label: "Height (m)", type: "number", min: 0, step: 0.1, group: "Vehicle", placeholder: "profile", hint: VEHICLE_HINT },
+  { key: "vehicle_width_m", label: "Width (m)", type: "number", min: 0, step: 0.1, group: "Vehicle", placeholder: "profile" },
+  { key: "vehicle_length_m", label: "Length (m)", type: "number", min: 0, step: 0.5, group: "Vehicle", placeholder: "profile" },
+  { key: "vehicle_weight_t", label: "Weight (t)", type: "number", min: 0, step: 0.5, group: "Vehicle", placeholder: "profile", hint: "Actual gross weight in metric tonnes." },
+  { key: "vehicle_axle_load_t", label: "Axle load (t)", type: "number", min: 0, step: 0.5, group: "Vehicle", placeholder: "profile" },
+  {
+    key: "vehicle_hazmat",
+    label: "Dangerous goods",
+    type: "select",
+    default: "",
+    group: "Vehicle",
+    options: [
+      { value: "", label: "profile" },
+      { value: "true", label: "carried" },
+      { value: "false", label: "none" },
+    ],
+  },
+  { key: "vehicle_trailers", label: "Trailers", type: "number", min: 0, step: 1, group: "Vehicle", placeholder: "profile", hint: "Any trailer is excluded by trailer=no and hgv_articulated=no." },
+];
+
 const alternativeFields: Field[] = [
   { key: "alt_max_routes", label: "Max routes (1 = best only)", type: "number", default: 1, min: 1, step: 1, group: "Alternatives" },
   { key: "alt_max_cost_ratio", label: "Max cost ratio", type: "number", default: 1.5, min: 1, step: 0.1, group: "Alternatives", when: (f) => Number(f.alt_max_routes ?? 1) > 1 },
@@ -344,6 +367,25 @@ function avoid(form: Record<string, unknown>) {
   return value ? { avoid: value } : {};
 }
 
+/** Request vehicle parameters (`{vehicle: ...}` or nothing); only filled fields are sent. */
+function vehicle(form: Record<string, unknown>) {
+  const out: Record<string, unknown> = {};
+  for (const key of ["height_m", "width_m", "length_m", "weight_t", "axle_load_t"]) {
+    const value = num(form, `vehicle_${key}`);
+    if (value === undefined) continue;
+    if (value <= 0) throw new Error(`Vehicle ${key.replace(/_/g, " ")} must be greater than 0`);
+    out[key] = value;
+  }
+  const hazmat = str(form, "vehicle_hazmat");
+  if (hazmat) out.hazmat = hazmat === "true";
+  const trailers = num(form, "vehicle_trailers");
+  if (trailers !== undefined) {
+    if (!Number.isInteger(trailers) || trailers < 0 || trailers > 255) throw new Error("Trailers must be a whole number from 0 to 255");
+    out.trailers = trailers;
+  }
+  return Object.keys(out).length ? { vehicle: out } : {};
+}
+
 function alternatives(form: Record<string, unknown>) {
   const maxRoutes = num(form, "alt_max_routes") ?? 1;
   if (maxRoutes <= 1) return undefined;
@@ -379,7 +421,7 @@ function routeId(ctx: BuildContext, key: string, fallback: string, index: number
   return ctx.routes.length > 1 ? `${base}_${index + 1}` : base;
 }
 
-function pointSet(ctx: BuildContext, slot: string, opts: { geometry?: boolean; avoid?: boolean } = {}) {
+function pointSet(ctx: BuildContext, slot: string, opts: { geometry?: boolean; avoid?: boolean; vehicle?: boolean } = {}) {
   const form = ctx.form;
   return {
     points: ctx.points(slot).map(labeled),
@@ -389,6 +431,7 @@ function pointSet(ctx: BuildContext, slot: string, opts: { geometry?: boolean; a
     returns: { geometry: opts.geometry === false ? "none" : (str(form, "geometry") ?? "none") },
     ...temporal(form),
     ...(opts.avoid ? avoid(form) : {}),
+    ...(opts.vehicle ? vehicle(form) : {}),
   };
 }
 
@@ -404,6 +447,7 @@ const routeFields: Field[] = [
   ...temporalFields,
   trafficField(false),
   ...avoidFields,
+  ...vehicleFields,
   {
     key: "component_constraints",
     label: "Component constraints (JSON)",
@@ -487,6 +531,7 @@ function buildRoute(ctx: BuildContext, route: RouteInput, index: number, directi
     fallback: fallback(form),
     returns: returns(form),
     ...avoid(form),
+    ...vehicle(form),
   };
   Object.assign(request, temporal(form));
   if (!directions) {
@@ -655,6 +700,7 @@ const odTool: ToolDef = {
     ...temporalFields,
     trafficField(true),
     ...avoidFields,
+    ...vehicleFields,
   ],
   build: (ctx) => {
     const pairs = ctx.routes.map(({ route, index }) => ({ pair_id: `pair_${index + 1}`, origin: labeled(route.origin!), destination: labeled(route.destination!) }));
@@ -666,6 +712,7 @@ const odTool: ToolDef = {
       returns: { geometry: str(ctx.form, "geometry") ?? "full" },
       ...temporal(ctx.form),
       ...avoid(ctx.form),
+      ...vehicle(ctx.form),
     };
     const alt = alternatives(ctx.form);
     if (alt) request.alternatives = alt;
@@ -709,10 +756,11 @@ const matrixTool: ToolDef = {
     ...temporalFields,
     trafficField(true),
     ...avoidFields,
+    ...vehicleFields,
   ],
   build: (ctx) =>
     envelope(ctx, {
-      origins: pointSet(ctx, "origins", { avoid: true }),
+      origins: pointSet(ctx, "origins", { avoid: true, vehicle: true }),
       destinations: pointSet(ctx, "destinations"),
     }),
   ready: (ctx) => needPoints(ctx, "origins", 1, "origin") ?? needPoints(ctx, "destinations", 1, "destination"),
@@ -874,6 +922,7 @@ function serviceAreaRequest(ctx: BuildContext) {
     returns,
     ...temporal(form),
     ...avoid(form),
+    ...vehicle(form),
   };
 }
 
@@ -890,7 +939,7 @@ const serviceAreaTool: ToolDef = {
   usesProfile: true,
   input: "slots",
   slots: [{ id: "origins", label: "Origins" }],
-  fields: [...serviceAreaFields, ...temporalFields, trafficField(true), ...avoidFields],
+  fields: [...serviceAreaFields, ...temporalFields, trafficField(true), ...avoidFields, ...vehicleFields],
   build: (ctx) => envelope(ctx, serviceAreaRequest(ctx), false),
   ready: (ctx) => needPoints(ctx, "origins", 1, "origin"),
 };
@@ -1436,6 +1485,7 @@ function tripRequest(ctx: BuildContext) {
     allow_late: bool(form, "allow_late"),
     snap: snap(form),
     returns: returns(form),
+    ...vehicle(form),
   };
   if (Object.keys(optimizer).length) request.optimizer = optimizer;
   return request;
@@ -1468,6 +1518,7 @@ const tripTool: ToolDef = {
     ...snapFields,
     returnFields[0],
     ...returnFields.slice(-2),
+    ...vehicleFields,
   ],
   build: (ctx) => envelope(ctx, tripRequest(ctx), false),
   ready: (ctx) => needPoints(ctx, "stops", 2, "stops"),

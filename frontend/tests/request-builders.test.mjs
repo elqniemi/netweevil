@@ -116,6 +116,32 @@ test("trip requests carry mode, clock departure, service times, windows and opti
   assert.throws(() => build("trip", { exact_max_stops: 19 }, { stops }), /at most 18/);
 });
 
+test("vehicle parameters are sent only when filled, on route, OD, matrix, service area and trip", () => {
+  const origins = [{ id: "o", lon: 6.56, lat: 53.21 }];
+  const destinations = [{ id: "d", lon: 6.6, lat: 53.2 }];
+  const stops = [...origins, ...destinations];
+  const form = { vehicle_height_m: 3.4, vehicle_weight_t: "12", vehicle_hazmat: "true", vehicle_trailers: 0 };
+  const expected = { height_m: 3.4, weight_t: 12, hazmat: true, trailers: 0 };
+  assert.deepEqual(build("route", form).request.vehicle, expected);
+  assert.deepEqual(build("od", form).request.vehicle, expected);
+  const matrix = build("matrix", form, { origins, destinations }).request;
+  assert.deepEqual(matrix.origins.vehicle, expected);
+  assert.equal("vehicle" in matrix.destinations, false);
+  assert.deepEqual(build("service_area", form, { origins }).request.vehicle, expected);
+  assert.deepEqual(build("trip", form, { stops }).request.vehicle, expected);
+
+  // Empty fields keep the profile's vehicle: no block at all.
+  assert.equal("vehicle" in build("route", {}).request, false);
+  assert.equal("vehicle" in build("trip", { vehicle_height_m: "" }, { stops }).request, false);
+  assert.deepEqual(build("route", { vehicle_hazmat: "false", vehicle_axle_load_t: 8 }).request.vehicle, { axle_load_t: 8, hazmat: false });
+  assert.throws(() => build("route", { vehicle_width_m: 0 }), /width m must be greater than 0/);
+  assert.throws(() => build("od", { vehicle_trailers: 1.5 }), /whole number/);
+  for (const toolId of ["route", "od", "matrix", "service_area", "trip"]) {
+    const groups = new Set(TOOL_BY_ID[toolId].fields.map((field) => field.group));
+    assert.ok(groups.has("Vehicle"), toolId);
+  }
+});
+
 test("height requests send [lon, lat] points, range for profiles and resampling", () => {
   const probe = [{ id: "p1", lon: 114.1455, lat: 22.2759 }, { id: "p2", lon: 114.1699, lat: 22.2793 }];
   assert.deepEqual(build("height", {}, { probe }), { points: [[114.1455, 22.2759], [114.1699, 22.2793]] });
