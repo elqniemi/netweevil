@@ -12,9 +12,9 @@ mod schema;
 mod turns;
 
 pub use compile::{
-    compile_profile_bundle, compile_profile_bundle_with_acceleration,
+    ServiceAreaMetric, compile_profile_bundle, compile_profile_bundle_with_acceleration,
     compile_profile_bundle_with_acceleration_with_progress, compile_profile_metrics_with_progress,
-    customize_acceleration,
+    customize_acceleration, customize_service_area_metric,
 };
 pub use load::load_profile;
 pub use progress::{ProfileCompileProgress, ProfileCompileStage};

@@ -80,13 +80,26 @@ pub(crate) struct AccelerationGraph {
     pub(crate) reverse_downward_first_out: Vec<u32>,
     pub(crate) reverse_downward_edge: Vec<u32>,
     pub(crate) reverse_downward_arc: Vec<u32>,
+    /// Service-area weight sets customized on first use when the compiled
+    /// profile was loaded without them. `None` for graphs whose weights
+    /// carry request-specific penalties (failure modes), which must never
+    /// gain plain per-metric weights.
+    pub(crate) deferred_metric_weights: Option<Arc<DeferredMetricWeights>>,
+}
+
+type ArcWeights = Option<(Vec<u32>, Vec<u32>)>;
+
+/// Travel-time and distance CCH weights customized on first use and shared
+/// by every routing graph of one prepared engine. Only service areas read
+/// them, so route-only servers never hold them in memory.
+#[derive(Default)]
+pub(crate) struct DeferredMetricWeights {
+    travel_time: std::sync::OnceLock<ArcWeights>,
+    distance: std::sync::OnceLock<ArcWeights>,
 }
 
 impl AccelerationGraph {
-    /// Customized weight sets for a service-area metric over the hierarchy
-    /// arcs, or `None` when the compiled profile carries no arc-aligned
-    /// weights for that metric. Callers fall back to Dijkstra on `None`.
-    pub(crate) fn metric_weights(
+    fn compiled_metric_weights(
         &self,
         metric_kind: crate::service_area::ServiceAreaMetricKind,
     ) -> Option<(&[u32], &[u32])> {
@@ -103,6 +116,64 @@ impl AccelerationGraph {
         (upward.len() == self.source.upward_head.len()
             && downward.len() == self.source.downward_head.len())
         .then_some((upward.as_slice(), downward.as_slice()))
+    }
+
+    fn deferred_cell(
+        &self,
+        metric_kind: crate::service_area::ServiceAreaMetricKind,
+    ) -> Option<(
+        &std::sync::OnceLock<ArcWeights>,
+        netweevil_profile::ServiceAreaMetric,
+    )> {
+        let deferred = self.deferred_metric_weights.as_deref()?;
+        Some(match metric_kind {
+            crate::service_area::ServiceAreaMetricKind::TravelTimeS => (
+                &deferred.travel_time,
+                netweevil_profile::ServiceAreaMetric::TravelTime,
+            ),
+            crate::service_area::ServiceAreaMetricKind::DistanceM => (
+                &deferred.distance,
+                netweevil_profile::ServiceAreaMetric::Distance,
+            ),
+        })
+    }
+
+    /// Customized weight sets for a service-area metric over the hierarchy
+    /// arcs, or `None` when no arc-aligned weights exist for that metric.
+    /// Deferred weights are customized on the first call (blocking
+    /// concurrent callers until done); `topology` must be the topology this
+    /// graph was built from. Callers fall back to Dijkstra on `None`.
+    pub(crate) fn metric_weights(
+        &self,
+        metric_kind: crate::service_area::ServiceAreaMetricKind,
+        topology: &TopologyBundle,
+    ) -> Option<(&[u32], &[u32])> {
+        if let Some(weights) = self.compiled_metric_weights(metric_kind) {
+            return Some(weights);
+        }
+        let (cell, metric) = self.deferred_cell(metric_kind)?;
+        cell.get_or_init(|| {
+            netweevil_profile::customize_service_area_metric(
+                topology,
+                &self.metrics,
+                &self.source,
+                metric,
+            )
+        })
+        .as_ref()
+        .map(|(upward, downward)| (upward.as_slice(), downward.as_slice()))
+    }
+
+    /// Whether [`Self::metric_weights`] can return weights, without
+    /// customizing deferred ones.
+    pub(crate) fn has_metric_weights(
+        &self,
+        metric_kind: crate::service_area::ServiceAreaMetricKind,
+    ) -> bool {
+        self.compiled_metric_weights(metric_kind).is_some()
+            || self
+                .deferred_cell(metric_kind)
+                .is_some_and(|(cell, _)| cell.get().is_none_or(Option::is_some))
     }
 
     /// Binary-searches the head-sorted CSR row of `tail` for an arc to `head`.
@@ -525,16 +596,18 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
 
 /// Compiled profile bundles persist per-edge metrics only. When `metrics`
 /// carries an acceleration header for `dataset_acceleration` but no arc
-/// weights yet, customize them now. Bundles that do not belong together are
+/// weights yet, customize the generalized-cost weights now and report
+/// `true`; service-area weights are then deferred (see
+/// [`DeferredMetricWeights`]). Bundles that do not belong together are
 /// returned unchanged so [`build_acceleration_graph`] reports the mismatch.
 pub(crate) fn customize_loaded_metrics(
     topology: &TopologyBundle,
     metrics: Arc<CompiledProfileBundle>,
     dataset_acceleration: Option<&DatasetAccelerationBundle>,
-) -> Arc<CompiledProfileBundle> {
+) -> (Arc<CompiledProfileBundle>, bool) {
     let (Some(source), Some(compiled)) = (dataset_acceleration, metrics.acceleration.as_ref())
     else {
-        return metrics;
+        return (metrics, false);
     };
     let customized = compiled.upward_weight.len() == source.upward_head.len()
         && compiled.downward_weight.len() == source.downward_head.len();
@@ -545,7 +618,7 @@ pub(crate) fn customize_loaded_metrics(
         || compiled.schema_version != netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION
         || metrics.edge_metrics.len() != topology.edge_count()
     {
-        return metrics;
+        return (metrics, false);
     }
     let weights = netweevil_profile::customize_acceleration(
         topology,
@@ -555,7 +628,7 @@ pub(crate) fn customize_loaded_metrics(
     );
     let mut owned = Arc::unwrap_or_clone(metrics);
     owned.acceleration = Some(weights);
-    Arc::new(owned)
+    (Arc::new(owned), true)
 }
 
 #[allow(clippy::needless_range_loop)]
@@ -703,5 +776,6 @@ pub(crate) fn build_acceleration_graph(
         reverse_downward_first_out,
         reverse_downward_edge,
         reverse_downward_arc,
+        deferred_metric_weights: None,
     }))
 }

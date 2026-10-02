@@ -11,7 +11,7 @@ use netweevil_persist::{
     read_compiled_profile_manifests, read_dataset_manifest, read_edge_name_bundle, read_json,
     read_topology_bundle, write_compiled_profile_bundle, write_compiled_profile_manifest,
 };
-use netweevil_profile::{ProfileDocument, compile_profile_bundle_with_acceleration, load_profile};
+use netweevil_profile::{ProfileDocument, compile_profile_metrics_with_progress, load_profile};
 use netweevil_query::PreparedRoutingEngine;
 use netweevil_transit::{
     PreparedTransitRouter, TransitFeedManifest, read_transit_bundle, read_transit_transfer_table,
@@ -464,7 +464,9 @@ fn load_or_compile_profile(
     let (manifest, compiled_bundle) = if let Some(cached) = cached {
         cached
     } else {
-        let compiled_bundle = compile_profile_bundle_with_acceleration(
+        // Stored bundles hold per-edge metrics; the engine below customizes
+        // the CCH exactly as it does for a cached bundle.
+        let compiled_bundle = compile_profile_metrics_with_progress(
             &document,
             topology.as_ref(),
             topology_bundle_id,
@@ -473,6 +475,7 @@ fn load_or_compile_profile(
                 .as_ref()
                 .zip(dataset_acceleration.as_ref())
                 .map(|(bundle_ref, bundle)| (bundle.as_ref(), bundle_ref.bundle_id.clone())),
+            |_| {},
         )
         .with_context(|| {
             format!(

@@ -1033,10 +1033,15 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
             }
         }
     } else {
-        let phast_ready = routing_graph
-            .acceleration
-            .as_ref()
-            .is_some_and(|acceleration| acceleration.metric_weights(metric_kind).is_some());
+        // Components are checked first so a component-bearing profile never
+        // customizes deferred PHAST weights it will not use.
+        let phast_ready = metrics.components.is_empty()
+            && routing_graph
+                .acceleration
+                .as_ref()
+                .is_some_and(|acceleration| {
+                    acceleration.metric_weights(metric_kind, topology).is_some()
+                });
         // CCH/PHAST stores only scalar customized weights. Without unpacking
         // every winning hierarchy path it cannot recover an exact additive
         // component label, so component-bearing profiles remain on the exact
@@ -1250,7 +1255,7 @@ fn phast_service_area_expansion(
         .as_ref()
         .expect("PHAST expansion requires acceleration");
     let (upward_weight, downward_weight) = acceleration
-        .metric_weights(metric_kind)
+        .metric_weights(metric_kind, topology)
         .expect("PHAST expansion requires per-metric weights");
     let edge_count = routing_graph.edge_costs.len();
 
@@ -1509,7 +1514,7 @@ fn phast_ready_for_metric(
     routing_graph
         .acceleration
         .as_ref()
-        .is_some_and(|acceleration| acceleration.metric_weights(metric_kind).is_some())
+        .is_some_and(|acceleration| acceleration.has_metric_weights(metric_kind))
 }
 
 fn resolve_service_area_origin(

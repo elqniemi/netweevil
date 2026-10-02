@@ -1274,11 +1274,23 @@ fn engine_customizes_stored_metrics_like_the_reference_cch() {
     let reference = reference.acceleration.expect("reference weights");
     assert_eq!(customized.upward_weight, reference.upward_weight);
     assert_eq!(customized.downward_weight, reference.downward_weight);
-    assert_eq!(customized.time_upward_weight, reference.time_upward_weight);
-    assert_eq!(
-        customized.distance_downward_weight,
-        reference.distance_downward_weight
-    );
+    // Service-area weights are customized on first use.
+    assert!(customized.time_upward_weight.is_empty());
+    let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
+    let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
+    let time = crate::service_area::ServiceAreaMetricKind::TravelTimeS;
+    let distance = crate::service_area::ServiceAreaMetricKind::DistanceM;
+    assert!(acceleration.has_metric_weights(time));
+    let (upward, downward) = acceleration
+        .metric_weights(time, engine.topology())
+        .expect("time weights");
+    assert_eq!(upward, reference.time_upward_weight.as_slice());
+    assert_eq!(downward, reference.time_downward_weight.as_slice());
+    let (upward, downward) = acceleration
+        .metric_weights(distance, engine.topology())
+        .expect("distance weights");
+    assert_eq!(upward, reference.distance_upward_weight.as_slice());
+    assert_eq!(downward, reference.distance_downward_weight.as_slice());
 }
 
 #[test]

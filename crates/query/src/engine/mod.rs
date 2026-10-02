@@ -36,13 +36,14 @@ impl PreparedRoutingEngine {
         acceleration: Option<Arc<DatasetAccelerationBundle>>,
     ) -> Result<Self> {
         validate_execution_inputs(topology.as_ref(), metrics.as_ref())?;
-        let metrics = customize_loaded_metrics(topology.as_ref(), metrics, acceleration.as_deref());
-        let default_routing_graph = build_routing_graph_from_shared(
+        let (metrics, customized_at_load) =
+            customize_loaded_metrics(topology.as_ref(), metrics, acceleration.as_deref());
+        let mut default_routing_graph = build_routing_graph_from_shared(
             topology.as_ref(),
             metrics.clone(),
             acceleration.clone(),
         )?;
-        let ignore_multi_edge_restrictions_graph =
+        let mut ignore_multi_edge_restrictions_graph =
             if default_routing_graph.has_restriction_sequences() {
                 Some(build_routing_graph_with_options_from_shared(
                     topology.as_ref(),
@@ -57,6 +58,16 @@ impl PreparedRoutingEngine {
             } else {
                 None
             };
+        if customized_at_load {
+            let deferred = Arc::new(DeferredMetricWeights::default());
+            for graph in std::iter::once(&mut default_routing_graph)
+                .chain(ignore_multi_edge_restrictions_graph.as_mut())
+            {
+                if let Some(acceleration) = graph.acceleration.as_mut() {
+                    acceleration.deferred_metric_weights = Some(deferred.clone());
+                }
+            }
+        }
         Ok(Self {
             topology,
             metrics,
