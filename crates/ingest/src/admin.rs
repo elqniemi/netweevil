@@ -30,6 +30,9 @@ pub(crate) struct AdminBoundary {
     pub(crate) level: u8,
     /// ISO 3166-1 alpha-2 (countries) or ISO 3166-2 (states) code.
     pub(crate) code: Option<String>,
+    /// ISO 3166-1 alpha-2 code a state carries itself, as territories with
+    /// their own code do (Hong Kong is `HK` at `admin_level=4`).
+    pub(crate) country_code: Option<String>,
     pub(crate) name: Option<String>,
     /// Closed rings of `(lon, lat)`; the first point is repeated last.
     pub(crate) rings: Vec<Vec<(f64, f64)>>,
@@ -41,6 +44,7 @@ pub(crate) struct AdminRelationCandidate {
     pub(crate) relation_id: i64,
     pub(crate) level: u8,
     pub(crate) code: Option<String>,
+    pub(crate) country_code: Option<String>,
     pub(crate) name: Option<String>,
     pub(crate) member_way_ids: Vec<i64>,
 }
@@ -51,10 +55,11 @@ pub(crate) fn parse_admin_relation(relation: &Relation) -> Option<AdminRelationC
         return None;
     }
     let level = tag("admin_level")?.trim().parse::<u8>().ok()?;
+    let country_code = tag("ISO3166-1:alpha2")
+        .or_else(|| tag("ISO3166-1"))
+        .and_then(normalize_country_code);
     let code = match level {
-        COUNTRY_LEVEL => tag("ISO3166-1:alpha2")
-            .or_else(|| tag("ISO3166-1"))
-            .and_then(normalize_country_code),
+        COUNTRY_LEVEL => country_code.clone(),
         STATE_LEVEL => tag("ISO3166-2").and_then(normalize_code),
         _ => return None,
     };
@@ -71,6 +76,7 @@ pub(crate) fn parse_admin_relation(relation: &Relation) -> Option<AdminRelationC
         relation_id: relation.id.0,
         level,
         code,
+        country_code,
         name: tag("name").map(str::to_string),
         member_way_ids,
     })
@@ -115,6 +121,7 @@ pub(crate) fn assemble_boundaries(
             Some(rings) if !rings.is_empty() => boundaries.push(AdminBoundary {
                 level: candidate.level,
                 code: candidate.code.clone(),
+                country_code: candidate.country_code.clone(),
                 name: candidate.name.clone(),
                 rings,
             }),
@@ -263,16 +270,17 @@ pub(crate) fn read_geojson_boundaries(path: &Path) -> Result<Vec<AdminBoundary>>
             None if state_code.is_some() => STATE_LEVEL,
             None => COUNTRY_LEVEL,
         };
+        let country_code = text(&[
+            "ISO3166-1:alpha2",
+            "ISO3166-1",
+            "ISO_A2_EH",
+            "ISO_A2",
+            "iso_a2",
+            "country_code",
+        ])
+        .and_then(|code| normalize_country_code(&code));
         let code = match level {
-            COUNTRY_LEVEL => text(&[
-                "ISO3166-1:alpha2",
-                "ISO3166-1",
-                "ISO_A2_EH",
-                "ISO_A2",
-                "iso_a2",
-                "country_code",
-            ])
-            .and_then(|code| normalize_country_code(&code)),
+            COUNTRY_LEVEL => country_code.clone(),
             STATE_LEVEL => state_code,
             _ => continue,
         };
@@ -287,6 +295,7 @@ pub(crate) fn read_geojson_boundaries(path: &Path) -> Result<Vec<AdminBoundary>>
         boundaries.push(AdminBoundary {
             level,
             code,
+            country_code,
             name: text(&["name", "NAME", "name_en", "NAME_EN"]),
             rings,
         });
@@ -474,6 +483,7 @@ impl AdminIndex {
         let state_code = state.and_then(|state| state.code.clone());
         let country_code = country
             .and_then(|country| country.code.clone())
+            .or_else(|| state.and_then(|state| state.country_code.clone()))
             .or_else(|| {
                 state_code
                     .as_deref()

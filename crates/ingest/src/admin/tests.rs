@@ -16,6 +16,7 @@ fn boundary(level: u8, code: &str, rings: Vec<Vec<(f64, f64)>>) -> AdminBoundary
     AdminBoundary {
         level,
         code: Some(code.to_string()),
+        country_code: None,
         name: Some(format!("{code} name")),
         rings,
     }
@@ -26,6 +27,7 @@ fn candidate(relation_id: i64, member_way_ids: &[i64]) -> AdminRelationCandidate
         relation_id,
         level: STATE_LEVEL,
         code: Some("NL-GR".to_string()),
+        country_code: None,
         name: None,
         member_way_ids: member_way_ids.to_vec(),
     }
@@ -106,6 +108,22 @@ fn a_state_without_its_country_boundary_supplies_the_country_code() {
     assert_eq!(area.country_code, "NL");
     assert_eq!(area.country_name, None);
     assert_eq!(area.state_name.as_deref(), Some("NL-GR name"));
+}
+
+#[test]
+fn a_territory_state_with_its_own_iso_code_is_its_own_country() {
+    let mut hong_kong = boundary(
+        STATE_LEVEL,
+        "HK",
+        vec![square((113.8, 22.1), (114.5, 22.6))],
+    );
+    hong_kong.code = None;
+    hong_kong.country_code = Some("HK".to_string());
+    let area = AdminIndex::new(vec![hong_kong])
+        .lookup(114.17, 22.3)
+        .unwrap();
+    assert_eq!(area.country_code, "HK");
+    assert_eq!(area.driving_side(), Some(netweevil_core::DrivingSide::Left));
 }
 
 #[test]
