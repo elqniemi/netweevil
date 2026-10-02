@@ -11,7 +11,6 @@ use netweevil_profile::{ReturnConfig, ReturnGeometry};
 use std::fs;
 
 use super::fixtures::*;
-use super::fixtures_disconnected::*;
 
 #[test]
 fn reports_structured_diagnostics_for_component_mismatch() {
@@ -1071,7 +1070,7 @@ fn emits_service_area_polygon_output() {
 #[test]
 fn allows_origin_hop_fallback_between_components() {
     let topology = hop_disconnected_topology();
-    let metrics = hop_disconnected_metrics();
+    let metrics = disconnected_metrics();
     let request = RouteRequest {
         route_id: "origin-hop".to_string(),
         origin: crate::LabeledPoint {
@@ -1118,7 +1117,7 @@ fn allows_origin_hop_fallback_between_components() {
 #[test]
 fn allows_destination_hop_fallback_between_components() {
     let topology = hop_disconnected_topology();
-    let metrics = hop_disconnected_metrics();
+    let metrics = disconnected_metrics();
     let request = RouteRequest {
         route_id: "destination-hop".to_string(),
         origin: crate::LabeledPoint {
@@ -1165,7 +1164,7 @@ fn allows_destination_hop_fallback_between_components() {
 #[test]
 fn allows_either_end_hop_fallback_between_components() {
     let topology = hop_disconnected_topology();
-    let metrics = hop_disconnected_metrics();
+    let metrics = disconnected_metrics();
     let request = RouteRequest {
         route_id: "either-hop".to_string(),
         origin: crate::LabeledPoint {
@@ -1205,7 +1204,7 @@ fn allows_either_end_hop_fallback_between_components() {
 #[test]
 fn hop_fallback_keeps_legal_network_cost_unchanged() {
     let topology = hop_disconnected_topology();
-    let metrics = hop_disconnected_metrics();
+    let metrics = disconnected_metrics();
     let legal_request = RouteRequest {
         route_id: "legal".to_string(),
         origin: crate::LabeledPoint {
