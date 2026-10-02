@@ -1,0 +1,20 @@
+{
+  "trip_id": "groningen_deliveries",
+  "mode": "roundtrip",
+  "departure_s": 28800,
+  "snap": { "max_distance_m": 500.0 },
+  "stops": [
+    { "point": { "id": "depot", "lon": 6.5665, "lat": 53.2194 }, "service_s": 600 },
+    { "point": { "id": "zernike", "lon": 6.5303, "lat": 53.2410 }, "service_s": 300 },
+    { "point": { "id": "station", "lon": 6.5641, "lat": 53.2108 }, "service_s": 300,
+      "time_window": { "earliest_s": 30600, "latest_s": 32400 } },
+    { "point": { "id": "martini_hospital", "lon": 6.5513, "lat": 53.1993 }, "service_s": 300 },
+    { "point": { "id": "beijum", "lon": 6.6080, "lat": 53.2435 }, "service_s": 300 },
+    { "point": { "id": "hoogkerk", "lon": 6.5016, "lat": 53.2135 }, "service_s": 300 },
+    { "point": { "id": "lewenborg", "lon": 6.6183, "lat": 53.2304 }, "service_s": 300,
+      "time_window": { "earliest_s": 28800, "latest_s": 31500 } },
+    { "point": { "id": "helpman", "lon": 6.5770, "lat": 53.1980 }, "service_s": 300 }
+  ],
+  "returns": { "geometry": "none" },
+  "optimizer": { "seed": 0 }
+}

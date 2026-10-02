@@ -367,6 +367,74 @@ async fn waypoint_endpoint_returns_legs_order_and_geojson_and_rejects_temporal_r
 }
 
 #[tokio::test]
+async fn trip_endpoint_orders_stops_along_one_way_streets_and_reports_failures() {
+    let state = ApiState::for_test(fixture());
+    // The fixture only drives east (0 -> 1 -> 2), so an open trip must visit
+    // the middle stop second whatever the input order.
+    let payload = json!({"request": {
+        "trip_id": "trip-test", "mode": "open", "snap": {"max_distance_m": 10},
+        "stops": [
+            {"point": {"id": "middle", "lon": 6.001, "lat": 53.0}, "service_s": 60},
+            {"point": {"id": "west", "lon": 6.0, "lat": 53.0}},
+            {"point": {"id": "east", "lon": 6.002, "lat": 53.0},
+             "time_window": {"earliest_s": 0, "latest_s": 3600}}
+        ]
+    }});
+    let response = crate::trip::trip_handler(
+        State(state.clone()),
+        format(None),
+        json_payload(payload.clone()),
+    )
+    .await
+    .unwrap();
+    let response = json_body(response).await;
+    let result = &response["result"];
+    assert_eq!(result["stop_order"], json!([1, 0, 2]));
+    assert_eq!(result["legs"].as_array().unwrap().len(), 2);
+    assert_eq!(result["visits"][1]["point_id"], "middle");
+    assert_eq!(result["total_service_s"], 60.0);
+    assert_eq!(result["time_windows_met"], true);
+    assert_eq!(
+        result["optimization"]["method"],
+        "held_karp_time_windows_exact"
+    );
+    assert_eq!(
+        response["service"]["batch_engine"],
+        "held_karp_time_windows_exact"
+    );
+
+    let response = crate::trip::trip_handler(
+        State(state.clone()),
+        format(Some("geojson")),
+        json_payload(payload.clone()),
+    )
+    .await
+    .unwrap();
+    let response = json_body(response).await;
+    assert_eq!(response["type"], "FeatureCollection");
+    let features = response["features"].as_array().unwrap();
+    let stops = features
+        .iter()
+        .filter(|feature| feature["properties"]["kind"] == "trip_stop")
+        .collect::<Vec<_>>();
+    assert_eq!(stops.len(), 3);
+    assert_eq!(stops[0]["properties"]["point_id"], "west");
+    assert!(
+        features
+            .iter()
+            .any(|feature| feature["properties"]["leg_index"] == 1)
+    );
+
+    // Nothing drives west, so no roundtrip exists.
+    let mut roundtrip = payload;
+    roundtrip["request"]["mode"] = json!("roundtrip");
+    let error = crate::trip::trip_handler(State(state), format(None), json_payload(roundtrip))
+        .await
+        .unwrap_err();
+    assert_eq!(status(error), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn locate_candidates_match_route_snapping_and_reject_invalid_requests() {
     let service = fixture();
     let state = ApiState::for_test(service.clone());

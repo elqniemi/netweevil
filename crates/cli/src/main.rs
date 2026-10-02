@@ -25,10 +25,10 @@ use tracing_subscriber::EnvFilter;
 use crate::analyze::{
     AnalyzeCommand, analyze_accessibility, analyze_betweenness, analyze_matrix, analyze_od,
     analyze_route, analyze_route_batch, analyze_scenario_batch, analyze_service_area,
-    analyze_service_area_sequence, analyze_transit_batch, analyze_transit_route,
+    analyze_service_area_sequence, analyze_transit_batch, analyze_transit_route, analyze_trip,
 };
 use crate::api::{ApiCommand, BootstrapArgs, api_serve, bootstrap};
-use crate::bench::{BenchCommand, bench_compare, bench_corpus, bench_http, bench_run};
+use crate::bench::{BenchCommand, bench_compare, bench_corpus, bench_http, bench_run, bench_trip};
 use crate::cache::{CacheCommand, cache_list, cache_prune};
 use crate::dataset::{DatasetCommand, dataset_audit, dataset_import, dataset_list, dataset_update};
 use crate::experiment::{ExperimentCommand, experiment_run};
@@ -88,6 +88,7 @@ fn main() -> Result<()> {
             AnalyzeCommand::ScenarioBatch(args) => analyze_scenario_batch(&paths, args),
             AnalyzeCommand::TransitRoute(args) => analyze_transit_route(&paths, args),
             AnalyzeCommand::TransitBatch(args) => analyze_transit_batch(&paths, args),
+            AnalyzeCommand::Trip(args) => analyze_trip(&paths, args),
         },
         Command::Experiment {
             command: experiment,
@@ -110,6 +111,7 @@ fn main() -> Result<()> {
             BenchCommand::Run(args) => bench_run(&paths, args),
             BenchCommand::Http(args) => bench_http(args),
             BenchCommand::Compare(args) => bench_compare(args),
+            BenchCommand::Trip(args) => bench_trip(&paths, args),
         },
         Command::Api { command: api } => match api {
             ApiCommand::Serve(args) => api_serve(paths, args),
