@@ -269,6 +269,19 @@ pub(super) fn forbidden_uturn_topology() -> TopologyBundle {
     with_no_turn(topology, 202, &[0, 1])
 }
 
+/// One-way edge 0 -> 1 with a two-edge legal detour 1 -> 2 -> 0 (20 s).
+pub(super) fn oneway_with_detour_topology() -> TopologyBundle {
+    topology(
+        "oneway-detour",
+        &[(6.0, 53.0), (6.001, 53.0), (6.0005, 53.0005)],
+        &[
+            edge(0, 0, 1, 310, 100),
+            edge(1, 1, 2, 311, 100),
+            edge(2, 2, 0, 312, 100),
+        ],
+    )
+}
+
 /// A ferry-only component next to a separate street component.
 pub(super) fn ferry_only_subnetwork_topology() -> TopologyBundle {
     let ferry = DirectedEdge {

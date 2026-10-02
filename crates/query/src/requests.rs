@@ -309,6 +309,12 @@ pub struct IllegalMovementPenaltyPolicy {
     pub forbidden_uturn_penalty_s: Option<f64>,
 }
 
+/// Failure modes relax legality at a price. Explicit `allow_*` /
+/// `ignore_turn_restrictions` flags make the relaxed movements available
+/// with their `penalties` added to the generalized cost; the route minimizes
+/// cost plus penalties, so a legal route wins whenever it is no more
+/// expensive than the cheapest penalized illegal one. `auto_relax_unreachable`
+/// instead routes strictly first and relaxes only when no legal route exists.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct FallbackPolicy {
     #[serde(default)]
