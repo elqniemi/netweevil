@@ -737,6 +737,11 @@ only when no name or route number carries over. `signs` holds `exit_number`
 and the junction `name`. `lanes` lists the approach lanes from `turn:lanes`,
 left to right, with their `indications` and `valid`/`active` flags. Walking and
 cycling routes get plain turns: no ramps, exits, lanes or U-turn collapsing.
+Two turns joined by a connector of up to 10 m are one turn. When they turn
+the route around, that is a sharp turn; only a motor vehicle crossing a
+dual carriageway gets a U-turn. A jog that leaves the heading
+almost unchanged, such as a step across onto a parallel cycle path, gets no
+step unless it leads onto a newly named street.
 
 Each maneuver identifies a half-open range in `route.edge_path`; distance and
 edge time sum those segments. Turn penalties remain in the route summary.

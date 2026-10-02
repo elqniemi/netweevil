@@ -194,6 +194,32 @@ impl Net {
     fn directions(&self, from: [f64; 2], to: [f64; 2]) -> DirectionsResult {
         self.directions_with(from, to, &DirectionsOptions::default())
     }
+
+    /// Directions for a bicycle profile at 5 m/s on every way.
+    fn cycling_directions(&self, from: [f64; 2], to: [f64; 2]) -> DirectionsResult {
+        let names = self.names();
+        let costs = self
+            .edges
+            .iter()
+            .map(|edge| f64::from(edge.length_m) / 5.0)
+            .collect::<Vec<_>>();
+        let mut cycling = metrics(&costs);
+        cycling.mode = netweevil_core::TravelMode::Bicycle;
+        let mut topology = self.topology();
+        for profile in &mut topology.edge_layers.profile {
+            profile.access_mask = netweevil_core::AccessMask::new(
+                netweevil_core::AccessMask::CAR | netweevil_core::AccessMask::BICYCLE,
+            );
+        }
+        exact_engine(topology, cycling)
+            .execute_directions(
+                &self.request(from, to),
+                DirectionsContext::new(&names),
+                &DirectionsOptions::default(),
+                EngineMode::Auto,
+            )
+            .expect("cycling directions succeed")
+    }
 }
 
 fn kinds(result: &DirectionsResult) -> Vec<ManeuverType> {
@@ -1100,3 +1126,66 @@ fn walking_routes_get_no_ramps_or_lanes() {
             .all(|maneuver| maneuver.lanes.is_empty())
     );
 }
+
+/// Main runs north through (0, 0). A 6 m cycleway connector leads east to
+/// (6, 0), where the cycle path `path` continues to (6, `path_end_y`) and
+/// Side leads east.
+fn cycle_path_beside_main(path: Option<&str>, path_end_y: f64) -> Net {
+    let cycleway = |name| Way {
+        name,
+        highway: Some(HighwayClass::Cycleway),
+        ..Way::default()
+    };
+    Net::new(&[
+        [0.0, -200.0],
+        [0.0, 0.0],
+        [6.0, 0.0],
+        [6.0, path_end_y],
+        [0.0, 200.0],
+        [200.0, 0.0],
+    ])
+    .way(&[0, 1, 4], named("Main"))
+    .way(&[1, 2], cycleway(None))
+    .way(&[2, 3], cycleway(path))
+    .way(&[2, 5], named("Side"))
+}
+
+#[test]
+fn two_right_turns_around_a_short_cycle_connector_are_not_a_u_turn() {
+    // North on Main, right onto the connector, right onto the path south.
+    let net = cycle_path_beside_main(Some("Fietspad"), -200.0);
+    let result = net.cycling_directions([0.0, -150.0], [6.0, -100.0]);
+    assert_eq!(
+        kinds(&result),
+        [
+            ManeuverType::Depart,
+            ManeuverType::SharpRight,
+            ManeuverType::Arrive
+        ]
+    );
+    assert_eq!(
+        result.maneuvers[1].instruction,
+        "Turn sharp right onto Fietspad."
+    );
+}
+
+#[test]
+fn cycle_path_jogs_with_little_heading_change_get_no_turn_step() {
+    // North on Main, right onto the connector, left onto a parallel path.
+    let unnamed = cycle_path_beside_main(None, 200.0);
+    let result = unnamed.cycling_directions([0.0, -150.0], [6.0, 100.0]);
+    assert_eq!(kinds(&result), [ManeuverType::Depart, ManeuverType::Arrive]);
+
+    // A named path is still announced, as a name change.
+    let named_path = cycle_path_beside_main(Some("Fietspad"), 200.0);
+    let result = named_path.cycling_directions([0.0, -150.0], [6.0, 100.0]);
+    assert_eq!(
+        instructions(&result),
+        [
+            "Head north on Main.",
+            "Continue onto Fietspad.",
+            "You have arrived at your destination."
+        ]
+    );
+}
+
