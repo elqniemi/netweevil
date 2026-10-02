@@ -54,7 +54,9 @@ impl PreparedRoutingEngine {
         metrics: Arc<CompiledProfileBundle>,
         acceleration: Option<Arc<DatasetAccelerationBundle>>,
     ) -> Result<Self> {
-        Self::build(topology, metrics, acceleration, true)
+        let engine = Self::build(topology, metrics, acceleration, true)?;
+        prepare_lower_bounds_in_background(&engine.default_routing_graph);
+        Ok(engine)
     }
 
     /// `with_ignore_mode_graph = false` skips the graph that serves
@@ -67,12 +69,15 @@ impl PreparedRoutingEngine {
         with_ignore_mode_graph: bool,
     ) -> Result<Self> {
         validate_execution_inputs(topology.as_ref(), metrics.as_ref())?;
-        let (metrics, customized_at_load) =
-            customize_loaded_metrics(topology.as_ref(), metrics, acceleration.as_deref());
-        let mut default_routing_graph = build_routing_graph_from_shared(
+        let weights =
+            customize_loaded_metrics(topology.as_ref(), metrics.as_ref(), acceleration.as_deref());
+        let customized_at_load = weights.is_some();
+        let mut default_routing_graph = build_routing_graph_with_weights(
             topology.as_ref(),
             metrics.clone(),
+            weights,
             acceleration.clone(),
+            RoutingGraphBuildOptions::default(),
         )?;
         if customized_at_load
             && let Some(acceleration) = default_routing_graph
@@ -81,11 +86,6 @@ impl PreparedRoutingEngine {
                 .and_then(Arc::get_mut)
         {
             acceleration.deferred_metric_weights = Some(Arc::default());
-        }
-        // Build the rank-ordered query arrays now rather than on the first
-        // route request (~40 ms on a province-sized graph).
-        if let Some(acceleration) = default_routing_graph.acceleration.as_ref() {
-            acceleration.ranked.get(acceleration);
         }
         // Route finalization and analysis read turn penalties from this
         // table once it exists; build it before the first request.
@@ -112,20 +112,27 @@ impl PreparedRoutingEngine {
     pub fn with_edge_metrics(&self, metrics: Arc<CompiledProfileBundle>) -> Result<Self> {
         let acceleration = self.dataset_acceleration();
         validate_execution_inputs(self.topology.as_ref(), metrics.as_ref())?;
-        let (metrics, customized_at_load) =
-            customize_loaded_metrics(self.topology.as_ref(), metrics, acceleration.as_deref());
+        let weights = customize_loaded_metrics(
+            self.topology.as_ref(),
+            metrics.as_ref(),
+            acceleration.as_deref(),
+        );
+        let customized_at_load = weights.is_some();
         // Speed-only changes keep the adjacency: share it with this engine.
         let shared = self.default_routing_graph.with_metrics(
             self.topology.as_ref(),
             self.metrics.as_ref(),
             metrics.clone(),
+            weights.as_ref(),
         );
         let mut default_routing_graph = match shared {
             Some(graph) => graph,
-            None => build_routing_graph_from_shared(
+            None => build_routing_graph_with_weights(
                 self.topology.as_ref(),
                 metrics.clone(),
+                weights,
                 acceleration,
+                RoutingGraphBuildOptions::default(),
             )?,
         };
         if customized_at_load
@@ -135,9 +142,6 @@ impl PreparedRoutingEngine {
                 .and_then(Arc::get_mut)
         {
             acceleration.deferred_metric_weights = Some(Arc::default());
-        }
-        if let Some(acceleration) = default_routing_graph.acceleration.as_ref() {
-            acceleration.ranked.get(acceleration);
         }
         Ok(Self {
             topology: self.topology.clone(),

@@ -258,8 +258,9 @@ pub(crate) fn cached_failure_mode_bundle(
     let (degraded_topology, mut degraded_metrics, mut routing_graph) =
         build_failure_mode_bundle(topology, metrics, fallback)?;
 
+    let mut failure_weights = None;
     if let Some(base_acceleration) = base_acceleration
-        && let Some(customized) = customize_failure_mode_acceleration(
+        && let Some(mut customized) = customize_failure_mode_acceleration(
             &degraded_topology,
             &degraded_metrics,
             &routing_graph,
@@ -267,14 +268,20 @@ pub(crate) fn cached_failure_mode_bundle(
             fallback,
         )
     {
+        // The ranked hierarchy keeps the only copy of the cost weights.
+        failure_weights = Some((
+            std::mem::take(&mut customized.upward_weight),
+            std::mem::take(&mut customized.downward_weight),
+        ));
         degraded_metrics.acceleration = Some(customized);
     }
     let degraded_metrics = std::sync::Arc::new(degraded_metrics);
-    if degraded_metrics.acceleration.is_some()
+    if failure_weights.is_some()
         && let Some(base_acceleration) = base_acceleration
     {
         routing_graph.acceleration = build_acceleration_graph(
             degraded_metrics.clone(),
+            failure_weights,
             Some(base_acceleration.source.clone()),
             degraded_topology.edge_count(),
         )?

@@ -40,6 +40,25 @@ pub(crate) fn lower_bound_weights(routing_graph: &RoutingGraph) -> Option<&Lower
         .as_ref()
 }
 
+/// Customizes the lower-bound weights of a graph with multi-edge
+/// restrictions on a background thread, so the first restricted fallback
+/// does not pay for them. A search that needs them sooner waits for the
+/// same customization rather than starting its own.
+pub(crate) fn prepare_lower_bounds_in_background(routing_graph: &RoutingGraph) {
+    if routing_graph.acceleration.is_none() || !routing_graph.has_restriction_sequences() {
+        return;
+    }
+    let graph = routing_graph.clone();
+    let spawned = std::thread::Builder::new()
+        .name("netweevil-lower-bounds".into())
+        .spawn(move || {
+            lower_bound_weights(&graph);
+        });
+    if let Err(error) = spawned {
+        tracing::warn!(%error, "lower-bound customization runs on first use instead");
+    }
+}
+
 fn build_lower_bound_weights(
     routing_graph: &RoutingGraph,
     acceleration: &AccelerationGraph,
@@ -124,14 +143,16 @@ impl AStarScratch {
             if cost > self.backward[&(edge_index as u32)] {
                 continue;
             }
-            for slot in acceleration.reverse_downward_first_out[edge_index] as usize
-                ..acceleration.reverse_downward_first_out[edge_index + 1] as usize
-            {
-                let weight = weights.downward[acceleration.reverse_downward_arc[slot] as usize];
+            let source = acceleration.source.as_ref();
+            let downward_slots = acceleration.downward_slots();
+            let rank = source.edge_rank[edge_index] as usize;
+            for position in acceleration.ranked.downward_range(rank) {
+                let weight = weights.downward[downward_slots[position] as usize];
                 if weight == CCH_WEIGHT_INFINITY {
                     continue;
                 }
-                let previous = acceleration.reverse_downward_edge[slot];
+                let (tail_rank, _) = acceleration.ranked.downward_arc(position);
+                let previous = source.edge_order[tail_rank as usize];
                 let next_cost = cost + decode_cch_weight(weight);
                 let known = self.backward.entry(previous).or_insert(f64::INFINITY);
                 if next_cost < *known {

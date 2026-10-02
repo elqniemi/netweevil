@@ -62,6 +62,13 @@ differ for edges within that bound of the cutoff.
 
 ## Queries and reconstruction
 
+Engines hold the customized hierarchy once, renumbered by rank: upward arcs
+grouped by tail and downward arcs grouped by head, each with its weight.
+This copy is the only one of the cost weights; arcs keep their dataset
+bundle slots, which reconstruction recovers from the endpoints. Upward rows
+keep the bundle's row order, and downward rows list tails by edge id, so
+every search relaxes arcs in the same order as on the bundle arrays.
+
 Forward search follows upward arcs from origin seeds. Backward search follows
 reversed downward arcs from destination seeds. Each direction stops when its
 queue minimum plus a lower bound on the opposite seed cost reaches the best

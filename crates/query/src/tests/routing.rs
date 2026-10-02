@@ -720,6 +720,59 @@ fn accelerated_query_returns_an_unpacked_path() {
     assert_eq!(path.total_generalized_cost, 30.0);
 }
 
+/// Traffic bucket engines re-cost the base engine's hierarchy: they share
+/// its ranked topology, carry only their own weights and route like an
+/// engine prepared from scratch.
+#[test]
+fn bucket_engines_share_the_ranked_hierarchy() {
+    let topology = test_topology();
+    let (bundle, base) = build_test_cch(&topology, &test_metrics());
+    let (_, slower) = build_test_cch(&topology, &metrics(&[10.0, 40.0, 100.0]));
+    let mut stored = slower.clone();
+    let header = stored.acceleration.as_mut().expect("fixture header");
+    header.upward_weight.clear();
+    header.downward_weight.clear();
+    let stored = Arc::new(stored);
+    let engine = PreparedRoutingEngine::new(
+        Arc::new(topology.clone()),
+        Arc::new(base),
+        Some(bundle.clone()),
+    )
+    .expect("base engine prepares");
+    let bucket = engine
+        .with_edge_metrics(stored.clone())
+        .expect("bucket engine prepares");
+    let fresh = PreparedRoutingEngine::new(Arc::new(topology), stored, Some(bundle))
+        .expect("fresh engine prepares");
+
+    let ranked = |engine: &PreparedRoutingEngine| {
+        let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
+        graph.acceleration.clone().expect("accelerated graph")
+    };
+    let (base, bucket_graph, fresh_graph) = (ranked(&engine), ranked(&bucket), ranked(&fresh));
+    assert!(bucket_graph.ranked.shares_topology(&base.ranked));
+    let reference = slower.acceleration.expect("reference weights");
+    let weights = (reference.upward_weight, reference.downward_weight);
+    assert_eq!(
+        bucket_graph.ranked.slot_weights(&bucket_graph.source),
+        weights
+    );
+    assert_eq!(
+        fresh_graph.ranked.slot_weights(&fresh_graph.source),
+        weights
+    );
+    assert_ne!(base.ranked.slot_weights(&base.source), weights);
+
+    let request = a_to_c("bucket");
+    let from_bucket = bucket.execute_route(&request).expect("bucket route");
+    let from_fresh = fresh.execute_route(&request).expect("fresh route");
+    assert_eq!(from_bucket.edge_path, from_fresh.edge_path);
+    assert_eq!(
+        from_bucket.summary.total_generalized_cost,
+        from_fresh.summary.total_generalized_cost
+    );
+}
+
 /// Stored profile bundles carry no arc weights; engine preparation
 /// customizes them and must match the independent fixture customization.
 #[test]
@@ -740,14 +793,21 @@ fn engine_customizes_stored_metrics_like_the_reference_cch() {
     }
     let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(stored), Some(bundle))
         .expect("engine prepares");
-    let customized = engine.metrics().acceleration.as_ref().expect("customized");
+    let header = engine.metrics().acceleration.as_ref().expect("customized");
     let reference = reference.acceleration.expect("reference weights");
-    assert_eq!(customized.upward_weight, reference.upward_weight);
-    assert_eq!(customized.downward_weight, reference.downward_weight);
+    // The ranked hierarchy holds the only copy of the cost weights.
+    assert!(header.upward_weight.is_empty() && header.downward_weight.is_empty());
     // Service-area weights are customized on first use.
-    assert!(customized.time_upward_weight.is_empty());
+    assert!(header.time_upward_weight.is_empty());
     let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
     let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
+    assert_eq!(
+        acceleration.ranked.slot_weights(&acceleration.source),
+        (
+            reference.upward_weight.clone(),
+            reference.downward_weight.clone()
+        )
+    );
     let time = ServiceAreaMetricKind::TravelTimeS;
     let distance = ServiceAreaMetricKind::DistanceM;
     assert!(acceleration.has_metric_weights(time));
@@ -1276,6 +1336,25 @@ fn single_route_restricted_fallback_matches_the_exact_engine() {
         via_astar.summary.total_distance_m,
         via_dijkstra.summary.total_distance_m
     );
+}
+
+#[test]
+fn engines_with_restriction_sequences_customize_lower_bounds_in_the_background() {
+    let topology = multi_edge_restricted_topology();
+    let (bundle, compiled) = build_test_cch(&topology, &restricted_metrics());
+    let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(compiled), Some(bundle))
+        .expect("accelerated engine builds");
+    let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
+    let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while acceleration.lower_bounds.get().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "lower bounds were not customized in the background"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    assert!(crate::lower_bound_weights(graph).is_some());
 }
 
 #[test]
