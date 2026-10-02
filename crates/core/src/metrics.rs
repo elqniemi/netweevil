@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CacheBundleId, EdgeId, TemporalRuleSet, TravelMode};
+use crate::{CacheBundleId, TemporalRuleSet, TravelMode};
 
 /// Schema version of [`CompiledProfileBundle`]. Readers accept this value only.
 pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 8;
@@ -21,9 +21,10 @@ pub struct CompiledTurnCostConfig {
     pub destination_only_penalty_s: f64,
 }
 
+/// Metrics of one edge, at the edge's index in
+/// [`CompiledProfileBundle::edge_metrics`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompiledEdgeMetric {
-    pub edge_id: EdgeId,
     pub travel_time_s: Option<f64>,
     pub generalized_cost: Option<f64>,
 }
@@ -38,7 +39,8 @@ pub struct CompiledCostComponent {
     /// Contribution of this component to generalized cost.
     pub weight: f64,
     /// Per-edge values aligned with [`CompiledProfileBundle::edge_metrics`].
-    pub edge_values: Vec<f32>,
+    /// Shared, so profiles with equal columns can hold one copy.
+    pub edge_values: std::sync::Arc<[f32]>,
     /// Components based on `travel_time` scale with a temporal speed factor
     /// (but not with waiting before an edge opens).
     pub scales_with_travel_time: bool,

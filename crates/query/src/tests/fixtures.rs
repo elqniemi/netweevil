@@ -336,9 +336,7 @@ pub(crate) fn metrics(costs: &[f64]) -> CompiledProfileBundle {
         acceleration: None,
         edge_metrics: costs
             .iter()
-            .enumerate()
-            .map(|(index, &cost)| CompiledEdgeMetric {
-                edge_id: EdgeId(index as u32),
+            .map(|&cost| CompiledEdgeMetric {
                 travel_time_s: Some(cost),
                 generalized_cost: Some(cost),
             })
@@ -368,7 +366,7 @@ pub(crate) fn cost_component(name: &str, edge_values: &[f32]) -> CompiledCostCom
     CompiledCostComponent {
         name: name.to_string(),
         weight: 0.0,
-        edge_values: edge_values.to_vec(),
+        edge_values: edge_values.into(),
         scales_with_travel_time: false,
         overlay_name: None,
         invert_overlay: false,

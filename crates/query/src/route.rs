@@ -361,7 +361,6 @@ fn build_failure_mode_bundle(
                 flags: 0,
             });
             degraded_metrics.edge_metrics.push(CompiledEdgeMetric {
-                edge_id: metric.edge_id,
                 travel_time_s: metric.travel_time_s,
                 generalized_cost: metric.generalized_cost,
             });

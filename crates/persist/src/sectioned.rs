@@ -673,13 +673,9 @@ fn encode_compiled_profile(
             })
             .collect(),
     })?;
-    writer.write_u32s(
-        &bundle
-            .edge_metrics
-            .iter()
-            .map(|metric| metric.edge_id.0)
-            .collect::<Vec<_>>(),
-    )?;
+    // The edge-id column predates metrics being addressed by position; it
+    // now holds the positions, which readers only use for its length.
+    writer.write_u32s(&(0..bundle.edge_metrics.len() as u32).collect::<Vec<_>>())?;
     // Travel times and costs derive from a few speed classes and integer
     // lengths, so (time, cost) pairs repeat heavily.
     writer.write_interned(
@@ -706,6 +702,26 @@ fn encode_compiled_profile(
     writer.write_u32s(&rules.edge_rule_sets)
 }
 
+/// `values` as a shared component column: a live column with the same bits
+/// read earlier in this process (profiles on one dataset often repeat
+/// components, and some components repeat within a profile), or a new one.
+/// Entries are weak, so columns live only as long as their profiles.
+fn shared_component_column(values: Vec<f32>) -> std::sync::Arc<[f32]> {
+    use std::sync::{Arc, Mutex, PoisonError, Weak};
+    static COLUMNS: Mutex<Vec<Weak<[f32]>>> = Mutex::new(Vec::new());
+    let mut columns = COLUMNS.lock().unwrap_or_else(PoisonError::into_inner);
+    columns.retain(|column| column.strong_count() > 0);
+    let bits = bytemuck::cast_slice::<f32, u32>(&values);
+    if let Some(column) = columns.iter().filter_map(Weak::upgrade).find(|column| {
+        column.len() == values.len() && bytemuck::cast_slice::<f32, u32>(column) == bits
+    }) {
+        return column;
+    }
+    let column: Arc<[f32]> = values.into();
+    columns.push(Arc::downgrade(&column));
+    column
+}
+
 pub(crate) fn read_compiled_profile_sectioned(
     bytes: &[u8],
     path: &Path,
@@ -720,19 +736,15 @@ pub(crate) fn read_compiled_profile_sectioned(
         return Err(unsupported_format_error(path));
     }
 
-    let edge_ids = reader.read_u32s()?;
+    let edge_count = reader.read_u32s()?.len();
     let metrics: Vec<(Option<f64>, Option<f64>)> = reader.read_interned()?;
-    ensure_len("compiled edge metrics", metrics.len(), edge_ids.len())?;
-    let edge_metrics: Vec<CompiledEdgeMetric> = edge_ids
+    ensure_len("compiled edge metrics", metrics.len(), edge_count)?;
+    let edge_metrics: Vec<CompiledEdgeMetric> = metrics
         .into_iter()
-        .zip(metrics)
-        .map(
-            |(edge_id, (travel_time_s, generalized_cost))| CompiledEdgeMetric {
-                edge_id: EdgeId(edge_id),
-                travel_time_s,
-                generalized_cost,
-            },
-        )
+        .map(|(travel_time_s, generalized_cost)| CompiledEdgeMetric {
+            travel_time_s,
+            generalized_cost,
+        })
         .collect();
 
     let mut components = Vec::with_capacity(header.components.len());
@@ -746,7 +758,7 @@ pub(crate) fn read_compiled_profile_sectioned(
         components.push(CompiledCostComponent {
             name: component.name,
             weight: component.weight,
-            edge_values,
+            edge_values: shared_component_column(edge_values),
             scales_with_travel_time: component.scales_with_travel_time,
             overlay_name: component.overlay_name,
             invert_overlay: component.invert_overlay,

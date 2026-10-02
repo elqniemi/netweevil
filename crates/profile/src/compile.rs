@@ -2,6 +2,7 @@ use netweevil_core::{
     CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, add_cch_weights, encode_cch_weight,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
 use rayon::prelude::*;
@@ -149,10 +150,11 @@ where
         .iter()
         .map(|(name, weight, parsed)| ComponentWork {
             parsed: Some(parsed.clone()),
+            edge_values: Vec::with_capacity(edge_count),
             compiled: CompiledCostComponent {
                 name: name.clone(),
                 weight: *weight,
-                edge_values: Vec::with_capacity(edge_count),
+                edge_values: Arc::default(),
                 scales_with_travel_time: parsed.scales_with_travel_time(),
                 overlay_name: parsed.overlay_name.clone(),
                 invert_overlay: parsed.invert_overlay,
@@ -213,10 +215,9 @@ where
             || is_excluded(profile, &edge, edge_profile.highway, &attribute_matches)
         {
             for component in &mut components {
-                component.compiled.edge_values.push(0.0);
+                component.edge_values.push(0.0);
             }
             CompiledEdgeMetric {
-                edge_id: edge.edge_id,
                 travel_time_s: None,
                 generalized_cost: None,
             }
@@ -257,10 +258,11 @@ where
                 } else {
                     components.push(ComponentWork {
                         parsed: None,
+                        edge_values: vec![0.0; edge_index],
                         compiled: CompiledCostComponent {
                             name: name.clone(),
                             weight: 0.0,
-                            edge_values: vec![0.0; edge_index],
+                            edge_values: Arc::default(),
                             scales_with_travel_time: false,
                             overlay_name: None,
                             invert_overlay: false,
@@ -276,7 +278,7 @@ where
                 cost += profile.preferences.border_crossing_penalty_s;
             }
             for (component, value) in components.iter_mut().zip(values) {
-                component.compiled.edge_values.push(value as f32);
+                component.edge_values.push(value as f32);
                 let overlay_multiplier = component
                     .parsed
                     .as_ref()
@@ -308,16 +310,14 @@ where
                 });
             }
             CompiledEdgeMetric {
-                edge_id: edge.edge_id,
                 travel_time_s: Some(traversal.travel_time_s),
                 generalized_cost: Some(cost),
             }
         } else {
             for component in &mut components {
-                component.compiled.edge_values.push(0.0);
+                component.edge_values.push(0.0);
             }
             CompiledEdgeMetric {
-                edge_id: edge.edge_id,
                 travel_time_s: None,
                 generalized_cost: None,
             }
@@ -406,7 +406,10 @@ where
         turn_costs,
         components: components
             .into_iter()
-            .map(|component| component.compiled)
+            .map(|component| CompiledCostComponent {
+                edge_values: component.edge_values.into(),
+                ..component.compiled
+            })
             .collect(),
         temporal: CompiledTemporalProfile {
             allow_wait: profile.temporal.allow_wait,
@@ -506,6 +509,8 @@ impl TemporalRuleResolver {
 
 struct ComponentWork {
     parsed: Option<ParsedCostComponent>,
+    /// Per-edge values, moved into `compiled` once every edge is done.
+    edge_values: Vec<f32>,
     compiled: CompiledCostComponent,
 }
 
