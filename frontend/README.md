@@ -78,6 +78,26 @@ static host and set the API base in the header.
   time, cost per km, allowed). Pick a second profile to colour by the
   difference (speed delta, time ratio, allowed by one or both). Hover an
   edge for all values; it re-runs live as the map moves once zoomed in.
+- **Trip** (street group) orders map-clicked stops with `POST /v1/trip`.
+  Stops are lettered in click order; each can carry its own service time and
+  a time window (HH:MM on the trip clock, which starts at the Departure
+  time). Mode picks a roundtrip, a fixed start and/or end, or an open trip.
+  The result numbers the stops in visit order, shades the legs light to dark
+  along the trip, and the Summary lists arrivals, waits, lateness and the
+  optimizer's method, proof and costs.
+- **Live traffic** (street group) selects roads by clicking: each click is
+  resolved to the nearest OSM way with `/v1/locate`, then "Post live updates"
+  closes, slows or clears them through `POST /v1/traffic/live?wait=true`. The
+  panel shows `GET /v1/traffic` (historical set, current bucket, live
+  entries) and clears every live entry. Route, OD, matrix and service-area
+  tools show a one-line traffic status and a **Traffic** option (auto,
+  historical, exact time-dependent for routes, off) under Time; it applies
+  to requests with a departure time.
+- **Heights** (street group) samples the dataset's DEM with `POST /v1/height`
+  at clicked points, or along the line through them as a profile chart.
+  Route's Returns options add **Regions** (country/state spans, border
+  crossings, timezones) and an **Elevation profile**; hovering the chart
+  marks the position on the map.
 - Pick an analysis in the left rail. Route tools (route, directions,
   waypoints, OD pairs, transit route, scenario batch) share one list of
   start/end pairs: click the map to place A, then B; drag markers to move

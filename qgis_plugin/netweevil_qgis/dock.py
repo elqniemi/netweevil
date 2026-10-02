@@ -37,6 +37,7 @@ from .settings_io import SettingsIoMixin
 from .simulation_tab import SimulationTabMixin
 from .temporal_controls import TemporalControlsMixin
 from .transit_tab import TransitTabMixin
+from .trip_tab import TripTabMixin
 
 
 class NetweevilDock(
@@ -48,6 +49,7 @@ class NetweevilDock(
     TransitTabMixin,
     BatchTabMixin,
     ServiceAreaTabMixin,
+    TripTabMixin,
     RunsTabMixin,
     ResultsMixin,
     SimulationTabMixin,
@@ -107,6 +109,7 @@ class NetweevilDock(
             self._wrap_tab_scroll(self._build_service_area_tab()), "Service Area"
         )
         self.tabs.addTab(self._wrap_tab_scroll(self._build_batch_tab()), "OD / Matrix")
+        self.tabs.addTab(self._wrap_tab_scroll(self._build_trip_tab()), "Trip")
         self.tabs.addTab(
             self._wrap_tab_scroll(self._build_simulation_tab()), "Simulation"
         )

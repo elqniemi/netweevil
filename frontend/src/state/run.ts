@@ -5,6 +5,7 @@ import { TOOL_BY_ID, requestPath, fieldDefaults, type BuildContext, type ToolDef
 import { styleNetworkFeatures, type NetworkLegend } from "../geo/network";
 import type { NetworkEdgesMeta } from "../api/types";
 import { addTransitConnections } from "../geo/transitConnections";
+import { heightFeatures, tripFeatures } from "../geo/trip";
 import {
   completeRoutes,
   getForm,
@@ -127,7 +128,7 @@ async function execute(tool: ToolDef, body: unknown, format: ResponseFormat, opt
       features = extractFeatures(response.data);
       networkLegend = applyNetworkStyle(features, response.data);
     } else {
-      features = styleFeatures(addTransitConnections(extractFeatures(response.data), body), styleCtx);
+      features = styleFeatures(responseFeatures(tool.id, response.data, body), styleCtx);
     }
     if (features.features.length === 0) features = synthesizeFeatures(tool.id, response.data);
     response.timing.featureCount = features.features.length;
@@ -264,10 +265,17 @@ export function restyleResult() {
       networkLegend = applyNetworkStyle(features, run.response);
       return { ...run, features };
     }
-    const features = styleFeatures(addTransitConnections(extractFeatures(run.response), run.requestBody), { tool: result.tool, runIndex: run.colorIndex, runCount: result.runs.length, mapStyle });
+    const features = styleFeatures(responseFeatures(result.tool, run.response, run.requestBody), { tool: result.tool, runIndex: run.colorIndex, runCount: result.runs.length, mapStyle });
     return { ...run, features };
   });
   setState({ result: { ...result, runs, features: mergeRunFeatures(runs) } });
+}
+
+/** Unstyled map features of one response: the generic walk plus tool-specific additions. */
+export function responseFeatures(toolId: ToolId, data: unknown, body: unknown): FeatureCollection {
+  if (toolId === "height") return heightFeatures(body, data);
+  const features = addTransitConnections(extractFeatures(data), body);
+  return toolId === "trip" ? tripFeatures(features, body, data) : features;
 }
 
 function mergeRunFeatures(runs: RunRecord[]): FeatureCollection {

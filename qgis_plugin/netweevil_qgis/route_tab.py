@@ -127,8 +127,24 @@ class RouteTabMixin:
             "Explain cost derivation request flag"
         )
         self.route_explain_cost_derivation_check.setChecked(True)
+        self.route_admin_areas_check = QCheckBox(
+            "Countries/states, border crossings, and timezones"
+        )
+        self.route_admin_areas_check.setChecked(False)
+        self.route_admin_areas_check.setToolTip(
+            "Request returns.admin_areas: the route layer gains border-crossing "
+            "and timezone attributes, plus a 'regions' layer with one line per "
+            "country/state stretch. Needs a dataset imported with admin boundaries."
+        )
+        self.route_elevation_check = QCheckBox("Elevation profile, ascent, and descent")
+        self.route_elevation_check.setChecked(False)
+        self.route_elevation_check.setToolTip(
+            "Request returns.elevation: the route layer gains ascent/descent, "
+            "min/max elevation, and steepest grades, plus an 'elevation_profile' "
+            "table of distance/height samples."
+        )
         detail_note = QLabel(
-            "The plugin will load the route line, segment rows, hop segments, violations, and road/surface breakdown tables when the API returns them. "
+            "The plugin will load the route line, segment rows, hop segments, violations, road/surface breakdown, region, and elevation tables when the API returns them. "
             "Penalty and explain flags are exposed here, but the current API only reports penalty totals in the route summary."
         )
         detail_note.setWordWrap(True)
@@ -140,6 +156,8 @@ class RouteTabMixin:
         return_form.addRow("", self.route_surface_time_check)
         return_form.addRow("", self.route_penalty_breakdown_check)
         return_form.addRow("", self.route_explain_cost_derivation_check)
+        return_form.addRow("", self.route_admin_areas_check)
+        return_form.addRow("", self.route_elevation_check)
         return_form.addRow("", detail_note)
         layout.addWidget(self._make_toggle_section("Returned Route Detail", return_group))
         layout.addWidget(return_group)
@@ -285,6 +303,8 @@ class RouteTabMixin:
             ),
             "penalty_breakdown": self.route_penalty_breakdown_check.isChecked(),
             "explain_cost_derivation": self.route_explain_cost_derivation_check.isChecked(),
+            "admin_areas": self.route_admin_areas_check.isChecked(),
+            "elevation": self.route_elevation_check.isChecked(),
         }
 
     def build_route_request(self):

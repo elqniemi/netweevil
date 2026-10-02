@@ -24,3 +24,9 @@ class PickTarget:
     SERVICE_AREA_ORIGIN = "service_area_origin"
     TRANSIT_ORIGIN = "transit_origin"
     TRANSIT_DESTINATION = "transit_destination"
+    TRIP_STOP = "trip_stop"
+
+
+class TripStopSource:
+    LIST = "list"
+    LAYER = "layer"

@@ -12,10 +12,14 @@ from qgis.core import (
     QgsFillSymbol,
     QgsLineSymbol,
     QgsMarkerSymbol,
+    QgsPalLayerSettings,
     QgsPointXY,
     QgsProject,
     QgsRendererCategory,
+    QgsTextBufferSettings,
+    QgsTextFormat,
     QgsVectorLayer,
+    QgsVectorLayerSimpleLabeling,
     QgsWkbTypes,
 )
 
@@ -113,6 +117,10 @@ class ResultsMixin:
 
         if analysis_kind == "transit_route":
             self.load_transit_route_layers(response_json, layer_name)
+            return True
+
+        if analysis_kind == "trip":
+            self.load_trip_layers(response_json, layer_name)
             return True
 
         geojson = self.analysis_json_to_geojson(analysis_kind, response_json)
@@ -214,6 +222,7 @@ class ResultsMixin:
                 },
             }
         ]
+        features[0]["properties"].update(self.route_annotation_properties(result))
         for alternative in result.get("alternatives") or []:
             alt_summary = alternative.get("summary") or {}
             features.append(
@@ -250,6 +259,118 @@ class ResultsMixin:
             "type": "FeatureCollection",
             "features": features,
         }
+
+    def route_annotation_properties(self, result):
+        """Flat route attributes for returns.admin_areas / returns.elevation."""
+        properties = {}
+        regions = result.get("regions")
+        if isinstance(regions, dict):
+            spans = regions.get("spans") or []
+            properties["border_crossing_count"] = regions.get("border_crossing_count")
+            properties["timezones"] = ", ".join(
+                str(zone) for zone in regions.get("timezones") or []
+            )
+            properties["countries"] = ", ".join(
+                self.unique_in_order(
+                    span.get("country_code") or span.get("country_name")
+                    for span in spans
+                )
+            )
+            properties["states"] = ", ".join(
+                self.unique_in_order(
+                    span.get("state_code") or span.get("state_name") for span in spans
+                )
+            )
+            properties["region_span_count"] = len(spans)
+        elevation = result.get("elevation")
+        if isinstance(elevation, dict):
+            for key in [
+                "ascent_m",
+                "descent_m",
+                "min_elevation_m",
+                "max_elevation_m",
+                "max_uphill_grade",
+                "max_downhill_grade",
+                "vertical_datum",
+            ]:
+                properties[key] = elevation.get(key)
+        return properties
+
+    def unique_in_order(self, values):
+        seen = []
+        for value in values:
+            if value in [None, ""] or value in seen:
+                continue
+            seen.append(value)
+        return [str(value) for value in seen]
+
+    def route_region_feature_collection(self, service, result):
+        regions = result.get("regions")
+        spans = (regions.get("spans") or []) if isinstance(regions, dict) else []
+        if not spans:
+            return {"type": "FeatureCollection", "features": []}
+        span_geometries = self.split_route_geometry_by_distance(
+            result.get("geometry") or [],
+            [span.get("distance_m") or 0 for span in spans],
+        )
+        features = []
+        for index, span in enumerate(spans, start=1):
+            geometry = None
+            if index - 1 < len(span_geometries):
+                geometry = self.item_geometry(span_geometries[index - 1])
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": {
+                        "dataset_id": service.get("dataset_id"),
+                        "profile_id": service.get("profile_id"),
+                        "route_id": result.get("route_id"),
+                        "span_index": index,
+                        "country_code": span.get("country_code"),
+                        "country_name": span.get("country_name"),
+                        "state_code": span.get("state_code"),
+                        "state_name": span.get("state_name"),
+                        "driving_side": span.get("driving_side"),
+                        "start_distance_m": span.get("start_distance_m"),
+                        "distance_m": span.get("distance_m"),
+                    },
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
+
+    def route_elevation_feature_collection(self, service, result):
+        elevation = result.get("elevation")
+        points = (elevation.get("points") or []) if isinstance(elevation, dict) else []
+        # Skip the table when the dataset has no heights at all.
+        if not any(len(sample or []) > 1 and sample[1] is not None for sample in points):
+            return {"type": "FeatureCollection", "features": []}
+        # Profile samples are one per route vertex; only place them on the map
+        # when the returned geometry has exactly those vertices.
+        coordinates = result.get("geometry") or []
+        on_vertices = len(coordinates) == len(points)
+        features = []
+        for index, sample in enumerate(points):
+            sample = sample or []
+            distance_m = sample[0] if len(sample) > 0 else None
+            elevation_m = sample[1] if len(sample) > 1 else None
+            geometry = None
+            if on_vertices:
+                geometry = {"type": "Point", "coordinates": list(coordinates[index])}
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": {
+                        "route_id": result.get("route_id"),
+                        "sample_index": index,
+                        "distance_m": distance_m,
+                        "elevation_m": elevation_m,
+                        "vertical_datum": elevation.get("vertical_datum"),
+                    },
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
 
     def route_distance_area(self):
         distance = QgsDistanceArea()
@@ -806,6 +927,20 @@ class ResultsMixin:
                 None,
                 None,
             ),
+            (
+                "regions",
+                self.route_region_feature_collection(service, result),
+                "#862e9c",
+                1.0,
+                "dash",
+            ),
+            (
+                "elevation_profile",
+                self.route_elevation_feature_collection(service, result),
+                None,
+                None,
+                None,
+            ),
         ]
 
         loaded_layers = []
@@ -1025,6 +1160,7 @@ class ResultsMixin:
                     "skipped_origin_count": result.get("skipped_origin_count"),
                     "fallback_origin_count": result.get("fallback_origin_count"),
                     "threshold_count": result.get("threshold_count"),
+                    "direction": result.get("direction"),
                     "departure_time": result.get("departure_time"),
                     "scenario_id": result.get("scenario_id"),
                     "warnings": result.get("warnings") or [],
@@ -1331,6 +1467,11 @@ class ResultsMixin:
                     ),
                     MSG_WARNING,
                 )
+            self.log_route_annotations(result)
+            return
+
+        if analysis_kind == "trip":
+            self.log_trip_summary(result)
             return
 
         if analysis_kind == "service_area":
@@ -1403,6 +1544,333 @@ class ResultsMixin:
                             ),
                             MSG_WARNING,
                         )
+
+    def log_route_annotations(self, result):
+        properties = self.route_annotation_properties(result)
+        if "border_crossing_count" in properties:
+            self.log(
+                "route regions: countries={} states={} border_crossings={} timezones={}.".format(
+                    properties.get("countries") or "none",
+                    properties.get("states") or "none",
+                    properties.get("border_crossing_count"),
+                    properties.get("timezones") or "none",
+                )
+            )
+        if "ascent_m" in properties:
+            self.log(
+                "route elevation: ascent_m={} descent_m={} min_m={} max_m={} "
+                "max_uphill_grade={} max_downhill_grade={}{}.".format(
+                    self.format_number(properties.get("ascent_m")),
+                    self.format_number(properties.get("descent_m")),
+                    self.format_number(properties.get("min_elevation_m")),
+                    self.format_number(properties.get("max_elevation_m")),
+                    self.format_number(properties.get("max_uphill_grade"), 3),
+                    self.format_number(properties.get("max_downhill_grade"), 3),
+                    " datum={}".format(properties["vertical_datum"])
+                    if properties.get("vertical_datum")
+                    else (
+                        " (no heights in this dataset)"
+                        if properties.get("min_elevation_m") is None
+                        and properties.get("max_elevation_m") is None
+                        else ""
+                    ),
+                )
+            )
+
+    def format_number(self, value, digits=1):
+        if value is None:
+            return "n/a"
+        try:
+            return "{:.{}f}".format(float(value), digits)
+        except (TypeError, ValueError):
+            return str(value)
+
+    def format_clock_s(self, seconds):
+        """Seconds on the caller's clock as H:MM:SS (hours may pass 24)."""
+        if seconds is None:
+            return None
+        try:
+            total = int(round(float(seconds)))
+        except (TypeError, ValueError):
+            return None
+        sign = "-" if total < 0 else ""
+        total = abs(total)
+        return "{}{}:{:02d}:{:02d}".format(
+            sign, total // 3600, (total % 3600) // 60, total % 60
+        )
+
+    def log_trip_summary(self, result):
+        optimization = result.get("optimization") or {}
+        self.log(
+            "trip {} mode={} visits={} legs={} distance_m={} travel_time_s={} "
+            "service_s={} wait_s={} start={} end={}.".format(
+                result.get("trip_id", ""),
+                result.get("mode", "unknown"),
+                len(result.get("visits") or []),
+                len(result.get("legs") or []),
+                result.get("total_distance_m"),
+                self.format_number(result.get("total_travel_time_s")),
+                self.format_number(result.get("total_service_s")),
+                self.format_number(result.get("total_wait_s")),
+                self.format_clock_s(result.get("start_s")),
+                self.format_clock_s(result.get("end_s")),
+            )
+        )
+        self.log(
+            "trip visit order (request stop indexes): {}".format(
+                " -> ".join(str(index) for index in result.get("stop_order") or [])
+            )
+        )
+        if result.get("time_windows_met", True):
+            self.log("trip time windows met.")
+        else:
+            self.log(
+                "trip time windows NOT met: total_lateness_s={} late_stops={}.".format(
+                    self.format_number(result.get("total_lateness_s")),
+                    result.get("late_stops") or [],
+                ),
+                MSG_WARNING,
+            )
+        input_cost = optimization.get("input_order_cost")
+        cost = optimization.get("cost")
+        saving = ""
+        try:
+            if input_cost and cost is not None and float(input_cost) > 0:
+                saving = " ({:.1f}% below request order)".format(
+                    100.0 * (float(input_cost) - float(cost)) / float(input_cost)
+                )
+        except (TypeError, ValueError):
+            saving = ""
+        self.log(
+            "trip optimization: method={} proven_optimal={} proven_infeasible={} "
+            "seed={} iterations={} cost={} input_order_cost={} construction_cost={}{}.".format(
+                optimization.get("method", "unknown"),
+                optimization.get("proven_optimal"),
+                optimization.get("proven_infeasible"),
+                optimization.get("seed"),
+                optimization.get("iterations"),
+                self.format_number(cost),
+                self.format_number(input_cost),
+                self.format_number(optimization.get("construction_cost")),
+                saving,
+            )
+        )
+        self.log(
+            "trip timings: matrix_ms={} solve_ms={} legs_ms={}.".format(
+                self.format_number(optimization.get("matrix_ms")),
+                self.format_number(optimization.get("solve_ms")),
+                self.format_number(optimization.get("legs_ms")),
+            )
+        )
+        for leg_index, leg in enumerate(result.get("legs") or []):
+            for warning in leg.get("warnings") or []:
+                self.log("trip leg {} warning: {}".format(leg_index, warning), MSG_WARNING)
+
+    def trip_leg_feature_collection(self, service, result):
+        stop_order = result.get("stop_order") or []
+        visits = result.get("visits") or []
+        features = []
+        for leg_index, leg in enumerate(result.get("legs") or []):
+            summary = leg.get("summary") or {}
+            from_visit = visits[leg_index] if leg_index < len(visits) else {}
+            to_visit = visits[leg_index + 1] if leg_index + 1 < len(visits) else {}
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": self.item_geometry(leg.get("geometry")),
+                    "properties": {
+                        "dataset_id": service.get("dataset_id"),
+                        "profile_id": service.get("profile_id"),
+                        "trip_id": result.get("trip_id"),
+                        "leg_index": leg_index,
+                        "from_stop_index": stop_order[leg_index]
+                        if leg_index < len(stop_order)
+                        else None,
+                        "to_stop_index": stop_order[leg_index + 1]
+                        if leg_index + 1 < len(stop_order)
+                        else None,
+                        "from_point_id": from_visit.get("point_id")
+                        or (leg.get("origin") or {}).get("point_id"),
+                        "to_point_id": to_visit.get("point_id")
+                        or (leg.get("destination") or {}).get("point_id"),
+                        "distance_m": summary.get("total_distance_m"),
+                        "travel_time_s": summary.get("total_travel_time_s"),
+                        "generalized_cost": summary.get("total_generalized_cost"),
+                        "depart_s": from_visit.get("departure_s"),
+                        "arrive_s": to_visit.get("arrival_s"),
+                        "depart_clock": self.format_clock_s(from_visit.get("departure_s")),
+                        "arrive_clock": self.format_clock_s(to_visit.get("arrival_s")),
+                        "outcome": leg.get("outcome"),
+                        "fallback_used": leg.get("fallback_used"),
+                    },
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
+
+    def trip_visit_position(self, result, visit_index):
+        """Snapped stop position: leg k starts at visit k; the last visit ends the last leg."""
+        legs = result.get("legs") or []
+        point = None
+        if visit_index < len(legs):
+            point = legs[visit_index].get("origin")
+        elif legs:
+            point = legs[-1].get("destination")
+        if not point:
+            return None
+        lon = point.get("snapped_lon", point.get("requested_lon"))
+        lat = point.get("snapped_lat", point.get("requested_lat"))
+        if lon is None or lat is None:
+            return None
+        return [lon, lat]
+
+    def trip_visit_feature_collection(self, service, result):
+        late_stops = set(result.get("late_stops") or [])
+        features = []
+        for visit_index, visit in enumerate(result.get("visits") or []):
+            position = self.trip_visit_position(result, visit_index)
+            lateness_s = visit.get("lateness_s") or 0.0
+            late = visit.get("stop_index") in late_stops or lateness_s > 1.0e-6
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {"type": "Point", "coordinates": position}
+                    if position is not None
+                    else None,
+                    "properties": {
+                        "dataset_id": service.get("dataset_id"),
+                        "profile_id": service.get("profile_id"),
+                        "trip_id": result.get("trip_id"),
+                        "visit_index": visit_index,
+                        "stop_index": visit.get("stop_index"),
+                        "point_id": visit.get("point_id"),
+                        "arrival_s": visit.get("arrival_s"),
+                        "wait_s": visit.get("wait_s"),
+                        "service_start_s": visit.get("service_start_s"),
+                        "service_s": visit.get("service_s"),
+                        "departure_s": visit.get("departure_s"),
+                        "lateness_s": lateness_s,
+                        "arrival_clock": self.format_clock_s(visit.get("arrival_s")),
+                        "departure_clock": self.format_clock_s(visit.get("departure_s")),
+                        "status": "late" if late else "on_time",
+                        "label": "{}: {}".format(visit_index, visit.get("point_id", "")),
+                    },
+                }
+            )
+        return {"type": "FeatureCollection", "features": features}
+
+    def trip_summary_feature_collection(self, service, result):
+        optimization = result.get("optimization") or {}
+        properties = {
+            "dataset_id": service.get("dataset_id"),
+            "profile_id": service.get("profile_id"),
+            "trip_id": result.get("trip_id"),
+            "mode": result.get("mode"),
+            "stop_order": " ".join(str(index) for index in result.get("stop_order") or []),
+            "total_distance_m": result.get("total_distance_m"),
+            "total_travel_time_s": result.get("total_travel_time_s"),
+            "total_generalized_cost": result.get("total_generalized_cost"),
+            "total_service_s": result.get("total_service_s"),
+            "total_wait_s": result.get("total_wait_s"),
+            "start_s": result.get("start_s"),
+            "end_s": result.get("end_s"),
+            "start_clock": self.format_clock_s(result.get("start_s")),
+            "end_clock": self.format_clock_s(result.get("end_s")),
+            "time_windows_met": result.get("time_windows_met"),
+            "total_lateness_s": result.get("total_lateness_s"),
+            "late_stops": " ".join(str(index) for index in result.get("late_stops") or []),
+        }
+        for key in [
+            "method",
+            "proven_optimal",
+            "proven_infeasible",
+            "seed",
+            "iterations",
+            "input_order_cost",
+            "construction_cost",
+            "cost",
+            "matrix_ms",
+            "solve_ms",
+            "legs_ms",
+        ]:
+            properties["opt_{}".format(key)] = optimization.get(key)
+        return {
+            "type": "FeatureCollection",
+            "features": [{"type": "Feature", "geometry": None, "properties": properties}],
+        }
+
+    def apply_trip_visit_style(self, layer):
+        if QgsWkbTypes.geometryType(layer.wkbType()) != GEOM_POINT:
+            return
+        categories = []
+        for status, fill in [("on_time", "#1971c2"), ("late", "#c92a2a")]:
+            symbol = QgsMarkerSymbol.createSimple(
+                {
+                    "name": "circle",
+                    "color": fill,
+                    "outline_color": "#ffffff",
+                    "outline_width": "0.5",
+                    "size": "3.6",
+                }
+            )
+            categories.append(QgsRendererCategory(status, symbol, status))
+        layer.setRenderer(QgsCategorizedSymbolRenderer("status", categories))
+        try:
+            settings = QgsPalLayerSettings()
+            settings.fieldName = "label"
+            settings.enabled = True
+            text_format = QgsTextFormat()
+            text_format.setSize(9)
+            buffer = QgsTextBufferSettings()
+            buffer.setEnabled(True)
+            buffer.setSize(1.0)
+            text_format.setBuffer(buffer)
+            settings.setFormat(text_format)
+            layer.setLabeling(QgsVectorLayerSimpleLabeling(settings))
+            layer.setLabelsEnabled(True)
+        except Exception as exc:
+            self.log("Trip stop labels could not be configured: {}".format(exc), MSG_WARNING)
+        layer.triggerRepaint()
+
+    def load_trip_layers(self, response_json, layer_name):
+        service = response_json.get("service") or {}
+        result = response_json.get("result") or {}
+        trip_id = result.get("trip_id") or layer_name or "netweevil_trip"
+        group = self.create_result_group(trip_id)
+
+        layer_specs = [
+            ("visits", self.trip_visit_feature_collection(service, result)),
+            ("legs", self.trip_leg_feature_collection(service, result)),
+            ("trip_summary", self.trip_summary_feature_collection(service, result)),
+        ]
+        loaded_layers = []
+        for sublayer_name, geojson in layer_specs:
+            features = geojson.get("features") or []
+            if not features:
+                continue
+            temp_path = self.write_temp_geojson(
+                "{}_{}".format(trip_id, sublayer_name), geojson
+            )
+            layer = QgsVectorLayer(str(temp_path), sublayer_name, "ogr")
+            if not layer.isValid():
+                self.log("Failed to load layer {}".format(temp_path), MSG_WARNING)
+                continue
+            if sublayer_name == "legs":
+                self.apply_route_line_style(layer, "#5f3dc4", 1.2, "solid")
+            elif sublayer_name == "visits":
+                self.apply_trip_visit_style(layer)
+            QgsProject.instance().addMapLayer(layer, False)
+            group.addLayer(layer)
+            loaded_layers.append(layer)
+            self.log(
+                "Loaded trip layer '{}' with {} feature(s).".format(
+                    sublayer_name, len(features)
+                )
+            )
+
+        if loaded_layers:
+            self.set_last_output_layers(loaded_layers)
+        else:
+            self.log("Trip response had no loadable layers.", MSG_WARNING)
 
     def log_geojson_messages(self, analysis_kind, geojson):
         metadata = geojson.get("metadata") or {}
