@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use super::fixtures::*;
 use crate::*;
 
@@ -32,13 +30,8 @@ fn network(features: &[ServiceAreaFeature]) -> &serde_json::Value {
 
 #[test]
 fn seeded_isochrone_spends_elapsed_time_and_clips_the_last_edge() {
-    let topology = Arc::new(service_area_linear_topology());
-    let engine = PreparedRoutingEngine::new(
-        topology.clone(),
-        Arc::new(service_area_linear_metrics()),
-        None,
-    )
-    .unwrap();
+    let topology = service_area_linear_topology();
+    let engine = exact_engine(topology.clone(), service_area_linear_metrics());
     let seeds = [node_seed(&topology, 0, 50.0)];
     let features = engine
         .execute_seeded_service_area("origin", &seeds, 65.0, false, &Default::default())
@@ -75,13 +68,8 @@ fn seeded_isochrone_spends_elapsed_time_and_clips_the_last_edge() {
 
 #[test]
 fn seeded_isochrone_preserves_disjoint_mid_edge_starts() {
-    let topology = Arc::new(service_area_linear_topology());
-    let engine = PreparedRoutingEngine::new(
-        topology.clone(),
-        Arc::new(service_area_linear_metrics()),
-        None,
-    )
-    .unwrap();
+    let topology = service_area_linear_topology();
+    let engine = exact_engine(topology.clone(), service_area_linear_metrics());
     let mut partial = node_seed(&topology, 1, 14.0);
     partial.point.snapped_edge_id = Some(1);
     partial.point.snapped_edge_fraction = Some(0.8);
@@ -102,13 +90,8 @@ fn seeded_isochrone_preserves_disjoint_mid_edge_starts() {
 
 #[test]
 fn seeded_isochrone_arrive_by_follows_incoming_streets() {
-    let topology = Arc::new(service_area_linear_topology());
-    let engine = PreparedRoutingEngine::new(
-        topology.clone(),
-        Arc::new(service_area_linear_metrics()),
-        None,
-    )
-    .unwrap();
+    let topology = service_area_linear_topology();
+    let engine = exact_engine(topology.clone(), service_area_linear_metrics());
     let seeds = [node_seed(&topology, 2, 4.0)];
     assert!(
         engine
@@ -126,13 +109,11 @@ fn seeded_isochrone_arrive_by_follows_incoming_streets() {
 
 #[test]
 fn seeded_isochrone_obeys_multi_edge_turn_restrictions_in_both_directions() {
-    let topology = Arc::new(multi_edge_restricted_topology());
+    let topology = multi_edge_restricted_topology();
     let mut metrics = restricted_metrics();
-    for metric in &mut metrics.edge_metrics[3..] {
-        metric.travel_time_s = Some(100.0);
-        metric.generalized_cost = Some(100.0);
-    }
-    let engine = PreparedRoutingEngine::new(topology.clone(), Arc::new(metrics), None).unwrap();
+    set_edge_cost(&mut metrics, 3, Some(100.0));
+    set_edge_cost(&mut metrics, 4, Some(100.0));
+    let engine = exact_engine(topology.clone(), metrics);
     for (node, reverse, excluded_edge) in [(0, false, 2), (3, true, 0)] {
         let features = engine
             .execute_seeded_service_area(

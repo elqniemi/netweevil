@@ -1,22 +1,18 @@
 use std::collections::BTreeMap;
-use std::sync::Arc;
 
-use netweevil_core::{CompiledEdgeMetric, EdgeId, NodeId, TopologyEdgeLayers, TopologyNode};
-
-use super::fixtures::{test_metrics, test_topology, with_edge_based_topology};
+use super::fixtures::{
+    edge, exact_engine, full_geometry, metrics, route_request, set_edge_cost, test_metrics,
+    test_topology, topology,
+};
 use crate::*;
 
+/// Two stacked two-way streets along lat 53: nodes 0-2 at ground level and
+/// nodes 3-5 directly above them at 20 m. With `one_way`, the odd (westbound)
+/// edges are not traversable.
 fn engine(one_way: bool) -> PreparedRoutingEngine {
-    let mut topology = test_topology();
-    topology.nodes = (0..6)
-        .map(|index| TopologyNode {
-            node_id: NodeId(index),
-            lon: 6.0 + f64::from(index % 3) * 0.001,
-            lat: 53.0,
-            z: if index < 3 { 0.0 } else { 20.0 },
-        })
-        .collect();
-    let template = topology.edge(0);
+    let nodes = (0..6)
+        .map(|index| (6.0 + f64::from(index % 3) * 0.001, 53.0))
+        .collect::<Vec<_>>();
     let edges = [
         (0, 1),
         (1, 0),
@@ -29,28 +25,20 @@ fn engine(one_way: bool) -> PreparedRoutingEngine {
     ]
     .into_iter()
     .enumerate()
-    .map(|(index, (from, to))| {
-        let mut edge = template;
-        edge.edge_id = EdgeId(index as u32);
-        edge.from = NodeId(from);
-        edge.to = NodeId(to);
-        edge.source_way_id = index as i64 / 2;
-        edge
-    })
+    .map(|(index, (from, to))| edge(index as u32, from, to, index as i64 / 2, 100))
     .collect::<Vec<_>>();
-    topology.edge_layers = TopologyEdgeLayers::from_directed_edges(&edges);
+    let mut topology = topology("test", &nodes, &edges);
+    for node in &mut topology.nodes[3..] {
+        node.z = 20.0;
+    }
     topology.spatial_index = None;
-    topology = with_edge_based_topology(topology);
-    let mut metrics = test_metrics();
-    metrics.edge_metrics = edges
-        .iter()
-        .map(|edge| CompiledEdgeMetric {
-            edge_id: edge.edge_id,
-            travel_time_s: (!(one_way && edge.edge_id.0 % 2 == 1)).then_some(10.0),
-            generalized_cost: (!(one_way && edge.edge_id.0 % 2 == 1)).then_some(10.0),
-        })
-        .collect();
-    PreparedRoutingEngine::new(Arc::new(topology), Arc::new(metrics), None).unwrap()
+    let mut metrics = metrics(&[10.0; 8]);
+    if one_way {
+        for westbound in (1..8).step_by(2) {
+            set_edge_cost(&mut metrics, westbound, None);
+        }
+    }
+    exact_engine(topology, metrics)
 }
 
 fn point(id: &str, lon: f64, lat: f64) -> LabeledPoint {
@@ -173,8 +161,7 @@ fn snap_constraint_angles_validate_and_wrap_at_true_north() {
         node.lat = 53.0 + index as f64 * 0.001;
     }
     topology.spatial_index = None;
-    let engine =
-        PreparedRoutingEngine::new(Arc::new(topology), Arc::new(test_metrics()), None).unwrap();
+    let engine = exact_engine(topology, test_metrics());
     let point = point("p", 6.0, 53.0005);
     for degrees in [0.0, 360.0, 359.5, 0.5] {
         assert!(
@@ -212,14 +199,28 @@ fn snap_constraint_angles_validate_and_wrap_at_true_north() {
 
 fn point_set(points: Vec<LabeledPoint>, snap: SnapOptions) -> PointSetDocument {
     PointSetDocument {
-        points,
         snap,
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: Default::default(),
-        alternatives: Default::default(),
+        ..super::fixtures::point_set(points)
+    }
+}
+
+fn waypoint_request(
+    route_id: &str,
+    waypoints: Vec<Waypoint>,
+    snap: SnapOptions,
+) -> WaypointRequest {
+    WaypointRequest {
+        route_id: route_id.into(),
+        waypoints,
+        snap,
+        returns: full_geometry(),
+        optimize_order: false,
         temporal: Default::default(),
     }
+}
+
+fn stop(point: LabeledPoint, kind: WaypointKind) -> Waypoint {
+    Waypoint { point, kind }
 }
 
 #[test]
@@ -273,30 +274,15 @@ fn waypoint_node_constraints_preserve_arrival_departure_and_through_continuity()
     let mut snap = options("a", bearing(90.0));
     snap.point_constraints.insert("mid".into(), bearing(90.0));
     snap.point_constraints.insert("end".into(), bearing(90.0));
-    let mut request = WaypointRequest {
-        route_id: "directed".into(),
-        waypoints: vec![
-            Waypoint {
-                point: point("a", 6.0, 53.0),
-                kind: WaypointKind::Break,
-            },
-            Waypoint {
-                point: point("mid", 6.001, 53.0),
-                kind: WaypointKind::Through,
-            },
-            Waypoint {
-                point: point("end", 6.002, 53.0),
-                kind: WaypointKind::Break,
-            },
+    let mut request = waypoint_request(
+        "directed",
+        vec![
+            stop(point("a", 6.0, 53.0), WaypointKind::Break),
+            stop(point("mid", 6.001, 53.0), WaypointKind::Through),
+            stop(point("end", 6.002, 53.0), WaypointKind::Break),
         ],
         snap,
-        returns: netweevil_profile::ReturnConfig {
-            geometry: netweevil_profile::ReturnGeometry::Full,
-            ..Default::default()
-        },
-        optimize_order: false,
-        temporal: Default::default(),
-    };
+    );
     let through = engine.execute_waypoints(&request).unwrap();
     assert_eq!(through.legs[0].edge_path, vec![0, 2]);
     request.waypoints[1].kind = WaypointKind::Break;
@@ -334,18 +320,13 @@ fn route_bearing_constraints_apply_to_both_arrival_and_departure() {
     let mut snap = options("start", bearing(90.0));
     snap.point_constraints.insert("end".into(), bearing(90.0));
     let mut request = RouteRequest {
-        route_id: "bearing-route".into(),
-        origin: point("start", 6.0, 53.0),
-        destination: point("end", 6.002, 53.0),
         snap,
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: netweevil_profile::ReturnConfig {
-            geometry: netweevil_profile::ReturnGeometry::Full,
-            ..Default::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
+        returns: full_geometry(),
+        ..route_request(
+            "bearing-route",
+            point("start", 6.0, 53.0),
+            point("end", 6.002, 53.0),
+        )
     };
     let route = engine.execute_route(&request).unwrap();
     assert_eq!(route.edge_path, vec![0, 2]);
@@ -378,28 +359,19 @@ fn coincident_waypoints_cannot_use_departure_as_arrival_or_skip_opposite_heading
     for id in ["first", "second", "end"] {
         snap.point_constraints.insert(id.into(), bearing(90.0));
     }
-    let mut request = WaypointRequest {
-        route_id: "coincident-breaks".into(),
-        waypoints: [
+    let mut request = waypoint_request(
+        "coincident-breaks",
+        [
             ("start", 6.0),
             ("first", 6.001),
             ("second", 6.001),
             ("end", 6.002),
         ]
         .into_iter()
-        .map(|(id, lon)| Waypoint {
-            point: point(id, lon, 53.0),
-            kind: WaypointKind::Break,
-        })
+        .map(|(id, lon)| stop(point(id, lon, 53.0), WaypointKind::Break))
         .collect(),
         snap,
-        returns: netweevil_profile::ReturnConfig {
-            geometry: netweevil_profile::ReturnGeometry::Full,
-            ..Default::default()
-        },
-        optimize_order: false,
-        temporal: Default::default(),
-    };
+    );
     let matching_headings = engine.execute_waypoints(&request).unwrap();
     // At a node the intermediate break offers incoming and outgoing edge
     // candidates. Its outgoing fraction0 must never finish the preceding leg.
@@ -426,10 +398,7 @@ fn coincident_waypoints_cannot_use_departure_as_arrival_or_skip_opposite_heading
 
     request.waypoints = ["first", "second"]
         .into_iter()
-        .map(|id| Waypoint {
-            point: point(id, 6.0005, 53.0),
-            kind: WaypointKind::Break,
-        })
+        .map(|id| stop(point(id, 6.0005, 53.0), WaypointKind::Break))
         .collect();
     request
         .snap
