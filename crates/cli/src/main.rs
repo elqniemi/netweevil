@@ -28,7 +28,7 @@ use crate::analyze::{
     analyze_service_area_sequence, analyze_transit_batch, analyze_transit_route,
 };
 use crate::api::{ApiCommand, BootstrapArgs, api_serve, bootstrap};
-use crate::bench::{BenchCommand, bench_compare, bench_corpus, bench_http, bench_run};
+use crate::bench::{BenchCommand, bench_compare, bench_corpus, bench_http, bench_run, bench_trip};
 use crate::cache::{CacheCommand, cache_list, cache_prune};
 use crate::dataset::{DatasetCommand, dataset_audit, dataset_import, dataset_list};
 use crate::experiment::{ExperimentCommand, experiment_run};
@@ -109,6 +109,7 @@ fn main() -> Result<()> {
             BenchCommand::Run(args) => bench_run(&paths, args),
             BenchCommand::Http(args) => bench_http(args),
             BenchCommand::Compare(args) => bench_compare(args),
+            BenchCommand::Trip(args) => bench_trip(&paths, args),
         },
         Command::Api { command: api } => match api {
             ApiCommand::Serve(args) => api_serve(paths, args),
