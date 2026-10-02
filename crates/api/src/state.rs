@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock, RwLock};
 
 use anyhow::{Context, Result, bail};
-use netweevil_core::{CacheBundleId, DatasetAccelerationBundle, DatasetId, TopologyBundle};
+use netweevil_core::{
+    CacheBundleId, DatasetAccelerationBundle, DatasetId, EdgeNameBundle, TopologyBundle,
+};
 use netweevil_manifest::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
 use netweevil_persist::{
     WorkspaceConfig, WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
@@ -111,7 +113,7 @@ pub(crate) struct ServiceRuntime {
     pub(crate) active: WorkspaceConfig,
     pub(crate) dataset_manifest: DatasetManifest,
     pub(crate) topology: Arc<TopologyBundle>,
-    pub(crate) edge_names: OnceLock<Arc<[String]>>,
+    pub(crate) edge_names: OnceLock<Arc<EdgeNameBundle>>,
     pub(crate) routing_workers: Arc<Semaphore>,
     pub(crate) default_profile_id: String,
     pub(crate) profiles: BTreeMap<String, LoadedProfile>,
@@ -192,6 +194,8 @@ pub(crate) struct ServiceCapabilities {
     breakdown_metrics: Vec<&'static str>,
     connectivity_policies: Vec<&'static str>,
     failure_modes: Vec<&'static str>,
+    /// Languages with directions phrase tables, as BCP 47 tags.
+    directions_languages: Vec<&'static str>,
 }
 
 fn service_capabilities() -> ServiceCapabilities {
@@ -229,6 +233,10 @@ fn service_capabilities() -> ServiceCapabilities {
             "ignore_turn_restrictions",
             "allow_uturn_where_normally_forbidden",
         ],
+        directions_languages: netweevil_query::guidance_languages()
+            .into_iter()
+            .map(|(tag, _)| tag)
+            .collect(),
     }
 }
 
@@ -594,7 +602,9 @@ where
         .map_err(|_| anyhow::anyhow!("routing worker panicked"))?
 }
 
-pub(crate) fn load_edge_names(service: &ServiceRuntime) -> Result<Arc<[String]>, ApiError> {
+/// Street names, route numbers, lanes and signposts of the loaded dataset,
+/// read on first use.
+pub(crate) fn load_edge_names(service: &ServiceRuntime) -> Result<Arc<EdgeNameBundle>, ApiError> {
     if let Some(edge_names) = service.edge_names.get() {
         return Ok(edge_names.clone());
     }
@@ -613,7 +623,15 @@ pub(crate) fn load_edge_names(service: &ServiceRuntime) -> Result<Arc<[String]>,
                 bundle_ref.path
             ))
         })?;
-        Arc::<[String]>::from(bundle.names)
+        if !bundle.edge_guidance.is_empty()
+            && bundle.edge_guidance.len() != service.topology.edge_count()
+        {
+            return Err(ApiError::internal(format!(
+                "edge-name bundle {} does not match the loaded topology; re-import the dataset",
+                bundle_ref.path
+            )));
+        }
+        Arc::new(bundle)
     };
 
     let _ = service.edge_names.set(loaded.clone());

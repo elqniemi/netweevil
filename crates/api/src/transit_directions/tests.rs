@@ -1,12 +1,7 @@
 use super::*;
 
-#[test]
-fn source_locations_preserve_known_elevation_without_inventing_a_floor() {
-    assert_eq!(
-        source_location(114.1, 22.3, Some(-30.93)),
-        json!([114.1, 22.3, -30.93])
-    );
-    assert_eq!(source_location(114.1, 22.3, None), json!([114.1, 22.3]));
+fn english() -> Phrasebook {
+    Phrasebook::for_language(None).0
 }
 
 fn two_ride_journey() -> TransitRouteResult {
@@ -39,7 +34,7 @@ fn orders_two_rides_station_transfer_and_source_walking_instructions() {
         json!({"kind":"stairs","instruction":"Take the stairs up.","source":"network_facility_attribute"}),
         json!({"kind":"lift","instruction":"Take the lift up.","source":"network_facility_attribute"}),
     ];
-    let steps = build_directions(&result, &stops, &walking).unwrap();
+    let steps = build_directions(&result, &stops, &walking, english()).unwrap();
     assert_eq!(
         steps
             .iter()
@@ -72,7 +67,7 @@ fn unreachable_journey_has_no_instructions_and_filtered_legs_are_not_invented() 
     let mut result = two_ride_journey();
     result.outcome = TransitOutcome::Unreachable;
     assert!(
-        build_directions(&result, &BTreeMap::new(), &[])
+        build_directions(&result, &BTreeMap::new(), &[], english())
             .unwrap()
             .is_empty()
     );
@@ -80,11 +75,29 @@ fn unreachable_journey_has_no_instructions_and_filtered_legs_are_not_invented() 
     result
         .legs
         .retain(|leg| leg.mode != Some(netweevil_transit::TransitMode::Tram));
-    let steps = build_directions(&result, &BTreeMap::new(), &[]).unwrap();
+    let steps = build_directions(&result, &BTreeMap::new(), &[], english()).unwrap();
     assert_eq!(steps.iter().filter(|step| step.kind == "board").count(), 1);
     assert!(
         steps
             .iter()
             .all(|step| step.route_id.as_deref() != Some("R2"))
     );
+}
+
+#[test]
+fn journey_steps_follow_the_requested_language() {
+    let result = two_ride_journey();
+    let (dutch, warning) = Phrasebook::for_language(Some("nl"));
+    assert_eq!(warning, None);
+    let steps = build_directions(&result, &BTreeMap::new(), &[], dutch).unwrap();
+    let instructions = steps
+        .iter()
+        .map(|step| step.instruction.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(instructions[0], "Loop van Origin naar Platform 1.");
+    assert_eq!(
+        instructions[2],
+        "Stap in Island richting Harbour bij Platform 1."
+    );
+    assert_eq!(instructions[4], "Stap uit bij Platform 2.");
 }

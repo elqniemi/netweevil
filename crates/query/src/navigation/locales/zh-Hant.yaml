@@ -1,0 +1,101 @@
+# Traditional Chinese guidance phrases using Hong Kong road and transit
+# vocabulary (迴旋處, 升降機, 扶手電梯, 米). Chinese has no plural forms;
+# sentences end with a full-width full stop. See en.yaml for the format.
+locale: zh-Hant
+name: 繁體中文（香港）
+aliases: [zh-HK, zh-Hant-HK, zh-MO, zh-TW, zh, yue]
+plural: none
+ordinal: other_only
+decimal_separator: "."
+list_separator: "、"
+sentence: "{text}。"
+
+units:
+  meters: {other: "{n}米"}
+  kilometers: {other: "{n}公里"}
+  feet: {other: "{n}英尺"}
+  miles: {other: "{n}英里"}
+
+ordinals: {other: "第{n}個"}
+
+directions:
+  slight_left: 稍向左轉
+  left: 左轉
+  sharp_left: 急左轉
+  slight_right: 稍向右轉
+  right: 右轉
+  sharp_right: 急右轉
+
+sides:
+  left: 左側
+  right: 右側
+
+cardinals:
+  north: 向北
+  northeast: 向東北
+  east: 向東
+  southeast: 向東南
+  south: 向南
+  southwest: 向西南
+  west: 向西
+  northwest: 向西北
+
+phrases:
+  depart: "{cardinal}出發"
+  depart_street: "沿{street}{cardinal}出發"
+  continue: "直行"
+  continue_street: "繼續前往{street}"
+  turn: "{direction}"
+  turn_street: "{direction}進入{street}"
+  turn_toward: "{direction}前往{toward}"
+  uturn: "掉頭"
+  uturn_street: "掉頭進入{street}"
+  ramp: "駛入{side}支路"
+  ramp_toward: "駛入{side}支路，前往{toward}"
+  ramp_straight: "直行駛入支路"
+  ramp_straight_toward: "直行駛入支路，前往{toward}"
+  exit: "從{side}出口離開"
+  exit_toward: "從{side}出口離開，前往{toward}"
+  exit_number: "從{side}{exit}號出口離開"
+  exit_number_toward: "從{side}{exit}號出口離開，前往{toward}"
+  keep: "在岔路口靠{side}行駛"
+  keep_street: "靠{side}進入{street}"
+  keep_toward: "靠{side}前往{toward}"
+  keep_straight: "在岔路口直行"
+  keep_straight_street: "直行進入{street}"
+  keep_straight_toward: "直行前往{toward}"
+  merge: "併入主線"
+  merge_street: "併入{street}"
+  roundabout_enter: "駛入迴旋處"
+  roundabout_enter_exit: "駛入迴旋處，然後從{ordinal}出口離開"
+  roundabout_enter_exit_street: "駛入迴旋處，然後從{ordinal}出口離開，進入{street}"
+  roundabout_exit: "離開迴旋處"
+  roundabout_exit_street: "離開迴旋處，進入{street}"
+  ferry_enter: "乘搭渡輪"
+  ferry_enter_street: "乘搭{street}渡輪"
+  ferry_exit: "離開渡輪"
+  stairs: "走樓梯"
+  stairs_up: "走樓梯上樓"
+  stairs_down: "走樓梯下樓"
+  escalator: "乘搭扶手電梯"
+  escalator_up: "乘搭扶手電梯上樓"
+  escalator_down: "乘搭扶手電梯下樓"
+  elevator: "乘搭升降機"
+  elevator_up: "乘搭升降機上樓"
+  elevator_down: "乘搭升降機下樓"
+  travelator: "使用自動行人道"
+  arrive: "已到達目的地"
+  arrive_side: "目的地在{side}"
+  arrive_pre_alert: "{distance}後到達目的地"
+  verbal_pre_alert: "{distance}後，{instruction}"
+  verbal_then: "{instruction}，然後{next}"
+  verbal_post_transition: "繼續前行{distance}"
+  transit_wait: "在{stop}等候"
+  transit_wait_line: "在{stop}等候{line}"
+  transit_board: "在{stop}登上{line}"
+  transit_board_toward: "在{stop}登上往{headsign}的{line}"
+  transit_ride: "乘搭{line}由{from}前往{to}"
+  transit_alight: "在{stop}下車"
+  street_leg_walk: "由{from}步行至{to}"
+  street_leg_bicycle: "由{from}踏單車至{to}"
+  street_leg_car: "由{from}駕車至{to}"

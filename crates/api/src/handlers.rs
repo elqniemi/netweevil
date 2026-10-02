@@ -12,7 +12,8 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::response::{IntoResponse, Response};
 use netweevil_profile::ReturnGeometry;
 use netweevil_query::{
-    EffectiveEngineDescription, EngineMode, TemporalRequestOptions, execute_scenario_batch,
+    DirectionsContext, DirectionsOptions, EffectiveEngineDescription, EngineMode,
+    TemporalRequestOptions, execute_scenario_batch,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -20,10 +21,10 @@ use tracing::{info, warn};
 
 use crate::dto::{
     AccessibilityExecutionRequest, AnalysisResponse, BetweennessExecutionRequest, DatasetInfo,
-    ExecutionContext, HealthResponse, MatrixExecutionRequest, OdExecutionRequest, ProfileInfo,
-    ResponseFormatQuery, RouteExecutionRequest, ScenarioBatchExecutionRequest,
-    ServiceAreaExecutionRequest, ServiceAreaSequenceExecutionRequest, ServiceInfoResponse,
-    TransitFeedInfo,
+    DirectionsExecutionRequest, ExecutionContext, HealthResponse, MatrixExecutionRequest,
+    OdExecutionRequest, ProfileInfo, ResponseFormatQuery, RouteExecutionRequest,
+    ScenarioBatchExecutionRequest, ServiceAreaExecutionRequest,
+    ServiceAreaSequenceExecutionRequest, ServiceInfoResponse, TransitFeedInfo,
 };
 use crate::dynamic_profiles::resolve_dynamic_profile;
 use crate::error::ApiError;
@@ -134,22 +135,29 @@ pub(crate) async fn route_handler(
     Query(query): Query<ResponseFormatQuery>,
     Json(payload): Json<RouteExecutionRequest>,
 ) -> Result<Response, ApiError> {
-    execute_route_response(state, query, payload, false).await
+    execute_route_response(state, query, payload, None).await
 }
 
 pub(crate) async fn directions_handler(
     State(state): State<ApiState>,
     Query(query): Query<ResponseFormatQuery>,
-    Json(payload): Json<RouteExecutionRequest>,
+    Json(payload): Json<DirectionsExecutionRequest>,
 ) -> Result<Response, ApiError> {
-    execute_route_response(state, query, payload, true).await
+    execute_route_response(
+        state,
+        query,
+        payload.route,
+        Some(payload.directions_options),
+    )
+    .await
 }
 
+/// `directions` carries the directions options of `/v1/directions`.
 async fn execute_route_response(
     state: ApiState,
     query: ResponseFormatQuery,
     payload: RouteExecutionRequest,
-    directions: bool,
+    directions: Option<DirectionsOptions>,
 ) -> Result<Response, ApiError> {
     let runtime = state.runtime()?;
     let dynamic = if payload.profile.is_some() || payload.profile_overrides.is_some() {
@@ -165,10 +173,14 @@ async fn execute_route_response(
     } else {
         None
     };
-    let engine = if let Some(dynamic) = &dynamic {
-        Arc::clone(&dynamic.engine)
+    let (engine, facility_attribute) = if let Some(dynamic) = &dynamic {
+        (Arc::clone(&dynamic.engine), None)
     } else {
-        Arc::clone(&resolve_profile(runtime.as_ref(), payload.profile_id.as_deref())?.engine)
+        let profile = resolve_profile(runtime.as_ref(), payload.profile_id.as_deref())?;
+        (
+            Arc::clone(&profile.engine),
+            Some(profile.document.facilities.attribute.clone()),
+        )
     };
     info!(
         endpoint = "route",
@@ -193,53 +205,64 @@ async fn execute_route_response(
         acceleration: effective_engine.acceleration.to_string(),
     };
     let route_id = request.route_id.clone();
-    let edge_names = if request.returns.segment_rows || directions {
+    let edge_names = if request.returns.segment_rows || directions.is_some() {
         Some(load_edge_names(runtime.as_ref())?)
     } else {
         None
     };
-    let (result, maneuvers) = run_inline_analysis(&state, "route", Some(&route_id), move || {
-        if directions {
-            let result = engine.execute_directions(
-                &request,
-                edge_names.as_deref().unwrap_or_default(),
-                engine_mode,
-            )?;
-            return Ok((result.route, Some(result.maneuvers)));
+    let result = run_inline_analysis(&state, "route", Some(&route_id), move || {
+        if let Some(mut options) = directions {
+            if options.facility_attribute.is_none() {
+                options.facility_attribute = facility_attribute;
+            }
+            let names = edge_names.expect("directions load edge names");
+            return engine
+                .execute_directions(
+                    &request,
+                    DirectionsContext::new(&names),
+                    &options,
+                    engine_mode,
+                )
+                .map(RouteOutput::Directions);
         }
         let result = if let Some(edge_names) = edge_names.as_deref() {
-            engine.execute_route_with_edge_names_and_mode(&request, edge_names, engine_mode)
+            engine.execute_route_with_edge_names_and_mode(&request, &edge_names.names, engine_mode)
         } else {
             engine.execute_route_with_mode(&request, engine_mode)
         }?;
-        Ok((result, None))
+        Ok(RouteOutput::Route(result))
     })
     .await?;
+    let route = match &result {
+        RouteOutput::Route(route) => route,
+        RouteOutput::Directions(directions) => &directions.route,
+    };
     info!(
         endpoint = "route",
-        route_id = %result.route_id,
-        distance_m = result.summary.total_distance_m,
-        time_s = result.summary.total_travel_time_s,
-        segments = result.summary.segment_count,
+        route_id = %route.route_id,
+        distance_m = route.summary.total_distance_m,
+        time_s = route.summary.total_travel_time_s,
+        segments = route.summary.segment_count,
         "response"
     );
-    let mut response = if let Some(maneuvers) = maneuvers {
-        let result = netweevil_query::DirectionsResult {
-            language: "en".into(),
-            route: result,
-            maneuvers,
-        };
-        analysis_response(&query, service, result, |context, result| {
-            let mut geojson = route_result_geojson(runtime.as_ref(), context, &result.route);
-            geojson["maneuvers"] =
-                serde_json::to_value(&result.maneuvers).expect("serializable maneuvers");
-            geojson["language"] = "en".into();
-            geojson
-        })?
-    } else {
-        analysis_response(&query, service, result, |context, result| {
-            route_result_geojson(runtime.as_ref(), context, result)
-        })?
+    let mut response = match result {
+        RouteOutput::Directions(result) => {
+            analysis_response(&query, service, result, |context, result| {
+                let mut geojson = route_result_geojson(runtime.as_ref(), context, &result.route);
+                geojson["maneuvers"] =
+                    serde_json::to_value(&result.maneuvers).expect("serializable maneuvers");
+                geojson["language"] = result.language.clone().into();
+                geojson["units"] = serde_json::to_value(result.units).expect("serializable units");
+                geojson["driving_side"] =
+                    serde_json::to_value(result.driving_side).expect("serializable side");
+                geojson
+            })?
+        }
+        RouteOutput::Route(result) => {
+            analysis_response(&query, service, result, |context, result| {
+                route_result_geojson(runtime.as_ref(), context, result)
+            })?
+        }
     };
     if let Some(dynamic) = dynamic {
         response.headers_mut().insert(
@@ -252,6 +275,11 @@ async fn execute_route_response(
         );
     }
     Ok(response)
+}
+
+enum RouteOutput {
+    Route(netweevil_query::RouteResult),
+    Directions(netweevil_query::DirectionsResult),
 }
 
 pub(crate) async fn od_handler(

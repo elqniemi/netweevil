@@ -219,11 +219,11 @@ async fn directions_endpoint_preserves_profile_context_in_json_and_geojson() {
     let service = fixture();
     service
         .edge_names
-        .set(Arc::from([
+        .set(Arc::new(EdgeNameBundle::from_names(vec![
             "First Road".into(),
             "Second Road".into(),
             "Service Road".into(),
-        ]))
+        ])))
         .unwrap();
     let state = ApiState::for_test(service.clone());
     for fmt in [None, Some("geojson")] {
@@ -261,6 +261,34 @@ async fn directions_endpoint_preserves_profile_context_in_json_and_geojson() {
             );
         }
     }
+    let response = crate::handlers::directions_handler(
+        State(state.clone()),
+        format(None),
+        json_payload(json!({
+            "request": request(),
+            "directions_options": {"language": "fi-FI", "units": "imperial"}
+        })),
+    )
+    .await
+    .unwrap();
+    let body = json_body(response).await;
+    assert_eq!(body["result"]["language"], "fi");
+    assert_eq!(body["result"]["units"], "imperial");
+    assert_eq!(body["result"]["driving_side_origin"], "default");
+    assert!(
+        body["result"]["maneuvers"][0]["instruction"]
+            .as_str()
+            .unwrap()
+            .starts_with("Lähde ")
+    );
+    // Misspelled options are rejected rather than silently ignored.
+    assert!(
+        serde_json::from_value::<crate::dto::DirectionsExecutionRequest>(json!({
+            "request": request(),
+            "directions_options": {"langauge": "fi"}
+        }))
+        .is_err()
+    );
 }
 
 #[tokio::test]

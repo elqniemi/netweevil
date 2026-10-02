@@ -1,0 +1,108 @@
+# English guidance phrases.
+#
+# Every table has the same keys (crates/query/src/navigation/phrases.rs
+# lists them with their placeholders). Phrases are sentence fragments:
+# the renderer capitalizes the first letter and wraps the result in
+# `sentence`. Placeholders: {street} street name and route number,
+# {direction} a word from `directions`, {side} a word from `sides`,
+# {cardinal} a word from `cardinals`, {toward} signposted destinations,
+# {exit} exit number, {ordinal} roundabout exit from `ordinals`,
+# {distance} a distance from `units` (`units_in` inside "in {distance}").
+locale: en
+name: English
+aliases: [en-US, en-GB]
+plural: one_exactly
+ordinal: english
+decimal_separator: "."
+list_separator: ", "
+sentence: "{text}."
+
+units:
+  meters: {one: "{n} meter", other: "{n} meters"}
+  kilometers: {one: "{n} kilometer", other: "{n} kilometers"}
+  feet: {one: "{n} foot", other: "{n} feet"}
+  miles: {one: "{n} mile", other: "{n} miles"}
+
+ordinals: {one: "{n}st", two: "{n}nd", few: "{n}rd", other: "{n}th"}
+
+directions:
+  slight_left: slightly left
+  left: left
+  sharp_left: sharp left
+  slight_right: slightly right
+  right: right
+  sharp_right: sharp right
+
+sides:
+  left: left
+  right: right
+
+cardinals:
+  north: north
+  northeast: northeast
+  east: east
+  southeast: southeast
+  south: south
+  southwest: southwest
+  west: west
+  northwest: northwest
+
+phrases:
+  depart: "head {cardinal}"
+  depart_street: "head {cardinal} on {street}"
+  continue: "continue straight"
+  continue_street: "continue onto {street}"
+  turn: "turn {direction}"
+  turn_street: "turn {direction} onto {street}"
+  turn_toward: "turn {direction} toward {toward}"
+  uturn: "make a U-turn"
+  uturn_street: "make a U-turn onto {street}"
+  ramp: "take the ramp on the {side}"
+  ramp_toward: "take the ramp on the {side} toward {toward}"
+  ramp_straight: "take the ramp straight ahead"
+  ramp_straight_toward: "take the ramp straight ahead toward {toward}"
+  exit: "take the exit on the {side}"
+  exit_toward: "take the exit on the {side} toward {toward}"
+  exit_number: "take exit {exit} on the {side}"
+  exit_number_toward: "take exit {exit} on the {side} toward {toward}"
+  keep: "keep {side} at the fork"
+  keep_street: "keep {side} onto {street}"
+  keep_toward: "keep {side} toward {toward}"
+  keep_straight: "keep straight at the fork"
+  keep_straight_street: "keep straight onto {street}"
+  keep_straight_toward: "keep straight toward {toward}"
+  merge: "merge"
+  merge_street: "merge onto {street}"
+  roundabout_enter: "enter the roundabout"
+  roundabout_enter_exit: "enter the roundabout and take the {ordinal} exit"
+  roundabout_enter_exit_street: "enter the roundabout and take the {ordinal} exit onto {street}"
+  roundabout_exit: "exit the roundabout"
+  roundabout_exit_street: "exit the roundabout onto {street}"
+  ferry_enter: "take the ferry"
+  ferry_enter_street: "take the ferry {street}"
+  ferry_exit: "leave the ferry"
+  stairs: "take the stairs"
+  stairs_up: "take the stairs up"
+  stairs_down: "take the stairs down"
+  escalator: "take the escalator"
+  escalator_up: "take the escalator up"
+  escalator_down: "take the escalator down"
+  elevator: "take the elevator"
+  elevator_up: "take the elevator up"
+  elevator_down: "take the elevator down"
+  travelator: "take the moving walkway"
+  arrive: "you have arrived at your destination"
+  arrive_side: "your destination is on the {side}"
+  arrive_pre_alert: "in {distance}, you will arrive at your destination"
+  verbal_pre_alert: "in {distance}, {instruction}"
+  verbal_then: "{instruction}, then {next}"
+  verbal_post_transition: "continue for {distance}"
+  transit_wait: "wait at {stop}"
+  transit_wait_line: "wait at {stop} for {line}"
+  transit_board: "board {line} at {stop}"
+  transit_board_toward: "board {line} toward {headsign} at {stop}"
+  transit_ride: "ride {line} from {from} to {to}"
+  transit_alight: "get off at {stop}"
+  street_leg_walk: "walk from {from} to {to}"
+  street_leg_bicycle: "cycle from {from} to {to}"
+  street_leg_car: "drive from {from} to {to}"

@@ -1,0 +1,99 @@
+# Dutch guidance phrases. See en.yaml for the format.
+locale: nl
+name: Nederlands
+aliases: [nl-NL, nl-BE]
+plural: one_exactly
+ordinal: other_only
+decimal_separator: ","
+list_separator: ", "
+sentence: "{text}."
+
+units:
+  meters: {one: "{n} meter", other: "{n} meter"}
+  kilometers: {one: "{n} kilometer", other: "{n} kilometer"}
+  feet: {one: "{n} voet", other: "{n} voet"}
+  miles: {one: "{n} mijl", other: "{n} mijl"}
+
+ordinals: {other: "{n}e"}
+
+directions:
+  slight_left: flauw linksaf
+  left: linksaf
+  sharp_left: scherp linksaf
+  slight_right: flauw rechtsaf
+  right: rechtsaf
+  sharp_right: scherp rechtsaf
+
+sides:
+  left: links
+  right: rechts
+
+cardinals:
+  north: naar het noorden
+  northeast: naar het noordoosten
+  east: naar het oosten
+  southeast: naar het zuidoosten
+  south: naar het zuiden
+  southwest: naar het zuidwesten
+  west: naar het westen
+  northwest: naar het noordwesten
+
+phrases:
+  depart: "ga {cardinal}"
+  depart_street: "ga {cardinal} op {street}"
+  continue: "ga rechtdoor"
+  continue_street: "ga verder op {street}"
+  turn: "sla {direction}"
+  turn_street: "sla {direction} naar {street}"
+  turn_toward: "sla {direction} richting {toward}"
+  uturn: "keer om"
+  uturn_street: "keer om naar {street}"
+  ramp: "neem de oprit {side}"
+  ramp_toward: "neem de oprit {side} richting {toward}"
+  ramp_straight: "neem de oprit rechtdoor"
+  ramp_straight_toward: "neem de oprit rechtdoor richting {toward}"
+  exit: "neem de afrit {side}"
+  exit_toward: "neem de afrit {side} richting {toward}"
+  exit_number: "neem afrit {exit} {side}"
+  exit_number_toward: "neem afrit {exit} {side} richting {toward}"
+  keep: "houd {side} aan bij de splitsing"
+  keep_street: "houd {side} aan naar {street}"
+  keep_toward: "houd {side} aan richting {toward}"
+  keep_straight: "ga rechtdoor bij de splitsing"
+  keep_straight_street: "ga rechtdoor naar {street}"
+  keep_straight_toward: "ga rechtdoor richting {toward}"
+  merge: "voeg in"
+  merge_street: "voeg in op {street}"
+  roundabout_enter: "ga de rotonde op"
+  roundabout_enter_exit: "neem op de rotonde de {ordinal} afslag"
+  roundabout_enter_exit_street: "neem op de rotonde de {ordinal} afslag naar {street}"
+  roundabout_exit: "verlaat de rotonde"
+  roundabout_exit_street: "verlaat de rotonde naar {street}"
+  ferry_enter: "neem de veerboot"
+  ferry_enter_street: "neem de veerboot {street}"
+  ferry_exit: "verlaat de veerboot"
+  stairs: "neem de trap"
+  stairs_up: "neem de trap omhoog"
+  stairs_down: "neem de trap omlaag"
+  escalator: "neem de roltrap"
+  escalator_up: "neem de roltrap omhoog"
+  escalator_down: "neem de roltrap omlaag"
+  elevator: "neem de lift"
+  elevator_up: "neem de lift omhoog"
+  elevator_down: "neem de lift omlaag"
+  travelator: "neem het rolpad"
+  arrive: "u bent op uw bestemming"
+  arrive_side: "uw bestemming bevindt zich {side}"
+  arrive_pre_alert: "over {distance} bereikt u uw bestemming"
+  verbal_pre_alert: "over {distance}: {instruction}"
+  verbal_then: "{instruction}, daarna {next}"
+  verbal_post_transition: "volg de weg {distance}"
+  transit_wait: "wacht bij {stop}"
+  transit_wait_line: "wacht bij {stop} op {line}"
+  transit_board: "stap in {line} bij {stop}"
+  transit_board_toward: "stap in {line} richting {headsign} bij {stop}"
+  transit_ride: "reis met {line} van {from} naar {to}"
+  transit_alight: "stap uit bij {stop}"
+  street_leg_walk: "loop van {from} naar {to}"
+  street_leg_bicycle: "fiets van {from} naar {to}"
+  street_leg_car: "rijd van {from} naar {to}"

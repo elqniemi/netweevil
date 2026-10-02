@@ -2,7 +2,11 @@
 use std::collections::BTreeMap;
 
 use axum::{Json, extract::State};
-use netweevil_query::{EngineMode, LabeledPoint, RouteRequest, SnapOptions};
+use netweevil_core::EdgeNameBundle;
+use netweevil_query::{
+    DirectionsContext, DirectionsOptions, EngineMode, LabeledPoint, Phrasebook, RouteRequest,
+    SnapOptions, StreetLegMode, TransitStep,
+};
 use netweevil_transit::{
     AccessMode, GtfsStopContext, TransitLeg, TransitLegType, TransitOutcome, TransitRouteResult,
     TransitTimeContext, read_gtfs_stop_context,
@@ -10,7 +14,7 @@ use netweevil_transit::{
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::dto::{TransitExecutionContext, TransitRouteExecutionRequest};
+use crate::dto::{TransitDirectionsExecutionRequest, TransitExecutionContext};
 use crate::error::ApiError;
 use crate::state::{ApiState, LoadedProfile, execute_on_routing_worker, load_edge_names};
 use crate::transit::transit_route_handler;
@@ -52,6 +56,8 @@ pub(crate) struct TransitDirection {
 pub(crate) struct TransitDirectionsResponse {
     service: TransitExecutionContext,
     result: TransitRouteResult,
+    /// Language of the instructions.
+    language: String,
     directions: Vec<TransitDirection>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     directions_diagnostics: Vec<String>,
@@ -59,8 +65,12 @@ pub(crate) struct TransitDirectionsResponse {
 
 pub(crate) async fn transit_directions_handler(
     State(state): State<ApiState>,
-    Json(mut payload): Json<TransitRouteExecutionRequest>,
+    Json(payload): Json<TransitDirectionsExecutionRequest>,
 ) -> Result<Json<TransitDirectionsResponse>, ApiError> {
+    let TransitDirectionsExecutionRequest {
+        route: mut payload,
+        directions_options,
+    } = payload;
     // Geometry and stop returns are needed to place instructions. Requested
     // modes, routing model, endpoint constraints and timetable remain intact.
     payload.request.returns.include_geometry = true;
@@ -75,6 +85,9 @@ pub(crate) async fn transit_directions_handler(
     let worker_runtime = runtime.clone();
     let response = execute_on_routing_worker(runtime.as_ref(), move || {
         let mut diagnostics = Vec::new();
+        let (phrasebook, warning) =
+            Phrasebook::for_language(directions_options.language.as_deref());
+        diagnostics.extend(warning);
         let contexts = read_gtfs_stop_context(&source_path).unwrap_or_else(|error| {
             diagnostics.push(format!(
                 "Station/platform display metadata unavailable; using stored stop names: {error}"
@@ -82,6 +95,8 @@ pub(crate) async fn transit_directions_handler(
             BTreeMap::new()
         });
         let edge_names = load_edge_names(&worker_runtime).ok();
+        let no_names = EdgeNameBundle::default();
+        let names = edge_names.as_deref().unwrap_or(&no_names);
         let walking = response
             .result
             .legs
@@ -119,7 +134,8 @@ pub(crate) async fn transit_directions_handler(
                         walking_maneuvers(
                             profile,
                             leg,
-                            edge_names.as_deref().unwrap_or(&[]),
+                            names,
+                            &directions_options,
                             index,
                             &mut diagnostics,
                         )
@@ -127,10 +143,11 @@ pub(crate) async fn transit_directions_handler(
                     .unwrap_or_default()
             })
             .collect::<Vec<_>>();
-        let directions = build_directions(&response.result, &contexts, &walking)?;
+        let directions = build_directions(&response.result, &contexts, &walking, phrasebook)?;
         Ok(TransitDirectionsResponse {
             service: response.service,
             result: response.result,
+            language: phrasebook.language().to_string(),
             directions,
             directions_diagnostics: diagnostics,
         })
@@ -208,6 +225,7 @@ fn build_directions(
     result: &TransitRouteResult,
     stops: &BTreeMap<String, GtfsStopContext>,
     walking: &[Vec<Value>],
+    phrasebook: Phrasebook,
 ) -> anyhow::Result<Vec<TransitDirection>> {
     if result.outcome != TransitOutcome::Scheduled {
         return Ok(Vec::new());
@@ -227,17 +245,15 @@ fn build_directions(
                 .as_deref()
                 .or(leg.route_id.as_deref())
                 .unwrap_or(&mode);
-            let towards = leg
-                .headsign
-                .as_ref()
-                .filter(|v| !v.is_empty())
-                .map(|v| format!(" toward {v}"))
-                .unwrap_or_default();
+            let headsign = leg.headsign.as_deref().filter(|value| !value.is_empty());
             if leg.departure_s > previous_arrival {
                 steps.push(direction(
                     "wait",
                     index,
-                    format!("Wait at {from} for {line}{towards}."),
+                    phrasebook.transit_step(TransitStep::Wait {
+                        stop: &from,
+                        line: Some(line),
+                    }),
                     leg,
                     previous_arrival,
                     leg.departure_s,
@@ -248,7 +264,11 @@ fn build_directions(
             steps.push(direction(
                 "board",
                 index,
-                format!("Board {line}{towards} at {from}."),
+                phrasebook.transit_step(TransitStep::Board {
+                    line,
+                    stop: &from,
+                    headsign,
+                }),
                 leg,
                 leg.departure_s,
                 leg.departure_s,
@@ -258,7 +278,11 @@ fn build_directions(
             steps.push(direction(
                 "ride",
                 index,
-                format!("Take {line} from {from} to {to}."),
+                phrasebook.transit_step(TransitStep::Ride {
+                    line,
+                    from: &from,
+                    to: &to,
+                }),
                 leg,
                 leg.departure_s,
                 leg.arrival_s,
@@ -268,7 +292,7 @@ fn build_directions(
             steps.push(direction(
                 "alight",
                 index,
-                format!("Alight at {to}."),
+                phrasebook.transit_step(TransitStep::Alight { stop: &to }),
                 leg,
                 leg.arrival_s,
                 leg.arrival_s,
@@ -280,7 +304,10 @@ fn build_directions(
                 steps.push(direction(
                     "wait",
                     index,
-                    format!("Wait at {from}."),
+                    phrasebook.transit_step(TransitStep::Wait {
+                        stop: &from,
+                        line: None,
+                    }),
                     leg,
                     previous_arrival,
                     leg.departure_s,
@@ -288,21 +315,25 @@ fn build_directions(
                     stops,
                 )?);
             }
-            let (kind, verb) = match leg.leg_type {
-                TransitLegType::Access => ("access", "Travel"),
-                TransitLegType::Transfer => ("transfer", "Transfer"),
-                TransitLegType::Egress => ("egress", "Continue"),
+            let kind = match leg.leg_type {
+                TransitLegType::Access => "access",
+                TransitLegType::Transfer => "transfer",
+                TransitLegType::Egress => "egress",
                 TransitLegType::Transit => unreachable!(),
             };
-            let travel = match leg.street_mode.unwrap_or(AccessMode::Walk) {
-                AccessMode::Walk => "on foot",
-                AccessMode::Bicycle => "by bicycle",
-                AccessMode::Car => "by car",
+            let mode = match leg.street_mode.unwrap_or(AccessMode::Walk) {
+                AccessMode::Walk => StreetLegMode::Walk,
+                AccessMode::Bicycle => StreetLegMode::Bicycle,
+                AccessMode::Car => StreetLegMode::Car,
             };
             let mut step = direction(
                 kind,
                 index,
-                format!("{verb} {travel} from {from} to {to}."),
+                phrasebook.transit_step(TransitStep::Street {
+                    mode,
+                    from: &from,
+                    to: &to,
+                }),
                 leg,
                 leg.departure_s,
                 leg.arrival_s,
@@ -323,7 +354,8 @@ fn build_directions(
 fn walking_maneuvers(
     profile: &LoadedProfile,
     leg: &TransitLeg,
-    names: &[String],
+    names: &EdgeNameBundle,
+    options: &DirectionsOptions,
     leg_index: usize,
     diagnostics: &mut Vec<String>,
 ) -> Vec<Value> {
@@ -358,13 +390,20 @@ fn walking_maneuvers(
         alternatives: Default::default(),
         temporal: Default::default(),
     };
+    let mut options = options.clone();
+    if options.facility_attribute.is_none() {
+        options.facility_attribute = Some(profile.document.facilities.attribute.clone());
+    }
     // Reuse the street instruction engine only if it reproduces the exact
-    // routed edge sequence. Otherwise retain source facility descriptions;
-    // never attach turns from a different walk to the scheduled journey.
-    let mut maneuvers = match profile
-        .engine
-        .execute_directions(&request, names, EngineMode::Auto)
-    {
+    // routed edge sequence. Otherwise give no turns rather than attach turns
+    // from a different walk to the scheduled journey. Stairs, escalators and
+    // lifts are maneuvers of their own.
+    let mut maneuvers = match profile.engine.execute_directions(
+        &request,
+        DirectionsContext::new(names),
+        &options,
+        EngineMode::Auto,
+    ) {
         Ok(result) if result.route.edge_path == path.edge_path => result
             .maneuvers
             .into_iter()
@@ -401,58 +440,7 @@ fn walking_maneuvers(
             location.push(json!(z));
         }
     }
-    let mut previous_facility = None;
-    for (position, &edge_index) in path.edge_path.iter().enumerate() {
-        if edge_index as usize >= topology.edge_count() {
-            continue;
-        }
-        let edge = topology.routing_edge(edge_index as usize);
-        let facility = profile
-            .document
-            .facilities
-            .classes
-            .iter()
-            .find(|(class, _)| {
-                topology.edge_attribute_matches(
-                    edge_index as usize,
-                    &profile.document.facilities.attribute,
-                    class,
-                )
-            });
-        let Some((class, _)) = facility else {
-            previous_facility = None;
-            continue;
-        };
-        if previous_facility == Some((edge.feature_row, class.as_str())) {
-            continue;
-        }
-        previous_facility = Some((edge.feature_row, class.as_str()));
-        let from = &topology.nodes[edge.from.0 as usize];
-        let to = &topology.nodes[edge.to.0 as usize];
-        let vertical = if to.z > from.z + 0.01 {
-            " up"
-        } else if to.z < from.z - 0.01 {
-            " down"
-        } else {
-            ""
-        };
-        let label = class.replace('_', " ");
-        maneuvers.push(json!({"kind":class,"instruction":format!("Take the {label}{vertical}."),"location":source_location(from.lon,from.lat,from.elevation_m()),"begin_edge_index":position,"end_edge_index":position+1,"source":"network_facility_attribute","from_elevation_m":from.elevation_m(),"to_elevation_m":to.elevation_m()}));
-    }
-    maneuvers.sort_by_key(|value| {
-        value
-            .get("begin_edge_index")
-            .and_then(Value::as_u64)
-            .unwrap_or(0)
-    });
     maneuvers
-}
-
-fn source_location(lon: f64, lat: f64, elevation: Option<f64>) -> Value {
-    match elevation {
-        Some(z) => json!([lon, lat, z]),
-        None => json!([lon, lat]),
-    }
 }
 
 #[cfg(test)]
