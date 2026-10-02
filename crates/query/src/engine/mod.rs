@@ -149,6 +149,29 @@ impl PreparedRoutingEngine {
         )
     }
 
+    pub fn execute_trip(&self, request: &crate::TripRequest) -> Result<crate::TripResult> {
+        crate::trip::execute_trip_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            request,
+        )
+    }
+
+    /// The directed tour instance behind a trip request: snapping and the
+    /// stop matrix without solving, for benchmarking the solver.
+    pub fn trip_tour_problem(
+        &self,
+        request: &crate::TripRequest,
+    ) -> Result<crate::trip_solver::TourProblem> {
+        crate::trip::trip_tour_problem_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            request,
+        )
+    }
+
     pub fn execute_route(&self, request: &RouteRequest) -> Result<RouteResult> {
         self.execute_route_with_optional_edge_names(request, None, EngineMode::Auto)
     }

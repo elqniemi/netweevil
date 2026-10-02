@@ -19,6 +19,10 @@ matrices, isochrones, map matching, elevation, and network location inspection.
 NetWeevil's existing dynamic profiles, temporal routing, alternatives, matrices,
 and service areas cover part of that workload. Basic English street directions
 and ordered/optimized waypoints are implemented, along with static GPS trace matching.
+`POST /v1/trip` covers OSRM `/trip` and Valhalla `optimized_route`: roundtrip,
+fixed-start, fixed-end, fixed-endpoint and open trips over directed costs, with
+single-vehicle service times and hard time windows (see
+[trip optimization](trip-optimization.md)).
 See the [Valhalla service index](https://valhalla.github.io/valhalla/api/).
 
 MOTIS combines street and public transport routing with multiple timetable
@@ -172,7 +176,6 @@ than a full multicriteria label set. These need separate correctness work.
    judging speed. Removing restrictions or legal u-turns changes the problem.
 3. Extend the static waypoint and English guidance implementation with the
    remaining waypoint types, signposts, lane guidance and localization.
-   Measure large directed stop sets before choosing an approximate optimizer.
 4. Benchmark trace matching with labeled GPS traces and compare ambiguity
    estimates against correct-road labels. Extend the static matcher with
    richer edge attribution, matched-path instructions and temporal traffic.

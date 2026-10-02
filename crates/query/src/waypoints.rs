@@ -1,15 +1,16 @@
-//! Ordered static routes and exact directed stop ordering.
+//! Ordered static routes and directed stop ordering.
 //!
 //! Break locations reset turn history and split legs. Through locations keep
 //! turn history, prohibit a U-turn at the location, and remain in the same leg.
-//! Stop ordering uses Held–Karp on directed, unquantized network costs, with
-//! fixed endpoints and at most 16 intermediate break locations. Temporal and
+//! Stop ordering keeps both endpoints fixed and minimizes directed network
+//! costs with the trip solver: exact Held–Karp for up to 16 intermediate
+//! break locations, iterated local search beyond. Temporal and
 //! component-constrained requests are rejected rather than priced statically.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, ensure};
 use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 use netweevil_profile::{BreakdownMetric, ReturnConfig};
 use rustc_hash::FxHashMap;
@@ -56,8 +57,9 @@ pub struct WaypointResult {
     pub total_distance_m: u64,
     pub total_travel_time_s: f64,
     pub total_generalized_cost: f64,
-    /// `held_karp_exact` minimizes directed static costs for the snapped stops.
-    /// `input_order` means no stop permutation was requested.
+    /// `held_karp_exact` minimizes directed static costs for the snapped
+    /// stops; `iterated_local_search` is the heuristic used for more than 16
+    /// intermediate stops. `input_order` means no permutation was requested.
     pub optimization_method: String,
 }
 
@@ -81,10 +83,6 @@ pub(crate) fn execute_waypoints_with_graph(
     );
     if request.optimize_order {
         ensure!(
-            request.waypoints.len() <= 18,
-            "exact stop ordering supports at most 16 intermediate locations"
-        );
-        ensure!(
             request.waypoints[1..request.waypoints.len() - 1]
                 .iter()
                 .all(|point| point.kind == WaypointKind::Break),
@@ -106,11 +104,10 @@ pub(crate) fn execute_waypoints_with_graph(
             )
         })
         .collect::<Result<Vec<_>>>()?;
-    let order = if request.optimize_order {
-        let costs = stop_cost_matrix(topology, metrics, graph, &snaps)?;
-        optimize_stop_order(&costs)?
+    let (order, optimization_method) = if request.optimize_order {
+        optimize_stop_order(topology, metrics, graph, request, &snaps)?
     } else {
-        (0..snaps.len()).collect()
+        ((0..snaps.len()).collect(), "input_order")
     };
     let mut legs = Vec::new();
     let mut start = 0;
@@ -147,12 +144,7 @@ pub(crate) fn execute_waypoints_with_graph(
             .iter()
             .map(|leg| leg.summary.total_generalized_cost)
             .sum(),
-        optimization_method: if request.optimize_order {
-            "held_karp_exact"
-        } else {
-            "input_order"
-        }
-        .into(),
+        optimization_method: optimization_method.into(),
         legs,
     })
 }
@@ -473,117 +465,42 @@ fn solve_ordered(
     }))
 }
 
-fn stop_cost_matrix(
+/// Orders the break locations between the fixed endpoints by directed
+/// matrix costs.
+fn optimize_stop_order(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     graph: &RoutingGraph,
+    request: &WaypointRequest,
     snaps: &[Vec<SnappedPoint>],
-) -> Result<Vec<Vec<f64>>> {
-    let mut costs = vec![vec![f64::INFINITY; snaps.len()]; snaps.len()];
-    let fallback = FallbackPolicy::default();
-    let mut search = RestrictedSearchScratch::default();
-    for (origin_index, origins) in snaps.iter().enumerate().take(snaps.len() - 1) {
-        let seeds = origins
+) -> Result<(Vec<usize>, &'static str)> {
+    let with_fraction = |excluded: f64| {
+        snaps
             .iter()
-            .filter(|point| point.snapped_edge_fraction != Some(1.0))
-            .flat_map(|point| origin_edge_seeds(graph, point))
-            .collect::<Vec<_>>();
-        search.prepare(metrics, graph, &seeds, &fallback);
-        for (destination_index, destinations) in snaps.iter().enumerate().skip(1) {
-            if origin_index == destination_index {
-                costs[origin_index][destination_index] = 0.0;
-                continue;
-            }
-            let seeds = destinations
-                .iter()
-                .filter(|point| point.snapped_edge_fraction != Some(0.0))
-                .flat_map(|point| destination_edge_seeds(graph, point))
-                .collect::<Vec<_>>();
-            let direct = origins
-                .iter()
-                .filter(|point| point.snapped_edge_fraction != Some(1.0))
-                .flat_map(|origin| {
-                    destinations
-                        .iter()
-                        .filter(|point| point.snapped_edge_fraction != Some(0.0))
-                        .filter_map(move |destination| {
-                            direct_same_edge_path(graph, origin, destination)
-                        })
-                })
-                .min_by(|left, right| {
-                    left.total_generalized_cost
-                        .total_cmp(&right.total_generalized_cost)
-                });
-            if let Some(path) =
-                search.route_to(topology, metrics, graph, &seeds, direct, &fallback)?
-            {
-                costs[origin_index][destination_index] = path.total_generalized_cost;
-            }
-        }
-    }
-    Ok(costs)
-}
-
-fn optimize_stop_order(costs: &[Vec<f64>]) -> Result<Vec<usize>> {
-    let count = costs.len();
-    let intermediate = count - 2;
-    if intermediate == 0 {
-        ensure!(costs[0][1].is_finite(), "fixed endpoints are unreachable");
-        return Ok(vec![0, 1]);
-    }
-    let states = 1_usize << intermediate;
-    let mut best = vec![f64::INFINITY; states * intermediate];
-    let mut previous = vec![usize::MAX; states * intermediate];
-    for next in 0..intermediate {
-        best[(1 << next) * intermediate + next] = costs[0][next + 1];
-    }
-    for mask in 1..states {
-        for last in 0..intermediate {
-            if mask & (1 << last) == 0 {
-                continue;
-            }
-            let known = best[mask * intermediate + last];
-            if !known.is_finite() {
-                continue;
-            }
-            for next in 0..intermediate {
-                if mask & (1 << next) != 0 {
-                    continue;
-                }
-                let next_mask = mask | (1 << next);
-                let cost = known + costs[last + 1][next + 1];
-                let slot = next_mask * intermediate + next;
-                if cost < best[slot] {
-                    best[slot] = cost;
-                    previous[slot] = last;
-                }
-            }
-        }
-    }
-    let full = states - 1;
-    let last = (0..intermediate)
-        .filter(|&last| (best[full * intermediate + last] + costs[last + 1][count - 1]).is_finite())
-        .min_by(|&left, &right| {
-            (best[full * intermediate + left] + costs[left + 1][count - 1])
-                .total_cmp(&(best[full * intermediate + right] + costs[right + 1][count - 1]))
-        });
-    let Some(mut last) = last else {
-        bail!("no directed route can visit all stops between the fixed endpoints");
+            .map(|candidates| {
+                candidates
+                    .iter()
+                    .filter(|point| point.snapped_edge_fraction != Some(excluded))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>()
     };
-    let mut order = vec![count - 1];
-    let mut mask = full;
-    loop {
-        order.push(last + 1);
-        let prior = previous[mask * intermediate + last];
-        mask ^= 1 << last;
-        if prior == usize::MAX {
-            break;
-        }
-        last = prior;
-    }
-    order.push(0);
-    order.reverse();
-    Ok(order)
+    let matrix = crate::trip::stop_matrix(
+        topology,
+        metrics,
+        graph,
+        with_fraction(1.0),
+        with_fraction(0.0),
+        request.snap.max_distance_m,
+    );
+    let shaped = crate::trip::shape_problem(crate::TripMode::FixedEndpoints, &matrix, None);
+    let solution = crate::trip::solver::solve(&shaped.problem, &Default::default());
+    ensure!(
+        solution.value.missing_legs == 0,
+        "no directed route can visit all stops between the fixed endpoints"
+    );
+    Ok((shaped.stop_order(&solution.order), solution.method.as_str()))
 }
 
 fn render_leg(

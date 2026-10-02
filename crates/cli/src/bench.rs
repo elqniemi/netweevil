@@ -43,6 +43,9 @@ use netweevil_query::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+mod trip;
+pub(crate) use trip::{BenchTripArgs, bench_trip};
+
 /// Snap radius used by every generated request, matching the request schema
 /// default so a corpus stays valid across all three subcommands.
 const DEFAULT_SNAP_DISTANCE_M: f64 = 500.0;
@@ -71,6 +74,8 @@ pub(crate) enum BenchCommand {
     Http(BenchHttpArgs),
     /// Compare two benchmark JSON reports produced from the same corpus.
     Compare(BenchCompareArgs),
+    /// Measure trip optimization quality and latency on real stop matrices.
+    Trip(BenchTripArgs),
 }
 
 #[derive(Args, Debug)]

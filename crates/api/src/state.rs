@@ -202,6 +202,7 @@ fn service_capabilities() -> ServiceCapabilities {
             "directions",
             "match",
             "waypoints",
+            "trip",
             "od",
             "matrix",
             "accessibility",
