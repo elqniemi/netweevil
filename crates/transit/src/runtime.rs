@@ -9,6 +9,7 @@ use crate::model::{
     AccessMode, TransitBundle, TransitConnection, TransitModeOptions, TransitStop,
     TransitStreetPath,
 };
+use crate::transfer_pack::PackedTransitTransferTable;
 
 pub(crate) struct DepartureIndex {
     pub(crate) by_stop: Vec<Vec<u32>>,
@@ -143,7 +144,7 @@ impl StopSpatialIndex {
                         stop_index,
                         distance_m,
                         transfer_time_s: None,
-                        network_path: None,
+                        network_transfer: None,
                     });
                 }
             }
@@ -335,6 +336,8 @@ pub(crate) struct TransitRuntime<'a> {
     pub(crate) departures_by_stop: &'a DepartureIndex,
     stop_index: &'a StopSpatialIndex,
     transfer_candidates: &'a [Vec<StopCandidate>],
+    /// Packed paths behind `StopCandidate::network_transfer` references.
+    transfer_paths: Option<&'a PackedTransitTransferTable>,
     pub(crate) allowed_routes: Vec<bool>,
     pub(crate) street_estimator: Option<&'a dyn StreetTimeEstimator>,
     /// Reverse timetable and transfer indexes for arrive-by searches. Hosts
@@ -362,6 +365,7 @@ impl<'a> TransitRuntime<'a> {
             departures_by_stop,
             stop_index,
             transfer_candidates,
+            transfer_paths: None,
             allowed_routes,
             street_estimator,
             backward_index: None,
@@ -371,6 +375,26 @@ impl<'a> TransitRuntime<'a> {
     pub(crate) fn with_backward_index(mut self, index: &'a BackwardIndex) -> Self {
         self.backward_index = Some(index);
         self
+    }
+
+    pub(crate) fn with_transfer_paths(mut self, paths: &'a PackedTransitTransferTable) -> Self {
+        self.transfer_paths = Some(paths);
+        self
+    }
+
+    /// Materializes the street path of a precomputed network transfer for a
+    /// returned leg. Geometric transfers carry no path.
+    pub(crate) fn transfer_path(
+        &self,
+        network_transfer: Option<u32>,
+    ) -> Result<Option<TransitStreetPath>> {
+        let Some(transfer) = network_transfer else {
+            return Ok(None);
+        };
+        let paths = self.transfer_paths.ok_or_else(|| {
+            anyhow::anyhow!("network transfer {transfer} has no loaded transfer table")
+        })?;
+        paths.path(transfer).map(Some)
     }
 
     /// Resolves explicit instants or unambiguous agency-local wall times.
@@ -462,14 +486,16 @@ impl<'a> TransitRuntime<'a> {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct StopCandidate {
     pub(crate) stop_index: u32,
     pub(crate) distance_m: f64,
     /// `Some` for a precomputed network transfer; `None` means derive a
     /// straight-line walking time from `distance_m` at request time.
     pub(crate) transfer_time_s: Option<u32>,
-    pub(crate) network_path: Option<TransitStreetPath>,
+    /// Index of the precomputed transfer in its packed table, whose path is
+    /// materialized only when a returned leg uses it.
+    pub(crate) network_transfer: Option<u32>,
 }
 
 /// Best street-mode connection between a point and a stop, picked across the
@@ -691,7 +717,7 @@ pub(crate) enum PrevStep {
         previous: StateKey,
         departure_s: u32,
         travel_time_s: u32,
-        network_path: Option<TransitStreetPath>,
+        network_transfer: Option<u32>,
     },
     Transit {
         previous: StateKey,

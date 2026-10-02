@@ -18,9 +18,9 @@ use netweevil_transit::{
     PreparedTransitRouter, StreetTimeEstimator, TransitBundle, TransitFeedManifest,
     TransitImportOptions, TransitStop, TransitStopBindingTarget, TransitStreetPath,
     TransitTransferBuildOptions, TransitTransferTableManifest, apply_transit_stop_bindings,
-    build_transit_transfer_table, import_gtfs, load_transit_stop_bindings, read_transit_bundle,
-    read_transit_transfer_table, transit_import_summary, write_transit_bundle,
-    write_transit_transfer_table,
+    build_packed_transit_transfer_table, import_gtfs, load_transit_stop_bindings,
+    read_packed_transit_transfer_table, read_transit_bundle, transit_import_summary,
+    write_packed_transit_transfer_table, write_transit_bundle,
 };
 
 #[derive(Subcommand, Debug)]
@@ -92,7 +92,7 @@ pub(crate) struct TransitTransfersBuildArgs {
     #[arg(long, default_value_t = 32)]
     max_candidates_per_stop: usize,
     /// Optional output path. `.json` produces readable JSON; other extensions
-    /// use compact bincode. The generated table is registered on the feed.
+    /// use the packed binary layout. The generated table is registered on the feed.
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -229,7 +229,8 @@ pub(crate) fn transit_build_transfers(
     }
     let (profile_hash, engine) = load_transfer_routing_engine(paths, &args.dataset, &profile)?;
     let estimator = BoundStopTransferEstimator::new(Arc::new(engine), &bundle)?;
-    let table = build_transit_transfer_table(
+    let started = std::time::Instant::now();
+    let table = build_packed_transit_transfer_table(
         &bundle,
         &TransitTransferBuildOptions {
             dataset_id: args.dataset.clone(),
@@ -249,7 +250,8 @@ pub(crate) fn transit_build_transfers(
             short_hash(&table.profile_hash)
         ))
     });
-    write_transit_transfer_table(&output_path, &table)?;
+    let build_elapsed = started.elapsed();
+    write_packed_transit_transfer_table(&output_path, &table)?;
 
     // Runtime selection is profile-keyed, so a feed may register only one
     // dataset-specific table for a given profile at a time.
@@ -262,7 +264,7 @@ pub(crate) fn transit_build_transfers(
         dataset_id: table.dataset_id.clone(),
         path: output_path.display().to_string(),
         created_at: netweevil_manifest::now_rfc3339()?,
-        transfer_count: table.transfers.len() as u64,
+        transfer_count: table.len() as u64,
         max_transfer_distance_m: table.max_transfer_distance_m,
     });
     manifest.transfer_tables.sort_by(|left, right| {
@@ -273,10 +275,11 @@ pub(crate) fn transit_build_transfers(
     write_transit_manifest(paths, &manifest)?;
 
     println!(
-        "built {} directed network transfers for feed '{}' with profile '{}'",
-        table.transfers.len(),
+        "built {} directed network transfers for feed '{}' with profile '{}' in {:.1}s",
+        table.len(),
         manifest.feed_id,
-        table.profile_id
+        table.profile_id,
+        build_elapsed.as_secs_f64()
     );
     println!("transfer table written to {}", output_path.display());
     Ok(())
@@ -320,14 +323,14 @@ pub(crate) fn prepare_registered_transit_router(
         .transfer_tables
         .iter()
         .map(|entry| {
-            read_transit_transfer_table(&entry.path)
+            read_packed_transit_transfer_table(&entry.path)
                 .with_context(|| format!("reading transit transfer table {}", entry.path))
         })
         .collect::<Result<Vec<_>>>()?;
     if tables.is_empty() {
         Ok(PreparedTransitRouter::new(Arc::new(bundle)))
     } else {
-        PreparedTransitRouter::new_with_transfer_tables(Arc::new(bundle), tables)
+        PreparedTransitRouter::new_with_packed_transfer_tables(Arc::new(bundle), tables)
     }
 }
 

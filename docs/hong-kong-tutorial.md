@@ -73,7 +73,7 @@ scripts/setup_hong_kong.sh \
 
 The enriched `3D_Indoor_Network_MTR_Platforms.gpkg` takes precedence over the baseline indoor file. It is staged as `3D_Indoor_Network.gpkg` so the mapping finds it. Horizontal coordinates become WGS84 longitude/latitude; Z remains Hong Kong Principal Datum metres. Do not reproject those heights into ellipsoidal or terrain-relative elevation.
 
-The setup script builds the console and CLI, downloads missing transit/platform files, creates audited precision connectors, imports both datasets, audits retained geometry and attributes, compiles profiles, imports the feed, and builds ordinary and step-free walking transfer tables. This is a substantial import, not a small demo. Allow several minutes and disk space for multi-gigabyte routing bundles and transfer paths. `--skip-build` reuses an existing executable and frontend build. `--serve-only` skips all preparation.
+The setup script builds the console and CLI, downloads missing transit/platform files, creates audited precision connectors, imports both datasets, audits retained geometry and attributes, compiles profiles, imports the feed, and builds ordinary and step-free walking transfer tables. This is a substantial import, not a small demo. Allow several minutes and a few gigabytes of disk space for the routing bundles; each packed walking transfer table is about 40 MB. `--skip-build` reuses an existing executable and frontend build. `--serve-only` skips all preparation.
 
 To apply profile or cost-model changes to existing imports without importing the spatial data again:
 

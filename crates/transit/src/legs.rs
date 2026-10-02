@@ -91,8 +91,9 @@ pub(crate) fn reconstruct_legs(
                 previous,
                 departure_s,
                 travel_time_s,
-                network_path,
+                network_transfer,
             } => {
+                let network_path = runtime.transfer_path(*network_transfer)?;
                 let from = &bundle.stops[previous.stop_index as usize];
                 let to = &bundle.stops[cursor.stop_index as usize];
                 let walk_s = *travel_time_s;
@@ -118,7 +119,7 @@ pub(crate) fn reconstruct_legs(
                         [to.lon, to.lat],
                     ),
                     geometry_elevation_source: None,
-                    network_path: network_path.clone(),
+                    network_path,
                 });
                 cursor = *previous;
             }
@@ -171,7 +172,7 @@ pub(crate) fn reconstruct_legs(
 /// legs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reconstruct_arrive_by_legs(
-    bundle: &TransitBundle,
+    runtime: &TransitRuntime<'_>,
     request: &TransitRouteRequest,
     next: &HashMap<BackwardStateKey, BackwardStep>,
     start_state: BackwardStateKey,
@@ -180,6 +181,7 @@ pub(crate) fn reconstruct_arrive_by_legs(
     access_mode: AccessMode,
     access_network_path: Option<TransitStreetPath>,
 ) -> Result<(u32, Vec<TransitLeg>)> {
+    let bundle = runtime.bundle;
     let access_stop = &bundle.stops[start_state.stop_index as usize];
     let mut previous_arrival_s = departure_s.saturating_add(access_time_s);
     let mut legs = vec![TransitLeg {
@@ -248,8 +250,9 @@ pub(crate) fn reconstruct_arrive_by_legs(
             BackwardStep::Transfer {
                 next,
                 travel_time_s,
-                network_path,
+                network_transfer,
             } => {
+                let network_path = runtime.transfer_path(*network_transfer)?;
                 let from = &bundle.stops[cursor.stop_index as usize];
                 let to = &bundle.stops[next.stop_index as usize];
                 let transfer_departure_s =
@@ -277,7 +280,7 @@ pub(crate) fn reconstruct_arrive_by_legs(
                         [to.lon, to.lat],
                     ),
                     geometry_elevation_source: None,
-                    network_path: network_path.clone(),
+                    network_path,
                 });
                 cursor = *next;
             }

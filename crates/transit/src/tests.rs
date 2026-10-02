@@ -1129,14 +1129,7 @@ fn transfer_builder_routes_bound_stops_directionally() {
             .as_nanos()
     ));
     write_transit_transfer_table(&path, &table).unwrap();
-    assert_eq!(
-        std::fs::read(&path).unwrap(),
-        bincode::serialize(&table).unwrap()
-    );
-    assert_eq!(
-        read_transit_transfer_table(&path).unwrap().transfers.len(),
-        table.transfers.len()
-    );
+    assert_eq!(read_transit_transfer_table(&path).unwrap(), table);
     std::fs::remove_file(path).unwrap();
 
     assert_eq!(table.profile_id, "step_free");

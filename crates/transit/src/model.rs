@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 pub const TRANSIT_BUNDLE_SCHEMA_VERSION: u32 = 6;
 pub const TRANSIT_STOP_BINDING_SCHEMA_VERSION: u32 = 1;
-pub const TRANSIT_TRANSFER_TABLE_SCHEMA_VERSION: u32 = 1;
+pub const TRANSIT_TRANSFER_TABLE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitImportOptions {

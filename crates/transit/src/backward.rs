@@ -140,7 +140,7 @@ pub(crate) enum BackwardStep {
     Transfer {
         next: BackwardStateKey,
         travel_time_s: u32,
-        network_path: Option<TransitStreetPath>,
+        network_transfer: Option<u32>,
     },
     Egress {
         time_s: u32,
@@ -218,10 +218,10 @@ pub(crate) fn previous_run_connection<'a>(
         .map(|connection| (previous, connection))
 }
 
-pub(crate) struct ReverseTransferWalk<'a> {
+pub(crate) struct ReverseTransferWalk {
     pub(crate) from_stop_index: u32,
     pub(crate) travel_time_s: u32,
-    pub(crate) network_path: Option<&'a TransitStreetPath>,
+    pub(crate) network_transfer: Option<u32>,
 }
 
 /// Transfer walks that end at `stop_index`, nearest first.
@@ -231,7 +231,7 @@ pub(crate) fn reverse_transfer_walks<'a>(
     stop_index: u32,
     max_transfer_distance_m: f64,
     walk_speed_kph: f64,
-) -> impl Iterator<Item = ReverseTransferWalk<'a>> {
+) -> impl Iterator<Item = ReverseTransferWalk> + 'a {
     index
         .reverse_transfers
         .get(stop_index as usize)
@@ -247,7 +247,7 @@ pub(crate) fn reverse_transfer_walks<'a>(
                 travel_time_s: candidate
                     .transfer_time_s
                     .unwrap_or_else(|| seconds_for_distance(candidate.distance_m, walk_speed_kph)),
-                network_path: candidate.network_path.as_ref(),
+                network_transfer: candidate.network_transfer,
             }
         })
 }
@@ -409,7 +409,7 @@ pub(crate) fn execute_transit_route_arrive_by(
                         BackwardStep::Transfer {
                             next: entry.state,
                             travel_time_s: walk.travel_time_s,
-                            network_path: walk.network_path.cloned(),
+                            network_transfer: walk.network_transfer,
                         },
                     );
                 }
@@ -534,7 +534,7 @@ pub(crate) fn execute_transit_route_arrive_by(
 
     let found_final_candidate = best_final.is_some();
     let Some((departure_s, arrival_s, mut legs)) = select_arrive_by_final_candidate(
-        bundle,
+        runtime,
         request,
         &next,
         best_final,
@@ -569,7 +569,7 @@ pub(crate) fn execute_transit_route_arrive_by(
     coalesce_transit_legs(&mut legs);
     let summary = summarize_legs(departure_s, arrival_s, &legs);
     let alternatives = build_arrive_by_alternatives(
-        bundle,
+        runtime,
         request,
         &next,
         deadline_s,
@@ -609,18 +609,19 @@ fn transit_alternative_departure_limit(
 }
 
 fn select_arrive_by_final_candidate(
-    bundle: &TransitBundle,
+    runtime: &TransitRuntime<'_>,
     request: &TransitRouteRequest,
     next: &HashMap<BackwardStateKey, BackwardStep>,
     best_final: Option<BackwardFinalCandidate>,
     final_candidates: &mut [BackwardFinalCandidate],
 ) -> Result<Option<(u32, u32, Vec<TransitLeg>)>> {
+    let bundle = runtime.bundle;
     if !transit_leg_minimums_enabled(&request.modes) {
         let Some(candidate) = best_final else {
             return Ok(None);
         };
         let (arrival_s, legs) = reconstruct_arrive_by_legs(
-            bundle,
+            runtime,
             request,
             next,
             candidate.state,
@@ -635,7 +636,7 @@ fn select_arrive_by_final_candidate(
     sort_arrive_by_candidates(final_candidates);
     for candidate in final_candidates.iter() {
         let (arrival_s, legs) = reconstruct_arrive_by_legs(
-            bundle,
+            runtime,
             request,
             next,
             candidate.state,
@@ -664,7 +665,7 @@ fn sort_arrive_by_candidates(candidates: &mut [BackwardFinalCandidate]) {
 }
 
 fn build_arrive_by_alternatives(
-    bundle: &TransitBundle,
+    runtime: &TransitRuntime<'_>,
     request: &TransitRouteRequest,
     next: &HashMap<BackwardStateKey, BackwardStep>,
     deadline_s: u32,
@@ -672,6 +673,7 @@ fn build_arrive_by_alternatives(
     best_legs: &[TransitLeg],
     mut final_candidates: Vec<BackwardFinalCandidate>,
 ) -> Result<Vec<TransitRouteAlternative>> {
+    let bundle = runtime.bundle;
     if request.alternatives.max_routes <= 1 {
         return Ok(Vec::new());
     }
@@ -690,7 +692,7 @@ fn build_arrive_by_alternatives(
             continue;
         }
         let (arrival_s, mut legs) = reconstruct_arrive_by_legs(
-            bundle,
+            runtime,
             request,
             next,
             candidate.state,

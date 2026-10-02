@@ -14,7 +14,8 @@ use netweevil_persist::{
 use netweevil_profile::{ProfileDocument, compile_profile_bundle_with_acceleration, load_profile};
 use netweevil_query::PreparedRoutingEngine;
 use netweevil_transit::{
-    PreparedTransitRouter, TransitFeedManifest, read_transit_bundle, read_transit_transfer_table,
+    PreparedTransitRouter, TransitFeedManifest, read_packed_transit_transfer_table,
+    read_transit_bundle,
 };
 use serde::Serialize;
 use tokio::sync::Semaphore;
@@ -383,7 +384,7 @@ pub(crate) fn load_transit_feed(
                     profile.manifest.profile_hash
                 );
             }
-            let table = read_transit_transfer_table(&entry.path)
+            let table = read_packed_transit_transfer_table(&entry.path)
                 .with_context(|| format!("reading transit transfer table {}", entry.path))?;
             if table.dataset_id != dataset_id
                 || table.profile_hash != entry.profile_hash
@@ -400,7 +401,7 @@ pub(crate) fn load_transit_feed(
     let router = Arc::new(if transfer_tables.is_empty() {
         PreparedTransitRouter::new(bundle)
     } else {
-        PreparedTransitRouter::new_with_transfer_tables(bundle, transfer_tables)?
+        PreparedTransitRouter::new_with_packed_transfer_tables(bundle, transfer_tables)?
     });
     info!(
         feed_id = %manifest.feed_id,
