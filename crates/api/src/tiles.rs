@@ -130,11 +130,7 @@ pub(crate) fn class_visible(class: RoadClass, z: u8) -> bool {
         ),
         10..=11 => matches!(
             class,
-            RoadClass::Motorway
-                | RoadClass::Trunk
-                | RoadClass::Primary
-                | RoadClass::Secondary
-                | RoadClass::Ferry
+            RoadClass::Motorway | RoadClass::Trunk | RoadClass::Primary | RoadClass::Ferry
         ),
         _ => matches!(class, RoadClass::Motorway | RoadClass::Trunk),
     }
@@ -312,7 +308,7 @@ fn add_edge_tags(
 }
 
 /// The edge running `to -> from` of `edge_index`, if the topology has one.
-fn reverse_edge(topology: &TopologyBundle, edge_index: usize) -> Option<usize> {
+pub(crate) fn reverse_edge(topology: &TopologyBundle, edge_index: usize) -> Option<usize> {
     let routing = topology.routing_edge(edge_index);
     let ebt = &topology.edge_based_topology;
     let to = routing.to.0 as usize;

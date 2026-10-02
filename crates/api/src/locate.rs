@@ -13,8 +13,9 @@ use serde_json::Value;
 
 use crate::dto::{ExecutionResponse, ProfiledRequest};
 use crate::error::ApiError;
-use crate::network::{enum_label, has_reverse_edge, mode_bit, profile_values};
+use crate::network::{enum_label, mode_bit, profile_values};
 use crate::state::{ApiState, execute_on_routing_worker, load_edge_names, resolve_profile};
+use crate::tiles::reverse_edge;
 
 const MAX_LOCATE_COUNT: usize = 100;
 
@@ -152,7 +153,9 @@ pub(crate) async fn locate_handler(
                 let nearest = engine
                     .nearest_segments(&point, &request.snap, request.count)?
                     .into_iter()
-                    .map(|segment| located_segment(&topology, &metrics, &names, mode, segment))
+                    .map(|segment| {
+                        located_segment(&topology, &engine, &metrics, &names, mode, segment)
+                    })
                     .collect();
                 Ok(LocatedPoint {
                     point_id: point.id,
@@ -169,6 +172,7 @@ pub(crate) async fn locate_handler(
 
 fn located_segment(
     topology: &TopologyBundle,
+    engine: &netweevil_query::PreparedRoutingEngine,
     metrics: &CompiledProfileBundle,
     names: &[String],
     mode: u16,
@@ -206,7 +210,9 @@ fn located_segment(
                 max_speed_kph: attributes.max_speed_kph,
                 lanes: attributes.lanes,
                 length_m,
-                oneway: !has_reverse_edge(topology, edge_index),
+                // Profile-aware: the reverse direction must be traversable.
+                oneway: !reverse_edge(topology, edge_index)
+                    .is_some_and(|reverse| engine.is_routable_edge(reverse)),
                 access_car: attributes.access_mask.contains(AccessMask::CAR),
                 access_bicycle: attributes.access_mask.contains(AccessMask::BICYCLE),
                 access_foot: attributes.access_mask.contains(AccessMask::FOOT),
