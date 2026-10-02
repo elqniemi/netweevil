@@ -44,6 +44,7 @@ fn graph(direct_weight: u32) -> AccelerationGraph {
         reverse_downward_first_out: vec![0, 1, 1, 1],
         reverse_downward_edge: vec![1],
         reverse_downward_arc: vec![0],
+        deferred_metric_weights: None,
     }
 }
 

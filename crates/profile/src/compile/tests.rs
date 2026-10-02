@@ -318,6 +318,44 @@ fn compiles_acceleration_weights_from_dataset_bundle() {
     assert!(compiled.time_downward_weight.is_empty());
     assert!(compiled.distance_downward_weight.is_empty());
 
+    // Storage compiles skip customization; load-time customization of the
+    // stored metrics reproduces the compile-time weights exactly.
+    let stored = super::compile_profile_metrics_with_progress(
+        &profile,
+        &topology,
+        CacheBundleId::new("topology-test"),
+        Some((&acceleration, CacheBundleId::new("accel-test"))),
+        |_| {},
+    )
+    .expect("metric compile succeeds");
+    let header = stored.acceleration.as_ref().expect("acceleration header");
+    assert!(header.upward_weight.is_empty() && header.time_upward_weight.is_empty());
+    let customized = super::customize_acceleration(
+        &topology,
+        &stored,
+        &acceleration,
+        header.source_acceleration_bundle_id.clone(),
+    );
+    assert_eq!(customized.upward_weight, compiled.upward_weight);
+    // Service-area metrics are customized on demand, not at load.
+    assert!(customized.time_upward_weight.is_empty());
+    for (metric, expected) in [
+        (
+            super::ServiceAreaMetric::TravelTime,
+            &compiled.time_upward_weight,
+        ),
+        (
+            super::ServiceAreaMetric::Distance,
+            &compiled.distance_upward_weight,
+        ),
+    ] {
+        let (upward, downward) =
+            super::customize_service_area_metric(&topology, &stored, &acceleration, metric)
+                .expect("metric customizes");
+        assert_eq!(&upward, expected);
+        assert!(downward.is_empty());
+    }
+
     // A temporal-only direction keeps exact metrics but is closed to the
     // static hierarchy.
     topology.edge_layers.routing[1].flags =

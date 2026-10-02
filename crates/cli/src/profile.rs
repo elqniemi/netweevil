@@ -9,8 +9,8 @@ use netweevil_persist::{
     write_compiled_profile_bundle, write_compiled_profile_manifest,
 };
 use netweevil_profile::{
-    ProfileCompileProgress, ProfileCompileStage,
-    compile_profile_bundle_with_acceleration_with_progress, load_profile,
+    ProfileCompileProgress, ProfileCompileStage, compile_profile_metrics_with_progress,
+    load_profile,
 };
 
 #[derive(Subcommand, Debug)]
@@ -80,7 +80,7 @@ pub(crate) fn profile_compile(
                 .map(|bundle| (bundle, bundle_ref.bundle_id.clone()))
         })
         .transpose()?;
-    let compiled_bundle = compile_profile_bundle_with_acceleration_with_progress(
+    let compiled_bundle = compile_profile_metrics_with_progress(
         &profile,
         &topology,
         topology_ref.bundle_id.clone(),

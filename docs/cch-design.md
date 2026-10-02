@@ -17,8 +17,10 @@ outrank `v`, excluding `x == y`. It deduplicates arcs without an insertion
 budget. Keeping every required shortcut preserves shortest paths under any
 supported nonnegative profile metric.
 
-The dataset bundle stores edge order and rank, and upward and downward CSR
-adjacency sorted by head id. It stores no expanded shortcut paths.
+The dataset bundle stores the edge order and upward and downward CSR
+adjacency sorted by head id; the rank is the inverse of the order and is
+rebuilt at load. Head rows are stored as gaps within each sorted row. It
+stores no expanded shortcut paths.
 
 ## Profile customization
 
@@ -28,9 +30,23 @@ at infinity. Basic customization processes states in increasing rank and
 relaxes each lower triangle, `w(x -> y) = min(w(x -> y), w(x -> v) + w(v -> y))`.
 Both child weights are final before their triangle is visited.
 
-Each arc has three `u32` weights for generalized cost, travel time, and
-distance, totaling 12 bytes. This figure excludes dataset adjacency and
-per-edge profile data. A weight unit is 1/1024 of the metric unit. Base
+Customization runs in parallel without changing the result. An elimination
+tree (Liu's algorithm over each state's lower neighbours) places every
+state that can write an arc a middle reads inside that middle's subtree.
+Subtrees of at most `max(n/256, 1024)` states relax concurrently, each in
+rank order; the remaining top states then relax in rank order, with large
+middles splitting their incoming arcs across threads. Concurrent writes to
+shared separator arcs use atomic `fetch_min`, and `min` is
+order-independent, so the weights are bit-identical to a sequential pass.
+
+Each arc has up to three `u32` weights for generalized cost, travel time,
+and distance. Compiled profile bundles persist only the per-edge metrics:
+customization is a pure function of those metrics, the topology and the
+dataset hierarchy, so engines customize the generalized-cost weights when
+they load a profile. The travel-time and distance weights are only read by
+PHAST service areas; they are customized on the first such request and
+shared by the engine's routing graphs, so route-only engines never hold
+them. A weight unit is 1/1024 of the metric unit. Base
 transition costs round to the nearest unit. Infinity and finite overflow have
 distinct sentinel values; overflow cannot turn a reachable route into an
 unreachable one. Metrics that cannot be represented use exact routing.
@@ -73,3 +89,6 @@ Dijkstra frontier when a candidate is illegal.
 Readers require the current bundle format and schema. Unsupported dataset
 bundles fail with a re-import instruction. Compiled profiles are validated
 against the dataset acceleration bundle id and recompile when stale.
+Load-time customization only runs when the profile's acceleration header,
+topology bundle id, algorithm and schema match the dataset hierarchy;
+otherwise engine preparation reports the mismatch.

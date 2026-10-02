@@ -274,10 +274,13 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
         distance_downward_weight: weights.clone(),
     });
     write_compiled_profile_bundle(file.path(), &bundle).expect("fixed-point bundle serializes");
-    let acceleration = read_compiled_profile_bundle(file.path())
-        .expect("fixed-point bundle reads")
-        .acceleration
-        .expect("acceleration retained");
+    let read = read_compiled_profile_bundle(file.path()).expect("fixed-point bundle reads");
+    // Customized weights are rebuilt at engine load, never persisted.
+    let acceleration = read.acceleration.expect("acceleration retained");
+    assert_eq!(
+        acceleration.source_acceleration_bundle_id.0,
+        "acceleration-test"
+    );
     for actual in [
         &acceleration.upward_weight,
         &acceleration.downward_weight,
@@ -286,6 +289,90 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
         &acceleration.distance_upward_weight,
         &acceleration.distance_downward_weight,
     ] {
-        assert_eq!(actual, &weights);
+        assert!(actual.is_empty());
     }
+    assert_eq!(read.edge_metrics[0].travel_time_s, Some(12.0));
+    assert_eq!(read.edge_metrics[0].generalized_cost, Some(18.0));
+}
+
+#[test]
+fn prune_keeps_the_newest_compile_and_referenced_bundles() {
+    use netweevil_manifest::{BundleRef, CompiledProfileManifest, DatasetManifest};
+
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock should be after unix epoch")
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("netweevil-prune-{unique}"));
+    let paths = super::WorkspacePaths::discover(&root).expect("workspace");
+    let bundle = |dir: &Path, name: &str| {
+        let path = dir.join(name);
+        std::fs::write(&path, b"NWSECB06").expect("bundle written");
+        BundleRef {
+            bundle_id: CacheBundleId::new(name),
+            path: path.display().to_string(),
+        }
+    };
+    let topology = bundle(&paths.topology_bundles_dir, "topology-a.bin");
+    super::write_dataset_manifest(
+        &paths,
+        &DatasetManifest {
+            dataset_id: netweevil_core::DatasetId::new("city"),
+            label: "city".to_string(),
+            source_path: "city.osm.pbf".to_string(),
+            source_paths: Vec::new(),
+            source_sha256: "abc".to_string(),
+            source_size_bytes: 1,
+            source_format: Default::default(),
+            imported_at: "2026-01-01T00:00:00Z".to_string(),
+            build_stage: netweevil_core::BuildStage::TopologyReady,
+            topology_bundle: Some(topology.clone()),
+            edge_name_bundle: None,
+            acceleration_bundle: None,
+            topology_meta: None,
+            acceleration_stats: None,
+        },
+    )
+    .expect("dataset manifest");
+    for (hash, created_at) in [
+        ("old", "2026-01-01T00:00:00Z"),
+        ("new", "2026-02-01T00:00:00Z"),
+    ] {
+        super::write_compiled_profile_manifest(
+            &paths,
+            &CompiledProfileManifest {
+                compile_id: format!("city-{hash}"),
+                dataset_id: netweevil_core::DatasetId::new("city"),
+                profile_id: "car".to_string(),
+                profile_hash: hash.to_string(),
+                defaults_pack: "test".to_string(),
+                mode: TravelMode::Car,
+                created_at: created_at.to_string(),
+                topology_bundle_id: Some(topology.bundle_id.clone()),
+                edge_count: None,
+                bundle: bundle(&paths.metric_bundles_dir, &format!("metric-{hash}.bin")),
+            },
+        )
+        .expect("compiled manifest");
+    }
+    bundle(&paths.acceleration_bundles_dir, "orphan.bin");
+
+    let preview = super::prune_bundle_cache(&paths, true).expect("dry run");
+    assert_eq!(preview.compiled_manifests.len(), 1);
+    assert_eq!(preview.bundle_files.len(), 2);
+    assert!(paths.metric_bundles_dir.join("metric-old.bin").exists());
+
+    let report = super::prune_bundle_cache(&paths, false).expect("prune");
+    assert_eq!(report.reclaimed_bytes(), 16);
+    assert!(!paths.metric_bundles_dir.join("metric-old.bin").exists());
+    assert!(!paths.acceleration_bundles_dir.join("orphan.bin").exists());
+    assert!(paths.metric_bundles_dir.join("metric-new.bin").exists());
+    assert!(paths.topology_bundles_dir.join("topology-a.bin").exists());
+    assert_eq!(
+        super::read_compiled_profile_manifests(&paths)
+            .expect("manifests")
+            .len(),
+        1
+    );
+    std::fs::remove_dir_all(root).expect("temporary workspace removed");
 }

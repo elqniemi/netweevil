@@ -14,10 +14,10 @@ use super::fixtures::*;
 use crate::service_area::{ServiceAreaMetricKind, build_service_area_expansion_with_settle_limit};
 use crate::{
     AlternativeRouteOptions, AnalysisKind, ComponentConstraint, EngineMode, LabeledPoint,
-    ParetoRouteOptions, PointSetDocument, RouteRequest, RoutingGraph, ScenarioBatchCase,
-    ScenarioBatchSelector, TemporalRequestOptions, WeightedPoint, build_routing_graph,
-    execute_matrix, execute_od, execute_route, execute_route_with_edge_names, load_experiment,
-    load_od_pairs, load_point_set,
+    ParetoRouteOptions, PointSetDocument, PreparedRoutingEngine, RouteRequest, RoutingGraph,
+    ScenarioBatchCase, ScenarioBatchSelector, TemporalRequestOptions, WeightedPoint,
+    build_routing_graph, execute_matrix, execute_od, execute_route, execute_route_with_edge_names,
+    load_experiment, load_od_pairs, load_point_set,
 };
 
 /// a -> c across `test_topology`; the cheapest path is edges 0, 1.
@@ -758,6 +758,49 @@ fn accelerated_query_returns_an_unpacked_path() {
 
     assert_eq!(path.edge_indexes, vec![0, 1]);
     assert_eq!(path.total_generalized_cost, 30.0);
+}
+
+/// Stored profile bundles carry no arc weights; engine preparation
+/// customizes them and must match the independent fixture customization.
+#[test]
+fn engine_customizes_stored_metrics_like_the_reference_cch() {
+    let topology = test_topology();
+    let (bundle, reference) = build_test_cch(&topology, &test_metrics());
+    let mut stored = reference.clone();
+    let header = stored.acceleration.as_mut().expect("fixture header");
+    for weights in [
+        &mut header.upward_weight,
+        &mut header.downward_weight,
+        &mut header.time_upward_weight,
+        &mut header.time_downward_weight,
+        &mut header.distance_upward_weight,
+        &mut header.distance_downward_weight,
+    ] {
+        weights.clear();
+    }
+    let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(stored), Some(bundle))
+        .expect("engine prepares");
+    let customized = engine.metrics().acceleration.as_ref().expect("customized");
+    let reference = reference.acceleration.expect("reference weights");
+    assert_eq!(customized.upward_weight, reference.upward_weight);
+    assert_eq!(customized.downward_weight, reference.downward_weight);
+    // Service-area weights are customized on first use.
+    assert!(customized.time_upward_weight.is_empty());
+    let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
+    let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
+    let time = ServiceAreaMetricKind::TravelTimeS;
+    let distance = ServiceAreaMetricKind::DistanceM;
+    assert!(acceleration.has_metric_weights(time));
+    let (upward, downward) = acceleration
+        .metric_weights(time, engine.topology())
+        .expect("time weights");
+    assert_eq!(upward, reference.time_upward_weight.as_slice());
+    assert_eq!(downward, reference.time_downward_weight.as_slice());
+    let (upward, downward) = acceleration
+        .metric_weights(distance, engine.topology())
+        .expect("distance weights");
+    assert_eq!(upward, reference.distance_upward_weight.as_slice());
+    assert_eq!(downward, reference.distance_downward_weight.as_slice());
 }
 
 #[test]

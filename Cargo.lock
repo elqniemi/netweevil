@@ -1431,9 +1431,11 @@ dependencies = [
  "anyhow",
  "bincode",
  "bytemuck",
+ "flate2",
  "memmap2",
  "netweevil-core",
  "netweevil-manifest",
+ "rayon",
  "serde",
  "serde_json",
 ]
