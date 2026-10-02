@@ -702,6 +702,7 @@ fn test_metrics(allow_wait: bool) -> CompiledProfileBundle {
             edge_metric(1, 20.0),
             edge_metric(2, 100.0),
         ],
+        vehicle: Default::default(),
     }
 }
 

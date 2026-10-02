@@ -91,6 +91,7 @@ fn trip_request(rows: &[&CorpusRow]) -> TripRequest {
         snap: snap_options(),
         returns: Default::default(),
         optimizer: Default::default(),
+        vehicle: None,
     }
 }
 

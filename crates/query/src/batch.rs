@@ -673,6 +673,7 @@ pub fn execute_od(
     document: &OdPairsDocument,
 ) -> Result<OdResult> {
     ensure_no_avoid([&document.temporal.avoid])?;
+    crate::vehicle::ensure_no_vehicle([document.temporal.vehicle.as_ref()])?;
     if has_failure_modes(&document.fallback) {
         validate_execution_inputs(topology, metrics)?;
         let degraded = cached_failure_mode_bundle(topology, metrics, &document.fallback, None)?;
@@ -695,6 +696,10 @@ pub fn execute_matrix(
     destinations: &PointSetDocument,
 ) -> Result<MatrixResult> {
     ensure_no_avoid([&origins.temporal.avoid, &destinations.temporal.avoid])?;
+    crate::vehicle::ensure_no_vehicle([
+        origins.temporal.vehicle.as_ref(),
+        destinations.temporal.vehicle.as_ref(),
+    ])?;
     let fallback = merge_point_set_fallback_policy(&origins.fallback, &destinations.fallback);
     if has_failure_modes(&fallback) {
         validate_execution_inputs(topology, metrics)?;

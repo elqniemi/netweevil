@@ -11,8 +11,9 @@ use netweevil_core::{
     COMPILED_ACCELERATION_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId,
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
     CompiledTemporalProfile, CompiledTemporalRules, CompiledTurnCostConfig,
-    DatasetAccelerationBundle, EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, NO_FEATURE_ROW,
-    RoadClass, TemporalEffect, TemporalRule, TemporalRuleSet, TopologyBundle,
+    CompiledVehicleExclusions, DatasetAccelerationBundle,
+    EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, NO_FEATURE_ROW, RoadClass, TemporalEffect,
+    TemporalRule, TemporalRuleSet, TopologyBundle,
 };
 
 use crate::components::{ParsedCostComponent, parse_component_expression};
@@ -162,6 +163,7 @@ where
     let mut edge_reporter = PercentReporter::starting_at_zero();
     let vehicle_excluded = vehicle_excluded_edges(profile, topology, mode_bit);
     let mut vehicle_excluded_cursor = vehicle_excluded.iter().peekable();
+    let mut vehicle_exclusions = VehicleExclusionBuilder::default();
     let mut temporal_rules = TemporalRuleResolver::default();
 
     emit_compile_progress(
@@ -204,9 +206,11 @@ where
             .next_if(|&&edge| edge as usize == edge_index)
             .is_some();
         let crosses_border = topology.edge_crosses_border(edge_index);
-        let metric = if !(edge.access_mask.contains(mode_bit)
+        // Edges the vehicle excludes are compiled like any other edge first,
+        // so their metrics can be recorded for request vehicles that pass
+        // them, and then made untraversable below.
+        let mut metric = if !(edge.access_mask.contains(mode_bit)
             || edge_profile.conditional_access.contains(mode_bit))
-            || vehicle_excluded
             || (edge.road_class == RoadClass::Ferry && !profile.ferry.allow)
             || (crosses_border && profile.preferences.avoid_border_crossings)
             || is_directionally_excluded(profile, &edge)
@@ -322,6 +326,14 @@ where
                 generalized_cost: None,
             }
         };
+        if vehicle_excluded
+            && let (Some(travel_time_s), Some(generalized_cost)) =
+                (metric.travel_time_s, metric.generalized_cost)
+        {
+            vehicle_exclusions.push(edge_index, travel_time_s, generalized_cost, &mut components);
+            metric.travel_time_s = None;
+            metric.generalized_cost = None;
+        }
 
         edge_metrics.push(metric);
 
@@ -398,6 +410,7 @@ where
         ),
     );
 
+    let vehicle = vehicle_exclusions.finish(profile.vehicle, components.len());
     Ok(CompiledProfileBundle {
         schema_version: COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
         profile_id: profile.profile.id.clone(),
@@ -416,7 +429,67 @@ where
         source_topology_bundle_id,
         acceleration: compiled_acceleration,
         edge_metrics,
+        vehicle,
     })
+}
+
+/// Collects [`CompiledVehicleExclusions`] while edges compile. Facility
+/// components may first appear after some exclusions were recorded, so
+/// component values are kept sparse until the component count is final.
+#[derive(Default)]
+struct VehicleExclusionBuilder {
+    edges: Vec<u32>,
+    travel_time_s: Vec<f64>,
+    generalized_cost: Vec<f64>,
+    /// `(component, exclusion position, value)` for non-zero values.
+    component_values: Vec<(usize, usize, f32)>,
+}
+
+impl VehicleExclusionBuilder {
+    /// Records `edge_index` with its compiled metric and moves the
+    /// component values just pushed for it into the table, leaving zeros.
+    fn push(
+        &mut self,
+        edge_index: usize,
+        travel_time_s: f64,
+        generalized_cost: f64,
+        components: &mut [ComponentWork],
+    ) {
+        let position = self.edges.len();
+        self.edges.push(edge_index as u32);
+        self.travel_time_s.push(travel_time_s);
+        self.generalized_cost.push(generalized_cost);
+        for (component_index, component) in components.iter_mut().enumerate() {
+            let value = component
+                .compiled
+                .edge_values
+                .last_mut()
+                .expect("a value was pushed for this edge");
+            if *value != 0.0 {
+                self.component_values
+                    .push((component_index, position, *value));
+            }
+            *value = 0.0;
+        }
+    }
+
+    fn finish(
+        self,
+        vehicle: Option<netweevil_core::VehicleParams>,
+        component_count: usize,
+    ) -> CompiledVehicleExclusions {
+        let mut component_values = vec![vec![0.0_f32; self.edges.len()]; component_count];
+        for (component, position, value) in self.component_values {
+            component_values[component][position] = value;
+        }
+        CompiledVehicleExclusions {
+            vehicle,
+            edges: self.edges,
+            travel_time_s: self.travel_time_s,
+            generalized_cost: self.generalized_cost,
+            component_values,
+        }
+    }
 }
 
 /// Sorted edges whose physical restrictions the profile's vehicle

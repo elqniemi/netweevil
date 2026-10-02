@@ -9,38 +9,67 @@ use anyhow::Result;
 use crate::edge_spatial_index::EdgeSpatialIndex;
 use crate::*;
 
-/// Engines prepared for recent avoid sets, most recently used last. Each
-/// slot is filled once; concurrent requests for the same set wait for the
+/// Engines derived from a prepared engine for recent request-scoped metric
+/// changes (avoid sets, request vehicles), most recently used last. Each
+/// slot is filled once; concurrent requests for the same key wait for the
 /// first build instead of customizing twice.
-#[derive(Default)]
-pub(crate) struct AvoidEngineCache {
-    entries: Mutex<Vec<(AvoidEngineKey, AvoidEngineSlot)>>,
+pub(crate) struct DerivedEngineCache<K> {
+    entries: Mutex<Vec<(K, DerivedEngineSlot)>>,
 }
 
-type AvoidEngineSlot = Arc<Mutex<Option<Arc<PreparedRoutingEngine>>>>;
+impl<K> Default for DerivedEngineCache<K> {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+type DerivedEngineSlot = Arc<Mutex<Option<Arc<PreparedRoutingEngine>>>>;
+
+const DERIVED_ENGINE_CACHE_CAPACITY: usize = 4;
+
+impl<K: PartialEq> DerivedEngineCache<K> {
+    /// The cached engine for `key`, built by `build` on a miss. A failed
+    /// build leaves the slot empty, so the next request retries.
+    pub(crate) fn get_or_build(
+        &self,
+        key: K,
+        build: impl FnOnce() -> Result<PreparedRoutingEngine>,
+    ) -> Result<Arc<PreparedRoutingEngine>> {
+        let slot = {
+            let mut entries = self.entries.lock().expect("engine cache poisoned");
+            let slot = match entries.iter().position(|(known, _)| *known == key) {
+                Some(position) => entries.remove(position).1,
+                None => {
+                    if entries.len() >= DERIVED_ENGINE_CACHE_CAPACITY {
+                        entries.remove(0);
+                    }
+                    DerivedEngineSlot::default()
+                }
+            };
+            entries.push((key, slot.clone()));
+            slot
+        };
+        let mut slot = slot.lock().expect("engine slot poisoned");
+        if let Some(engine) = slot.as_ref() {
+            return Ok(engine.clone());
+        }
+        let engine = Arc::new(build()?);
+        *slot = Some(engine.clone());
+        Ok(engine)
+    }
+}
 
 /// Resolved edges with factor bits, plus whether the engine needs the
 /// `IgnoreMultiEdgeRestrictions` graph (skipped otherwise: building it is a
 /// large share of the preparation time on restriction-rich networks).
-type AvoidEngineKey = (Vec<(u32, u64)>, bool);
-
-const AVOID_ENGINE_CACHE_CAPACITY: usize = 4;
+pub(crate) type AvoidEngineKey = (Vec<(u32, u64)>, bool);
 
 impl PreparedRoutingEngine {
-    /// The engine that serves requests carrying `avoid`, or `None` when the
-    /// set does not change the problem (empty, matching no routable edge, or
-    /// already applied to this engine).
-    pub(crate) fn avoid_target(
-        &self,
-        avoid: &AvoidOptions,
-        mode: EngineMode,
-    ) -> Result<Option<Arc<PreparedRoutingEngine>>> {
-        match self.resolve_request_avoid(avoid)? {
-            Some(resolved) => self.avoid_engine(&resolved, mode).map(Some),
-            None => Ok(None),
-        }
-    }
-
+    /// The edges `avoid` excludes or penalizes, or `None` when the set does
+    /// not change the problem (empty, matching no routable edge, or already
+    /// applied to this engine).
     pub(crate) fn resolve_request_avoid(
         &self,
         avoid: &AvoidOptions,
@@ -98,47 +127,22 @@ impl PreparedRoutingEngine {
                 .collect::<Vec<_>>(),
             with_ignore_mode_graph,
         );
-        let slot = {
-            let mut entries = self
-                .avoid_engines
-                .entries
-                .lock()
-                .expect("avoid engine cache poisoned");
-            let slot = match entries.iter().position(|(known, _)| *known == key) {
-                Some(position) => entries.remove(position).1,
-                None => {
-                    if entries.len() >= AVOID_ENGINE_CACHE_CAPACITY {
-                        entries.remove(0);
-                    }
-                    AvoidEngineSlot::default()
-                }
-            };
-            entries.push((key, slot.clone()));
-            slot
-        };
-        let mut slot = slot.lock().expect("avoid engine slot poisoned");
-        if let Some(engine) = slot.as_ref() {
-            return Ok(engine.clone());
-        }
-        let started = std::time::Instant::now();
-        let mut engine = PreparedRoutingEngine::build(
-            self.topology.clone(),
-            Arc::new(resolved.apply(self.metrics.as_ref())),
-            self.default_routing_graph
-                .acceleration
-                .as_ref()
-                .map(|acceleration| acceleration.source.clone()),
-            with_ignore_mode_graph,
-        )?;
-        engine.avoid_applied = true;
-        tracing::debug!(
-            edges = resolved.edges.len(),
-            prepare_ms = started.elapsed().as_secs_f64() * 1000.0,
-            "avoid engine prepared"
-        );
-        let engine = Arc::new(engine);
-        *slot = Some(engine.clone());
-        Ok(engine)
+        self.avoid_engines.get_or_build(key, || {
+            let started = std::time::Instant::now();
+            let mut engine = PreparedRoutingEngine::build(
+                self.topology.clone(),
+                Arc::new(resolved.apply(self.metrics.as_ref())),
+                self.dataset_acceleration(),
+                with_ignore_mode_graph,
+            )?;
+            engine.avoid_applied = true;
+            tracing::debug!(
+                edges = resolved.edges.len(),
+                prepare_ms = started.elapsed().as_secs_f64() * 1000.0,
+                "avoid engine prepared"
+            );
+            Ok(engine)
+        })
     }
 
     /// Exact single-route fast path: route on this engine between the

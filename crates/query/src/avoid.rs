@@ -197,6 +197,17 @@ impl ResolvedAvoid {
         self.factor(edge_index).is_some()
     }
 
+    /// This set with `edges` excluded as well.
+    pub(crate) fn excluding(self, edges: &[u32]) -> Self {
+        let mut factors = self.edges.into_iter().collect::<BTreeMap<_, _>>();
+        for &edge in edges {
+            factors.insert(edge, f64::INFINITY);
+        }
+        Self {
+            edges: factors.into_iter().collect(),
+        }
+    }
+
     pub(crate) fn fingerprint(&self) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for &(edge, factor) in &self.edges {

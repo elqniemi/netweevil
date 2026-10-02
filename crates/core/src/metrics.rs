@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CacheBundleId, EdgeId, TemporalRuleSet, TravelMode};
+use crate::{CacheBundleId, EdgeId, TemporalRuleSet, TravelMode, VehicleParams};
 
 /// Schema version of [`CompiledProfileBundle`]. Readers accept this value only.
-pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 8;
+pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 9;
 
 /// Schema version of [`CompiledAcceleration`] customization data.
 pub const COMPILED_ACCELERATION_SCHEMA_VERSION: u32 = 4;
@@ -188,6 +188,70 @@ pub struct CompiledProfileBundle {
     pub source_topology_bundle_id: CacheBundleId,
     pub acceleration: Option<CompiledAcceleration>,
     pub edge_metrics: Vec<CompiledEdgeMetric>,
+    /// Edges the profile's vehicle excludes, with the metrics they would
+    /// otherwise have, so requests with other vehicle parameters can
+    /// re-enable them.
+    #[serde(default)]
+    pub vehicle: CompiledVehicleExclusions,
+}
+
+/// The profile's vehicle and the edges its physical restrictions exclude
+/// although the profile could otherwise traverse them, each with the metric
+/// and cost component values it would have. Excluded edges carry no metric
+/// in [`CompiledProfileBundle::edge_metrics`] and zero component values, as
+/// any untraversable edge does; this table lets a request whose vehicle
+/// passes some of them restore their metrics without recompiling.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CompiledVehicleExclusions {
+    /// The profile's `vehicle` block; request vehicles override its fields.
+    pub vehicle: Option<VehicleParams>,
+    /// Excluded edge indexes, strictly increasing.
+    pub edges: Vec<u32>,
+    pub travel_time_s: Vec<f64>,
+    pub generalized_cost: Vec<f64>,
+    /// `component_values[c][i]` is the value of component `c` of
+    /// [`CompiledProfileBundle::components`] on `edges[i]`.
+    pub component_values: Vec<Vec<f32>>,
+}
+
+impl CompiledVehicleExclusions {
+    pub fn is_empty(&self) -> bool {
+        self.edges.is_empty()
+    }
+
+    /// Position of `edge_index` in [`Self::edges`].
+    pub fn position(&self, edge_index: usize) -> Option<usize> {
+        let edge = u32::try_from(edge_index).ok()?;
+        self.edges.binary_search(&edge).ok()
+    }
+
+    pub fn validate(&self, edge_count: usize, component_count: usize) -> Result<(), String> {
+        let len = self.edges.len();
+        if self.travel_time_s.len() != len
+            || self.generalized_cost.len() != len
+            || self.component_values.len() != component_count
+            || self
+                .component_values
+                .iter()
+                .any(|values| values.len() != len)
+        {
+            return Err("vehicle exclusion columns differ in length".to_string());
+        }
+        if self.edges.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err("vehicle exclusion edges are not strictly sorted".to_string());
+        }
+        if self
+            .edges
+            .last()
+            .is_some_and(|edge| *edge as usize >= edge_count)
+        {
+            return Err("vehicle exclusions reference a missing edge".to_string());
+        }
+        if let Some(vehicle) = &self.vehicle {
+            vehicle.validate()?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -537,6 +537,59 @@ fn excludes_edges_whose_restrictions_the_profile_vehicle_violates() {
 }
 
 #[test]
+fn records_the_metrics_and_components_of_vehicle_excluded_edges() {
+    use netweevil_core::{
+        VehicleRestriction, VehicleRestrictionKind as Kind, VehicleRestrictionTable,
+    };
+    let mut topology = topology(&[
+        edge(0, RoadClass::Residential, AccessMask::HGV),
+        edge(1, RoadClass::Residential, AccessMask::HGV),
+        // Not open to trucks: excluded either way, so not recorded.
+        edge(2, RoadClass::Residential, AccessMask::CAR),
+    ]);
+    topology.edge_layers.vehicle_restrictions = VehicleRestrictionTable {
+        restrictions: vec![VehicleRestriction {
+            modes: AccessMask::new(AccessMask::HGV),
+            kind: Kind::MaxHeightCm(350),
+        }],
+        edges: vec![1, 2],
+        edge_restrictions: vec![0, 0],
+    };
+    let body = "components: {time: {expression: travel_time, weight: 0.5}}";
+    let open = compile(&profile("hgv", body), &topology);
+    let truck = compile(
+        &profile("hgv", &format!("{body}\nvehicle: {{height_m: 4.0}}")),
+        &topology,
+    );
+    let exclusions = &truck.vehicle;
+    assert_eq!(
+        exclusions.vehicle.and_then(|vehicle| vehicle.height_m),
+        Some(4.0)
+    );
+    assert_eq!(exclusions.edges, vec![1]);
+    assert_eq!(
+        Some(exclusions.travel_time_s[0]),
+        open.edge_metrics[1].travel_time_s
+    );
+    assert_eq!(
+        Some(exclusions.generalized_cost[0]),
+        open.edge_metrics[1].generalized_cost
+    );
+    assert_eq!(
+        exclusions.component_values,
+        vec![vec![open.components[0].edge_values[1]]]
+    );
+    assert!(open.components[0].edge_values[1] > 0.0);
+    // The excluded edge itself looks like any untraversable edge.
+    assert!(truck.edge_metrics[1].generalized_cost.is_none());
+    assert_eq!(truck.components[0].edge_values[1], 0.0);
+    assert_eq!(
+        truck.edge_metrics[0].generalized_cost,
+        open.edge_metrics[0].generalized_cost
+    );
+}
+
+#[test]
 fn resolves_posted_speed_rules_into_profile_speed_factors() {
     use netweevil_core::{EVERY_DAY, TemporalEffect, TemporalRule, TemporalRuleSet};
     let mut topology = topology(&[

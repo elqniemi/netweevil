@@ -48,8 +48,8 @@ pub use metrics::{
     CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, CCH_WEIGHT_SCALE,
     COMPILED_ACCELERATION_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
-    CompiledTemporalProfile, CompiledTemporalRules, CompiledTurnCostConfig, add_cch_weights,
-    decode_cch_weight, encode_cch_weight,
+    CompiledTemporalProfile, CompiledTemporalRules, CompiledTurnCostConfig,
+    CompiledVehicleExclusions, add_cch_weights, decode_cch_weight, encode_cch_weight,
 };
 pub use regions::{
     AdminArea, AdminBoundarySource, DrivingSide, NO_ADMIN_AREA, NO_TIMEZONE, TopologyRegions,

@@ -20,6 +20,7 @@ pub fn execute_service_area(
     request: &ServiceAreaRequest,
 ) -> Result<ServiceAreaResult> {
     ensure_no_avoid([&request.temporal.avoid])?;
+    crate::vehicle::ensure_no_vehicle([request.temporal.vehicle.as_ref()])?;
     validate_execution_inputs(topology, metrics)?;
     let routing_graph = build_routing_graph(topology, metrics)?;
     execute_service_area_with_graph(topology, metrics, &routing_graph, request)

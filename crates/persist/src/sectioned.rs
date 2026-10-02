@@ -26,9 +26,9 @@ use netweevil_core::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId,
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
     CompiledTemporalProfile, CompiledTemporalRules, CompiledTurnCostConfig,
-    DatasetAccelerationBundle, EDGE_NAME_BUNDLE_SCHEMA_VERSION, ELEVATION_RASTER_SCHEMA_VERSION,
-    EdgeBasedTopology, EdgeGuidance, EdgeId, EdgeNameBundle, EdgePresentation,
-    EdgeProfileAttributes, ElevationRasterHeader, FeatureAttributeColumn,
+    CompiledVehicleExclusions, DatasetAccelerationBundle, EDGE_NAME_BUNDLE_SCHEMA_VERSION,
+    ELEVATION_RASTER_SCHEMA_VERSION, EdgeBasedTopology, EdgeGuidance, EdgeId, EdgeNameBundle,
+    EdgePresentation, EdgeProfileAttributes, ElevationRasterHeader, FeatureAttributeColumn,
     FeatureAttributeColumnData, FeatureAttributeDefinition, FeatureAttributeTable, NodeId,
     NodeSpatialIndex, RoutingEdge, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle,
     TopologyEdgeLayers, TopologyNode, TravelMode, VehicleRestrictionTable,
@@ -703,7 +703,12 @@ fn encode_compiled_profile(
         .map_err(anyhow::Error::msg)?;
     writer.write_bincode(&rules.rule_sets)?;
     writer.write_u32s(&rules.edges)?;
-    writer.write_u32s(&rules.edge_rule_sets)
+    writer.write_u32s(&rules.edge_rule_sets)?;
+    bundle
+        .vehicle
+        .validate(bundle.edge_metrics.len(), bundle.components.len())
+        .map_err(anyhow::Error::msg)?;
+    writer.write_bincode(&bundle.vehicle)
 }
 
 pub(crate) fn read_compiled_profile_sectioned(
@@ -762,6 +767,10 @@ pub(crate) fn read_compiled_profile_sectioned(
         .rules
         .validate(edge_metrics.len())
         .map_err(anyhow::Error::msg)?;
+    let vehicle: CompiledVehicleExclusions = reader.read_bincode()?;
+    vehicle
+        .validate(edge_metrics.len(), components.len())
+        .map_err(anyhow::Error::msg)?;
 
     Ok(CompiledProfileBundle {
         schema_version: header.schema_version,
@@ -786,6 +795,7 @@ pub(crate) fn read_compiled_profile_sectioned(
                 distance_downward_weight: Vec::new(),
             }),
         edge_metrics,
+        vehicle,
     })
 }
 

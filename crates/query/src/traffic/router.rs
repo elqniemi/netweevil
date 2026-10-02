@@ -493,6 +493,17 @@ impl TrafficRouter {
         snapshot: &LiveTrafficSnapshot,
     ) -> CompiledProfileBundle {
         let base = self.base.metrics();
+        // Edges the profile's vehicle excludes get traffic speeds too, so a
+        // request vehicle that re-enables them sees the bucket's speeds.
+        let unrestricted;
+        let base = if base.vehicle.is_empty() {
+            base
+        } else {
+            let mut metrics = base.clone();
+            crate::vehicle::restore_vehicle_exclusions(&mut metrics);
+            unrestricted = metrics;
+            &unrestricted
+        };
         let edge_metrics = bucket_edge_metrics(
             self.shared.topology.as_ref(),
             base,
@@ -504,7 +515,7 @@ impl TrafficRouter {
         );
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         key.hash(&mut hasher);
-        CompiledProfileBundle {
+        let mut metrics = CompiledProfileBundle {
             schema_version: base.schema_version,
             profile_id: base.profile_id.clone(),
             // Distinct per metric so no cache keyed by profile hash can mix
@@ -532,7 +543,13 @@ impl TrafficRouter {
                     distance_downward_weight: Vec::new(),
                 }),
             edge_metrics,
+            vehicle: base.vehicle.clone(),
+        };
+        let excluded = &self.base.metrics().vehicle.edges;
+        if !excluded.is_empty() {
+            crate::vehicle::exclude_vehicle_edges(&mut metrics, excluded);
         }
+        metrics
     }
 
     /// The per-edge metric of the engine `engine_at(departure, use_live)`
@@ -628,8 +645,19 @@ impl TrafficRouter {
         let live = use_live.then_some(snapshot);
         let context = context_from_request(&request.temporal)?
             .with_traffic(self.temporal_traffic(live.clone()));
-        let topology = self.base.topology();
-        let metrics = self.base.metrics();
+        // Replay on the profile metric of the request's vehicle when it
+        // re-enables edges, so they carry their static times and costs.
+        // Vehicles that only exclude edges leave the path's metric as is.
+        let vehicle_engine = match self.base.request_adjustment(
+            &crate::AvoidOptions::default(),
+            request.temporal.vehicle.as_ref(),
+        )? {
+            crate::RequestAdjustment::Engine(engine) => Some(engine),
+            _ => None,
+        };
+        let replay_engine = vehicle_engine.as_ref().unwrap_or(&self.base);
+        let topology = replay_engine.topology();
+        let metrics = replay_engine.metrics();
         let deadline = departure + time::Duration::days(366);
         let Some((departure, arrival, generalized_cost, traversals)) =
             replay_temporal_edge_path(topology, metrics, &context, &path, departure, deadline)
@@ -690,11 +718,12 @@ impl TrafficRouter {
         let live_version = snapshot.as_ref().map_or(0, |live| live.version);
         let context =
             context_from_request(&request.temporal)?.with_traffic(self.temporal_traffic(snapshot));
-        // Avoid areas remove edges from the metric the exact search uses.
-        let avoided = self
+        // Avoid areas and request vehicles change the metric the exact
+        // search uses.
+        let target = self
             .base
-            .avoid_target(&request.temporal.avoid, EngineMode::Auto)?;
-        let engine = avoided.as_ref().unwrap_or(&self.base);
+            .temporal_target(&request.temporal, EngineMode::Auto)?;
+        let engine = target.as_ref().unwrap_or(&self.base);
         let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
         let mut result = execute_temporal_route_with_graph(
             engine.topology(),
@@ -813,10 +842,11 @@ impl TrafficRouter {
 }
 
 /// Static options for a departure-bucket engine: timing is baked into the
-/// metric, request-owned avoid areas still apply.
+/// metric, request-owned avoid areas and vehicles still apply.
 fn static_options(temporal: &TemporalRequestOptions) -> TemporalRequestOptions {
     TemporalRequestOptions {
         avoid: temporal.avoid.clone(),
+        vehicle: temporal.vehicle,
         ..TemporalRequestOptions::default()
     }
 }

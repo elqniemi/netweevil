@@ -100,6 +100,10 @@ pub struct TripRequest {
     pub returns: ReturnConfig,
     #[serde(default)]
     pub optimizer: TripOptimizerOptions,
+    /// Physical vehicle parameters overriding the profile's `vehicle`
+    /// block, as for routes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle: Option<netweevil_core::VehicleParams>,
 }
 
 /// Arrival and service at one stop of the trip.

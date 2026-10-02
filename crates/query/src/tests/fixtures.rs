@@ -343,6 +343,7 @@ pub(crate) fn metrics(costs: &[f64]) -> CompiledProfileBundle {
                 generalized_cost: Some(cost),
             })
             .collect(),
+        vehicle: Default::default(),
     }
 }
 
@@ -400,6 +401,120 @@ pub(crate) fn roundabout_entry_penalty_metrics() -> CompiledProfileBundle {
 
 pub(crate) fn disconnected_metrics() -> CompiledProfileBundle {
     metrics(&[5.0, 5.0])
+}
+
+// Truck fixtures.
+
+pub(crate) const TRUCK_GRID: u32 = 5;
+pub(crate) const TRUCK_GRID_STEP_DEG: f64 = 0.001;
+
+/// A 5x5 two-way street grid open to cars and trucks, with block lengths
+/// between 60 and 150 m. Every eighth block from the second carries a 3.0 m
+/// height limit, from the fourth a 3.8 m one and from the seventh a 4.2 m
+/// one; every ninth from the sixth a 7.5 t truck weight limit and every
+/// tenth from the eighth a dangerous-goods ban. Trucks of different sizes
+/// therefore route on different networks. Block `b` is source feature
+/// `100 + b` in both directions.
+pub(crate) fn truck_restricted_grid() -> TopologyBundle {
+    use netweevil_core::{VehicleRestriction, VehicleRestrictionKind, VehicleRestrictionTable};
+    let restriction = |modes: u16, kind| VehicleRestriction {
+        modes: AccessMask::new(modes),
+        kind,
+    };
+    let restrictions = vec![
+        restriction(
+            AccessMask::VEHICLES,
+            VehicleRestrictionKind::MaxHeightCm(300),
+        ),
+        restriction(
+            AccessMask::VEHICLES,
+            VehicleRestrictionKind::MaxHeightCm(380),
+        ),
+        restriction(
+            AccessMask::VEHICLES,
+            VehicleRestrictionKind::MaxHeightCm(420),
+        ),
+        restriction(AccessMask::HGV, VehicleRestrictionKind::MaxWeightKg(7_500)),
+        restriction(AccessMask::VEHICLES, VehicleRestrictionKind::NoHazmat),
+    ];
+    let block_restrictions = |block: u32| {
+        [
+            (block % 8 == 1).then_some(0),
+            (block % 8 == 3).then_some(1),
+            (block % 8 == 6).then_some(2),
+            (block % 9 == 5).then_some(3),
+            (block % 10 == 7).then_some(4),
+        ]
+        .into_iter()
+        .flatten()
+    };
+    let nodes = (0..TRUCK_GRID * TRUCK_GRID)
+        .map(|id| {
+            (
+                6.0 + f64::from(id % TRUCK_GRID) * TRUCK_GRID_STEP_DEG,
+                53.0 + f64::from(id / TRUCK_GRID) * TRUCK_GRID_STEP_DEG,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut edges = Vec::new();
+    let mut table = VehicleRestrictionTable {
+        restrictions,
+        ..Default::default()
+    };
+    let mut block = 0_u32;
+    for id in 0..TRUCK_GRID * TRUCK_GRID {
+        let neighbours = [
+            (id % TRUCK_GRID + 1 < TRUCK_GRID).then_some(id + 1),
+            (id / TRUCK_GRID + 1 < TRUCK_GRID).then_some(id + TRUCK_GRID),
+        ];
+        for neighbour in neighbours.into_iter().flatten() {
+            for (from, to) in [(id, neighbour), (neighbour, id)] {
+                let edge_id = edges.len() as u32;
+                edges.push(DirectedEdge {
+                    access_mask: AccessMask::new(AccessMask::CAR | AccessMask::HGV),
+                    ..edge(
+                        edge_id,
+                        from,
+                        to,
+                        100 + i64::from(block),
+                        60 + block * 37 % 91,
+                    )
+                });
+                for restriction in block_restrictions(block) {
+                    table.edges.push(edge_id);
+                    table.edge_restrictions.push(restriction);
+                }
+            }
+            block += 1;
+        }
+    }
+    let mut topology = topology("truck-grid", &nodes, &edges);
+    topology.edge_layers.vehicle_restrictions = table;
+    topology
+}
+
+pub(crate) fn truck_grid_point(id: &str, x: f64, y: f64) -> LabeledPoint {
+    point(
+        id,
+        6.0 + x * TRUCK_GRID_STEP_DEG,
+        53.0 + y * TRUCK_GRID_STEP_DEG,
+    )
+}
+
+/// A truck profile with turn penalties and the given `vehicle` block,
+/// compiled for `topology` without a hierarchy.
+pub(crate) fn compile_truck_profile(
+    topology: &TopologyBundle,
+    vehicle: Option<netweevil_core::VehicleParams>,
+) -> CompiledProfileBundle {
+    let mut profile: netweevil_profile::ProfileDocument = serde_yaml::from_str(
+        "profile: {id: truck, label: Truck, mode: hgv, defaults_pack: test}\n\
+         turns: {left_penalty_s: 8, right_penalty_s: 3, uturn_penalty_s: 40}",
+    )
+    .expect("truck profile parses");
+    profile.vehicle = vehicle;
+    netweevil_profile::compile_profile_bundle(&profile, topology, CacheBundleId::new("truck-grid"))
+        .expect("truck profile compiles")
 }
 
 // Request builders.

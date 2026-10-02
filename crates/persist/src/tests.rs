@@ -426,11 +426,29 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
         },
         source_topology_bundle_id: CacheBundleId::new("topology-test"),
         acceleration: None,
-        edge_metrics: vec![CompiledEdgeMetric {
-            edge_id: EdgeId(0),
-            travel_time_s: Some(12.0),
-            generalized_cost: Some(18.0),
-        }],
+        edge_metrics: vec![
+            CompiledEdgeMetric {
+                edge_id: EdgeId(0),
+                travel_time_s: Some(12.0),
+                generalized_cost: Some(18.0),
+            },
+            CompiledEdgeMetric {
+                edge_id: EdgeId(1),
+                travel_time_s: None,
+                generalized_cost: None,
+            },
+        ],
+        // Edge 1 is too low for the profile's 4 m vehicle.
+        vehicle: netweevil_core::CompiledVehicleExclusions {
+            vehicle: Some(netweevil_core::VehicleParams {
+                height_m: Some(4.0),
+                ..Default::default()
+            }),
+            edges: vec![1],
+            travel_time_s: vec![9.5],
+            generalized_cost: vec![14.25],
+            component_values: Vec::new(),
+        },
     };
     let file = TempFile::new("compiled-profile");
 
@@ -440,7 +458,8 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
     assert_eq!(read.turn_costs.cost_time_weight, 1.5);
     assert_eq!(read.turn_costs.destination_only_penalty_s, 600.0);
     assert_eq!(read.temporal.rules, bundle.temporal.rules);
-    assert_eq!(read.edge_metrics.len(), 1);
+    assert_eq!(read.vehicle, bundle.vehicle);
+    assert_eq!(read.edge_metrics.len(), 2);
 
     // Fixed-point weights, including both sentinels, are dropped from every
     // per-metric weight set while the acceleration header is kept.

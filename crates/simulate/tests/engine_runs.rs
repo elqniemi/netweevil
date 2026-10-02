@@ -141,6 +141,7 @@ fn grid_engine_for(
         source_topology_bundle_id: CacheBundleId::new("synthetic"),
         acceleration: None,
         edge_metrics,
+        vehicle: Default::default(),
     };
 
     Arc::new(

@@ -100,6 +100,7 @@ fn trip(stops: Vec<TripStop>, mode: TripMode) -> TripRequest {
         snap: snap_within(1.0),
         returns: Default::default(),
         optimizer: Default::default(),
+        vehicle: None,
     }
 }
 

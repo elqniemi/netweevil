@@ -479,6 +479,14 @@ pub fn execute_accessibility(
                 .map(|category| &category.destinations.temporal.avoid),
         ),
     )?;
+    crate::vehicle::ensure_no_vehicle(
+        std::iter::once(request.origins.temporal.vehicle.as_ref()).chain(
+            request
+                .categories
+                .iter()
+                .map(|category| category.destinations.temporal.vehicle.as_ref()),
+        ),
+    )?;
     if has_failure_modes(&request.origins.fallback) {
         validate_execution_inputs(topology, metrics)?;
         let degraded =

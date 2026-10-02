@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use netweevil_core::VehicleParams;
 use netweevil_profile::ReturnConfig;
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +67,13 @@ pub struct TemporalRequestOptions {
     /// temporal, but request-scoped like the rest of these options.
     #[serde(default, skip_serializing_if = "AvoidOptions::is_empty")]
     pub avoid: AvoidOptions,
+    /// Physical vehicle parameters (height, weight, hazmat, trailers, ...)
+    /// overriding individual fields of the profile's `vehicle` block. Edges
+    /// whose restrictions the merged vehicle violates are excluded; edges
+    /// the profile's own vehicle could not use but this one can are
+    /// re-enabled. Not temporal, but request-scoped like `avoid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle: Option<VehicleParams>,
     /// Per-state nondominated label guard for temporal/generalized searches.
     #[serde(default = "default_max_temporal_labels_per_state")]
     pub max_labels_per_state: usize,
@@ -118,6 +126,7 @@ impl Default for TemporalRequestOptions {
             holidays: Vec::new(),
             overlays: Vec::new(),
             avoid: AvoidOptions::default(),
+            vehicle: None,
             max_labels_per_state: default_max_temporal_labels_per_state(),
             arrive_by_lookback_s: default_arrive_by_lookback_s(),
             constraints: Vec::new(),

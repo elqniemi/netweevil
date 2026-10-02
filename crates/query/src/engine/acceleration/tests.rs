@@ -35,6 +35,7 @@ fn graph(source: Arc<DatasetAccelerationBundle>, direct_weight: u32) -> Accelera
         temporal: Default::default(),
         source_topology_bundle_id: CacheBundleId::new("witness-test"),
         edge_metrics: vec![],
+        vehicle: Default::default(),
         acceleration: Some(CompiledAcceleration {
             schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
             source_acceleration_bundle_id: CacheBundleId::new("witness-test"),

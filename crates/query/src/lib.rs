@@ -35,6 +35,7 @@ mod temporal;
 mod trace_matching;
 mod traffic;
 mod trip;
+mod vehicle;
 mod waypoints;
 
 pub use accessibility::*;
