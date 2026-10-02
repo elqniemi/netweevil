@@ -75,7 +75,7 @@ pub fn load_service_area_sequence_request(
             other
         ),
     };
-    request.expanded_departure_times()?;
+    request.validate_timing()?;
     Ok(request)
 }
 

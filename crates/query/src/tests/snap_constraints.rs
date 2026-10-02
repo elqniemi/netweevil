@@ -10,6 +10,11 @@ use crate::*;
 /// nodes 3-5 directly above them at 20 m. With `one_way`, the odd (westbound)
 /// edges are not traversable.
 fn engine(one_way: bool) -> PreparedRoutingEngine {
+    engine_in(one_way, None)
+}
+
+/// `engine` with every node in `country`.
+fn engine_in(one_way: bool, country: Option<&str>) -> PreparedRoutingEngine {
     let nodes = (0..6)
         .map(|index| (6.0 + f64::from(index % 3) * 0.001, 53.0))
         .collect::<Vec<_>>();
@@ -32,6 +37,13 @@ fn engine(one_way: bool) -> PreparedRoutingEngine {
         node.z = 20.0;
     }
     topology.spatial_index = None;
+    if let Some(country) = country {
+        topology.regions.admin_areas = vec![netweevil_core::AdminArea {
+            country_code: country.to_string(),
+            ..Default::default()
+        }];
+        topology.regions.node_admin_area = vec![0; 6];
+    }
     let mut metrics = metrics(&[10.0; 8]);
     if one_way {
         for westbound in (1..8).step_by(2) {
@@ -118,6 +130,41 @@ fn bearings_preserve_directed_endpoint_seeds_and_stack_elevation() {
 }
 
 #[test]
+fn curb_approaches_default_to_the_country_driving_side() {
+    let point = point("p", 6.0005, 52.9999);
+    let curb = |driving_side| {
+        options(
+            "p",
+            PointSnapConstraint {
+                approach: SnapApproach::Curb,
+                driving_side,
+                ..Default::default()
+            },
+        )
+    };
+    // The point lies south of the street: the curb side of eastbound traffic
+    // in right-hand countries and of westbound traffic in left-hand ones.
+    for (country, expected) in [
+        (Some("NL"), vec![0]),
+        (Some("GB"), vec![1]),
+        (None, vec![0]),
+    ] {
+        let engine = engine_in(false, country);
+        assert_eq!(
+            candidate_edges(&engine, &point, &curb(None), true),
+            expected,
+            "{country:?}"
+        );
+    }
+    let left_hand = engine_in(false, Some("JP"));
+    assert_eq!(
+        candidate_edges(&left_hand, &point, &curb(Some(DrivingSide::Right)), true),
+        vec![0],
+        "an explicit driving side overrides the country"
+    );
+}
+
+#[test]
 fn curb_opposite_and_driving_side_filter_direction_without_inventing_one_way_edges() {
     let engine = engine(false);
     let mut point = point("p", 6.0005, 52.9999);
@@ -133,7 +180,7 @@ fn curb_opposite_and_driving_side_filter_direction_without_inventing_one_way_edg
     snap.point_constraints.get_mut("p").unwrap().approach = SnapApproach::Opposite;
     assert_eq!(candidate_edges(&engine, &point, &snap, true), vec![1]);
     snap.point_constraints.get_mut("p").unwrap().approach = SnapApproach::Curb;
-    snap.point_constraints.get_mut("p").unwrap().driving_side = DrivingSide::Left;
+    snap.point_constraints.get_mut("p").unwrap().driving_side = Some(DrivingSide::Left);
     assert_eq!(candidate_edges(&engine, &point, &snap, true), vec![1]);
     point.lat = 53.0;
     let mut edges = candidate_edges(&engine, &point, &snap, true);

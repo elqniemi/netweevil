@@ -116,10 +116,15 @@ pub(crate) fn execute_service_area_with_graph(
             .departure_time
             .as_deref()
             .context("a temporal service area requires departure_time")?;
-        Some((
-            crate::temporal::context_from_request(&request.temporal)?,
-            parse_datetime(departure)?,
-        ))
+        let context = crate::temporal::context_from_request(&request.temporal)?;
+        let origin = request
+            .origins
+            .first()
+            .context("a service area requires at least one origin")?;
+        let departure = crate::temporal::parse_request_time_at(
+            topology, &context, departure, origin.lon, origin.lat,
+        )?;
+        Some((context, departure))
     } else {
         None
     };

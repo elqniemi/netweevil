@@ -21,7 +21,7 @@ pub(crate) struct SnapPointCacheKey {
 struct SnapConstraintCacheKey {
     bearing: Option<(u64, u64)>,
     approach: SnapApproach,
-    driving_side: DrivingSide,
+    driving_side: Option<DrivingSide>,
     street_side_tolerance: u64,
 }
 
@@ -334,7 +334,11 @@ fn collect_snap_candidates(
             || !edge_matches_filters(topology, edge_index as usize, &options.attribute_filters)
             || !elevation_is_eligible(point, candidate_z, options.z_window_m)
             || constraint.is_some_and(|constraint| {
-                !edge_matches_point_constraint(point, from, to, constraint)
+                let driving_side = constraint
+                    .driving_side
+                    .or_else(|| topology.edge_driving_side(edge_index as usize))
+                    .unwrap_or_default();
+                !edge_matches_point_constraint(point, from, to, constraint, driving_side)
             })
         {
             continue;
@@ -402,6 +406,7 @@ fn edge_matches_point_constraint(
     from: &TopologyNode,
     to: &TopologyNode,
     constraint: &PointSnapConstraint,
+    driving_side: DrivingSide,
 ) -> bool {
     // Use the same local road tangent as projection, including its latitude
     // scale. Cross-product sign is positive on the left of travel.
@@ -427,7 +432,7 @@ fn edge_matches_point_constraint(
     if side_distance.abs() <= constraint.street_side_tolerance_m {
         return true;
     }
-    let on_driving_side = (side_distance < 0.0) == (constraint.driving_side == DrivingSide::Right);
+    let on_driving_side = (side_distance < 0.0) == (driving_side == DrivingSide::Right);
     on_driving_side == (constraint.approach == SnapApproach::Curb)
 }
 

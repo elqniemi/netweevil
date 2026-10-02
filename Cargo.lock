@@ -1484,6 +1484,8 @@ dependencies = [
  "anyhow",
  "arrow-json",
  "bytemuck",
+ "chrono",
+ "chrono-tz",
  "csv",
  "netweevil-core",
  "netweevil-profile",
