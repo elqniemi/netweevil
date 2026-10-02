@@ -120,6 +120,15 @@ pub(crate) async fn network_edges_handler(
             properties.insert("access_car".into(), json!(attributes.access_mask.contains(AccessMask::CAR)));
             properties.insert("access_bicycle".into(), json!(attributes.access_mask.contains(AccessMask::BICYCLE)));
             properties.insert("access_foot".into(), json!(attributes.access_mask.contains(AccessMask::FOOT)));
+            for (key, bit) in [
+                ("access_bus", AccessMask::BUS),
+                ("access_hgv", AccessMask::HGV),
+                ("access_taxi", AccessMask::TAXI),
+                ("access_motorcycle", AccessMask::MOTORCYCLE),
+                ("access_moped", AccessMask::MOPED),
+            ] {
+                properties.insert(key.into(), json!(attributes.access_mask.contains(bit)));
+            }
             properties.insert("temporal".into(), json!(routing.temporal_rule_id.is_some()));
             properties.insert("oneway".into(), json!(!has_reverse_edge(&topology, edge_index)));
             properties.insert(

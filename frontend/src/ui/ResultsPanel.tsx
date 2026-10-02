@@ -6,6 +6,7 @@ import { requestFit, setState, useStore, type ResultRecord, type RunRecord } fro
 import { TOOL_BY_ID } from "../tools/registry";
 import { DirectionsList } from "./DirectionsList";
 import { TransitDirectionsList } from "./TransitDirectionsList";
+import { HeightSummary, RouteExtras, TripSummary } from "./RouteExtras";
 import { fmtBytes, fmtMs, fmtValue } from "./format";
 import { transitTimeContext, type TransitTimeContext } from "../api/time";
 
@@ -50,6 +51,16 @@ const SUMMARY_KEYS = [
   "boarding_count",
   "max_travel_time_s",
   "language",
+  "total_wait_s",
+  "total_service_s",
+  "total_lateness_s",
+  "time_windows_met",
+  "version",
+  "update_count",
+  "entry_count",
+  "active_entry_count",
+  "swap_ms",
+  "accepted",
 ];
 
 /** Columns of the per-route comparison table, in display order (only those present are shown). */
@@ -433,6 +444,17 @@ function RunsTable({ result }: { result: ResultRecord }) {
   );
 }
 
+/** Execution context entries; nested blocks such as `traffic` are flattened one level. */
+function serviceEntries(service: Record<string, unknown>): [string, string][] {
+  const out: [string, string][] = [];
+  for (const [k, v] of Object.entries(service)) {
+    if (isPlainObject(v)) {
+      for (const [ik, iv] of Object.entries(v)) out.push([`${k} ${ik}`, isPlainObject(iv) ? String(iv.label ?? JSON.stringify(iv)) : String(iv)]);
+    } else out.push([k, String(v)]);
+  }
+  return out;
+}
+
 function SummaryTab({ result }: { result: ResultRecord }) {
   const selected = useStore((s) => s.selectedRun);
   const multi = result.runs.length > 1;
@@ -454,7 +476,7 @@ function SummaryTab({ result }: { result: ResultRecord }) {
           {run.error && <span className="error-text">{run.error}</span>}
         </div>
       )}
-      {run && entries.length === 0 && !run.error && <p className="muted">No headline figures for this response. See the table or JSON.</p>}
+      {run && entries.length === 0 && !run.error && result.tool !== "height" && <p className="muted">No headline figures for this response. See the table or JSON.</p>}
       {entries.length > 0 && (
         <dl className="kv kv-figures">
           {entries.map(([k, v]) => (
@@ -466,15 +488,18 @@ function SummaryTab({ result }: { result: ResultRecord }) {
         </dl>
       )}
       {run && result.tool === "transit_directions" && <TransitDirectionsList run={run} />}
+      {run && !run.error && result.tool === "trip" && <TripSummary run={run} />}
+      {run && !run.error && result.tool === "height" && <HeightSummary run={run} />}
+      {run && !run.error && <RouteExtras run={run} />}
       {(service || hints.length > 0) && (
         <details className="service-context">
           <summary>Execution context</summary>
           <dl className="kv">
             {service &&
-              Object.entries(service).map(([k, v]) => (
+              serviceEntries(service).map(([k, v]) => (
                 <div key={k}>
                   <dt>{k.replace(/_/g, " ")}</dt>
-                  <dd>{String(v)}</dd>
+                  <dd>{v}</dd>
                 </div>
               ))}
             {hints.map(([k, v]) => (

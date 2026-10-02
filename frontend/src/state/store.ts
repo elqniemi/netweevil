@@ -21,7 +21,10 @@ export type ToolId =
   | "transit_service_area"
   | "transit_editor"
   | "network"
-  | "simulation";
+  | "simulation"
+  | "trip"
+  | "height"
+  | "traffic";
 
 export type Basemap = "positron" | "dark" | "osm";
 export type ResponseFormat = "json" | "geojson";
@@ -30,6 +33,13 @@ export type ResponseFormat = "json" | "geojson";
 export interface InputPoint extends LabeledPoint {
   kind?: string;
   weight?: number;
+  /** Trip stops: service time and time window, in seconds on the trip clock. */
+  service_s?: number;
+  earliest_s?: number;
+  latest_s?: number;
+  /** Live traffic: the OSM way (source feature) nearest to the clicked point. */
+  way_id?: number;
+  way_name?: string | null;
 }
 
 export type RouteEnd = "origin" | "destination";
@@ -213,6 +223,8 @@ export interface AppState {
   /** Whether the settings part of the tool panel is expanded. */
   settingsOpen: boolean;
   hoverInfo: { x: number; y: number; props: Record<string, unknown> } | null;
+  /** Position hovered on an elevation profile chart, marked on the map. */
+  profileHover: [number, number] | null;
   viewport: { bbox: [number, number, number, number] | null; zoom: number | null };
   /** Bumps whenever the map should fit to the current result (or one run). */
   fitRequest: number;
@@ -275,6 +287,7 @@ const initialState: AppState = {
   editor: { scenarioId: null, scenario: null, info: null, dirty: false, activeLine: null, mode: "add", baseStops: [], selectedStop: null },
   settingsOpen: true,
   hoverInfo: null,
+  profileHover: null,
   viewport: { bbox: null, zoom: null },
   fitRequest: 0,
   fitRun: null,
@@ -358,6 +371,7 @@ function loadPersisted(base: AppState): AppState {
         result: null,
         running: false,
         timings: [],
+        profileHover: null,
       };
     }
     const legacy = localStorage.getItem(LEGACY_KEY);
@@ -587,6 +601,7 @@ export function clearMap() {
     result: null,
     selectedRun: null,
     hoverInfo: null,
+    profileHover: null,
     simulation: { ...prev.simulation, agentFeatures: null, edgeFeatures: null, playing: false },
   }));
 }
