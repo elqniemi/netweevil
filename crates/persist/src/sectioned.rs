@@ -54,6 +54,79 @@ pub(crate) fn unsupported_format_error(path: &Path) -> anyhow::Error {
 const DEFLATED: u64 = 1 << 63;
 /// Sections smaller than this are never compressed.
 const DEFLATE_MIN_BYTES: usize = 64 * 1024;
+/// Deflated sections are split into independently compressed chunks of
+/// this many inflated bytes, so one large section inflates on all cores.
+/// Deflate's 32 KiB window makes the ratio loss negligible.
+const DEFLATE_CHUNK_BYTES: usize = 1 << 20;
+
+/// Compressed section layout: `u64` inflated length, `u32` chunk count,
+/// one `u32` compressed length per chunk, then the raw deflate chunks.
+fn deflate_chunked(section: &[u8]) -> std::io::Result<Vec<u8>> {
+    let chunks = section
+        .par_chunks(DEFLATE_CHUNK_BYTES)
+        .map(|chunk| {
+            let mut encoder = flate2::write::DeflateEncoder::new(
+                Vec::with_capacity(chunk.len() / 2 + 16),
+                flate2::Compression::default(),
+            );
+            encoder.write_all(chunk)?;
+            encoder.finish()
+        })
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let mut out =
+        Vec::with_capacity(12 + 4 * chunks.len() + chunks.iter().map(Vec::len).sum::<usize>());
+    out.extend_from_slice(&(section.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(chunks.len() as u32).to_le_bytes());
+    for chunk in &chunks {
+        out.extend_from_slice(&(chunk.len() as u32).to_le_bytes());
+    }
+    for chunk in &chunks {
+        out.extend_from_slice(chunk);
+    }
+    Ok(out)
+}
+
+fn inflate_chunked(payload: &[u8]) -> Result<Vec<u8>> {
+    let mut cursor = payload;
+    let mut take = |len: usize| -> Result<&[u8]> {
+        if cursor.len() < len {
+            bail!("truncated compressed bundle section");
+        }
+        let (head, tail) = cursor.split_at(len);
+        cursor = tail;
+        Ok(head)
+    };
+    let length = usize::try_from(u64::from_le_bytes(take(8)?.try_into().unwrap()))
+        .context("compressed section too large")?;
+    let chunk_count = u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize;
+    // Deflate expands at most ~1032:1, which also bounds the allocation
+    // below for corrupt lengths.
+    if chunk_count != length.div_ceil(DEFLATE_CHUNK_BYTES) || length / 1032 > payload.len() {
+        bail!("compressed bundle section has an inconsistent chunk table");
+    }
+    let lengths = (0..chunk_count)
+        .map(|_| Ok(u32::from_le_bytes(take(4)?.try_into().unwrap()) as usize))
+        .collect::<Result<Vec<_>>>()?;
+    let chunks = lengths
+        .into_iter()
+        .map(&mut take)
+        .collect::<Result<Vec<_>>>()?;
+    let mut inflated = vec![0_u8; length];
+    inflated
+        .par_chunks_mut(DEFLATE_CHUNK_BYTES)
+        .zip(chunks)
+        .try_for_each(|(output, chunk)| -> Result<()> {
+            let mut decoder = flate2::read::DeflateDecoder::new(chunk);
+            decoder
+                .read_exact(output)
+                .context("inflating bundle section")?;
+            if decoder.read(&mut [0_u8])? != 0 {
+                bail!("compressed bundle chunk is longer than expected");
+            }
+            Ok(())
+        })?;
+    Ok(inflated)
+}
 
 /// Collects encoded sections and writes them, deflating large sections in
 /// parallel when that saves at least a tenth of their size.
@@ -131,13 +204,7 @@ impl SectionWriter {
             .into_par_iter()
             .map(|section| {
                 if section.len() >= DEFLATE_MIN_BYTES {
-                    let mut encoder = flate2::write::DeflateEncoder::new(
-                        Vec::with_capacity(section.len() / 2 + 16),
-                        flate2::Compression::default(),
-                    );
-                    encoder.write_all(&(section.len() as u64).to_le_bytes())?;
-                    encoder.write_all(&section)?;
-                    let compressed = encoder.finish()?;
+                    let compressed = deflate_chunked(&section)?;
                     if compressed.len() * 10 <= section.len() * 9 {
                         return Ok((compressed.len() as u64 | DEFLATED, compressed));
                     }
@@ -203,25 +270,22 @@ impl<'a> SectionReader<'a> {
                 if !deflated {
                     return Ok(Cow::Borrowed(payload));
                 }
-                let mut decoder = flate2::read::DeflateDecoder::new(payload);
-                let mut length = [0_u8; 8];
-                decoder
-                    .read_exact(&mut length)
-                    .context("reading compressed section length")?;
-                let length = usize::try_from(u64::from_le_bytes(length))
-                    .context("compressed section too large")?;
-                // Cap the preallocation; a corrupt length must not abort.
-                let mut inflated = Vec::with_capacity(length.min(1 << 30));
-                decoder
-                    .read_to_end(&mut inflated)
-                    .context("inflating bundle section")?;
-                if inflated.len() != length {
-                    bail!("compressed bundle section has the wrong length");
-                }
+                let inflated = inflate_chunked(payload)?;
                 Ok(Cow::Owned(inflated))
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
+            sections: sections.into_iter(),
+        })
+    }
+
+    /// Moves the next `count` sections into their own reader, so they can
+    /// be decoded on another thread.
+    fn take(&mut self, count: usize) -> Result<SectionReader<'a>> {
+        let sections = (0..count)
+            .map(|_| self.next_section())
+            .collect::<Result<Vec<_>>>()?;
+        Ok(SectionReader {
             sections: sections.into_iter(),
         })
     }
@@ -385,17 +449,33 @@ pub(crate) fn read_acceleration_sectioned(
     if header.schema_version != ACCELERATION_BUNDLE_SCHEMA_VERSION {
         return Err(unsupported_format_error(path));
     }
-    let edge_order = reader.read_u32s()?;
-    let edge_rank = match reader.read_bincode::<Stored<()>>()? {
-        Stored::Derived => {
-            invert_permutation(&edge_order).context("CCH edge order is not a permutation")?
-        }
-        Stored::Explicit(()) => reader.read_u32s()?,
+    let order_section = reader.next_section()?;
+    let rank_section = match reader.read_bincode::<Stored<()>>()? {
+        Stored::Derived => None,
+        Stored::Explicit(()) => Some(reader.next_section()?),
     };
-    let upward_first_out = reader.read_u32s()?;
-    let upward_head = codec::decode_sorted_rows(&upward_first_out, &reader.next_section()?)?;
-    let downward_first_out = reader.read_u32s()?;
-    let downward_head = codec::decode_sorted_rows(&downward_first_out, &reader.next_section()?)?;
+    let upward = (reader.next_section()?, reader.next_section()?);
+    let downward = (reader.next_section()?, reader.next_section()?);
+    let csr = |(first_out, heads): (Cow<'_, [u8]>, Cow<'_, [u8]>)| -> Result<_> {
+        let first_out = codec::decode_u32s(&first_out)?;
+        let heads = codec::decode_sorted_rows(&first_out, &heads)?;
+        Ok((first_out, heads))
+    };
+    let (order, (upward, downward)) = rayon::join(
+        || -> Result<_> {
+            let edge_order = codec::decode_u32s(&order_section)?;
+            let edge_rank = match rank_section {
+                None => invert_permutation(&edge_order)
+                    .context("CCH edge order is not a permutation")?,
+                Some(section) => codec::decode_u32s(&section)?,
+            };
+            Ok((edge_order, edge_rank))
+        },
+        || rayon::join(|| csr(upward), || csr(downward)),
+    );
+    let (edge_order, edge_rank) = order?;
+    let (upward_first_out, upward_head) = upward?;
+    let (downward_first_out, downward_head) = downward?;
     Ok(DatasetAccelerationBundle {
         schema_version: header.schema_version,
         source_topology_bundle_id: header.source_topology_bundle_id,
@@ -901,122 +981,169 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
     let node_count = usize::try_from(header.node_count).context("node count overflow")?;
     let edge_count = usize::try_from(header.edge_count).context("edge count overflow")?;
 
-    let node_ids = reader.read_u32s()?;
-    let lons = reader.read_f64s()?;
-    let lats = reader.read_f64s()?;
-    let elevations = reader.read_f64s()?;
-    for (name, len) in [
-        ("node ids", node_ids.len()),
-        ("longitudes", lons.len()),
-        ("latitudes", lats.len()),
-        ("elevations", elevations.len()),
-    ] {
-        ensure_len(name, len, node_count)?;
-    }
-    let nodes: Vec<TopologyNode> = (0..node_count)
-        .map(|index| TopologyNode {
-            node_id: NodeId(node_ids[index]),
-            lon: lons[index],
-            lat: lats[index],
-            z: elevations[index],
-        })
-        .collect();
-    drop((node_ids, lons, lats, elevations));
-    let spatial_index = match reader.read_bincode::<Stored<Option<NodeSpatialIndex>>>()? {
-        Stored::Derived => {
-            Some(NodeSpatialIndex::build(&nodes).context("derived spatial index needs nodes")?)
-        }
-        Stored::Explicit(index) => index,
-    };
-
-    let edge_ids = reader.read_u32s()?;
-    let froms = reader.read_u32s()?;
-    let tos = reader.read_u32s()?;
-    let way_ids = reader.read_i64s()?;
-    let lengths = reader.read_u32s()?;
-    let ascents = reader.read_f32s()?;
-    let descents = reader.read_f32s()?;
-    let flags = reader.read_u32s()?;
-    let feature_rows = reader.read_u32s()?;
-    let source_directions = reader.read_i64s()?;
-    let temporal_rule_ids = reader.read_i64s()?;
-    for (name, len) in [
-        ("edge ids", edge_ids.len()),
-        ("edge tails", froms.len()),
-        ("edge heads", tos.len()),
-        ("way ids", way_ids.len()),
-        ("lengths", lengths.len()),
-        ("ascents", ascents.len()),
-        ("descents", descents.len()),
-        ("flags", flags.len()),
-        ("feature rows", feature_rows.len()),
-        ("source directions", source_directions.len()),
-        ("temporal rule ids", temporal_rule_ids.len()),
-    ] {
-        ensure_len(name, len, edge_count)?;
-    }
-    let routing = (0..edge_count)
-        .map(|index| {
-            Ok(RoutingEdge {
-                edge_id: EdgeId(edge_ids[index]),
-                from: NodeId(froms[index]),
-                to: NodeId(tos[index]),
-                source_way_id: way_ids[index],
-                length_m: lengths[index],
-                ascent_m: ascents[index],
-                descent_m: descents[index],
-                feature_row: feature_rows[index],
-                source_direction: i8::try_from(source_directions[index])
-                    .context("source direction out of range")?,
-                temporal_rule_id: i64_to_option_u32(temporal_rule_ids[index])?,
-                flags: flags[index],
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let profile: Vec<EdgeProfileAttributes> = reader.read_interned()?;
-    ensure_len("edge profile layer", profile.len(), edge_count)?;
-    let name_indexes = reader.read_i64s()?;
-    let geometry_offsets = reader.read_i64s()?;
-    let geometry_lens = reader.read_u32s()?;
-    ensure_len("edge names", name_indexes.len(), edge_count)?;
-    ensure_len("geometry offsets", geometry_offsets.len(), edge_count)?;
-    ensure_len("geometry lengths", geometry_lens.len(), edge_count)?;
-    let presentation = (0..edge_count)
-        .map(|index| {
-            Ok(EdgePresentation {
-                name_index: i64_to_option_u32(name_indexes[index])?,
-                geometry_offset: geometry_offsets[index] as u64,
-                geometry_len: geometry_lens[index],
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-
-    let edge_based_topology = match reader.read_bincode::<Stored<()>>()? {
-        Stored::Derived => derived_edge_based_topology(node_count, &routing)
-            .context("edge endpoints reference missing nodes")?,
-        Stored::Explicit(()) => {
-            let node_first_out = reader.read_u32s()?;
-            let node_edge_order = reader.read_u32s()?;
-            let edge_transition_first_out = reader.read_u32s()?;
-            let edge_transition_edges =
-                codec::decode_sorted_rows(&edge_transition_first_out, &reader.next_section()?)?;
-            EdgeBasedTopology {
-                node_first_out,
-                node_edge_order,
-                edge_transition_first_out,
-                edge_transition_edges,
+    // Nodes, routing columns and the profile/presentation layers are
+    // independent: decode the three groups concurrently.
+    let mut node_reader = reader.take(5)?;
+    let mut routing_reader = reader.take(11)?;
+    let mut layer_reader = reader.take(5)?;
+    let (nodes, (routing, layers)) = rayon::join(
+        move || -> Result<_> {
+            let reader = &mut node_reader;
+            let node_ids = reader.read_u32s()?;
+            let lons = reader.read_f64s()?;
+            let lats = reader.read_f64s()?;
+            let elevations = reader.read_f64s()?;
+            for (name, len) in [
+                ("node ids", node_ids.len()),
+                ("longitudes", lons.len()),
+                ("latitudes", lats.len()),
+                ("elevations", elevations.len()),
+            ] {
+                ensure_len(name, len, node_count)?;
             }
-        }
+            let nodes: Vec<TopologyNode> = (0..node_count)
+                .map(|index| TopologyNode {
+                    node_id: NodeId(node_ids[index]),
+                    lon: lons[index],
+                    lat: lats[index],
+                    z: elevations[index],
+                })
+                .collect();
+            drop((node_ids, lons, lats, elevations));
+            let spatial_index = match reader.read_bincode::<Stored<Option<NodeSpatialIndex>>>()? {
+                Stored::Derived => Some(
+                    NodeSpatialIndex::build(&nodes).context("derived spatial index needs nodes")?,
+                ),
+                Stored::Explicit(index) => index,
+            };
+
+            Ok((nodes, spatial_index))
+        },
+        move || {
+            rayon::join(
+                move || -> Result<_> {
+                    let reader = &mut routing_reader;
+                    let edge_ids = reader.read_u32s()?;
+                    let froms = reader.read_u32s()?;
+                    let tos = reader.read_u32s()?;
+                    let way_ids = reader.read_i64s()?;
+                    let lengths = reader.read_u32s()?;
+                    let ascents = reader.read_f32s()?;
+                    let descents = reader.read_f32s()?;
+                    let flags = reader.read_u32s()?;
+                    let feature_rows = reader.read_u32s()?;
+                    let source_directions = reader.read_i64s()?;
+                    let temporal_rule_ids = reader.read_i64s()?;
+                    for (name, len) in [
+                        ("edge ids", edge_ids.len()),
+                        ("edge tails", froms.len()),
+                        ("edge heads", tos.len()),
+                        ("way ids", way_ids.len()),
+                        ("lengths", lengths.len()),
+                        ("ascents", ascents.len()),
+                        ("descents", descents.len()),
+                        ("flags", flags.len()),
+                        ("feature rows", feature_rows.len()),
+                        ("source directions", source_directions.len()),
+                        ("temporal rule ids", temporal_rule_ids.len()),
+                    ] {
+                        ensure_len(name, len, edge_count)?;
+                    }
+                    let routing = (0..edge_count)
+                        .map(|index| {
+                            Ok(RoutingEdge {
+                                edge_id: EdgeId(edge_ids[index]),
+                                from: NodeId(froms[index]),
+                                to: NodeId(tos[index]),
+                                source_way_id: way_ids[index],
+                                length_m: lengths[index],
+                                ascent_m: ascents[index],
+                                descent_m: descents[index],
+                                feature_row: feature_rows[index],
+                                source_direction: i8::try_from(source_directions[index])
+                                    .context("source direction out of range")?,
+                                temporal_rule_id: i64_to_option_u32(temporal_rule_ids[index])?,
+                                flags: flags[index],
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    Ok(routing)
+                },
+                move || -> Result<_> {
+                    let reader = &mut layer_reader;
+                    let profile: Vec<EdgeProfileAttributes> = reader.read_interned()?;
+                    ensure_len("edge profile layer", profile.len(), edge_count)?;
+                    let name_indexes = reader.read_i64s()?;
+                    let geometry_offsets = reader.read_i64s()?;
+                    let geometry_lens = reader.read_u32s()?;
+                    ensure_len("edge names", name_indexes.len(), edge_count)?;
+                    ensure_len("geometry offsets", geometry_offsets.len(), edge_count)?;
+                    ensure_len("geometry lengths", geometry_lens.len(), edge_count)?;
+                    let presentation = (0..edge_count)
+                        .map(|index| {
+                            Ok(EdgePresentation {
+                                name_index: i64_to_option_u32(name_indexes[index])?,
+                                geometry_offset: geometry_offsets[index] as u64,
+                                geometry_len: geometry_lens[index],
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+
+                    Ok((profile, presentation))
+                },
+            )
+        },
+    );
+    let (nodes, spatial_index) = nodes?;
+    let routing = routing?;
+    let (profile, presentation) = layers?;
+
+    let explicit_transitions = match reader.read_bincode::<Stored<()>>()? {
+        Stored::Derived => None,
+        Stored::Explicit(()) => Some(reader.take(4)?),
     };
-    let node_component_ids = reader.read_u32s()?;
-    let edge_component_ids = match reader.read_bincode::<Stored<()>>()? {
-        Stored::Derived => derived_edge_component_ids(&node_component_ids, &routing)
-            .context("edge components reference missing nodes")?,
-        Stored::Explicit(()) => reader.read_u32s()?,
-    };
-    let feature_attributes = read_feature_attributes(&mut reader)?;
-    let temporal_rule_sets = reader.read_bincode()?;
+    let (edge_based_topology, rest) = rayon::join(
+        || -> Result<_> {
+            Ok(match explicit_transitions {
+                None => derived_edge_based_topology(node_count, &routing)
+                    .context("edge endpoints reference missing nodes")?,
+                Some(mut reader) => {
+                    let node_first_out = reader.read_u32s()?;
+                    let node_edge_order = reader.read_u32s()?;
+                    let edge_transition_first_out = reader.read_u32s()?;
+                    let edge_transition_edges = codec::decode_sorted_rows(
+                        &edge_transition_first_out,
+                        &reader.next_section()?,
+                    )?;
+                    EdgeBasedTopology {
+                        node_first_out,
+                        node_edge_order,
+                        edge_transition_first_out,
+                        edge_transition_edges,
+                    }
+                }
+            })
+        },
+        || -> Result<_> {
+            let node_component_ids = reader.read_u32s()?;
+            let edge_component_ids = match reader.read_bincode::<Stored<()>>()? {
+                Stored::Derived => derived_edge_component_ids(&node_component_ids, &routing)
+                    .context("edge components reference missing nodes")?,
+                Stored::Explicit(()) => reader.read_u32s()?,
+            };
+            let feature_attributes = read_feature_attributes(&mut reader)?;
+            let temporal_rule_sets = reader.read_bincode()?;
+            Ok((
+                node_component_ids,
+                edge_component_ids,
+                feature_attributes,
+                temporal_rule_sets,
+            ))
+        },
+    );
+    let edge_based_topology = edge_based_topology?;
+    let (node_component_ids, edge_component_ids, feature_attributes, temporal_rule_sets) = rest?;
 
     Ok(TopologyBundle {
         schema_version: header.schema_version,
@@ -1146,7 +1273,8 @@ mod tests {
 
     #[test]
     fn large_sections_deflate_and_round_trip() {
-        let compressible: Vec<u8> = (0..200_000_u32).map(|value| (value % 7) as u8).collect();
+        // Spans three deflate chunks.
+        let compressible: Vec<u8> = (0..2_500_000_u32).map(|value| (value % 7) as u8).collect();
         let small = vec![1_u8, 2, 3];
         let mut writer = SectionWriter::new();
         writer.write_section(compressible.clone()).unwrap();

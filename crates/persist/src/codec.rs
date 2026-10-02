@@ -61,7 +61,19 @@ impl<'a> Cursor<'a> {
         Self { bytes, offset: 0 }
     }
 
+    #[inline]
     pub(crate) fn varint(&mut self) -> Result<u64> {
+        // Most column entries are single bytes.
+        if let Some(&byte) = self.bytes.get(self.offset)
+            && byte < 0x80
+        {
+            self.offset += 1;
+            return Ok(u64::from(byte));
+        }
+        self.multi_byte_varint()
+    }
+
+    fn multi_byte_varint(&mut self) -> Result<u64> {
         let mut value = 0_u64;
         let mut shift = 0_u32;
         loop {
