@@ -264,7 +264,7 @@ fn encode_polyline(points: &[[f64; 2]], precision: u32) -> String {
     let scale = 10_f64.powi(precision as i32);
     let mut output = String::new();
     let mut previous = (0_i64, 0_i64);
-    let mut push = |value: i64, output: &mut String| {
+    let push = |value: i64, output: &mut String| {
         let mut value = if value < 0 { !(value << 1) } else { value << 1 };
         while value >= 0x20 {
             output.push(char::from((0x20 | (value & 0x1f)) as u8 + 63));
