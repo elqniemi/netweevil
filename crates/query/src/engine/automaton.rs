@@ -104,6 +104,34 @@ impl RestrictionAutomaton {
         automaton
     }
 
+    /// Every edge that appears in some restriction sequence. A forbidden
+    /// sequence can only match inside a contiguous run of these edges.
+    pub(crate) fn sequence_edges(&self) -> Vec<usize> {
+        let mut edges = self
+            .states
+            .iter()
+            .flat_map(|state| {
+                state
+                    .transitions
+                    .keys()
+                    .chain(state.prohibited_next.iter())
+                    .copied()
+            })
+            .collect::<Vec<_>>();
+        edges.sort_unstable();
+        edges.dedup();
+        edges
+    }
+
+    /// Length of the longest restriction sequence, in edges.
+    pub(crate) fn max_sequence_len(&self) -> usize {
+        self.states
+            .iter()
+            .flat_map(|state| state.prohibited_meta.values().copied())
+            .max()
+            .unwrap_or_default()
+    }
+
     pub(crate) fn is_trivial(&self) -> bool {
         self.states.len() <= 1
     }

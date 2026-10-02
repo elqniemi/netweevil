@@ -314,43 +314,7 @@ pub(crate) fn customize_failure_mode_acceleration(
 
     // Phase 2: triangle relaxation in elimination order, reusing the base
     // graph's reverse-downward index over the identical arc topology.
-    for &middle in source.edge_order.iter() {
-        let middle_index = middle as usize;
-        let incoming_range = base_acceleration.reverse_downward_first_out[middle_index] as usize
-            ..base_acceleration.reverse_downward_first_out[middle_index + 1] as usize;
-        let outgoing_range = source.upward_first_out[middle_index] as usize
-            ..source.upward_first_out[middle_index + 1] as usize;
-        for reverse_slot in incoming_range {
-            let incoming_arc = base_acceleration.reverse_downward_arc[reverse_slot] as usize;
-            let incoming_weight = downward_weight[incoming_arc];
-            if incoming_weight == CCH_WEIGHT_INFINITY {
-                continue;
-            }
-            let tail = base_acceleration.downward_tail[incoming_arc] as usize;
-            for outgoing_arc in outgoing_range.clone() {
-                let head = source.upward_head[outgoing_arc];
-                if head as usize == tail {
-                    continue;
-                }
-                let outgoing_weight = upward_weight[outgoing_arc];
-                if outgoing_weight == CCH_WEIGHT_INFINITY {
-                    continue;
-                }
-                let candidate = add_cch_weights(incoming_weight, outgoing_weight);
-                if source.edge_rank[tail] < source.edge_rank[head as usize] {
-                    if let Some(slot) = base_acceleration.upward_arc_slot(tail, head)
-                        && candidate < upward_weight[slot]
-                    {
-                        upward_weight[slot] = candidate;
-                    }
-                } else if let Some(slot) = base_acceleration.downward_arc_slot(tail, head)
-                    && candidate < downward_weight[slot]
-                {
-                    downward_weight[slot] = candidate;
-                }
-            }
-        }
-    }
+    relax_lower_triangles(base_acceleration, &mut upward_weight, &mut downward_weight);
 
     if upward_weight.contains(&CCH_WEIGHT_OVERFLOW)
         || downward_weight.contains(&CCH_WEIGHT_OVERFLOW)
@@ -368,6 +332,55 @@ pub(crate) fn customize_failure_mode_acceleration(
         distance_upward_weight: Vec::new(),
         distance_downward_weight: Vec::new(),
     })
+}
+
+/// CCH basic customization over the hierarchy's arc topology: processes
+/// middle states in elimination order and relaxes every lower triangle
+/// `w(x -> y) = min(w(x -> y), w(x -> v) + w(v -> y))`. Child weights are
+/// final before their triangles are visited.
+pub(crate) fn relax_lower_triangles(
+    acceleration: &AccelerationGraph,
+    upward_weight: &mut [u32],
+    downward_weight: &mut [u32],
+) {
+    let source = acceleration.source.as_ref();
+    for &middle in source.edge_order.iter() {
+        let middle_index = middle as usize;
+        let incoming_range = acceleration.reverse_downward_first_out[middle_index] as usize
+            ..acceleration.reverse_downward_first_out[middle_index + 1] as usize;
+        let outgoing_range = source.upward_first_out[middle_index] as usize
+            ..source.upward_first_out[middle_index + 1] as usize;
+        for reverse_slot in incoming_range {
+            let incoming_arc = acceleration.reverse_downward_arc[reverse_slot] as usize;
+            let incoming_weight = downward_weight[incoming_arc];
+            if incoming_weight == CCH_WEIGHT_INFINITY {
+                continue;
+            }
+            let tail = acceleration.downward_tail[incoming_arc] as usize;
+            for outgoing_arc in outgoing_range.clone() {
+                let head = source.upward_head[outgoing_arc];
+                if head as usize == tail {
+                    continue;
+                }
+                let outgoing_weight = upward_weight[outgoing_arc];
+                if outgoing_weight == CCH_WEIGHT_INFINITY {
+                    continue;
+                }
+                let candidate = add_cch_weights(incoming_weight, outgoing_weight);
+                if source.edge_rank[tail] < source.edge_rank[head as usize] {
+                    if let Some(slot) = acceleration.upward_arc_slot(tail, head)
+                        && candidate < upward_weight[slot]
+                    {
+                        upward_weight[slot] = candidate;
+                    }
+                } else if let Some(slot) = acceleration.downward_arc_slot(tail, head)
+                    && candidate < downward_weight[slot]
+                {
+                    downward_weight[slot] = candidate;
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn dijkstra_between_edge_seeds_with_failure_modes(

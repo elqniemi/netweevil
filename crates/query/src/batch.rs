@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use anyhow::{Result, bail};
 use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 use netweevil_profile::ReturnConfig;
+use rayon::prelude::*;
 
 use crate::*;
 
@@ -24,157 +25,64 @@ pub(crate) fn execute_od_with_graph(
         };
         return execute_od_per_pair_exact(topology, metrics, routing_graph, document);
     }
-    let mut snap_cache = HashMap::new();
-    let origin_snaps = document
+    let origin_points = document
         .pairs
         .iter()
-        .map(|pair| {
-            cached_snap_candidates(
-                &mut snap_cache,
-                topology,
-                routing_graph,
-                &pair.origin,
-                &document.snap,
-                true,
-            )
-        })
+        .map(|pair| pair.origin.clone())
         .collect::<Vec<_>>();
-    let destination_snaps = document
+    let destination_points = document
         .pairs
         .iter()
-        .map(|pair| {
-            cached_snap_candidates(
-                &mut snap_cache,
-                topology,
-                routing_graph,
-                &pair.destination,
-                &document.snap,
-                false,
-            )
-        })
+        .map(|pair| pair.destination.clone())
         .collect::<Vec<_>>();
+    let origin_snaps = presnap_points_parallel(
+        topology,
+        routing_graph,
+        &origin_points,
+        &document.snap,
+        true,
+    );
+    let destination_snaps = presnap_points_parallel(
+        topology,
+        routing_graph,
+        &destination_points,
+        &document.snap,
+        false,
+    );
     let (origin_refs, unique_origin_candidates) = intern_candidate_sets(origin_snaps);
     let (destination_refs, unique_destination_candidates) =
         intern_candidate_sets(destination_snaps);
-    let batch_strategy = choose_batch_route_strategy(
+    let context = BatchRouteContext {
+        topology,
+        metrics,
         routing_graph,
-        unique_origin_candidates.len(),
-        count_unique_ok_pairs(&origin_refs, &destination_refs),
+        strategy: choose_batch_route_strategy(
+            routing_graph,
+            unique_origin_candidates.len(),
+            count_unique_ok_pairs(&origin_refs, &destination_refs),
+        ),
+        snap_max_distance_m: document.snap.max_distance_m,
+        connectivity: &document.connectivity,
+        fallback: &document.fallback,
+        returns: &document.returns,
+        alternatives: &document.alternatives,
+        origin_candidates: &unique_origin_candidates,
+        destination_candidates: &unique_destination_candidates,
+    };
+    let pairs = resolve_batch_routes(
+        &context,
+        document.pairs.len(),
+        |index| (&origin_refs[index], &destination_refs[index]),
+        |index, route| od_pair_result(&document.pairs[index], route),
     );
-    let mut route_cache = HashMap::new();
-    let mut origin_tree_cache = HashMap::new();
-    let mut cch_space_caches = CchSpaceCaches::default();
-    let mut pairs = Vec::with_capacity(document.pairs.len());
-    let mut succeeded_count = 0_usize;
-    let mut ignored_count = 0_usize;
-
-    for ((pair, origin_ref), destination_ref) in document
-        .pairs
+    let succeeded_count = pairs
         .iter()
-        .zip(&origin_refs)
-        .zip(&destination_refs)
-    {
-        let route = match (origin_ref, destination_ref) {
-            (Ok(origin_set_id), Ok(destination_set_id)) => cached_batch_route_result(
-                &mut route_cache,
-                &mut origin_tree_cache,
-                &mut cch_space_caches,
-                topology,
-                metrics,
-                routing_graph,
-                batch_strategy,
-                "",
-                document.snap.max_distance_m,
-                &document.connectivity,
-                &document.fallback,
-                &document.returns,
-                &document.alternatives,
-                &unique_origin_candidates,
-                *origin_set_id,
-                &unique_destination_candidates,
-                *destination_set_id,
-            ),
-            (Err(error), _) => Err(anyhow::anyhow!(error.clone())),
-            (_, Err(error)) => Err(anyhow::anyhow!(error.clone())),
-        };
-        match route {
-            Ok(route) => {
-                let status = batch_status_for_route(&route);
-                if matches!(status, BatchItemStatus::Succeeded) {
-                    succeeded_count += 1;
-                } else {
-                    ignored_count += 1;
-                }
-                let ignored = matches!(status, BatchItemStatus::Ignored);
-                let error = batch_ignored_message(&route);
-                let alternatives = batch_alternatives_from_route(&route, ignored);
-                let geometry = route.geometry;
-                let diagnostics = route.diagnostics;
-                pairs.push(OdPairResult {
-                    pair_id: pair.pair_id.clone(),
-                    origin_id: pair.origin.id.clone(),
-                    destination_id: pair.destination.id.clone(),
-                    status,
-                    outcome: route.outcome,
-                    fallback_used: route.fallback_used,
-                    origin_component_id: route.origin.component_id,
-                    destination_component_id: route.destination.component_id,
-                    origin_hop_distance_m: route.origin_hop_distance_m,
-                    destination_hop_distance_m: route.destination_hop_distance_m,
-                    origin_snap_distance_m: Some(route.origin.snap_distance_m),
-                    destination_snap_distance_m: Some(route.destination.snap_distance_m),
-                    total_distance_m: (!ignored).then_some(route.summary.total_distance_m),
-                    total_travel_time_s: (!ignored).then_some(route.summary.total_travel_time_s),
-                    total_generalized_cost: (!ignored)
-                        .then_some(route.summary.total_generalized_cost),
-                    components: if ignored {
-                        BTreeMap::new()
-                    } else {
-                        route.summary.components.clone()
-                    },
-                    illegal_movement_penalty_s: (!ignored)
-                        .then_some(route.summary.illegal_movement_penalty_s),
-                    illegal_movement_penalty_cost: (!ignored)
-                        .then_some(route.summary.illegal_movement_penalty_cost),
-                    violation_count: route.summary.violation_count,
-                    violation_types: route.summary.violation_types.clone(),
-                    geometry,
-                    diagnostics,
-                    error,
-                    alternatives,
-                });
-            }
-            Err(error) => {
-                let (outcome, diagnostics) = failure_outcome_and_diagnostics(&error);
-                pairs.push(OdPairResult {
-                    pair_id: pair.pair_id.clone(),
-                    origin_id: pair.origin.id.clone(),
-                    destination_id: pair.destination.id.clone(),
-                    status: BatchItemStatus::Failed,
-                    outcome,
-                    fallback_used: false,
-                    origin_component_id: None,
-                    destination_component_id: None,
-                    origin_hop_distance_m: None,
-                    destination_hop_distance_m: None,
-                    origin_snap_distance_m: None,
-                    destination_snap_distance_m: None,
-                    total_distance_m: None,
-                    total_travel_time_s: None,
-                    total_generalized_cost: None,
-                    components: BTreeMap::new(),
-                    illegal_movement_penalty_s: None,
-                    illegal_movement_penalty_cost: None,
-                    violation_count: 0,
-                    violation_types: Vec::new(),
-                    geometry: None,
-                    diagnostics,
-                    error: Some(error.to_string()),
-                    alternatives: Vec::new(),
-                });
-            }
-        }
-    }
+        .filter(|pair| matches!(pair.status, BatchItemStatus::Succeeded))
+        .count();
+    let ignored_count = pairs
+        .iter()
+        .filter(|pair| matches!(pair.status, BatchItemStatus::Ignored))
+        .count();
 
     let provenance = temporal_result_provenance(&document.temporal)?;
     Ok(OdResult {
@@ -273,7 +181,7 @@ pub(crate) fn execute_matrix_with_graph(
     let fallback = merge_point_set_fallback_policy(&origins.fallback, &destinations.fallback);
     let alternatives =
         merge_point_set_alternatives(&origins.alternatives, &destinations.alternatives);
-    let origin_snaps = presnap_point_set(
+    let origin_snaps = presnap_points_parallel(
         topology,
         routing_graph,
         &origins.points,
@@ -281,7 +189,7 @@ pub(crate) fn execute_matrix_with_graph(
         true,
     );
     let (origin_refs, unique_origin_candidates) = intern_candidate_sets(origin_snaps);
-    let destination_snaps = presnap_point_set(
+    let destination_snaps = presnap_points_parallel(
         topology,
         routing_graph,
         &destinations.points,
@@ -290,121 +198,49 @@ pub(crate) fn execute_matrix_with_graph(
     );
     let (destination_refs, unique_destination_candidates) =
         intern_candidate_sets(destination_snaps);
-    let batch_strategy = choose_batch_route_strategy(
+    let context = BatchRouteContext {
+        topology,
+        metrics,
         routing_graph,
-        unique_origin_candidates.len(),
-        unique_origin_candidates.len() * unique_destination_candidates.len(),
+        strategy: choose_batch_route_strategy(
+            routing_graph,
+            unique_origin_candidates.len(),
+            unique_origin_candidates.len() * unique_destination_candidates.len(),
+        ),
+        snap_max_distance_m,
+        connectivity: &connectivity,
+        fallback: &fallback,
+        returns: &returns,
+        alternatives: &alternatives,
+        origin_candidates: &unique_origin_candidates,
+        destination_candidates: &unique_destination_candidates,
+    };
+    let destination_count = destinations.points.len();
+    let cells = resolve_batch_routes(
+        &context,
+        requested_cells,
+        |index| {
+            (
+                &origin_refs[index / destination_count],
+                &destination_refs[index % destination_count],
+            )
+        },
+        |index, route| {
+            matrix_cell_result(
+                &origins.points[index / destination_count].id,
+                &destinations.points[index % destination_count].id,
+                route,
+            )
+        },
     );
-    let mut route_cache = HashMap::new();
-    let mut origin_tree_cache = HashMap::new();
-    let mut cch_space_caches = CchSpaceCaches::default();
-    let mut cells = Vec::with_capacity(origins.points.len() * destinations.points.len());
-    let mut succeeded_count = 0_usize;
-    let mut ignored_count = 0_usize;
-
-    for (origin, origin_ref) in origins.points.iter().zip(&origin_refs) {
-        for (destination, destination_ref) in destinations.points.iter().zip(&destination_refs) {
-            let route = match (origin_ref, destination_ref) {
-                (Ok(origin_set_id), Ok(destination_set_id)) => cached_batch_route_result(
-                    &mut route_cache,
-                    &mut origin_tree_cache,
-                    &mut cch_space_caches,
-                    topology,
-                    metrics,
-                    routing_graph,
-                    batch_strategy,
-                    "",
-                    snap_max_distance_m,
-                    &connectivity,
-                    &fallback,
-                    &returns,
-                    &alternatives,
-                    &unique_origin_candidates,
-                    *origin_set_id,
-                    &unique_destination_candidates,
-                    *destination_set_id,
-                ),
-                (Err(error), _) => Err(anyhow::anyhow!(error.clone())),
-                (_, Err(error)) => Err(anyhow::anyhow!(error.clone())),
-            };
-            match route {
-                Ok(route) => {
-                    let status = batch_status_for_route(&route);
-                    if matches!(status, BatchItemStatus::Succeeded) {
-                        succeeded_count += 1;
-                    } else {
-                        ignored_count += 1;
-                    }
-                    let ignored = matches!(status, BatchItemStatus::Ignored);
-                    let error = batch_ignored_message(&route);
-                    let alternatives = batch_alternatives_from_route(&route, ignored);
-                    let geometry = route.geometry;
-                    let diagnostics = route.diagnostics;
-                    cells.push(MatrixCellResult {
-                        origin_id: origin.id.clone(),
-                        destination_id: destination.id.clone(),
-                        status,
-                        outcome: route.outcome,
-                        fallback_used: route.fallback_used,
-                        origin_component_id: route.origin.component_id,
-                        destination_component_id: route.destination.component_id,
-                        origin_hop_distance_m: route.origin_hop_distance_m,
-                        destination_hop_distance_m: route.destination_hop_distance_m,
-                        origin_snap_distance_m: Some(route.origin.snap_distance_m),
-                        destination_snap_distance_m: Some(route.destination.snap_distance_m),
-                        total_distance_m: (!ignored).then_some(route.summary.total_distance_m),
-                        total_travel_time_s: (!ignored)
-                            .then_some(route.summary.total_travel_time_s),
-                        total_generalized_cost: (!ignored)
-                            .then_some(route.summary.total_generalized_cost),
-                        components: if ignored {
-                            BTreeMap::new()
-                        } else {
-                            route.summary.components.clone()
-                        },
-                        illegal_movement_penalty_s: (!ignored)
-                            .then_some(route.summary.illegal_movement_penalty_s),
-                        illegal_movement_penalty_cost: (!ignored)
-                            .then_some(route.summary.illegal_movement_penalty_cost),
-                        violation_count: route.summary.violation_count,
-                        violation_types: route.summary.violation_types.clone(),
-                        geometry,
-                        diagnostics,
-                        error,
-                        alternatives,
-                    });
-                }
-                Err(error) => {
-                    let (outcome, diagnostics) = failure_outcome_and_diagnostics(&error);
-                    cells.push(MatrixCellResult {
-                        origin_id: origin.id.clone(),
-                        destination_id: destination.id.clone(),
-                        status: BatchItemStatus::Failed,
-                        outcome,
-                        fallback_used: false,
-                        origin_component_id: None,
-                        destination_component_id: None,
-                        origin_hop_distance_m: None,
-                        destination_hop_distance_m: None,
-                        origin_snap_distance_m: None,
-                        destination_snap_distance_m: None,
-                        total_distance_m: None,
-                        total_travel_time_s: None,
-                        total_generalized_cost: None,
-                        components: BTreeMap::new(),
-                        illegal_movement_penalty_s: None,
-                        illegal_movement_penalty_cost: None,
-                        violation_count: 0,
-                        violation_types: Vec::new(),
-                        geometry: None,
-                        diagnostics,
-                        error: Some(error.to_string()),
-                        alternatives: Vec::new(),
-                    });
-                }
-            }
-        }
-    }
+    let succeeded_count = cells
+        .iter()
+        .filter(|cell| matches!(cell.status, BatchItemStatus::Succeeded))
+        .count();
+    let ignored_count = cells
+        .iter()
+        .filter(|cell| matches!(cell.status, BatchItemStatus::Ignored))
+        .count();
 
     Ok(MatrixResult {
         departure_time: None,
@@ -426,6 +262,129 @@ pub(crate) fn execute_matrix_with_graph(
             warnings
         },
     })
+}
+
+/// Snaps every point independently and in parallel; duplicate coordinates
+/// are interned afterwards by candidate identity.
+fn presnap_points_parallel(
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    points: &[LabeledPoint],
+    options: &SnapOptions,
+    is_origin: bool,
+) -> Vec<std::result::Result<Vec<SnappedPoint>, AnalysisFailure>> {
+    points
+        .par_iter()
+        .map(|point| {
+            snap_candidates_with_options(topology, routing_graph, point, options, is_origin)
+                .map_err(|_| route_snap_failure(point, options.max_distance_m))
+        })
+        .collect()
+}
+
+fn od_pair_result(
+    pair: &OdPair,
+    route: std::result::Result<&RouteResult, &anyhow::Error>,
+) -> OdPairResult {
+    let cell = matrix_cell_result(&pair.origin.id, &pair.destination.id, route);
+    OdPairResult {
+        pair_id: pair.pair_id.clone(),
+        origin_id: cell.origin_id,
+        destination_id: cell.destination_id,
+        status: cell.status,
+        outcome: cell.outcome,
+        fallback_used: cell.fallback_used,
+        origin_component_id: cell.origin_component_id,
+        destination_component_id: cell.destination_component_id,
+        origin_hop_distance_m: cell.origin_hop_distance_m,
+        destination_hop_distance_m: cell.destination_hop_distance_m,
+        origin_snap_distance_m: cell.origin_snap_distance_m,
+        destination_snap_distance_m: cell.destination_snap_distance_m,
+        total_distance_m: cell.total_distance_m,
+        total_travel_time_s: cell.total_travel_time_s,
+        total_generalized_cost: cell.total_generalized_cost,
+        components: cell.components,
+        illegal_movement_penalty_s: cell.illegal_movement_penalty_s,
+        illegal_movement_penalty_cost: cell.illegal_movement_penalty_cost,
+        violation_count: cell.violation_count,
+        violation_types: cell.violation_types,
+        geometry: cell.geometry,
+        diagnostics: cell.diagnostics,
+        error: cell.error,
+        alternatives: cell.alternatives,
+    }
+}
+
+fn matrix_cell_result(
+    origin_id: &str,
+    destination_id: &str,
+    route: std::result::Result<&RouteResult, &anyhow::Error>,
+) -> MatrixCellResult {
+    match route {
+        Ok(route) => {
+            let status = batch_status_for_route(route);
+            let ignored = matches!(status, BatchItemStatus::Ignored);
+            MatrixCellResult {
+                origin_id: origin_id.to_string(),
+                destination_id: destination_id.to_string(),
+                status,
+                outcome: route.outcome,
+                fallback_used: route.fallback_used,
+                origin_component_id: route.origin.component_id,
+                destination_component_id: route.destination.component_id,
+                origin_hop_distance_m: route.origin_hop_distance_m,
+                destination_hop_distance_m: route.destination_hop_distance_m,
+                origin_snap_distance_m: Some(route.origin.snap_distance_m),
+                destination_snap_distance_m: Some(route.destination.snap_distance_m),
+                total_distance_m: (!ignored).then_some(route.summary.total_distance_m),
+                total_travel_time_s: (!ignored).then_some(route.summary.total_travel_time_s),
+                total_generalized_cost: (!ignored).then_some(route.summary.total_generalized_cost),
+                components: if ignored {
+                    BTreeMap::new()
+                } else {
+                    route.summary.components.clone()
+                },
+                illegal_movement_penalty_s: (!ignored)
+                    .then_some(route.summary.illegal_movement_penalty_s),
+                illegal_movement_penalty_cost: (!ignored)
+                    .then_some(route.summary.illegal_movement_penalty_cost),
+                violation_count: route.summary.violation_count,
+                violation_types: route.summary.violation_types.clone(),
+                geometry: route.geometry.clone(),
+                diagnostics: route.diagnostics.clone(),
+                error: batch_ignored_message(route),
+                alternatives: batch_alternatives_from_route(route, ignored),
+            }
+        }
+        Err(error) => {
+            let (outcome, diagnostics) = failure_outcome_and_diagnostics(error);
+            MatrixCellResult {
+                origin_id: origin_id.to_string(),
+                destination_id: destination_id.to_string(),
+                status: BatchItemStatus::Failed,
+                outcome,
+                fallback_used: false,
+                origin_component_id: None,
+                destination_component_id: None,
+                origin_hop_distance_m: None,
+                destination_hop_distance_m: None,
+                origin_snap_distance_m: None,
+                destination_snap_distance_m: None,
+                total_distance_m: None,
+                total_travel_time_s: None,
+                total_generalized_cost: None,
+                components: BTreeMap::new(),
+                illegal_movement_penalty_s: None,
+                illegal_movement_penalty_cost: None,
+                violation_count: 0,
+                violation_types: Vec::new(),
+                geometry: None,
+                diagnostics,
+                error: Some(error.to_string()),
+                alternatives: Vec::new(),
+            }
+        }
+    }
 }
 
 fn execute_od_per_pair_exact(
@@ -854,68 +813,185 @@ pub(crate) fn intern_candidate_sets(
     (refs, unique)
 }
 
-fn cached_batch_route_result(
-    cache: &mut HashMap<(usize, usize), std::result::Result<RouteResult, AnalysisFailure>>,
-    origin_tree_cache: &mut HashMap<(u32, u64, u64), Result<SingleSourceEdgeTree, String>>,
-    cch_space_caches: &mut CchSpaceCaches,
-    topology: &TopologyBundle,
-    metrics: &CompiledProfileBundle,
-    routing_graph: &RoutingGraph,
+/// Request-wide inputs shared by every batch item.
+struct BatchRouteContext<'a> {
+    topology: &'a TopologyBundle,
+    metrics: &'a CompiledProfileBundle,
+    routing_graph: &'a RoutingGraph,
     strategy: BatchRouteStrategy,
-    route_id: &str,
     snap_max_distance_m: f64,
-    connectivity: &ConnectivityPolicy,
-    fallback: &FallbackPolicy,
-    returns: &ReturnConfig,
-    alternatives: &AlternativeRouteOptions,
-    origin_candidates: &[Vec<SnappedPoint>],
-    origin_set_id: usize,
-    destination_candidates: &[Vec<SnappedPoint>],
-    destination_set_id: usize,
-) -> Result<RouteResult> {
-    let key = (origin_set_id, destination_set_id);
-    let value = cache.entry(key).or_insert_with(|| {
-        execute_batched_route_with_candidates(
-            origin_tree_cache,
-            cch_space_caches,
-            topology,
-            metrics,
-            routing_graph,
-            strategy,
-            route_id,
-            snap_max_distance_m,
-            connectivity,
-            fallback,
-            returns,
-            alternatives,
-            &origin_candidates[origin_set_id],
-            &destination_candidates[destination_set_id],
-        )
-        .map_err(|error| {
-            analysis_failure(&error).cloned().unwrap_or_else(|| {
-                AnalysisFailure::new(error.to_string(), AnalysisOutcome::Unreachable, Vec::new())
-            })
-        })
-    });
-    value.clone().map_err(anyhow::Error::new)
+    connectivity: &'a ConnectivityPolicy,
+    fallback: &'a FallbackPolicy,
+    returns: &'a ReturnConfig,
+    alternatives: &'a AlternativeRouteOptions,
+    origin_candidates: &'a [Vec<SnappedPoint>],
+    destination_candidates: &'a [Vec<SnappedPoint>],
 }
 
-/// Per-request caches of complete CCH search spaces, keyed by snapped
-/// candidate identity. Each unique endpoint pays for one full upward search;
-/// every origin/destination combination is answered by a merge-join.
-#[derive(Default)]
-struct CchSpaceCaches {
-    forward: HashMap<(u32, u64, u64), CchSearchSpace>,
-    backward: HashMap<(u32, u64, u64), CchSearchSpace>,
-    // Retain only the current origin's exact frontier. A row-major matrix
-    // reuses it across destinations without retaining one full graph per row.
-    restricted_origin: Option<(u32, u64, u64)>,
-    restricted_search: RestrictedSearchScratch,
+type SnapRef = std::result::Result<usize, AnalysisFailure>;
+type CellResult = std::result::Result<RouteResult, AnalysisFailure>;
+
+/// Cells computed by the many-to-many engine, grouped by origin set with
+/// ascending destination sets per row.
+struct PrecomputedRoutes {
+    row_of_origin: Vec<u32>,
+    rows: Vec<(usize, Vec<usize>)>,
+    results: Vec<Vec<CellResult>>,
+}
+
+impl PrecomputedRoutes {
+    fn get(&self, origin: usize, destination: usize) -> &CellResult {
+        let row = self.row_of_origin[origin] as usize;
+        let column = self.rows[row]
+            .1
+            .binary_search(&destination)
+            .expect("precomputed cell present");
+        &self.results[row][column]
+    }
+}
+
+/// Resolves one route per batch item, in item order. Accelerated
+/// many-to-many requests compute every unique cell in parallel up front;
+/// other strategies route items sequentially with per-request caches.
+fn resolve_batch_routes<'a, R: Send>(
+    context: &BatchRouteContext<'_>,
+    count: usize,
+    refs: impl Fn(usize) -> (&'a SnapRef, &'a SnapRef) + Sync,
+    build: impl Fn(usize, std::result::Result<&RouteResult, &anyhow::Error>) -> R + Sync,
+) -> Vec<R> {
+    let use_many_to_many = batchable_request(context.fallback, context.alternatives)
+        && matches!(context.strategy, BatchRouteStrategy::AcceleratedManyToMany)
+        && context.routing_graph.acceleration.is_some();
+    if use_many_to_many {
+        let precomputed = precompute_many_to_many(context, count, &refs);
+        return (0..count)
+            .into_par_iter()
+            .map(|index| {
+                let route = match refs(index) {
+                    (Ok(origin), Ok(destination)) => precomputed
+                        .get(*origin, *destination)
+                        .as_ref()
+                        .map_err(|error| anyhow::Error::new(error.clone())),
+                    (Err(error), _) | (_, Err(error)) => Err(anyhow::Error::new(error.clone())),
+                };
+                build(index, route.as_ref().map(|route| *route))
+            })
+            .collect();
+    }
+
+    let mut route_cache = HashMap::new();
+    let mut origin_tree_cache = HashMap::new();
+    (0..count)
+        .map(|index| {
+            let route = match refs(index) {
+                (Ok(origin_set_id), Ok(destination_set_id)) => cached_batch_route_result(
+                    &mut route_cache,
+                    &mut origin_tree_cache,
+                    context,
+                    *origin_set_id,
+                    *destination_set_id,
+                ),
+                (Err(error), _) | (_, Err(error)) => Err(anyhow::Error::new(error.clone())),
+            };
+            build(index, route.as_ref())
+        })
+        .collect()
+}
+
+fn precompute_many_to_many<'a>(
+    context: &BatchRouteContext<'_>,
+    count: usize,
+    refs: &(impl Fn(usize) -> (&'a SnapRef, &'a SnapRef) + Sync),
+) -> PrecomputedRoutes {
+    let mut pairs = (0..count)
+        .filter_map(|index| match refs(index) {
+            (Ok(origin), Ok(destination)) => Some((*origin, *destination)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    pairs.par_sort_unstable();
+    pairs.dedup();
+    let mut row_of_origin = vec![u32::MAX; context.origin_candidates.len()];
+    let mut rows = Vec::<(usize, Vec<usize>)>::new();
+    for (origin, destination) in pairs {
+        match rows.last_mut() {
+            Some((row_origin, destinations)) if *row_origin == origin => {
+                destinations.push(destination);
+            }
+            _ => {
+                row_of_origin[origin] = rows.len() as u32;
+                rows.push((origin, vec![destination]));
+            }
+        }
+    }
+    let results = many_to_many_routes(
+        &ManyToManyRequest {
+            topology: context.topology,
+            metrics: context.metrics,
+            routing_graph: context.routing_graph,
+            route_id: "",
+            snap_max_distance_m: context.snap_max_distance_m,
+            connectivity: context.connectivity,
+            fallback: context.fallback,
+            returns: context.returns,
+            origin_sets: context.origin_candidates,
+            destination_sets: context.destination_candidates,
+        },
+        &rows,
+    );
+    PrecomputedRoutes {
+        row_of_origin,
+        rows,
+        results,
+    }
+}
+
+fn batchable_request(fallback: &FallbackPolicy, alternatives: &AlternativeRouteOptions) -> bool {
+    !has_failure_modes(fallback)
+        && !auto_relaxation_requested(fallback)
+        && alternatives.max_routes <= 1
+}
+
+fn cached_batch_route_result(
+    cache: &mut HashMap<(usize, usize), CellResult>,
+    origin_tree_cache: &mut HashMap<(u32, u64, u64), Result<SingleSourceEdgeTree, String>>,
+    context: &BatchRouteContext<'_>,
+    origin_set_id: usize,
+    destination_set_id: usize,
+) -> Result<RouteResult> {
+    let value = cache
+        .entry((origin_set_id, destination_set_id))
+        .or_insert_with(|| {
+            execute_batched_route_with_candidates(
+                origin_tree_cache,
+                context.topology,
+                context.metrics,
+                context.routing_graph,
+                context.strategy,
+                "",
+                context.snap_max_distance_m,
+                context.connectivity,
+                context.fallback,
+                context.returns,
+                context.alternatives,
+                &context.origin_candidates[origin_set_id],
+                &context.destination_candidates[destination_set_id],
+            )
+            .map_err(|error| {
+                analysis_failure(&error).cloned().unwrap_or_else(|| {
+                    AnalysisFailure::new(
+                        error.to_string(),
+                        AnalysisOutcome::Unreachable,
+                        Vec::new(),
+                    )
+                })
+            })
+        });
+    value.clone().map_err(anyhow::Error::new)
 }
 
 fn execute_batched_route_with_candidates(
     origin_tree_cache: &mut HashMap<(u32, u64, u64), Result<SingleSourceEdgeTree, String>>,
-    cch_space_caches: &mut CchSpaceCaches,
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     routing_graph: &RoutingGraph,
@@ -929,16 +1005,12 @@ fn execute_batched_route_with_candidates(
     origin_candidates: &[SnappedPoint],
     destination_candidates: &[SnappedPoint],
 ) -> Result<RouteResult> {
-    let batchable = !has_failure_modes(fallback)
-        && !auto_relaxation_requested(fallback)
-        && alternatives.max_routes <= 1;
-    let use_single_source = batchable
+    // Accelerated many-to-many cells are precomputed by
+    // `many_to_many_route_cache`; only exact single-source trees remain here.
+    let use_single_source = batchable_request(fallback, alternatives)
         && !routing_graph.has_restriction_sequences()
         && matches!(strategy, BatchRouteStrategy::SingleSource);
-    let use_cch_spaces = batchable
-        && matches!(strategy, BatchRouteStrategy::AcceleratedManyToMany)
-        && routing_graph.acceleration.is_some();
-    if !use_single_source && !use_cch_spaces {
+    if !use_single_source {
         return execute_route_with_candidates(
             topology,
             metrics,
@@ -957,124 +1029,7 @@ fn execute_batched_route_with_candidates(
 
     let mut attachment: Option<(usize, usize)> = None;
     let mut best: Option<RouteResult> = None;
-    if use_cch_spaces {
-        let CchSpaceCaches {
-            forward: forward_cache,
-            backward: backward_cache,
-            restricted_origin,
-            restricted_search,
-        } = cch_space_caches;
-        for (origin_index, origin) in origin_candidates.iter().enumerate() {
-            if let Some((first_origin, _)) = attachment
-                && !same_physical_attachment(origin, &origin_candidates[first_origin])
-            {
-                continue;
-            }
-            let forward = forward_cache
-                .entry(snap_cache_key(origin))
-                .or_insert_with(|| {
-                    build_forward_cch_space(
-                        routing_graph,
-                        &origin_edge_seeds(routing_graph, origin),
-                    )
-                });
-            for (destination_index, destination) in destination_candidates.iter().enumerate() {
-                if let Some((_, first_destination)) = attachment
-                    && !same_physical_attachment(
-                        destination,
-                        &destination_candidates[first_destination],
-                    )
-                {
-                    continue;
-                }
-                if same_edge_reverse_pair(origin, destination) {
-                    continue;
-                }
-                let Some(hop_info) =
-                    hop_info_for_pair(origin, destination, snap_max_distance_m, connectivity)
-                else {
-                    continue;
-                };
-                let backward = backward_cache
-                    .entry(snap_cache_key(destination))
-                    .or_insert_with(|| {
-                        build_backward_cch_space(
-                            routing_graph,
-                            &destination_edge_seeds(routing_graph, destination),
-                        )
-                    });
-                let direct = direct_same_edge_path(routing_graph, origin, destination);
-                let joined = join_cch_spaces(forward, backward);
-                let path = match (direct, joined) {
-                    (Some(direct), Some((cost, meeting)))
-                        if cost < direct.total_generalized_cost =>
-                    {
-                        Some(reconstruct_cch_space_path(
-                            routing_graph,
-                            forward,
-                            backward,
-                            meeting,
-                            cost,
-                        ))
-                    }
-                    (Some(direct), _) => Some(direct),
-                    (None, Some((cost, meeting))) => Some(reconstruct_cch_space_path(
-                        routing_graph,
-                        forward,
-                        backward,
-                        meeting,
-                        cost,
-                    )),
-                    (None, None) => None,
-                };
-                let path = if path.as_ref().is_some_and(|path| {
-                    !path_respects_restriction_sequences(routing_graph, &path.edge_indexes)
-                }) {
-                    let key = snap_cache_key(origin);
-                    if *restricted_origin != Some(key) {
-                        restricted_search.prepare(
-                            metrics,
-                            routing_graph,
-                            &origin_edge_seeds(routing_graph, origin),
-                            fallback,
-                        );
-                        *restricted_origin = Some(key);
-                    }
-                    restricted_search.route_to(
-                        topology,
-                        metrics,
-                        routing_graph,
-                        &destination_edge_seeds(routing_graph, destination),
-                        direct_same_edge_path(routing_graph, origin, destination),
-                        fallback,
-                    )?
-                } else {
-                    path
-                };
-                if let Some(path) = path {
-                    let result = batch_route_result_for_path(
-                        topology,
-                        metrics,
-                        routing_graph,
-                        route_id,
-                        fallback,
-                        returns,
-                        origin,
-                        destination,
-                        hop_info,
-                        path,
-                    )?;
-                    attachment.get_or_insert((origin_index, destination_index));
-                    if best.as_ref().is_none_or(|previous| {
-                        result.summary.total_generalized_cost
-                            < previous.summary.total_generalized_cost
-                    }) {
-                        best = Some(result);
-                    }
-                }
-            }
-        }
-    } else {
+    {
         for (origin_index, origin) in origin_candidates.iter().enumerate() {
             if let Some((first_origin, _)) = attachment
                 && !same_physical_attachment(origin, &origin_candidates[first_origin])

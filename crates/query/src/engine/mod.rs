@@ -3,12 +3,16 @@ mod automaton;
 mod exact;
 mod fallback;
 mod graph;
+mod many_to_many;
+mod restricted_astar;
 
 pub(crate) use acceleration::*;
 pub(crate) use automaton::*;
 pub(crate) use exact::*;
 pub(crate) use fallback::*;
 pub(crate) use graph::*;
+pub(crate) use many_to_many::*;
+pub(crate) use restricted_astar::*;
 
 use std::cmp::Ordering;
 use std::sync::Arc;

@@ -8,5 +8,6 @@ mod waypoints;
 
 mod trace_matching;
 
+mod many_to_many;
 mod seeded_service_area;
 mod snap_constraints;
