@@ -386,7 +386,11 @@ cargo run -p netweevil-cli -- analyze service-area \
 Street-analysis commands also accept `--departure-time`, `--scenario`,
 `--holiday-calendar`, and repeatable `--overlay` overrides. Scalars replace
 only the matching request-file field; CLI overlays append to any overlays
-already in the document. See the multilayer runbook for matrix and
+already in the document. The CLI reads these files itself and sends their
+content inline: API requests carry `scenario`, `holidays`, and `overlays` as
+JSON and never name server-side files. Request documents may reference local
+files with `scenario_file`, `holiday_calendar_file`, and `overlay_files`,
+resolved relative to the document. See the multilayer runbook for matrix and
 service-area-sequence semantics.
 
 ## Transit

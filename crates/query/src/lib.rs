@@ -55,8 +55,8 @@ pub use service_area_sequence::*;
 pub(crate) use snapping::*;
 pub use temporal::{
     HolidayCalendarDocument, ScenarioFeatureOverride, ScenarioOverlay, TemporalContext,
-    TemporalOverlaySeries, everyday_mask, load_holiday_calendar, load_scenario_overlay,
-    load_temporal_overlay, parse_datetime,
+    TemporalOverlayDocument, TemporalOverlayRow, TemporalOverlaySeries, everyday_mask,
+    load_holiday_calendar, load_scenario_overlay, load_temporal_overlay, parse_datetime,
 };
 pub use trace_matching::*;
 pub use waypoints::*;

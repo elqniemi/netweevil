@@ -23,7 +23,9 @@ use crate::{
     request_returns_detailed_path, snap_candidates_with_options, turn_penalty_seconds,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// Runtime scenario overlay keyed by source feature id. Requests carry it
+/// inline; the CLI loads it from local JSON/YAML files.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ScenarioOverlay {
     #[serde(default)]
     pub id: Option<String>,
@@ -31,7 +33,7 @@ pub struct ScenarioOverlay {
     pub features: Vec<ScenarioFeatureOverride>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScenarioFeatureOverride {
     pub source_feature_id: i64,
     #[serde(default)]
@@ -48,6 +50,7 @@ pub struct ScenarioFeatureOverride {
     pub speed_factor: Option<f32>,
 }
 
+/// Reads a scenario overlay from a local JSON/YAML file (CLI side).
 pub fn load_scenario_overlay(path: impl AsRef<Path>) -> Result<ScenarioOverlay> {
     let path = path.as_ref();
     let raw = fs::read_to_string(path)
@@ -77,7 +80,9 @@ enum HolidayCalendarFile {
     Bare(Vec<String>),
 }
 
-pub fn load_holiday_calendar(path: impl AsRef<Path>) -> Result<HashSet<Date>> {
+/// Reads holiday dates (`YYYY-MM-DD`) from a local JSON/YAML file (CLI side),
+/// either a bare list or `{dates: [...]}`.
+pub fn load_holiday_calendar(path: impl AsRef<Path>) -> Result<Vec<String>> {
     let path = path.as_ref();
     let raw = fs::read_to_string(path)
         .with_context(|| format!("reading holiday calendar {}", path.display()))?;
@@ -92,14 +97,42 @@ pub fn load_holiday_calendar(path: impl AsRef<Path>) -> Result<HashSet<Date>> {
             other
         ),
     };
-    let values = match file {
+    let dates = match file {
         HolidayCalendarFile::Document(document) => document.dates,
         HolidayCalendarFile::Bare(values) => values,
     };
-    values
-        .into_iter()
-        .map(|value| parse_date(&value).with_context(|| format!("invalid holiday date '{value}'")))
+    parse_holidays(&dates).with_context(|| format!("holiday calendar {}", path.display()))?;
+    Ok(dates)
+}
+
+fn parse_holidays(dates: &[String]) -> Result<HashSet<Date>> {
+    dates
+        .iter()
+        .map(|value| parse_date(value).with_context(|| format!("invalid holiday date '{value}'")))
         .collect()
+}
+
+/// A continuous temporal overlay: per source feature, time intervals with
+/// named numeric values (for example `shade_fraction`) that overlay-backed
+/// cost components read at edge entry time.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TemporalOverlayDocument {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub rows: Vec<TemporalOverlayRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TemporalOverlayRow {
+    pub feature_id: i64,
+    /// RFC 3339 interval start (inclusive).
+    pub t_start: String,
+    /// RFC 3339 interval end (exclusive).
+    pub t_end: String,
+    /// Named overlay values active during the interval.
+    #[serde(flatten)]
+    pub values: BTreeMap<String, f64>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,9 +167,38 @@ impl TemporalOverlaySeries {
                 .any(|interval| interval.values.contains_key(name))
         })
     }
+
+    pub fn from_document(document: &TemporalOverlayDocument) -> Result<Self> {
+        let mut by_feature: HashMap<i64, Vec<TemporalOverlayInterval>> = HashMap::new();
+        for (index, row) in document.rows.iter().enumerate() {
+            let start = parse_datetime(&row.t_start)
+                .with_context(|| format!("overlay row {} has an invalid t_start", index + 1))?;
+            let end = parse_datetime(&row.t_end)
+                .with_context(|| format!("overlay row {} has an invalid t_end", index + 1))?;
+            if end <= start {
+                bail!("overlay row {} must end after it starts", index + 1);
+            }
+            if let Some((name, _)) = row.values.iter().find(|(_, value)| !value.is_finite()) {
+                bail!("overlay row {} value '{name}' must be finite", index + 1);
+            }
+            by_feature
+                .entry(row.feature_id)
+                .or_default()
+                .push(TemporalOverlayInterval {
+                    start_unix_s: start.unix_timestamp(),
+                    end_unix_s: end.unix_timestamp(),
+                    values: row.values.clone(),
+                });
+        }
+        for intervals in by_feature.values_mut() {
+            intervals.sort_by_key(|interval| interval.start_unix_s);
+        }
+        Ok(Self { by_feature })
+    }
 }
 
-pub fn load_temporal_overlay(path: impl AsRef<Path>) -> Result<TemporalOverlaySeries> {
+/// Reads a temporal overlay from a local CSV or Parquet file (CLI side).
+pub fn load_temporal_overlay(path: impl AsRef<Path>) -> Result<TemporalOverlayDocument> {
     let path = path.as_ref();
     let rows = match path.extension().and_then(|extension| extension.to_str()) {
         Some("csv") => load_overlay_csv_rows(path)?,
@@ -146,7 +208,11 @@ pub fn load_temporal_overlay(path: impl AsRef<Path>) -> Result<TemporalOverlaySe
             other
         ),
     };
-    overlay_series_from_rows(rows)
+    let document = overlay_document_from_rows(rows)
+        .with_context(|| format!("temporal overlay {}", path.display()))?;
+    TemporalOverlaySeries::from_document(&document)
+        .with_context(|| format!("temporal overlay {}", path.display()))?;
+    Ok(document)
 }
 
 fn load_overlay_csv_rows(path: &Path) -> Result<Vec<BTreeMap<String, String>>> {
@@ -194,45 +260,39 @@ fn load_overlay_parquet_rows(path: &Path) -> Result<Vec<BTreeMap<String, String>
     Ok(rows)
 }
 
-fn overlay_series_from_rows(rows: Vec<BTreeMap<String, String>>) -> Result<TemporalOverlaySeries> {
-    let mut by_feature: HashMap<i64, Vec<TemporalOverlayInterval>> = HashMap::new();
-    for (index, mut row) in rows.into_iter().enumerate() {
-        let feature_id = take_required(&mut row, &["feature_id", "source_feature_id"])?
-            .parse::<i64>()
-            .with_context(|| format!("overlay row {} has an invalid feature_id", index + 1))?;
-        let start = parse_datetime(&take_required(&mut row, &["t_start", "start"])?)
-            .with_context(|| format!("overlay row {} has an invalid t_start", index + 1))?;
-        let end = parse_datetime(&take_required(&mut row, &["t_end", "end"])?)
-            .with_context(|| format!("overlay row {} has an invalid t_end", index + 1))?;
-        if end <= start {
-            bail!("overlay row {} must end after it starts", index + 1);
-        }
-        let values = row
-            .into_iter()
-            .filter(|(_, value)| !value.trim().is_empty() && !value.eq_ignore_ascii_case("null"))
-            .map(|(name, value)| {
-                let parsed = value.parse::<f64>().with_context(|| {
-                    format!("overlay row {} value '{name}' is not numeric", index + 1)
-                })?;
-                if !parsed.is_finite() {
-                    bail!("overlay row {} value '{name}' must be finite", index + 1);
-                }
-                Ok((name, parsed))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
-        by_feature
-            .entry(feature_id)
-            .or_default()
-            .push(TemporalOverlayInterval {
-                start_unix_s: start.unix_timestamp(),
-                end_unix_s: end.unix_timestamp(),
+fn overlay_document_from_rows(
+    rows: Vec<BTreeMap<String, String>>,
+) -> Result<TemporalOverlayDocument> {
+    let rows = rows
+        .into_iter()
+        .enumerate()
+        .map(|(index, mut row)| {
+            let feature_id = take_required(&mut row, &["feature_id", "source_feature_id"])?
+                .parse::<i64>()
+                .with_context(|| format!("overlay row {} has an invalid feature_id", index + 1))?;
+            let t_start = take_required(&mut row, &["t_start", "start"])?;
+            let t_end = take_required(&mut row, &["t_end", "end"])?;
+            let values = row
+                .into_iter()
+                .filter(|(_, value)| {
+                    !value.trim().is_empty() && !value.eq_ignore_ascii_case("null")
+                })
+                .map(|(name, value)| {
+                    let parsed = value.parse::<f64>().with_context(|| {
+                        format!("overlay row {} value '{name}' is not numeric", index + 1)
+                    })?;
+                    Ok((name, parsed))
+                })
+                .collect::<Result<BTreeMap<_, _>>>()?;
+            Ok(TemporalOverlayRow {
+                feature_id,
+                t_start,
+                t_end,
                 values,
-            });
-    }
-    for intervals in by_feature.values_mut() {
-        intervals.sort_by_key(|interval| interval.start_unix_s);
-    }
-    Ok(TemporalOverlaySeries { by_feature })
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(TemporalOverlayDocument { id: None, rows })
 }
 
 fn take_required(row: &mut BTreeMap<String, String>, names: &[&str]) -> Result<String> {
@@ -613,23 +673,21 @@ pub fn everyday_mask() -> u8 {
 pub(crate) fn context_from_request(
     options: &crate::TemporalRequestOptions,
 ) -> Result<TemporalContext> {
-    let scenario = options
-        .scenario
-        .as_ref()
-        .map(load_scenario_overlay)
-        .transpose()?;
-    let holidays = options
-        .holiday_calendar
-        .as_ref()
-        .map(load_holiday_calendar)
-        .transpose()?
-        .unwrap_or_default();
+    let holidays = parse_holidays(&options.holidays)?;
     let overlays = options
         .overlays
         .iter()
-        .map(load_temporal_overlay)
+        .enumerate()
+        .map(|(index, overlay)| {
+            TemporalOverlaySeries::from_document(overlay)
+                .with_context(|| format!("temporal overlay {}", index + 1))
+        })
         .collect::<Result<Vec<_>>>()?;
-    Ok(TemporalContext::new(scenario, holidays, overlays))
+    Ok(TemporalContext::new(
+        options.scenario.clone(),
+        holidays,
+        overlays,
+    ))
 }
 
 pub(crate) fn validate_speed_factor_wait_policy(

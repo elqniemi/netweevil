@@ -36,25 +36,32 @@ pub struct RouteRequest {
     pub returns: ReturnConfig,
     #[serde(default)]
     pub alternatives: AlternativeRouteOptions,
-    /// Exact time-dependent routing options. Flattening keeps request files
-    /// ergonomic (`departure_time: ...`, `scenario: ...`) while grouping the
-    /// runtime contract in Rust.
+    /// Request-level runtime options (time, scenario, overlays, avoid areas,
+    /// component constraints). Flattening keeps request bodies ergonomic
+    /// (`departure_time: ...`, `avoid: ...`) while grouping the runtime
+    /// contract in Rust.
     #[serde(default, flatten)]
     pub temporal: TemporalRequestOptions,
 }
 
+/// Runtime options shared by every street analysis request. All content is
+/// carried inline: requests never name server-side files. The CLI reads
+/// local files and inlines them before execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TemporalRequestOptions {
     #[serde(default)]
     pub departure_time: Option<String>,
     #[serde(default)]
     pub arrive_by: Option<String>,
+    /// Inline runtime scenario overlay keyed by source feature id.
     #[serde(default)]
-    pub scenario: Option<PathBuf>,
+    pub scenario: Option<ScenarioOverlay>,
+    /// Public-holiday dates (`YYYY-MM-DD`) for holiday temporal rules.
     #[serde(default)]
-    pub holiday_calendar: Option<PathBuf>,
-    #[serde(default, rename = "overlay")]
-    pub overlays: Vec<PathBuf>,
+    pub holidays: Vec<String>,
+    /// Inline continuous temporal overlays; later overlays take precedence.
+    #[serde(default)]
+    pub overlays: Vec<TemporalOverlayDocument>,
     /// Per-state nondominated label guard for temporal/generalized searches.
     #[serde(default = "default_max_temporal_labels_per_state")]
     pub max_labels_per_state: usize,
@@ -75,7 +82,7 @@ impl Default for TemporalRequestOptions {
             departure_time: None,
             arrive_by: None,
             scenario: None,
-            holiday_calendar: None,
+            holidays: Vec::new(),
             overlays: Vec::new(),
             max_labels_per_state: default_max_temporal_labels_per_state(),
             arrive_by_lookback_s: default_arrive_by_lookback_s(),

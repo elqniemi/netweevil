@@ -55,44 +55,60 @@ fn parses_repeatable_temporal_analyze_overrides() {
 }
 
 #[test]
-fn temporal_overrides_preserve_unmentioned_request_fields() {
+fn temporal_overrides_inline_local_files_and_preserve_unmentioned_fields() {
+    let directory = std::env::temp_dir().join(format!(
+        "netweevil-cli-temporal-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let scenario_path = directory.join("cli-scenario.yml");
+    std::fs::write(&scenario_path, "id: cli_scenario\nfeatures: []\n").unwrap();
+    let overlay_path = directory.join("cli-overlay.csv");
+    std::fs::write(
+        &overlay_path,
+        "feature_id,t_start,t_end,shade\n7,2026-07-10T08:00:00Z,2026-07-10T09:00:00Z,0.5\n",
+    )
+    .unwrap();
+    let request_overlay = netweevil_query::TemporalOverlayDocument {
+        id: Some("request".into()),
+        rows: Vec::new(),
+    };
     let mut temporal = TemporalRequestOptions {
         departure_time: Some("2026-07-10T08:00:00+08:00".to_string()),
-        scenario: Some(PathBuf::from("request-scenario.yml")),
-        holiday_calendar: Some(PathBuf::from("request-holidays.yml")),
-        overlays: vec![PathBuf::from("request-overlay.csv")],
+        holidays: vec!["2026-12-25".to_string()],
+        overlays: vec![request_overlay.clone()],
         ..TemporalRequestOptions::default()
     };
-    TemporalOverrideArgs {
-        scenario: Some(PathBuf::from("cli-scenario.yml")),
-        overlays: vec![
-            PathBuf::from("cli-overlay-a.csv"),
-            PathBuf::from("cli-overlay-b.csv"),
-        ],
+    let applied = TemporalOverrideArgs {
+        scenario: Some(scenario_path),
+        overlays: vec![overlay_path],
         ..TemporalOverrideArgs::default()
     }
     .apply_to(&mut temporal);
+    let _ = std::fs::remove_dir_all(&directory);
+    applied.expect("local files load");
 
     assert_eq!(
         temporal.departure_time.as_deref(),
         Some("2026-07-10T08:00:00+08:00")
     );
     assert_eq!(
-        temporal.scenario.as_deref(),
-        Some(Path::new("cli-scenario.yml"))
+        temporal
+            .scenario
+            .and_then(|scenario| scenario.id)
+            .as_deref(),
+        Some("cli_scenario")
     );
-    assert_eq!(
-        temporal.holiday_calendar.as_deref(),
-        Some(Path::new("request-holidays.yml"))
-    );
-    assert_eq!(
-        temporal.overlays,
-        [
-            PathBuf::from("request-overlay.csv"),
-            PathBuf::from("cli-overlay-a.csv"),
-            PathBuf::from("cli-overlay-b.csv"),
-        ]
-    );
+    assert_eq!(temporal.holidays, ["2026-12-25"]);
+    assert_eq!(temporal.overlays.len(), 2);
+    assert_eq!(temporal.overlays[0], request_overlay);
+    let row = &temporal.overlays[1].rows[0];
+    assert_eq!(row.feature_id, 7);
+    assert_eq!(row.values.get("shade"), Some(&0.5));
 }
 
 #[test]
@@ -160,4 +176,28 @@ fn hong_kong_escalator_fixture_uses_materialized_source_feature() {
     assert_eq!(scenario.features.len(), 1);
     assert_eq!(scenario.features[0].source_feature_id, 250_009_423);
     assert!(scenario.features[0].replace_rules);
+}
+
+/// Example request documents name local files that the loaders inline, so
+/// the executed requests carry content only.
+#[test]
+fn example_requests_inline_their_referenced_files() {
+    let requests = repository().join("examples/requests");
+    let route =
+        netweevil_query::load_route_request(requests.join("hong_kong_example_temporal_route.json"))
+            .expect("temporal route example loads");
+    assert!(route.temporal.scenario.is_some());
+    assert!(!route.temporal.holidays.is_empty());
+    assert!(!route.temporal.overlays[0].rows.is_empty());
+    netweevil_query::load_betweenness_request(requests.join("hong_kong_example_betweenness.json"))
+        .expect("betweenness example loads");
+    netweevil_query::load_service_area_sequence_request(
+        requests.join("hong_kong_example_service_area_sequence.json"),
+    )
+    .expect("service-area sequence example loads");
+    let batch = netweevil_query::load_scenario_batch_request(
+        requests.join("hong_kong_example_scenario_batch.yml"),
+    )
+    .expect("scenario batch example loads");
+    assert_eq!(batch.scenarios.len(), 2);
 }

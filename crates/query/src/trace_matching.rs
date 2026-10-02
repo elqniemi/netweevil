@@ -315,7 +315,7 @@ fn validate_request(request: &TraceMatchRequest) -> Result<()> {
         );
     }
     ensure!(
-        !request.temporal.requires_exact_labels() && request.temporal.holiday_calendar.is_none(),
+        !request.temporal.requires_exact_labels() && request.temporal.holidays.is_empty(),
         "trace matching supports static road costs only; timestamps constrain trace continuity and do not enable time-dependent routing"
     );
     let timestamped = request.observations[0].timestamp_s.is_some();

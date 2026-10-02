@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::{BufWriter, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::fs;
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
@@ -10,12 +8,12 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use crate::{
     AccessibilityCategoryResult, AccessibilityRequest, AccessibilityResult, AnalysisOutcome,
     BatchItemStatus, BetweennessRequest, BetweennessResult, MatrixResult, OdPairsDocument,
-    OdResult, PointSetDocument, PreparedRoutingEngine, RouteRequest, RouteResult,
+    OdResult, PointSetDocument, PreparedRoutingEngine, RouteRequest, RouteResult, ScenarioOverlay,
     ServiceAreaRequest, ServiceAreaResult, TemporalRequestOptions,
 };
 
-/// A runtime scenario and the overlay file that defines its edge/feature
-/// state. Paths in a loaded document are resolved relative to that document.
+/// A runtime scenario and the inline overlay or selector that defines its
+/// edge/feature state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScenarioBatchCase {
     pub id: String,
@@ -23,11 +21,12 @@ pub struct ScenarioBatchCase {
     pub selector: ScenarioBatchSelector,
 }
 
-/// Exactly one scenario source: an overlay file or a generated closure selector.
+/// Exactly one scenario source: an inline overlay or a generated closure
+/// selector.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum ScenarioBatchSelector {
-    Overlay { overlay: PathBuf },
+    Overlay { overlay: ScenarioOverlay },
     TopK { top_k: ScenarioTopKSelector },
     Group { group: ScenarioGroupSelector },
 }
@@ -41,7 +40,7 @@ impl<'de> Deserialize<'de> for ScenarioBatchSelector {
         #[serde(deny_unknown_fields)]
         struct SelectorFields {
             #[serde(default)]
-            overlay: Option<PathBuf>,
+            overlay: Option<ScenarioOverlay>,
             #[serde(default)]
             top_k: Option<ScenarioTopKSelector>,
             #[serde(default)]
@@ -62,8 +61,9 @@ impl<'de> Deserialize<'de> for ScenarioBatchSelector {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScenarioTopKSelector {
-    /// CSV/JSON/YAML feature-score input, or a prior betweenness result JSON.
-    pub ranking: PathBuf,
+    /// Feature scores; scores of repeated features are summed. The CLI
+    /// inlines CSV/JSON/YAML rankings or a prior betweenness result.
+    pub ranking: Vec<ScenarioFeatureScore>,
     pub count: usize,
 }
 
@@ -76,15 +76,15 @@ pub struct ScenarioGroupSelector {
     pub value: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScenarioFeatureScore {
     pub source_feature_id: i64,
     pub score: f64,
 }
 
 /// Mixed analysis batch evaluated once without a scenario and once for each
-/// runtime overlay. Requests retain their holiday calendars and continuous
-/// temporal overlays; only the scenario file is replaced per case.
+/// runtime overlay. Requests retain their holidays and continuous temporal
+/// overlays; only the scenario overlay is replaced per case.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScenarioBatchRequest {
@@ -256,24 +256,11 @@ pub struct ScenarioBatchResult {
     pub scenarios: Vec<ScenarioBatchCaseResult>,
 }
 
+/// Reads a scenario batch from a local JSON/YAML file (CLI side), inlining
+/// the files it references relative to the document (see
+/// [`crate::inline_file_references`]).
 pub fn load_scenario_batch_request(path: impl AsRef<Path>) -> Result<ScenarioBatchRequest> {
-    let path = path.as_ref();
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("reading scenario batch {}", path.display()))?;
-    let mut request = match path.extension().and_then(|extension| extension.to_str()) {
-        Some("json") => serde_json::from_str(&raw).context("parsing JSON scenario batch")?,
-        Some("yaml") | Some("yml") => {
-            serde_yaml::from_str(&raw).context("parsing YAML scenario batch")?
-        }
-        other => bail!(
-            "unsupported scenario-batch extension {:?}; use .json, .yml, or .yaml",
-            other
-        ),
-    };
-    resolve_document_paths(
-        &mut request,
-        path.parent().unwrap_or_else(|| Path::new(".")),
-    );
+    let request = crate::read_request_document(path.as_ref(), "scenario batch")?;
     validate_scenario_batch_request(&request)?;
     Ok(request)
 }
@@ -297,7 +284,7 @@ pub fn execute_scenario_batch(
         .iter()
         .zip(&resolved_scenarios)
         .map(|(scenario, resolved)| {
-            let analyses = execute_snapshot(engine, request, Some(&resolved.path));
+            let analyses = execute_snapshot(engine, request, Some(&resolved.overlay));
             let diff = diff_snapshots(&baseline, &analyses);
             Ok(ScenarioBatchCaseResult {
                 scenario_id: scenario.id.clone(),
@@ -316,17 +303,8 @@ pub fn execute_scenario_batch(
 }
 
 struct ResolvedScenarioOverlay {
-    path: PathBuf,
+    overlay: ScenarioOverlay,
     closed_source_feature_ids: Vec<i64>,
-    remove_on_drop: bool,
-}
-
-impl Drop for ResolvedScenarioOverlay {
-    fn drop(&mut self) {
-        if self.remove_on_drop {
-            let _ = fs::remove_file(&self.path);
-        }
-    }
 }
 
 fn resolve_scenario_overlay(
@@ -335,18 +313,10 @@ fn resolve_scenario_overlay(
 ) -> Result<ResolvedScenarioOverlay> {
     match &scenario.selector {
         ScenarioBatchSelector::Overlay { overlay } => {
-            let document = crate::load_scenario_overlay(overlay).with_context(|| {
-                format!(
-                    "validating scenario '{}' overlay {}",
-                    scenario.id,
-                    overlay.display()
-                )
-            })?;
-            validate_overlay_source_features(engine, scenario, overlay, &document)?;
+            validate_overlay_source_features(engine, scenario, overlay)?;
             Ok(ResolvedScenarioOverlay {
-                path: overlay.clone(),
+                overlay: overlay.clone(),
                 closed_source_feature_ids: Vec::new(),
-                remove_on_drop: false,
             })
         }
         ScenarioBatchSelector::TopK { top_k } => {
@@ -356,8 +326,8 @@ fn resolve_scenario_overlay(
                     scenario.id
                 );
             }
-            let closed_source_feature_ids =
-                load_ranked_source_features(&top_k.ranking, top_k.count)?;
+            let closed_source_feature_ids = rank_source_features(&top_k.ranking, top_k.count)
+                .with_context(|| format!("scenario '{}' top_k ranking", scenario.id))?;
             if closed_source_feature_ids.is_empty() {
                 bail!(
                     "scenario '{}' top_k selector produced no source features",
@@ -424,8 +394,7 @@ fn resolve_scenario_overlay(
 fn validate_overlay_source_features(
     engine: &PreparedRoutingEngine,
     scenario: &ScenarioBatchCase,
-    overlay_path: &Path,
-    overlay: &crate::ScenarioOverlay,
+    overlay: &ScenarioOverlay,
 ) -> Result<()> {
     let topology = engine.topology();
     let active_source_feature_ids = (0..topology.edge_count())
@@ -439,9 +408,8 @@ fn validate_overlay_source_features(
         .collect::<BTreeSet<_>>();
     if !stale_source_feature_ids.is_empty() {
         bail!(
-            "scenario '{}' overlay '{}' references source feature ids not present in the active topology: {}",
+            "scenario '{}' overlay references source feature ids not present in the active topology: {}",
             scenario.id,
-            overlay_path.display(),
             stale_source_feature_ids
                 .iter()
                 .map(i64::to_string)
@@ -456,8 +424,7 @@ fn generated_closure_overlay(
     scenario_id: &str,
     closed_source_feature_ids: Vec<i64>,
 ) -> Result<ResolvedScenarioOverlay> {
-    static NEXT_OVERLAY_ID: AtomicU64 = AtomicU64::new(0);
-    let overlay = crate::ScenarioOverlay {
+    let overlay = ScenarioOverlay {
         id: Some(scenario_id.to_string()),
         features: closed_source_feature_ids
             .iter()
@@ -471,35 +438,10 @@ fn generated_closure_overlay(
             })
             .collect(),
     };
-    let temp_dir = std::env::temp_dir();
-    for _ in 0..32 {
-        let sequence = NEXT_OVERLAY_ID.fetch_add(1, Ordering::Relaxed);
-        let path = temp_dir.join(format!(
-            "netweevil-scenario-{}-{sequence}.json",
-            std::process::id()
-        ));
-        let file = match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(error).with_context(|| {
-                    format!("creating generated scenario overlay {}", path.display())
-                });
-            }
-        };
-        let mut writer = BufWriter::new(file);
-        serde_json::to_writer(&mut writer, &overlay)
-            .with_context(|| format!("writing generated scenario overlay {}", path.display()))?;
-        writer
-            .flush()
-            .with_context(|| format!("flushing generated scenario overlay {}", path.display()))?;
-        return Ok(ResolvedScenarioOverlay {
-            path,
-            closed_source_feature_ids,
-            remove_on_drop: true,
-        });
-    }
-    bail!("could not allocate a unique generated scenario overlay path")
+    Ok(ResolvedScenarioOverlay {
+        overlay,
+        closed_source_feature_ids,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -509,7 +451,10 @@ enum ScenarioFeatureRankingFile {
     Bare(Vec<ScenarioFeatureScore>),
 }
 
-fn load_ranked_source_features(path: &Path, count: usize) -> Result<Vec<i64>> {
+/// Reads feature scores from a local CSV/JSON/YAML ranking or a prior
+/// betweenness result (CLI side).
+pub fn load_scenario_feature_ranking(path: impl AsRef<Path>) -> Result<Vec<ScenarioFeatureScore>> {
+    let path = path.as_ref();
     let scores = match path.extension().and_then(|extension| extension.to_str()) {
         Some(extension) if extension.eq_ignore_ascii_case("csv") => {
             let mut reader = csv::Reader::from_path(path)
@@ -569,6 +514,10 @@ fn load_ranked_source_features(path: &Path, count: usize) -> Result<Vec<i64>> {
             other
         ),
     };
+    Ok(scores)
+}
+
+fn rank_source_features(scores: &[ScenarioFeatureScore], count: usize) -> Result<Vec<i64>> {
     let mut aggregated = BTreeMap::<i64, f64>::new();
     for score in scores {
         if !score.score.is_finite() {
@@ -666,7 +615,7 @@ fn validate_unique_ids<'a>(label: &str, ids: impl IntoIterator<Item = &'a str>) 
 fn execute_snapshot(
     engine: &PreparedRoutingEngine,
     batch: &ScenarioBatchRequest,
-    scenario: Option<&Path>,
+    scenario: Option<&ScenarioOverlay>,
 ) -> ScenarioAnalysisSnapshot {
     let routes = batch
         .routes
@@ -828,9 +777,9 @@ fn execute_snapshot(
 fn configure_temporal(
     temporal: &mut TemporalRequestOptions,
     default_departure: Option<&str>,
-    scenario: Option<&Path>,
+    scenario: Option<&ScenarioOverlay>,
 ) {
-    temporal.scenario = scenario.map(Path::to_path_buf);
+    temporal.scenario = scenario.cloned();
     if temporal.departure_time.is_none() && temporal.arrive_by.is_none() {
         temporal.departure_time = default_departure.map(str::to_string);
     }
@@ -840,7 +789,7 @@ fn configure_matrix_temporal(
     origins: &mut PointSetDocument,
     destinations: &mut PointSetDocument,
     default_departure: Option<&str>,
-    scenario: Option<&Path>,
+    scenario: Option<&ScenarioOverlay>,
 ) {
     match (
         origins.temporal.requires_exact_labels(),
@@ -861,7 +810,7 @@ fn execute_temporal_accessibility(
     engine: &PreparedRoutingEngine,
     request: &AccessibilityRequest,
     default_departure: Option<&str>,
-    scenario: Option<&Path>,
+    scenario: Option<&ScenarioOverlay>,
 ) -> Result<AccessibilityResult> {
     let mut request = request.clone();
     configure_temporal(&mut request.origins.temporal, default_departure, scenario);
@@ -1178,56 +1127,6 @@ fn largest_threshold_count(row: &AccessibilityCategoryResult) -> usize {
         .max_by(|left, right| left.0.total_cmp(&right.0))
         .map(|(_, count)| *count)
         .unwrap_or_default()
-}
-
-fn resolve_document_paths(request: &mut ScenarioBatchRequest, base: &Path) {
-    for scenario in &mut request.scenarios {
-        match &mut scenario.selector {
-            ScenarioBatchSelector::Overlay { overlay } => resolve_path(overlay, base),
-            ScenarioBatchSelector::TopK { top_k } => resolve_path(&mut top_k.ranking, base),
-            ScenarioBatchSelector::Group { .. } => {}
-        }
-    }
-    for route in &mut request.routes {
-        resolve_temporal_paths(&mut route.temporal, base);
-    }
-    for service_area in &mut request.service_areas {
-        resolve_temporal_paths(&mut service_area.temporal, base);
-    }
-    for accessibility in &mut request.accessibility {
-        resolve_temporal_paths(&mut accessibility.origins.temporal, base);
-        for category in &mut accessibility.categories {
-            resolve_temporal_paths(&mut category.destinations.temporal, base);
-        }
-    }
-    for od in &mut request.od {
-        resolve_temporal_paths(&mut od.request.temporal, base);
-    }
-    for matrix in &mut request.matrices {
-        resolve_temporal_paths(&mut matrix.origins.temporal, base);
-        resolve_temporal_paths(&mut matrix.destinations.temporal, base);
-    }
-    for betweenness in &mut request.betweenness {
-        resolve_temporal_paths(&mut betweenness.temporal, base);
-    }
-}
-
-fn resolve_temporal_paths(temporal: &mut TemporalRequestOptions, base: &Path) {
-    if let Some(path) = &mut temporal.scenario {
-        resolve_path(path, base);
-    }
-    if let Some(path) = &mut temporal.holiday_calendar {
-        resolve_path(path, base);
-    }
-    for path in &mut temporal.overlays {
-        resolve_path(path, base);
-    }
-}
-
-fn resolve_path(path: &mut PathBuf, base: &Path) {
-    if path.is_relative() {
-        *path = base.join(&*path);
-    }
 }
 
 #[cfg(test)]

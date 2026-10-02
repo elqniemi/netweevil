@@ -76,7 +76,7 @@ pub(crate) fn execute_waypoints_with_graph(
         "waypoint routes support at most 128 locations"
     );
     ensure!(
-        !request.temporal.requires_exact_labels() && request.temporal.holiday_calendar.is_none(),
+        !request.temporal.requires_exact_labels() && request.temporal.holidays.is_empty(),
         "waypoint routing supports static costs only; temporal, scenario, and component-constrained requests are not supported"
     );
     if request.optimize_order {
