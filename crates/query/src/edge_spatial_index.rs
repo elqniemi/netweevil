@@ -147,4 +147,54 @@ impl EdgeSpatialIndex {
         edges.sort_unstable();
         edges
     }
+
+    /// Indexed edges whose endpoint bounding box intersects
+    /// `[west, south, east, north]`, in ascending edge order. Edges are
+    /// straight between their nodes, so this is exact up to the segment
+    /// crossing only a corner of the box.
+    pub(crate) fn edges_in_bbox(&self, topology: &TopologyBundle, bbox: [f64; 4]) -> Vec<u32> {
+        let [west, south, east, north] = bbox;
+        let intersects = |bounds: [f64; 4]| {
+            bounds[0] <= east && bounds[2] >= west && bounds[1] <= north && bounds[3] >= south
+        };
+        let mut edges = Vec::new();
+        if self.nodes.is_empty() {
+            return edges;
+        }
+        let mut stack = [0_u32; 64];
+        let mut length = 1;
+        while length != 0 {
+            length -= 1;
+            let node = &self.nodes[stack[length] as usize];
+            if !intersects(node.bounds) {
+                continue;
+            }
+            if node.count != 0 {
+                for &edge_id in
+                    &self.edge_ids[node.first as usize..(node.first + node.count) as usize]
+                {
+                    let edge = topology.routing_edge(edge_id as usize);
+                    let from = &topology.nodes[edge.from.0 as usize];
+                    let to = &topology.nodes[edge.to.0 as usize];
+                    if intersects([
+                        from.lon.min(to.lon),
+                        from.lat.min(to.lat),
+                        from.lon.max(to.lon),
+                        from.lat.max(to.lat),
+                    ]) {
+                        edges.push(edge_id);
+                    }
+                }
+            } else {
+                stack[length] = node.first;
+                stack[length + 1] = node.first + 1;
+                length += 2;
+            }
+        }
+        edges.sort_unstable();
+        edges
+    }
 }
+
+#[cfg(test)]
+mod tests;

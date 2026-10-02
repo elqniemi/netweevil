@@ -223,6 +223,22 @@ impl PreparedRoutingEngine {
         )
     }
 
+    /// Edges this profile can traverse whose extent intersects
+    /// `[west, south, east, north]`, in ascending edge order.
+    pub fn routable_edges_in_bbox(&self, bbox: [f64; 4]) -> Vec<u32> {
+        self.default_routing_graph
+            .edge_spatial_index
+            .edges_in_bbox(self.topology.as_ref(), bbox)
+    }
+
+    /// Whether this profile can traverse `edge_index`.
+    pub fn is_routable_edge(&self, edge_index: usize) -> bool {
+        self.default_routing_graph
+            .edge_costs
+            .get(edge_index)
+            .is_some_and(|cost| cost.is_finite())
+    }
+
     /// Execute a route between pre-snapped candidate sets produced by
     /// [`Self::snap_route_candidates`]. Requests with failure modes or exact
     /// temporal/component labels fall back to the full snap-and-route path so

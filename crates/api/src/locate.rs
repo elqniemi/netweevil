@@ -125,7 +125,9 @@ pub(crate) async fn locate_handler(
         profile_id: profile.document.profile.id.clone(),
         profile_hash: profile.manifest.profile_hash.clone(),
     };
-    let names = load_edge_names(&runtime)?;
+    // Names only decorate results; a dataset without the name bundle still
+    // locates and renders.
+    let names = load_edge_names(&runtime).unwrap_or_else(|_| Arc::from(Vec::new()));
     let engine = Arc::clone(&profile.engine);
     let topology = runtime.topology.clone();
     let metrics = engine.metrics_arc();
