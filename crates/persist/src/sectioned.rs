@@ -200,6 +200,14 @@ fn create_writer(path: &Path) -> Result<SectionWriter<BufWriter<File>>> {
     SectionWriter::new(BufWriter::new(file))
 }
 
+pub(crate) fn has_current_magic(path: &Path) -> bool {
+    use std::io::Read;
+    let mut magic = [0_u8; MAGIC_LEN];
+    File::open(path)
+        .and_then(|mut file| file.read_exact(&mut magic))
+        .is_ok_and(|()| &magic == CURRENT_MAGIC)
+}
+
 pub(crate) fn map_file(path: &Path) -> Result<Mmap> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
     unsafe { Mmap::map(&file) }.with_context(|| format!("memory-mapping {}", path.display()))

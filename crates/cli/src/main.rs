@@ -29,7 +29,7 @@ use crate::analyze::{
 };
 use crate::api::{ApiCommand, BootstrapArgs, api_serve, bootstrap};
 use crate::bench::{BenchCommand, bench_compare, bench_corpus, bench_http, bench_run};
-use crate::cache::{CacheCommand, cache_list};
+use crate::cache::{CacheCommand, cache_list, cache_prune};
 use crate::dataset::{DatasetCommand, dataset_audit, dataset_import, dataset_list};
 use crate::experiment::{ExperimentCommand, experiment_run};
 use crate::profile::{ProfileCommand, profile_compile, profile_validate};
@@ -102,6 +102,7 @@ fn main() -> Result<()> {
         },
         Command::Cache { command: cache } => match cache {
             CacheCommand::List => cache_list(&paths),
+            CacheCommand::Prune { dry_run } => cache_prune(&paths, dry_run),
         },
         Command::Bench { command: bench } => match bench {
             BenchCommand::Corpus(args) => bench_corpus(&paths, args),

@@ -168,7 +168,7 @@ pub(crate) fn encode_i64s(values: &[i64]) -> Vec<u8> {
         plain_len += varint_len(zigzag(value));
         previous = value;
     }
-    let raw_len = values.len() * size_of::<i64>();
+    let raw_len = size_of_val(values);
     if raw_len <= delta_len.min(plain_len) {
         return raw_column(values);
     }
@@ -245,7 +245,7 @@ pub(crate) fn encode_u32s(values: &[u32]) -> Vec<u8> {
         plain_len += varint_len(value as u64);
         previous = value;
     }
-    let raw_len = values.len() * size_of::<u32>();
+    let raw_len = size_of_val(values);
     if raw_len <= delta_len.min(plain_len) {
         return raw_column(values);
     }
@@ -416,7 +416,7 @@ pub(crate) fn encode_f64s(values: &[f64]) -> Vec<u8> {
             put_varint(&mut out, zigzag(value - previous));
             previous = value;
         }
-        if out.len() < values.len() * size_of::<f64>() {
+        if out.len() < size_of_val(values) {
             return out;
         }
     }

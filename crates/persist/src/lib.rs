@@ -364,6 +364,137 @@ pub fn read_run_manifest(path: impl AsRef<Path>) -> Result<RunManifest> {
     read_json(path)
 }
 
+/// Whether `path` starts with the current sectioned bundle magic. Bundles
+/// written by older releases fail this check and must be rebuilt.
+pub fn is_current_bundle_format(path: impl AsRef<Path>) -> bool {
+    sectioned::has_current_magic(path.as_ref())
+}
+
+/// What [`prune_bundle_cache`] removed (or would remove on a dry run).
+#[derive(Debug, Default)]
+pub struct CachePruneReport {
+    /// Compiled-profile manifests with the reason each one is stale.
+    pub compiled_manifests: Vec<(PathBuf, &'static str)>,
+    /// Bundle files no remaining manifest references, with their sizes.
+    pub bundle_files: Vec<(PathBuf, u64)>,
+}
+
+impl CachePruneReport {
+    pub fn reclaimed_bytes(&self) -> u64 {
+        self.bundle_files.iter().map(|(_, bytes)| bytes).sum()
+    }
+}
+
+/// Removes compiled profiles that can no longer be used and bundle files
+/// that nothing references.
+///
+/// A compiled-profile manifest is stale when its dataset is gone, the
+/// dataset was re-imported (different topology bundle), its bundle is
+/// missing or uses an old format, or a newer compile of the same profile id
+/// exists for the dataset (each profile edit gets a new hash and file).
+/// Stale profiles are recompiled on demand. Afterwards, files under the
+/// topology, name, acceleration and metric bundle directories that no
+/// dataset or compiled-profile manifest references are removed. Transit
+/// bundles are left alone. With `dry_run`, nothing is deleted.
+pub fn prune_bundle_cache(paths: &WorkspacePaths, dry_run: bool) -> Result<CachePruneReport> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let canonical = |path: &Path| fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let datasets = read_dataset_manifests(paths)?
+        .into_iter()
+        .map(|manifest| (manifest.dataset_id.0.clone(), manifest))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut compiled = Vec::new();
+    for path in list_json_files(&paths.compiled_profiles_dir)? {
+        // Unreadable manifests are left for the user to inspect.
+        if let Ok(manifest) = read_json::<CompiledProfileManifest>(&path) {
+            compiled.push((path, manifest));
+        }
+    }
+    let mut newest = BTreeMap::<(String, String), String>::new();
+    for (_, manifest) in &compiled {
+        let key = (manifest.dataset_id.0.clone(), manifest.profile_id.clone());
+        let entry = newest.entry(key).or_default();
+        if manifest.created_at > *entry {
+            entry.clone_from(&manifest.created_at);
+        }
+    }
+
+    let mut report = CachePruneReport::default();
+    let mut referenced = BTreeSet::new();
+    for (path, manifest) in &compiled {
+        let dataset = datasets.get(&manifest.dataset_id.0);
+        let bundle_path = Path::new(&manifest.bundle.path);
+        let reason = if dataset.is_none() {
+            Some("dataset no longer exists")
+        } else if manifest.topology_bundle_id.as_ref()
+            != dataset
+                .and_then(|dataset| dataset.topology_bundle.as_ref())
+                .map(|bundle| &bundle.bundle_id)
+        {
+            Some("dataset was re-imported")
+        } else if !bundle_path.exists() {
+            Some("bundle file is missing")
+        } else if !is_current_bundle_format(bundle_path) {
+            Some("bundle uses an old format")
+        } else if newest
+            .get(&(manifest.dataset_id.0.clone(), manifest.profile_id.clone()))
+            .is_some_and(|created_at| *created_at != manifest.created_at)
+        {
+            Some("superseded by a newer compile of the same profile")
+        } else {
+            None
+        };
+        match reason {
+            Some(reason) => report.compiled_manifests.push((path.clone(), reason)),
+            None => {
+                referenced.insert(canonical(bundle_path));
+            }
+        }
+    }
+    for dataset in datasets.values() {
+        for bundle in [
+            &dataset.topology_bundle,
+            &dataset.edge_name_bundle,
+            &dataset.acceleration_bundle,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            referenced.insert(canonical(Path::new(&bundle.path)));
+        }
+    }
+
+    for dir in [
+        &paths.topology_bundles_dir,
+        &paths.edge_name_bundles_dir,
+        &paths.acceleration_bundles_dir,
+        &paths.metric_bundles_dir,
+    ] {
+        for entry in
+            fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?
+        {
+            let entry = entry?;
+            let metadata = entry.metadata()?;
+            if metadata.is_file() && !referenced.contains(&canonical(&entry.path())) {
+                report.bundle_files.push((entry.path(), metadata.len()));
+            }
+        }
+    }
+    report.bundle_files.sort();
+
+    if !dry_run {
+        for (path, _) in &report.compiled_manifests {
+            fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+        }
+        for (path, _) in &report.bundle_files {
+            fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+        }
+    }
+    Ok(report)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -675,5 +806,87 @@ mod tests {
         assert_eq!(round_tripped.edge_metrics[0].travel_time_s, Some(12.0));
         assert_eq!(round_tripped.edge_metrics[0].generalized_cost, Some(18.0));
         fs::remove_file(path).expect("temporary bundle should be removed");
+    }
+
+    #[test]
+    fn prune_keeps_the_newest_compile_and_referenced_bundles() {
+        use netweevil_manifest::{BundleRef, CompiledProfileManifest, DatasetManifest};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("netweevil-prune-{unique}"));
+        let paths = super::WorkspacePaths::discover(&root).expect("workspace");
+        let bundle = |dir: &std::path::Path, name: &str| {
+            let path = dir.join(name);
+            fs::write(&path, b"NWSECB06").expect("bundle written");
+            BundleRef {
+                bundle_id: CacheBundleId::new(name),
+                path: path.display().to_string(),
+            }
+        };
+        let topology = bundle(&paths.topology_bundles_dir, "topology-a.bin");
+        super::write_dataset_manifest(
+            &paths,
+            &DatasetManifest {
+                dataset_id: netweevil_core::DatasetId::new("city"),
+                label: "city".to_string(),
+                source_path: "city.osm.pbf".to_string(),
+                source_paths: Vec::new(),
+                source_sha256: "abc".to_string(),
+                source_size_bytes: 1,
+                source_format: Default::default(),
+                imported_at: "2026-01-01T00:00:00Z".to_string(),
+                build_stage: netweevil_core::BuildStage::TopologyReady,
+                topology_bundle: Some(topology.clone()),
+                edge_name_bundle: None,
+                acceleration_bundle: None,
+                topology_meta: None,
+                acceleration_stats: None,
+            },
+        )
+        .expect("dataset manifest");
+        for (hash, created_at) in [
+            ("old", "2026-01-01T00:00:00Z"),
+            ("new", "2026-02-01T00:00:00Z"),
+        ] {
+            super::write_compiled_profile_manifest(
+                &paths,
+                &CompiledProfileManifest {
+                    compile_id: format!("city-{hash}"),
+                    dataset_id: netweevil_core::DatasetId::new("city"),
+                    profile_id: "car".to_string(),
+                    profile_hash: hash.to_string(),
+                    defaults_pack: "test".to_string(),
+                    mode: TravelMode::Car,
+                    created_at: created_at.to_string(),
+                    topology_bundle_id: Some(topology.bundle_id.clone()),
+                    edge_count: None,
+                    bundle: bundle(&paths.metric_bundles_dir, &format!("metric-{hash}.bin")),
+                },
+            )
+            .expect("compiled manifest");
+        }
+        bundle(&paths.acceleration_bundles_dir, "orphan.bin");
+
+        let preview = super::prune_bundle_cache(&paths, true).expect("dry run");
+        assert_eq!(preview.compiled_manifests.len(), 1);
+        assert_eq!(preview.bundle_files.len(), 2);
+        assert!(paths.metric_bundles_dir.join("metric-old.bin").exists());
+
+        let report = super::prune_bundle_cache(&paths, false).expect("prune");
+        assert_eq!(report.reclaimed_bytes(), 16);
+        assert!(!paths.metric_bundles_dir.join("metric-old.bin").exists());
+        assert!(!paths.acceleration_bundles_dir.join("orphan.bin").exists());
+        assert!(paths.metric_bundles_dir.join("metric-new.bin").exists());
+        assert!(paths.topology_bundles_dir.join("topology-a.bin").exists());
+        assert_eq!(
+            super::read_compiled_profile_manifests(&paths)
+                .expect("manifests")
+                .len(),
+            1
+        );
+        fs::remove_dir_all(root).expect("temporary workspace removed");
     }
 }
