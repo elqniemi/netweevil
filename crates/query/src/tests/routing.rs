@@ -1248,6 +1248,57 @@ fn single_route_restricted_fallback_matches_the_exact_engine() {
 }
 
 #[test]
+fn graph_without_restriction_sequences_matches_an_ignoring_build() {
+    let topology = multi_edge_restricted_topology();
+    let metrics = restricted_metrics();
+    let graph = build_routing_graph(&topology, &metrics).expect("graph builds");
+    let ignoring = crate::build_routing_graph_with_options(
+        &topology,
+        &metrics,
+        crate::RoutingGraphBuildOptions {
+            ignore_multi_edge_restriction_sequences: true,
+            ..Default::default()
+        },
+    )
+    .expect("ignoring graph builds");
+    let shared = graph.without_restriction_sequences();
+
+    assert!(graph.has_restriction_sequences());
+    assert!(!shared.has_restriction_sequences());
+    assert!(!ignoring.has_restriction_sequences());
+    assert!(Arc::ptr_eq(
+        &shared.transition_edges,
+        &graph.transition_edges
+    ));
+    let transitions = |graph: &RoutingGraph| {
+        (0..topology.edge_count())
+            .map(|edge| {
+                let forward = graph
+                    .transition_range(edge)
+                    .map(|index| {
+                        (
+                            graph.transition_edges[index],
+                            graph.transition_costs[index].to_bits(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let backward = graph
+                    .reverse_transition_range(edge)
+                    .map(|index| {
+                        (
+                            graph.reverse_transition_edges[index],
+                            graph.reverse_transition_costs[index].to_bits(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (forward, backward)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(transitions(&shared), transitions(&ignoring));
+}
+
+#[test]
 fn builds_pairwise_turn_table_without_automaton_for_two_edge_restrictions() {
     let graph =
         build_routing_graph(&restricted_topology(), &restricted_metrics()).expect("graph builds");

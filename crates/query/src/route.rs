@@ -276,7 +276,8 @@ pub(crate) fn cached_failure_mode_bundle(
             degraded_metrics.clone(),
             Some(base_acceleration.source.clone()),
             degraded_topology.edge_count(),
-        )?;
+        )?
+        .map(std::sync::Arc::new);
         routing_graph.acceleration_includes_failure_penalties =
             routing_graph.acceleration.is_some();
     }
