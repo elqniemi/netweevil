@@ -1,8 +1,10 @@
 use super::*;
 use crate::osm_change::ChangeAction;
 use crate::test_util::{
-    GRID_SIDE, OsmEdit, TempDir, apply_edits, osm_grid, osm_grid_edits, write_osc, write_pbf,
+    GRID_SIDE, OsmEdit, TempDir, apply_edits, grid_dem, osm_grid, osm_grid_edits, write_osc,
+    write_pbf,
 };
+use crate::topology::build_topology_from_scan;
 use crate::{DatasetImportOptions, import_dataset};
 use netweevil_persist::read_edge_name_bundle;
 use netweevil_profile::{ProfileDocument, load_profile};
@@ -11,14 +13,27 @@ use osmpbfreader::{OsmObj, OsmPbfReader};
 use std::sync::Arc;
 
 fn import(paths: &WorkspacePaths, source: &Path, name: &str) -> DatasetManifest {
+    import_with_dem(paths, source, name, None)
+}
+
+fn import_with_dem(
+    paths: &WorkspacePaths,
+    source: &Path,
+    name: &str,
+    dem: Option<&Path>,
+) -> DatasetManifest {
     import_dataset(
         paths,
         &[source.to_path_buf()],
         DatasetImportOptions {
             name: name.to_string(),
             source: source.display().to_string(),
-            format: None,
-            mapping: None,
+            dem: dem.map(|path| crate::DemImportOptions {
+                path: path.to_path_buf(),
+                crs: None,
+                vertical_datum: Some("test".to_string()),
+            }),
+            ..Default::default()
         },
         |_| {},
     )
@@ -248,6 +263,22 @@ fn incremental_update_matches_a_full_import_of_the_edited_extract() {
             .iter()
             .any(|restriction| restriction.condition.is_some())
     );
+    // The moved boundary corner leaves part of the grid outside the
+    // country, which the update reassembles from the retained boundary way.
+    let assigned = |topology: &TopologyBundle| {
+        topology
+            .regions
+            .node_admin_area
+            .iter()
+            .filter(|area| **area != netweevil_core::NO_ADMIN_AREA)
+            .count()
+    };
+    assert_eq!(
+        assigned(&topology(&imported)),
+        topology(&imported).nodes.len()
+    );
+    assert!(assigned(&rebuilt) > 0 && assigned(&rebuilt) < rebuilt.nodes.len());
+    assert!(!rebuilt.regions.timezones.is_empty());
     // The retained objects match the full import's, so the next update
     // starts from the same source state.
     let snapshot = |manifest: &DatasetManifest| -> OsmSourceSnapshot {
@@ -270,7 +301,7 @@ fn incremental_update_matches_a_full_import_of_the_edited_extract() {
     assert_eq!(
         report.changed_objects,
         Some(ChangedObjects {
-            nodes: 6,
+            nodes: 7,
             ways: 11,
             relations: 2,
         })
@@ -400,6 +431,51 @@ fn consecutive_change_files_chain_and_auto_reorder_on_fill_growth() {
 }
 
 #[test]
+fn updates_resample_the_dem_the_dataset_was_imported_with() {
+    let dir = TempDir::new("update-dem");
+    let paths = WorkspacePaths::discover(dir.path()).expect("workspace");
+    let fixture = write_fixture(&dir, &osm_grid(), &osm_grid_edits());
+    let dem = dir.join("grid.asc");
+    std::fs::write(&dem, grid_dem()).unwrap();
+    import_with_dem(&paths, &fixture.base, "city", Some(&dem));
+    let full = import_with_dem(&paths, &fixture.edited, "city_full", Some(&dem));
+
+    let report = update(
+        &paths,
+        "city",
+        DatasetUpdateInput::OsmChanges(vec![fixture.change.clone()]),
+        ReorderPolicy::Never,
+    );
+    let updated = report.manifest;
+
+    assert_same_topology(&dir, &updated, &full);
+    let rebuilt = topology(&updated);
+    assert!(rebuilt.elevation.dem.is_some());
+    assert!(rebuilt.nodes.iter().any(|node| node.z > 10.0));
+    // The runtime raster is rewritten next to the new build.
+    let raster = updated.elevation_bundle.as_ref().expect("elevation raster");
+    assert!(Path::new(&raster.path).exists());
+    assert!(
+        std::fs::read(&raster.path).unwrap()
+            == std::fs::read(&full.elevation_bundle.as_ref().unwrap().path).unwrap()
+    );
+
+    // A DEM that changed since the import cannot reproduce a full import.
+    std::fs::write(&dem, grid_dem().replacen("10 ", "11 ", 1)).unwrap();
+    let error = update_dataset(
+        &paths,
+        DatasetUpdateOptions {
+            dataset_id: "city".to_string(),
+            input: DatasetUpdateInput::OsmChanges(vec![fixture.change]),
+            reorder: ReorderPolicy::Never,
+        },
+        |_| {},
+    )
+    .expect_err("a changed DEM is rejected");
+    assert!(error.to_string().contains("changed since"), "{error}");
+}
+
+#[test]
 fn updates_need_an_osm_dataset_with_a_source_snapshot() {
     let dir = TempDir::new("update-missing");
     let paths = WorkspacePaths::discover(dir.path()).expect("workspace");
@@ -427,7 +503,7 @@ fn previous_ranks_follow_edge_identity_through_way_splits() {
     let edits = osm_grid_edits();
     let build = |objects: Vec<OsmObj>| {
         let state = OsmSourceState::from_objects(objects);
-        let (scan, node_ids) = state.scan_output();
+        let (scan, node_ids) = state.scan_output(true);
         let (topology, _, _) =
             build_topology_from_scan(Path::new("grid"), "abc", scan, &mut |_| {}).unwrap();
         (topology, node_ids)

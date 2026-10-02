@@ -13,16 +13,32 @@ An OSM import reads the extract in one pass and writes a source snapshot
 - every node position, except that topology nodes store only their OSM id
   because the topology bundle already holds their coordinates;
 - the routable ways as classified records (id, node list and name are
-  separate columns, the rest is interned);
-- the turn-restriction relations and the traffic-signal node ids;
-- the ids of the other ways and relations, which keep the source object
-  counts exact.
+  separate columns, the rest is interned), including guidance tags, vehicle
+  restrictions, destination-only and conditional access, and the ids of
+  their temporal rule sets;
+- the turn-restriction relations, one record per kind, mode set and
+  condition, and the temporal rule sets they and the ways refer to;
+- the traffic-signal and motorway-junction nodes, and the routable ways on
+  bridges or in tunnels;
+- the other ways with their node lists and the ids of the other relations,
+  which keep the source object counts exact and let admin boundaries be
+  assembled from the retained `boundary=administrative` relations;
+- the admin boundaries file and DEM the dataset was imported with, by path
+  and SHA-256.
 
 A change file only lists the objects it touches. A modified way can reference
 an unmodified node that no routable way used before, so the snapshot keeps
 every node position. Classification is not stored as raw tags: changed
 objects arrive with all their tags, and a classifier change requires a full
 re-import.
+
+Rule set ids depend on the order a scan interns them. After every scan or
+change set the state renumbers them as a full import does (ways by id,
+forward before reverse, then restriction relations by id), so the updated
+topology carries the same ids. Updates re-hash the boundaries file and the
+DEM and refuse to run when either changed, because the result could no
+longer equal a full import with the same inputs; they resample the DEM, write
+a new elevation raster and reassign timezones and admin areas.
 
 | Extract | PBF | Snapshot | Topology | Acceleration |
 | --- | ---: | ---: | ---: | ---: |
@@ -31,7 +47,9 @@ re-import.
 | North Netherlands routing extract | 26.9 MB | 8.14 MB | 26.5 MB | 36.4 MB |
 
 The unfiltered extract shows why the routing filter in the README matters:
-the snapshot holds positions of every building node.
+the snapshot holds positions of every building node. These sizes were
+measured before the snapshot kept the node lists of non-routable ways, which
+adds little to a routing extract but grows the unfiltered one further.
 
 ## Applying changes
 

@@ -144,7 +144,7 @@ pub fn load_service_area_sequence_request(
 ) -> Result<ServiceAreaSequenceRequest> {
     let request: ServiceAreaSequenceRequest =
         read_request_document(path.as_ref(), "service-area sequence request")?;
-    request.expanded_departure_times()?;
+    request.validate_timing()?;
     Ok(request)
 }
 
@@ -452,6 +452,8 @@ pub(crate) fn merge_point_set_returns(left: &ReturnConfig, right: &ReturnConfig)
     }
     merged.penalty_breakdown |= right.penalty_breakdown;
     merged.explain_cost_derivation |= right.explain_cost_derivation;
+    merged.admin_areas |= right.admin_areas;
+    merged.elevation |= right.elevation;
     merged
 }
 

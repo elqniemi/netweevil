@@ -37,6 +37,10 @@ pub struct DatasetManifest {
     pub edge_name_bundle: Option<BundleRef>,
     #[serde(default)]
     pub acceleration_bundle: Option<BundleRef>,
+    /// Tiled DEM raster for runtime height queries, when the import sampled
+    /// a DEM.
+    #[serde(default)]
+    pub elevation_bundle: Option<BundleRef>,
     #[serde(default)]
     pub topology_meta: Option<TopologyBundleMeta>,
     #[serde(default)]

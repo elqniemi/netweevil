@@ -90,6 +90,8 @@ pub(crate) fn route_result_geojson(
             "violations": result.violations,
             "segment_count": result.summary.segment_count,
             "warnings": result.warnings,
+            "regions": result.regions,
+            "elevation": result.elevation,
         }
     })];
     for alternative in &result.alternatives {

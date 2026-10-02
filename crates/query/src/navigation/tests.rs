@@ -692,6 +692,28 @@ fn median_crossover_collapses_into_a_u_turn_on_the_driving_side() {
         .unwrap();
     assert_eq!(result.maneuvers[1].kind, ManeuverType::UturnRight);
     assert_eq!(result.driving_side_origin, DrivingSideOrigin::Dataset);
+    // Without a source, the imported admin areas give the country's side.
+    let mut topology = net.topology();
+    topology.regions.admin_areas = vec![netweevil_core::AdminArea {
+        country_code: "GB".to_string(),
+        ..Default::default()
+    }];
+    topology.regions.node_admin_area = vec![0; topology.nodes.len()];
+    let costs = net
+        .edges
+        .iter()
+        .map(|edge| f64::from(edge.length_m) / 10.0)
+        .collect::<Vec<_>>();
+    let result = exact_engine(topology, metrics(&costs))
+        .execute_directions(
+            &net.request([10.0, -200.0], [-10.0, -200.0]),
+            DirectionsContext::new(&names),
+            &DirectionsOptions::default(),
+            EngineMode::Auto,
+        )
+        .unwrap();
+    assert_eq!(result.driving_side, DrivingSide::Left);
+    assert_eq!(result.driving_side_origin, DrivingSideOrigin::Dataset);
     // The request overrides the dataset.
     let options = DirectionsOptions {
         driving_side: Some(DrivingSide::Right),

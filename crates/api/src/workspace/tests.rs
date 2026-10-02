@@ -127,6 +127,8 @@ fn street(node_count: u32) -> TopologyBundle {
         names: Vec::new(),
         feature_attributes: Default::default(),
         temporal_rule_sets: Vec::new(),
+        elevation: Default::default(),
+        regions: Default::default(),
     }
 }
 

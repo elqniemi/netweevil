@@ -295,7 +295,10 @@ fn execute_temporal_component_route(
             request,
             &origin_candidates,
             &destination_candidates,
-            crate::parse_datetime(departure)?,
+            crate::local_time::parse_local_datetime(
+                departure,
+                crate::temporal::candidate_zone(topology, &context, &origin_candidates),
+            )?,
             constraints,
             dominance_dimensions,
             pareto_index,
@@ -310,7 +313,10 @@ fn execute_temporal_component_route(
             request,
             &origin_candidates,
             &destination_candidates,
-            crate::parse_datetime(arrive_by)?,
+            crate::local_time::parse_local_datetime(
+                arrive_by,
+                crate::temporal::candidate_zone(topology, &context, &destination_candidates),
+            )?,
             constraints,
             dominance_dimensions,
             pareto_index,
@@ -1274,6 +1280,8 @@ fn build_component_route_result(
         diagnostics: primary.hop_info.diagnostics,
         warnings,
         alternatives,
+        regions: None,
+        elevation: None,
     })
 }
 
@@ -1384,6 +1392,8 @@ fn build_temporal_component_route_result(
             warnings
         },
         alternatives,
+        regions: None,
+        elevation: None,
     })
 }
 

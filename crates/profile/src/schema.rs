@@ -110,6 +110,20 @@ impl ProfileDocument {
         if !destination_only_penalty_s.is_finite() || destination_only_penalty_s < 0.0 {
             bail!("preferences.destination_only_penalty_s must be finite and non-negative");
         }
+        for (name, value) in [
+            (
+                "border_crossing_penalty_s",
+                self.preferences.border_crossing_penalty_s,
+            ),
+            (
+                "border_crossing_time_s",
+                self.preferences.border_crossing_time_s,
+            ),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                bail!("preferences.{name} must be finite and non-negative");
+            }
+        }
         if let Some(vehicle) = &self.vehicle {
             vehicle.validate().map_err(anyhow::Error::msg)?;
         }
@@ -599,6 +613,17 @@ pub struct PreferencesConfig {
     /// traffic avoids it while local access stays possible.
     #[serde(default = "default_destination_only_penalty_s")]
     pub destination_only_penalty_s: f64,
+    /// Exclude edges between two different countries. Needs a dataset
+    /// imported with admin boundaries; elsewhere no edge crosses a border.
+    #[serde(default)]
+    pub avoid_border_crossings: bool,
+    /// Generalized cost added to each edge that crosses a country border.
+    #[serde(default)]
+    pub border_crossing_penalty_s: f64,
+    /// Travel time added to each border crossing (for example a border
+    /// control stop).
+    #[serde(default)]
+    pub border_crossing_time_s: f64,
 }
 
 fn default_pref() -> f64 {
@@ -619,6 +644,9 @@ impl Default for PreferencesConfig {
             use_tracks: 0.0,
             service_penalty_s: 0.0,
             destination_only_penalty_s: default_destination_only_penalty_s(),
+            avoid_border_crossings: false,
+            border_crossing_penalty_s: 0.0,
+            border_crossing_time_s: 0.0,
         }
     }
 }
@@ -637,6 +665,14 @@ pub struct ReturnConfig {
     pub penalty_breakdown: bool,
     #[serde(default)]
     pub explain_cost_derivation: bool,
+    /// Report the countries/states, border crossings and timezones along a
+    /// route.
+    #[serde(default)]
+    pub admin_areas: bool,
+    /// Report the route's elevation profile, ascent/descent and steepest
+    /// grades.
+    #[serde(default)]
+    pub elevation: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]

@@ -19,6 +19,7 @@ fn open_only_waits_across_a_direction_flip_boundary() {
             AccessMask::FOOT,
             1,
             candidate,
+            None,
             &HashSet::new(),
         )
     };
@@ -69,6 +70,106 @@ fn wrapping_rule_uses_the_day_on_which_the_interval_started() {
             "{timestamp}"
         );
     }
+}
+
+/// `test_topology` with every node in `zone` and edge 0 open from 10:00 to
+/// midnight.
+fn opening_hours_topology(zone: Option<&str>) -> TopologyBundle {
+    let mut topology = test_topology();
+    set_rules(
+        &mut topology,
+        &[0],
+        vec![every_day(10 * 60, 24 * 60, TemporalEffect::OpenOnly)],
+    );
+    if let Some(zone) = zone {
+        topology.regions.timezones = vec![zone.to_string()];
+        topology.regions.node_timezone = vec![0; topology.nodes.len()];
+    }
+    topology
+}
+
+#[test]
+fn rules_read_the_local_clock_of_the_edge() {
+    let metrics = test_metrics(false);
+    // 08:00 UTC is 10:00 in Amsterdam (CEST): the edge is open there, but a
+    // dataset without zones evaluates the rule on the request's UTC clock.
+    let request = depart_at("2026-07-10T08:00:00Z");
+    let local = crate::execute_route(
+        &opening_hours_topology(Some("Europe/Amsterdam")),
+        &metrics,
+        &request,
+    )
+    .unwrap();
+    assert_eq!(local.edge_path, vec![0, 1]);
+    let request_clock =
+        crate::execute_route(&opening_hours_topology(None), &metrics, &request).unwrap();
+    assert_eq!(request_clock.edge_path, vec![2]);
+
+    let rules = TemporalRuleSet {
+        rules: vec![every_day(10 * 60, 24 * 60, TemporalEffect::OpenOnly)],
+    };
+    let zone = Some(chrono_tz::Asia::Hong_Kong);
+    let evaluate = |instant| {
+        evaluate_rules(
+            Some(&rules),
+            None,
+            AccessMask::FOOT,
+            1,
+            at(instant),
+            zone,
+            &HashSet::new(),
+        )
+    };
+    assert_eq!(
+        evaluate("2026-07-10T02:00:00Z"),
+        RuleEvaluation::Available { speed_factor: 1.0 }
+    );
+    assert_eq!(
+        evaluate("2026-07-10T01:59:00Z"),
+        RuleEvaluation::Unavailable
+    );
+}
+
+#[test]
+fn offset_less_departures_use_the_origin_zone_and_reject_dst_gaps_and_overlaps() {
+    let topology = opening_hours_topology(Some("Europe/Amsterdam"));
+    let metrics = test_metrics(false);
+    let route = crate::execute_route(&topology, &metrics, &depart_at("2026-07-10T10:00")).unwrap();
+    assert_eq!(route.edge_path, vec![0, 1]);
+    assert_eq!(
+        route.summary.departure_time.as_deref(),
+        Some("2026-07-10T10:00:00+02:00")
+    );
+    let winter =
+        crate::execute_route(&topology, &metrics, &depart_at("2026-12-01T10:00:00")).unwrap();
+    assert_eq!(
+        winter.summary.departure_time.as_deref(),
+        Some("2026-12-01T10:00:00+01:00")
+    );
+
+    for (raw, message) in [
+        ("2026-03-29T02:30:00", "does not exist"),
+        ("2026-10-25T02:30:00", "ambiguous"),
+    ] {
+        let error = crate::execute_route(&topology, &metrics, &depart_at(raw))
+            .expect_err("DST transitions need an explicit offset");
+        assert!(error.to_string().contains(message), "{error}");
+    }
+    // An explicit offset resolves the autumn overlap.
+    let second =
+        crate::execute_route(&topology, &metrics, &depart_at("2026-10-25T02:30:00+01:00")).unwrap();
+    assert_eq!(
+        second.summary.departure_time.as_deref(),
+        Some("2026-10-25T02:30:00+01:00")
+    );
+
+    let error = crate::execute_route(
+        &opening_hours_topology(None),
+        &metrics,
+        &depart_at("2026-07-10T10:00"),
+    )
+    .expect_err("a dataset without zones needs an offset");
+    assert!(error.to_string().contains("no UTC offset"), "{error}");
 }
 
 #[test]
@@ -641,6 +742,8 @@ fn test_topology() -> TopologyBundle {
         edge_component_ids: vec![0, 0, 0],
         feature_attributes: Default::default(),
         temporal_rule_sets: Vec::new(),
+        regions: Default::default(),
+        elevation: Default::default(),
     };
     topology.edge_based_topology = crate::build_edge_based_topology_fallback(&topology);
     topology

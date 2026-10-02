@@ -1,11 +1,13 @@
 use anyhow::{Context, Result, bail};
+use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 use time::Duration;
 use time::format_description::well_known::Rfc3339;
 
+use crate::local_time::{NetworkTimezones, in_zone, parse_local_datetime};
 use crate::{
     RoutingGraph, ServiceAreaRequest, ServiceAreaResult, build_temporal_routing_graph,
-    execute_service_area_with_graph, parse_datetime,
+    execute_service_area_with_graph,
 };
 use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 
@@ -49,7 +51,10 @@ pub(crate) fn execute_service_area_sequence_with_graph(
     routing_graph: &RoutingGraph,
     request: &ServiceAreaSequenceRequest,
 ) -> Result<ServiceAreaSequenceResult> {
-    let departure_times = request.expanded_departure_times()?;
+    let zone = request.request.origins.first().and_then(|origin| {
+        NetworkTimezones::new(topology).zone_at(topology, origin.lon, origin.lat)
+    });
+    let departure_times = request.expanded_departure_times(zone)?;
     let temporal_routing_graph;
     let routing_graph = if routing_graph.includes_temporal_materialized_directions {
         routing_graph
@@ -84,7 +89,16 @@ pub(crate) fn execute_service_area_sequence_with_graph(
 }
 
 impl ServiceAreaSequenceRequest {
-    pub fn expanded_departure_times(&self) -> Result<Vec<String>> {
+    /// Checks the timing fields without a dataset: offset-less local times
+    /// are only checked for syntax.
+    pub fn validate_timing(&self) -> Result<()> {
+        self.expanded_departure_times(Some(Tz::UTC)).map(|_| ())
+    }
+
+    /// Frame departure times. Offset-less local times are read in `zone` and
+    /// range frames are stepped in elapsed seconds, each formatted with the
+    /// zone's offset at that instant.
+    pub fn expanded_departure_times(&self, zone: Option<Tz>) -> Result<Vec<String>> {
         if self.sequence_id.trim().is_empty() {
             bail!("service-area sequence_id must not be empty");
         }
@@ -109,7 +123,7 @@ impl ServiceAreaSequenceRequest {
                 bail!("service-area sequence is limited to 10000 frames");
             }
             for value in &self.departure_times {
-                parse_datetime(value)
+                parse_local_datetime(value, zone)
                     .with_context(|| format!("invalid sequence departure_time '{value}'"))?;
             }
             return Ok(self.departure_times.clone());
@@ -129,9 +143,10 @@ impl ServiceAreaSequenceRequest {
         if step_s == 0 {
             bail!("service-area sequence step_s must be greater than zero");
         }
-        let start =
-            parse_datetime(start_text).context("invalid service-area sequence start_time")?;
-        let end = parse_datetime(end_text).context("invalid service-area sequence end_time")?;
+        let start = parse_local_datetime(start_text, zone)
+            .context("invalid service-area sequence start_time")?;
+        let end = parse_local_datetime(end_text, zone)
+            .context("invalid service-area sequence end_time")?;
         if end < start {
             bail!("service-area sequence end_time must not precede start_time");
         }
@@ -144,8 +159,9 @@ impl ServiceAreaSequenceRequest {
             if values.len() >= 10_000 {
                 bail!("service-area sequence is limited to 10000 frames");
             }
+            let local = zone.map_or(current, |zone| in_zone(current, zone));
             values.push(
-                current
+                local
                     .format(&Rfc3339)
                     .context("formatting service-area frame datetime")?,
             );
@@ -174,7 +190,7 @@ mod tests {
 
     #[test]
     fn expands_inclusive_boundary_time_sequence() {
-        let values = request().expanded_departure_times().expect("sequence");
+        let values = request().expanded_departure_times(None).expect("sequence");
         assert_eq!(values.len(), 9);
         assert_eq!(values.first().unwrap(), "2026-07-10T09:40:00+08:00");
         assert_eq!(values.last().unwrap(), "2026-07-10T10:20:00+08:00");
@@ -184,6 +200,6 @@ mod tests {
     fn rejects_ambiguous_sequence_timing() {
         let mut request = request();
         request.departure_times = vec!["2026-07-10T10:00:00+08:00".to_string()];
-        assert!(request.expanded_departure_times().is_err());
+        assert!(request.expanded_departure_times(None).is_err());
     }
 }

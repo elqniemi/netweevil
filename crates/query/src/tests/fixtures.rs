@@ -96,6 +96,8 @@ pub(crate) fn topology(
         edge_component_ids: Vec::new(),
         feature_attributes: Default::default(),
         temporal_rule_sets: Vec::new(),
+        regions: Default::default(),
+        elevation: Default::default(),
     })
 }
 

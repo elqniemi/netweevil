@@ -1207,6 +1207,8 @@ pub(crate) fn batch_route_result_for_path(
         diagnostics: hop_info.diagnostics,
         warnings: merge_warnings(analysis.warnings, hop_info.warnings),
         alternatives: Vec::new(),
+        regions: None,
+        elevation: None,
     })
 }
 

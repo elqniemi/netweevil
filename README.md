@@ -129,6 +129,15 @@ cargo run -p netweevil-cli -- dataset import \
 #   datasets/overture-groningen-segments.parquet \
 #   --name groningen_overture
 
+# Every import assigns IANA timezones. Optionally add country/state
+# boundaries (GeoJSON or OSM PBF) and a DEM (GeoTIFF or ESRI ASCII grid)
+# for driving sides, border crossings, regional profile rules, grades,
+# elevation profiles and /v1/height; see docs/regions-and-elevation.md:
+# cargo run -p netweevil-cli -- dataset import \
+#   datasets/groningen-260508-routing.osm.pbf --name groningen_2026_05 \
+#   --admin-boundaries datasets/boundaries.geojson \
+#   --dem datasets/dem.tif
+
 cargo run -p netweevil-cli -- profile validate \
   examples/profiles/car_research_v1.yml
 
@@ -635,6 +644,7 @@ Execution endpoints:
 - `POST /v1/trip`: optimized stop order (roundtrip, fixed start/end, open) with service times and time windows
 - `POST /v1/locate`: routing snap candidates plus the `count` nearest road segments with edge attributes
 - `POST /v1/expansion`: settled edges of the exact search behind a route or service area, in order, as GeoJSON
+- `POST /v1/height`: DEM heights at `[lon, lat]` points or along an encoded polyline, with optional resampling and `[distance, height]` range output, for datasets imported with `--dem` ([regions and elevation](docs/regions-and-elevation.md))
 - `POST /v1/od`
 - `POST /v1/matrix`
 - `POST /v1/accessibility`
@@ -653,7 +663,7 @@ stays under `.netweevil/`):
 
 - `GET /v1/workspace`: folders and their purpose, saved and active selection, datasets, profile files, feeds, uploads, running jobs
 - `POST /v1/workspace/uploads?name=<file>` (raw body, streamed to `.netweevil/uploads/`), `DELETE /v1/workspace/uploads/{name}`
-- `POST /v1/workspace/datasets/import` `{sources, name, format?, mapping?}` → job; sources and mapping are upload names in `.netweevil/uploads/`, never server paths (import other files with the CLI); `DELETE /v1/workspace/datasets/{id}`
+- `POST /v1/workspace/datasets/import` `{sources, name, format?, mapping?, admin_boundaries?, dem?: {source, crs?, vertical_datum?}}` → job; sources, mapping, boundaries and DEM are upload names in `.netweevil/uploads/`, never server paths (import other files with the CLI); `DELETE /v1/workspace/datasets/{id}`
 - `GET /v1/workspace/profile-templates`; `POST /v1/workspace/profiles` `{yaml, file_name?}`; `GET|DELETE /v1/workspace/profiles/{file}`
 - `POST /v1/workspace/transit/import` `{source, name, service_start, service_days}` → job; `source` is an upload name; `DELETE /v1/workspace/transit-feeds/{id}`
 - `POST /v1/workspace/activate` `{dataset_id, default_profile, profiles, transit_feeds}` → job that compiles missing profiles, swaps the loaded runtime, and writes `workspace.json`; profiles are files in `.netweevil/profiles/` or `examples/profiles/` (by name, `examples/<file>`, or the path `/v1/workspace` lists)

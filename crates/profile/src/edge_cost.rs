@@ -192,7 +192,23 @@ fn is_builtin_match_key(key: &str) -> bool {
     matches!(
         normalize_key(key).as_str(),
         "highway" | "road_class" | "surface" | "smoothness" | "route" | "toll"
-    )
+    ) || region_match_key(key).is_some()
+}
+
+/// Administrative-area match keys: `country` compares the ISO 3166-1
+/// alpha-2 code and `state` the ISO 3166-2 code of the edge's area.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegionMatchKey {
+    Country,
+    State,
+}
+
+pub(crate) fn region_match_key(key: &str) -> Option<RegionMatchKey> {
+    match normalize_key(key).as_str() {
+        "country" => Some(RegionMatchKey::Country),
+        "state" => Some(RegionMatchKey::State),
+        _ => None,
+    }
 }
 
 fn normalize_key(key: &str) -> String {

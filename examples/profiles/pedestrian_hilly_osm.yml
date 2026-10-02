@@ -1,0 +1,41 @@
+# Walking on an OSM network imported with --dem: Tobler's hiking function
+# slows uphill and steep downhill edges using the DEM-derived ascent and
+# descent. Routes report their elevation profile and the areas they cross.
+profile:
+  id: pedestrian_hilly_osm
+  label: "Pedestrian profile with DEM slope response"
+  mode: foot
+  defaults_pack: eu_foot_2026_01
+  extends: foot_default
+
+cost:
+  objective: fastest
+
+speed_rules:
+  - match: {highway: steps}
+    speed_kph: 2.5
+  - match: {highway: path}
+    speed_kph: 4.8
+  - match: {highway: footway}
+    speed_kph: 5.0
+  - match: {highway: residential}
+    speed_kph: 5.0
+
+exclude_rules:
+  - match: {highway: motorway}
+  - match: {highway: trunk}
+
+slope_model:
+  kind: tobler
+  exponent: 3.5
+  optimal_gradient: 0.05
+  min_speed_factor: 0.2
+  max_speed_factor: 1.2
+
+direction:
+  ignore_plain_oneway_for_foot: true
+
+returns:
+  geometry: full
+  elevation: true
+  admin_areas: true

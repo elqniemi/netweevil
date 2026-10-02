@@ -5,7 +5,7 @@ use crate::topology::build_topology_from_scan;
 use netweevil_persist::{read_source_snapshot_bundle, write_source_snapshot_bundle};
 
 fn topology_of(state: &OsmSourceState) -> (TopologyBundle, Vec<i64>) {
-    let (scan, topology_node_ids) = state.scan_output();
+    let (scan, topology_node_ids) = state.scan_output(true);
     let (topology, _, _) =
         build_topology_from_scan(Path::new("grid.osm.pbf"), "abc", scan, &mut |_| {})
             .expect("grid topology builds");
@@ -24,9 +24,9 @@ fn pbf_scan_retains_every_object_of_the_extract() {
     assert_eq!(
         scanned.counts(),
         ObjectCounts {
-            nodes: 68,
-            ways: 17,
-            relations: 3,
+            nodes: 72,
+            ways: 18,
+            relations: 4,
         }
     );
     assert_eq!(scanned.ways.len(), 16);
@@ -45,18 +45,21 @@ fn applying_a_change_file_equals_scanning_the_edited_extract() {
     assert_eq!(
         summary,
         ChangeSummary {
-            nodes: 6,
+            nodes: 7,
             ways: 11,
             relations: 2,
         }
     );
     let edited = OsmSourceState::from_objects(apply_edits(&osm_grid(), &edits));
     assert_eq!(state, edited);
-    assert_eq!(state.scan_output().0.counts, edited.scan_output().0.counts);
+    assert_eq!(
+        state.scan_output(true).0.counts,
+        edited.scan_output(true).0.counts
+    );
     // The building became a service road over nodes that were not part of
     // the topology before.
     assert!(state.ways.contains_key(&900));
-    assert!(!state.other_ways.contains(&900));
+    assert!(!state.other_ways.contains_key(&900));
     assert!(state.restrictions.contains_key(&501));
     assert!(state.other_relations.contains(&500));
 }
@@ -66,7 +69,11 @@ fn snapshot_restores_the_state_from_topology_coordinates() {
     let edits = osm_grid_edits();
     let state = OsmSourceState::from_objects(apply_edits(&osm_grid(), &edits));
     let (topology, topology_node_ids) = topology_of(&state);
-    let snapshot = state.to_snapshot(CacheBundleId::new("topology-grid"), &topology_node_ids);
+    let snapshot = state.to_snapshot(
+        CacheBundleId::new("topology-grid"),
+        &topology_node_ids,
+        &EnrichmentInputs::default(),
+    );
     // Only nodes outside the topology carry coordinates in the snapshot.
     assert_eq!(snapshot.topology_node_ids.len(), topology.nodes.len());
     assert_eq!(
@@ -88,7 +95,11 @@ fn snapshot_restores_the_state_from_topology_coordinates() {
 fn snapshot_rejects_the_topology_of_another_build() {
     let state = OsmSourceState::from_objects(osm_grid());
     let (topology, topology_node_ids) = topology_of(&state);
-    let snapshot = state.to_snapshot(CacheBundleId::new("topology-grid"), &topology_node_ids);
+    let snapshot = state.to_snapshot(
+        CacheBundleId::new("topology-grid"),
+        &topology_node_ids,
+        &EnrichmentInputs::default(),
+    );
     let edited = OsmSourceState::from_objects(apply_edits(&osm_grid(), &osm_grid_edits()));
     let (other_topology, _) = topology_of(&edited);
     assert_ne!(topology.nodes.len(), other_topology.nodes.len());

@@ -9,6 +9,7 @@
 
 mod accessibility;
 mod alternatives;
+mod annotations;
 mod avoid;
 mod batch;
 mod betweenness;
@@ -19,6 +20,7 @@ mod engine;
 mod expansion;
 mod geometry;
 mod isochrone_polygon;
+mod local_time;
 mod navigation;
 mod pareto;
 mod provenance;
@@ -36,6 +38,8 @@ mod waypoints;
 
 pub use accessibility::*;
 pub(crate) use alternatives::*;
+pub use annotations::{RouteAdminSpan, RouteElevationProfile, RouteRegions};
+pub(crate) use annotations::{annotate_route, wants_annotations};
 pub use avoid::{AvoidOptions, AvoidPoint, AvoidPolygon};
 pub(crate) use avoid::{ResolvedAvoid, ensure_no_avoid, resolve_avoid};
 pub use batch::*;
@@ -49,6 +53,7 @@ pub use documents::*;
 pub use engine::*;
 pub use expansion::*;
 pub(crate) use geometry::*;
+pub use local_time::{NetworkTimezones, in_zone, parse_local_datetime};
 pub use navigation::*;
 pub(crate) use pareto::*;
 pub(crate) use provenance::*;

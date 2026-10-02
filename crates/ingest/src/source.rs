@@ -23,6 +23,10 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::access::ConditionalCounts;
+use crate::admin::{
+    AdminBoundary, AdminRelationCandidate, assemble_boundaries, boundary_node_ids,
+    parse_admin_relation,
+};
 use crate::classify::is_traffic_signal_node;
 use crate::guidance::{JunctionNodeTags, junction_node_tags};
 use crate::import::{
@@ -30,7 +34,10 @@ use crate::import::{
 };
 use crate::osm_change::{ChangeAction, OsmChange};
 use crate::restrictions::{TurnRestrictionCandidate, ViaSpec, parse_turn_restriction_relation};
-use crate::scan::{ObjectCounts, PendingWay, RuleSetInterner, ScanOutput, pending_osm_way};
+use crate::scan::{
+    ObjectCounts, PendingWay, RuleSetInterner, ScanOutput, is_structure_way, pending_osm_way,
+};
+use crate::topology::EnrichmentInputs;
 
 /// The snapshot record types the ingest persists.
 pub(crate) type OsmSourceSnapshot =
@@ -44,6 +51,20 @@ pub(crate) struct SnapshotExtras {
     /// Temporal rule sets that way and restriction records refer to, in the
     /// order a full import interns them.
     rule_sets: Vec<TemporalRuleSet>,
+    /// Routable ways on bridges or in tunnels, sorted.
+    structure_way_ids: Vec<i64>,
+    /// Admin boundary relations, by id.
+    admin_relations: Vec<AdminRelationCandidate>,
+    /// The boundaries file and DEM the dataset was built with, by path and
+    /// SHA-256; updates apply them again.
+    enrichment: EnrichmentInputs,
+}
+
+impl SnapshotExtras {
+    /// The enrichment inputs of the build the snapshot belongs to.
+    pub(crate) fn enrichment(&self) -> &EnrichmentInputs {
+        &self.enrichment
+    }
 }
 
 /// One source node in 1e-7 degree units, as PBF files store positions.
@@ -78,7 +99,12 @@ pub(crate) struct OsmSourceState {
     /// full import of the current objects numbers them.
     rule_sets: RuleSetInterner,
     /// Ids of the ways that are not routable.
-    other_ways: FxHashSet<i64>,
+    other_ways: BTreeMap<i64, Vec<i64>>,
+    /// Routable ways on bridges or in tunnels.
+    structure_ways: FxHashSet<i64>,
+    /// Admin boundary relations (`boundary=administrative`), a subset of
+    /// the other relations.
+    admin_relations: BTreeMap<i64, AdminRelationCandidate>,
     /// Ids of the relations that are not turn restrictions.
     other_relations: FxHashSet<i64>,
 }
@@ -195,17 +221,37 @@ impl OsmSourceState {
 
     fn upsert_way(&mut self, way: osmpbfreader::Way, conditionals: &mut ConditionalCounts) {
         let id = way.id.0;
-        let node_ids = way.nodes.iter().map(|node| node.0).collect();
-        match pending_osm_way(id, node_ids, &way.tags, &mut self.rule_sets, conditionals) {
-            Some(way) => {
+        let node_ids = way.nodes.iter().map(|node| node.0).collect::<Vec<_>>();
+        let pending = pending_osm_way(
+            id,
+            node_ids.clone(),
+            &way.tags,
+            &mut self.rule_sets,
+            conditionals,
+        );
+        match pending {
+            Some(pending) => {
                 self.other_ways.remove(&id);
-                self.ways.insert(id, way);
+                if is_structure_way(&way.tags) {
+                    self.structure_ways.insert(id);
+                } else {
+                    self.structure_ways.remove(&id);
+                }
+                self.ways.insert(id, pending);
             }
             None => {
                 self.ways.remove(&id);
-                self.other_ways.insert(id);
+                self.structure_ways.remove(&id);
+                // Kept for admin boundaries assembled from member ways.
+                self.other_ways.insert(id, node_ids);
             }
         }
+    }
+
+    fn delete_way(&mut self, id: i64) {
+        self.ways.remove(&id);
+        self.other_ways.remove(&id);
+        self.structure_ways.remove(&id);
     }
 
     fn upsert_relation(&mut self, relation: &osmpbfreader::Relation) {
@@ -214,10 +260,25 @@ impl OsmSourceState {
         if candidates.is_empty() {
             self.restrictions.remove(&id);
             self.other_relations.insert(id);
+            match parse_admin_relation(relation) {
+                Some(admin) => {
+                    self.admin_relations.insert(id, admin);
+                }
+                None => {
+                    self.admin_relations.remove(&id);
+                }
+            }
         } else {
             self.other_relations.remove(&id);
+            self.admin_relations.remove(&id);
             self.restrictions.insert(id, candidates);
         }
+    }
+
+    fn delete_relation(&mut self, id: i64) {
+        self.restrictions.remove(&id);
+        self.other_relations.remove(&id);
+        self.admin_relations.remove(&id);
     }
 
     /// Renumbers the rule sets in the order a full import interns them:
@@ -296,8 +357,7 @@ impl OsmSourceState {
                 OsmObj::Way(way) => {
                     summary.ways += 1;
                     if deleted {
-                        self.ways.remove(&way.id.0);
-                        self.other_ways.remove(&way.id.0);
+                        self.delete_way(way.id.0);
                     } else {
                         self.upsert_way(way, &mut ConditionalCounts::default());
                     }
@@ -305,8 +365,7 @@ impl OsmSourceState {
                 OsmObj::Relation(relation) => {
                     summary.relations += 1;
                     if deleted {
-                        self.restrictions.remove(&relation.id.0);
-                        self.other_relations.remove(&relation.id.0);
+                        self.delete_relation(relation.id.0);
                     } else {
                         self.upsert_relation(&relation);
                     }
@@ -338,8 +397,10 @@ impl OsmSourceState {
     }
 
     /// The scan output a PBF scan of this state's objects produces, plus the
-    /// OSM ids of the topology nodes in topology node order.
-    pub(crate) fn scan_output(&self) -> (ScanOutput, Vec<i64>) {
+    /// OSM ids of the topology nodes in topology node order. With
+    /// `collect_admin`, admin boundaries are assembled from the retained
+    /// admin relations and their member ways.
+    pub(crate) fn scan_output(&self, collect_admin: bool) -> (ScanOutput, Vec<i64>) {
         let mut needed = Vec::new();
         for way in self.ways.values() {
             needed.extend_from_slice(&way.node_ids);
@@ -351,6 +412,11 @@ impl OsmSourceState {
         }
         needed.sort_unstable();
         needed.dedup();
+        let (admin_boundaries, incomplete_admin_relations) = if collect_admin {
+            self.admin_boundaries()
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let junction_nodes = needed
             .iter()
             .filter_map(|id| Some((*id, self.junction_nodes.get(id)?.clone())))
@@ -373,16 +439,46 @@ impl OsmSourceState {
             counts: self.counts(),
             feature_attributes: Default::default(),
             temporal_rule_sets: self.rule_sets.sets().to_vec(),
+            structure_ways: self.structure_ways.clone(),
+            admin_boundaries,
+            incomplete_admin_relations,
         };
         (scan, topology_node_ids)
     }
 
+    /// Admin boundaries assembled from the admin relations, and the ids of
+    /// relations that could not be assembled.
+    fn admin_boundaries(&self) -> (Vec<AdminBoundary>, Vec<i64>) {
+        let candidates = self.admin_relations.values().cloned().collect::<Vec<_>>();
+        let mut way_nodes = FxHashMap::<i64, Vec<i64>>::default();
+        for way_id in candidates
+            .iter()
+            .flat_map(|candidate| candidate.member_way_ids.iter())
+        {
+            let nodes = self
+                .ways
+                .get(way_id)
+                .map(|way| &way.node_ids)
+                .or_else(|| self.other_ways.get(way_id));
+            if let Some(nodes) = nodes {
+                way_nodes.insert(*way_id, nodes.clone());
+            }
+        }
+        let boundary_coords = boundary_node_ids(&way_nodes)
+            .into_iter()
+            .filter_map(|id| Some((id, self.node(id)?.lon_lat())))
+            .collect::<FxHashMap<_, _>>();
+        assemble_boundaries(&candidates, &way_nodes, &boundary_coords)
+    }
+
     /// The persisted form of this state. `topology_node_ids` are the ids
-    /// [`Self::scan_output`] returned for the topology built from it.
+    /// [`Self::scan_output`] returned for the topology built from it, and
+    /// `enrichment` the inputs that build used.
     pub(crate) fn to_snapshot(
         &self,
         source_topology_bundle_id: CacheBundleId,
         topology_node_ids: &[i64],
+        enrichment: &EnrichmentInputs,
     ) -> OsmSourceSnapshot {
         let mut other_node_ids = Vec::with_capacity(self.nodes.len() - topology_node_ids.len());
         let mut other_node_lon_e7 = Vec::with_capacity(other_node_ids.capacity());
@@ -437,7 +533,13 @@ impl OsmSourceState {
             names,
             way_attributes,
             restrictions: self.restrictions.values().flatten().cloned().collect(),
-            other_way_ids: sorted(&self.other_ways),
+            other_way_ids: self.other_ways.keys().copied().collect(),
+            other_way_node_counts: self
+                .other_ways
+                .values()
+                .map(|nodes| nodes.len() as u32)
+                .collect(),
+            other_way_node_ids: self.other_ways.values().flatten().copied().collect(),
             other_relation_ids: sorted(&self.other_relations),
             extras: SnapshotExtras {
                 junction_nodes: {
@@ -450,6 +552,9 @@ impl OsmSourceState {
                     junctions
                 },
                 rule_sets: self.rule_sets.sets().to_vec(),
+                structure_way_ids: sorted(&self.structure_ways),
+                admin_relations: self.admin_relations.values().cloned().collect(),
+                enrichment: enrichment.clone(),
             },
         }
     }
@@ -528,6 +633,13 @@ impl OsmSourceState {
                 .or_default()
                 .push(candidate);
         }
+        let mut other_way_refs = snapshot.other_way_node_ids.into_iter();
+        let other_ways = snapshot
+            .other_way_ids
+            .into_iter()
+            .zip(snapshot.other_way_node_counts)
+            .map(|(id, count)| (id, other_way_refs.by_ref().take(count as usize).collect()))
+            .collect();
         let mut rule_sets = RuleSetInterner::default();
         for (index, set) in snapshot.extras.rule_sets.iter().enumerate() {
             if rule_sets.intern(set.clone()) as usize != index {
@@ -541,8 +653,15 @@ impl OsmSourceState {
             ways,
             restrictions,
             rule_sets,
-            other_ways: snapshot.other_way_ids.into_iter().collect(),
+            other_ways,
             other_relations: snapshot.other_relation_ids.into_iter().collect(),
+            structure_ways: snapshot.extras.structure_way_ids.into_iter().collect(),
+            admin_relations: snapshot
+                .extras
+                .admin_relations
+                .into_iter()
+                .map(|candidate| (candidate.relation_id, candidate))
+                .collect(),
         })
     }
 }

@@ -12,6 +12,7 @@ categories.workspace = true
 [dependencies]
 anyhow.workspace = true
 hex.workspace = true
+memmap2.workspace = true
 netweevil-core = { path = "../core" }
 netweevil-persist = { path = "../persist" }
 netweevil-manifest = { path = "../manifest" }
@@ -21,6 +22,7 @@ arrow-schema.workspace = true
 flate2.workspace = true
 osmpbfreader.workspace = true
 parquet.workspace = true
+proj4rs.workspace = true
 quick-xml.workspace = true
 rayon.workspace = true
 rusqlite.workspace = true
@@ -29,6 +31,8 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 sha2.workspace = true
+tiff.workspace = true
+tzf-rs.workspace = true
 
 [dev-dependencies]
 netweevil-profile = { path = "../profile" }

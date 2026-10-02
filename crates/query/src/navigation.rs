@@ -293,9 +293,19 @@ impl PreparedRoutingEngine {
         let warnings = warning.into_iter().collect();
         let (driving_side, driving_side_origin) = match options.driving_side {
             Some(side) => (side, DrivingSideOrigin::Request),
-            None => match context.driving_side_source.and_then(|source| {
-                source.driving_side_at(route.origin.snapped_lon, route.origin.snapped_lat)
-            }) {
+            // An explicit source wins; otherwise the dataset's admin areas
+            // give the traffic side of the country the route starts in.
+            None => match context
+                .driving_side_source
+                .and_then(|source| {
+                    source.driving_side_at(route.origin.snapped_lon, route.origin.snapped_lat)
+                })
+                .or_else(|| {
+                    route
+                        .edge_path
+                        .first()
+                        .and_then(|&edge| self.topology().edge_driving_side(edge as usize))
+                }) {
                 Some(side) => (side, DrivingSideOrigin::Dataset),
                 None => (DrivingSide::Right, DrivingSideOrigin::Default),
             },
@@ -312,7 +322,15 @@ impl PreparedRoutingEngine {
                 .facility_attribute
                 .as_deref()
                 .unwrap_or(DEFAULT_FACILITY_ATTRIBUTE),
-            motor_vehicle: matches!(self.metrics().mode, TravelMode::Car | TravelMode::Hgv),
+            motor_vehicle: matches!(
+                self.metrics().mode,
+                TravelMode::Car
+                    | TravelMode::Hgv
+                    | TravelMode::Bus
+                    | TravelMode::Taxi
+                    | TravelMode::Motorcycle
+                    | TravelMode::Moped
+            ),
         };
         let drafts = builder.build();
         let maneuvers =

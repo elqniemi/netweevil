@@ -2,9 +2,11 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 use std::fs;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
 use arrow_json::ArrayWriter;
+use chrono_tz::Tz;
 use netweevil_core::{
     CompiledProfileBundle, EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, EVERY_DAY, FRIDAY, MONDAY,
     SATURDAY, SUNDAY, THURSDAY, TUESDAY, TemporalEffect, TemporalRule, TemporalRuleSet,
@@ -16,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, Duration, OffsetDateTime, Weekday};
 
+use crate::local_time::{NetworkTimezones, in_zone, parse_local_datetime};
 use crate::{
     AlternativeRouteOptions, AnalysisOutcome, ConnectivityPolicy, FallbackPolicy, HopSelectionInfo,
     RouteResult, RouteSegment, RouteSummary, RoutingGraph, SearchStateKey, SnapOptions,
@@ -314,6 +317,9 @@ pub struct TemporalContext {
     scenario_features: HashMap<i64, ScenarioFeatureOverride>,
     pub holidays: HashSet<Date>,
     pub overlays: Vec<TemporalOverlaySeries>,
+    /// Parsed network timezones, filled on first use. A context serves one
+    /// request against one dataset.
+    timezones: OnceLock<NetworkTimezones>,
 }
 
 impl TemporalContext {
@@ -337,7 +343,14 @@ impl TemporalContext {
             scenario_features,
             holidays,
             overlays,
+            timezones: OnceLock::new(),
         }
+    }
+
+    /// Timezones of `topology`, parsed once per context.
+    pub fn timezones(&self, topology: &TopologyBundle) -> &NetworkTimezones {
+        self.timezones
+            .get_or_init(|| NetworkTimezones::new(topology))
     }
 
     fn overlay_value(&self, feature_id: i64, timestamp: OffsetDateTime, name: &str) -> Option<f64> {
@@ -384,6 +397,7 @@ pub(crate) fn evaluate_edge_at(
     let mode_bit = metrics.mode.access_bit();
     let rules_vary_over_time = has_time_varying_rules(rule_set, scenario, mode_bit);
     let speed_factor_varies = has_time_varying_speed_factor(rule_set, scenario, mode_bit);
+    let zone = context.timezones(topology).edge_zone(topology, edge_index);
     let rules = |timestamp| {
         evaluate_rules(
             rule_set,
@@ -391,6 +405,7 @@ pub(crate) fn evaluate_edge_at(
             mode_bit,
             routing_edge.source_direction,
             timestamp,
+            zone,
             &context.holidays,
         )
     };
@@ -585,12 +600,15 @@ enum RuleEvaluation {
     Unavailable,
 }
 
+/// Evaluates imported and scenario rules at `timestamp`, read as wall-clock
+/// time in the edge's `zone` (the request's clock when the edge has none).
 fn evaluate_rules(
     imported: Option<&TemporalRuleSet>,
     scenario: Option<&ScenarioFeatureOverride>,
     mode_bit: u16,
     source_direction: i8,
     timestamp: OffsetDateTime,
+    zone: Option<Tz>,
     holidays: &HashSet<Date>,
 ) -> RuleEvaluation {
     if scenario.is_some_and(|scenario| scenario.force_open) {
@@ -599,6 +617,12 @@ fn evaluate_rules(
         };
     }
     let rules = effective_rules(imported, scenario, mode_bit).collect::<Vec<_>>();
+    // Opening hours and conditional restrictions are written in the local
+    // time of the place they apply to.
+    let timestamp = match zone {
+        Some(zone) if !rules.is_empty() => in_zone(timestamp, zone),
+        _ => timestamp,
+    };
     let has_open_only = rules
         .iter()
         .any(|rule| matches!(rule.effect, TemporalEffect::OpenOnly));
@@ -667,6 +691,31 @@ fn day_matches(rule: &TemporalRule, date: Date, holidays: &HashSet<Date>) -> boo
 pub fn parse_datetime(value: &str) -> Result<OffsetDateTime> {
     OffsetDateTime::parse(value.trim(), &Rfc3339)
         .with_context(|| "datetime must be RFC 3339 with an explicit UTC offset")
+}
+
+/// Zone in which a request time anchored at the first snapped candidate is
+/// read when it has no UTC offset.
+pub(crate) fn candidate_zone(
+    topology: &TopologyBundle,
+    context: &TemporalContext,
+    candidates: &[SnappedPoint],
+) -> Option<Tz> {
+    let candidate = candidates.first()?;
+    context
+        .timezones(topology)
+        .node_zone(topology, candidate.snapped_node_id as usize)
+}
+
+/// Parses a request time, reading offset-less local times in the zone at
+/// `(lon, lat)`.
+pub(crate) fn parse_request_time_at(
+    topology: &TopologyBundle,
+    context: &TemporalContext,
+    raw: &str,
+    lon: f64,
+    lat: f64,
+) -> Result<OffsetDateTime> {
+    parse_local_datetime(raw, context.timezones(topology).zone_at(topology, lon, lat))
 }
 
 fn parse_date(value: &str) -> Result<Date> {
@@ -930,12 +979,18 @@ pub(crate) fn execute_temporal_route_with_graph(
             request.snap.max_distance_m,
             &origin_candidates,
             &destination_candidates,
-            parse_datetime(departure)?,
+            parse_local_datetime(
+                departure,
+                candidate_zone(topology, context, &origin_candidates),
+            )?,
             request.temporal.max_labels_per_state,
             context,
         )?
     } else if let Some(arrive_by) = request.temporal.arrive_by.as_deref() {
-        let deadline = parse_datetime(arrive_by)?;
+        let deadline = parse_local_datetime(
+            arrive_by,
+            candidate_zone(topology, context, &destination_candidates),
+        )?;
         arrive_by_route_between_candidates(
             topology,
             metrics,
@@ -2000,6 +2055,7 @@ fn edge_rule_evaluation(
         metrics.mode.access_bit(),
         edge.source_direction,
         timestamp,
+        context.timezones(topology).edge_zone(topology, edge_index),
         &context.holidays,
     )
 }
@@ -2721,6 +2777,8 @@ fn build_temporal_route_result(
             warnings
         },
         alternatives: Vec::new(),
+        regions: None,
+        elevation: None,
     })
 }
 

@@ -14,15 +14,17 @@ use netweevil_core::{
 use netweevil_manifest::{AccelerationOrdering, BundleRef, DatasetManifest, now_rfc3339};
 use netweevil_persist::{
     WorkspacePaths, write_acceleration_bundle, write_dataset_manifest, write_edge_name_bundle,
-    write_source_snapshot_bundle, write_topology_bundle,
+    write_elevation_raster, write_source_snapshot_bundle, write_topology_bundle,
 };
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::acceleration::build_dataset_acceleration_bundle_with_progress;
+use crate::dem::DemRaster;
 use crate::source::OsmSourceSnapshot;
-use crate::topology::build_topology_bundle;
+use crate::topology::{EnrichmentInputs, build_topology_bundle};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DatasetImportOptions {
     pub name: String,
     pub source: String,
@@ -30,7 +32,28 @@ pub struct DatasetImportOptions {
     pub format: Option<SourceFormat>,
     /// Required for GeoPackage sources; ignored by other readers.
     pub mapping: Option<PathBuf>,
+    /// Admin boundaries (GeoJSON or OSM PBF) used instead of the
+    /// `boundary=administrative` relations in an OSM extract, for extracts
+    /// that cut country or state boundaries.
+    pub admin_boundaries: Option<PathBuf>,
+    /// DEM sampled for node heights and edge grades (OSM and Overture).
+    pub dem: Option<DemImportOptions>,
 }
+
+/// A DEM to sample during import.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DemImportOptions {
+    /// ESRI ASCII grid (`.asc`) or GeoTIFF.
+    pub path: PathBuf,
+    /// Raster CRS as `EPSG:<code>` or a `+proj=` definition; GeoTIFFs
+    /// normally carry their own.
+    pub crs: Option<String>,
+    /// Vertical datum label recorded with the heights (`HKPD`, `EGM2008`).
+    pub vertical_datum: Option<String>,
+}
+
+/// Tile edge length, in cells, of the stored elevation raster.
+const ELEVATION_TILE_SIZE: u32 = 256;
 
 /// Infers the source format from the path: a directory or a
 /// `.parquet`/`.geoparquet` file is Overture GeoParquet, `.gpkg` is an OGC
@@ -57,7 +80,9 @@ pub enum DatasetImportStage {
     LoadPreviousBuild,
     ApplyChanges,
     ScanRoutableObjects,
+    SampleElevation,
     BuildTopology,
+    AssignRegions,
     BuildAcceleration,
     WriteTopologyBundle,
     WriteManifest,
@@ -71,7 +96,9 @@ impl DatasetImportStage {
             Self::LoadPreviousBuild => "Load Previous Build",
             Self::ApplyChanges => "Apply Changes",
             Self::ScanRoutableObjects => "Scan Routable Objects",
+            Self::SampleElevation => "Sample Elevation",
             Self::BuildTopology => "Build Topology",
+            Self::AssignRegions => "Assign Regions",
             Self::BuildAcceleration => "Build Acceleration",
             Self::WriteTopologyBundle => "Write Topology Bundle",
             Self::WriteManifest => "Write Dataset Manifest",
@@ -132,29 +159,47 @@ where
         format!("Hashing {} source(s)", source_paths.len()),
     );
     let (sha256, size) = sha256_sources(source_paths, &mut progress)?;
+    let mut enrichment = EnrichmentInputs::default();
+    if let Some(path) = &options.admin_boundaries {
+        let (digest, _) = sha256_source(path, &mut progress)?;
+        enrichment.admin_boundaries = Some((path.clone(), digest));
+    }
+    if let Some(dem) = &options.dem {
+        let (digest, _) = sha256_source(&dem.path, &mut progress)?;
+        enrichment.dem = Some((dem.clone(), digest));
+    }
     let dataset_id = DatasetId::new(options.name);
-    let bundles = DatasetBundleRefs::new(paths, &dataset_id, &sha256);
+    // Bundle ids change with every enrichment input, so cached compiled
+    // profiles never outlive the boundaries or DEM they were built on.
+    let bundles = DatasetBundleRefs::new(paths, &dataset_id, &enrichment_key(&sha256, &enrichment));
     let built = build_topology_bundle(
         source_paths,
         size,
         &sha256,
         source_format,
         mapping.as_ref(),
+        &enrichment,
         &mut progress,
     )?;
+    emit_warnings(&built.warnings, &mut progress);
     let acceleration_bundle = build_dataset_acceleration_bundle_with_progress(
         &built.bundle,
         bundles.topology.bundle_id.clone(),
         &mut progress,
     );
     let snapshot = built.osm_source.as_ref().map(|(state, topology_node_ids)| {
-        state.to_snapshot(bundles.topology.bundle_id.clone(), topology_node_ids)
+        state.to_snapshot(
+            bundles.topology.bundle_id.clone(),
+            topology_node_ids,
+            &enrichment,
+        )
     });
-    write_dataset_bundles(
+    let elevation_bundle = write_dataset_bundles(
         &bundles,
         &built.bundle,
         &built.names,
         &acceleration_bundle,
+        built.dem.as_ref(),
         snapshot.as_ref(),
         &mut progress,
     )?;
@@ -175,6 +220,7 @@ where
         topology_bundle: Some(bundles.topology),
         edge_name_bundle: Some(bundles.edge_names),
         acceleration_bundle: Some(bundles.acceleration),
+        elevation_bundle,
         source_snapshot_bundle: snapshot.is_some().then_some(bundles.source),
         topology_meta: Some(built.meta),
         acceleration_ordering: Some(AccelerationOrdering {
@@ -217,21 +263,55 @@ where
     Ok(manifest)
 }
 
+pub(crate) fn emit_warnings(warnings: &[String], progress: &mut impl FnMut(DatasetImportProgress)) {
+    for warning in warnings {
+        emit_progress(
+            progress,
+            DatasetImportStage::AssignRegions,
+            None,
+            format!("Warning: {warning}"),
+        );
+    }
+}
+
+/// Source hash, extended with the enrichment inputs when there are any.
+pub(crate) fn enrichment_key(source_sha256: &str, enrichment: &EnrichmentInputs) -> String {
+    if enrichment.admin_boundaries.is_none() && enrichment.dem.is_none() {
+        return source_sha256.to_string();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(source_sha256.as_bytes());
+    if let Some((_, digest)) = &enrichment.admin_boundaries {
+        hasher.update(b"\0admin\0");
+        hasher.update(digest.as_bytes());
+    }
+    if let Some((dem, digest)) = &enrichment.dem {
+        hasher.update(b"\0dem\0");
+        hasher.update(digest.as_bytes());
+        hasher.update(dem.crs.as_deref().unwrap_or_default().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(dem.vertical_datum.as_deref().unwrap_or_default().as_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
 /// Ids and paths of the bundles one build of a dataset writes. Ids embed the
-/// source hash, so an update writes new files next to the ones a running
-/// API may still be reading.
+/// source and enrichment hash, so an update writes new files next to the
+/// ones a running API may still be reading.
 pub(crate) struct DatasetBundleRefs {
     pub(crate) topology: BundleRef,
     pub(crate) edge_names: BundleRef,
     pub(crate) acceleration: BundleRef,
+    pub(crate) elevation: BundleRef,
     pub(crate) source: BundleRef,
 }
 
 impl DatasetBundleRefs {
-    pub(crate) fn new(paths: &WorkspacePaths, dataset_id: &DatasetId, source_sha256: &str) -> Self {
+    /// `bundle_key` is [`enrichment_key`] of the build's inputs.
+    pub(crate) fn new(paths: &WorkspacePaths, dataset_id: &DatasetId, bundle_key: &str) -> Self {
         let bundle = |dir: &Path, kind: &str| {
             let bundle_id =
-                CacheBundleId::new(format!("{kind}-{}-{}", dataset_id.0, &source_sha256[..12]));
+                CacheBundleId::new(format!("{kind}-{}-{}", dataset_id.0, &bundle_key[..12]));
             let path = dir.join(format!("{}.bin", bundle_id.0));
             BundleRef {
                 bundle_id,
@@ -242,21 +322,24 @@ impl DatasetBundleRefs {
             topology: bundle(&paths.topology_bundles_dir, "topology"),
             edge_names: bundle(&paths.edge_name_bundles_dir, "edge-names"),
             acceleration: bundle(&paths.acceleration_bundles_dir, "acceleration"),
+            elevation: bundle(&paths.elevation_bundles_dir, "elevation"),
             source: bundle(&paths.source_bundles_dir, "source"),
         }
     }
 }
 
-/// Writes the bundles of one dataset build; the snapshot only for OSM
+/// Writes the bundles of one dataset build: the elevation raster when a DEM
+/// was sampled (its reference is returned), the snapshot only for OSM
 /// sources.
 pub(crate) fn write_dataset_bundles(
     refs: &DatasetBundleRefs,
     topology: &TopologyBundle,
     names: &EdgeNameBundle,
     acceleration: &DatasetAccelerationBundle,
+    dem: Option<&DemRaster>,
     snapshot: Option<&OsmSourceSnapshot>,
     progress: &mut impl FnMut(DatasetImportProgress),
-) -> Result<()> {
+) -> Result<Option<BundleRef>> {
     let mut announce = |what: &str, bundle: &BundleRef| {
         emit_progress(
             progress,
@@ -275,7 +358,13 @@ pub(crate) fn write_dataset_bundles(
         announce("source snapshot", &refs.source);
         write_source_snapshot_bundle(&refs.source.path, snapshot)?;
     }
-    Ok(())
+    let (Some(dem), Some(summary)) = (dem, topology.elevation.dem.as_ref()) else {
+        return Ok(None);
+    };
+    announce("elevation raster", &refs.elevation);
+    let (header, tiles) = dem.to_tiles(summary.source.clone(), ELEVATION_TILE_SIZE);
+    write_elevation_raster(&refs.elevation.path, &header, &tiles)?;
+    Ok(Some(refs.elevation.clone()))
 }
 
 fn sha256_sources<F>(source_paths: &[PathBuf], progress: &mut F) -> Result<(String, u64)>

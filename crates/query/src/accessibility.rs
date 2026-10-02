@@ -23,10 +23,16 @@ pub(crate) fn execute_accessibility_with_graph(
             .departure_time
             .as_deref()
             .context("temporal accessibility requires departure_time")?;
-        Some((
-            crate::temporal::context_from_request(&request.origins.temporal)?,
-            parse_datetime(departure)?,
-        ))
+        let context = crate::temporal::context_from_request(&request.origins.temporal)?;
+        let origin = request
+            .origins
+            .points
+            .first()
+            .context("temporal accessibility requires at least one origin")?;
+        let departure = crate::temporal::parse_request_time_at(
+            topology, &context, departure, origin.lon, origin.lat,
+        )?;
+        Some((context, departure))
     } else {
         None
     };

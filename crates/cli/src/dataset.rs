@@ -5,8 +5,8 @@ use clap::{Args, Subcommand, ValueEnum};
 use netweevil_core::SourceFormat;
 use netweevil_ingest::{
     DEFAULT_MAX_FILL_GROWTH, DatasetImportOptions, DatasetImportProgress, DatasetImportStage,
-    DatasetUpdateInput, DatasetUpdateOptions, ReorderPolicy, audit_geopackage_dataset,
-    import_dataset, load_gpkg_mapping, update_dataset,
+    DatasetUpdateInput, DatasetUpdateOptions, DemImportOptions, ReorderPolicy,
+    audit_geopackage_dataset, import_dataset, load_gpkg_mapping, update_dataset,
 };
 use netweevil_persist::{WorkspacePaths, read_dataset_manifests, read_topology_bundle};
 
@@ -34,6 +34,22 @@ pub(crate) struct DatasetImportArgs {
     /// GeoPackage field/semantic mapping (YAML or JSON).
     #[arg(long)]
     mapping: Option<PathBuf>,
+    /// Country (admin_level 2) and state (admin_level 4) boundaries as
+    /// GeoJSON or OSM PBF, used instead of the boundary relations in an OSM
+    /// extract (for extracts that cut them).
+    #[arg(long)]
+    admin_boundaries: Option<PathBuf>,
+    /// DEM (ESRI ASCII grid `.asc` or GeoTIFF) sampled for node heights and
+    /// edge grades of OSM and Overture sources.
+    #[arg(long)]
+    dem: Option<PathBuf>,
+    /// DEM CRS as `EPSG:<code>` or a `+proj=` definition; GeoTIFFs normally
+    /// carry their own, ASCII grids default to longitude/latitude.
+    #[arg(long, requires = "dem")]
+    dem_crs: Option<String>,
+    /// Vertical datum label recorded with DEM heights (for example `HKPD`).
+    #[arg(long, requires = "dem")]
+    dem_vertical_datum: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -116,6 +132,12 @@ pub(crate) fn dataset_import(paths: &WorkspacePaths, args: DatasetImportArgs) ->
             source: source_label,
             format: args.format.map(SourceFormat::from),
             mapping: args.mapping,
+            admin_boundaries: args.admin_boundaries,
+            dem: args.dem.map(|path| DemImportOptions {
+                path,
+                crs: args.dem_crs,
+                vertical_datum: args.dem_vertical_datum,
+            }),
         },
         |event| render_import_progress(&event, &mut progress_line_len),
     )?;

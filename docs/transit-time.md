@@ -8,6 +8,8 @@ For example, an Amsterdam trip on October 24, 2026 with stop times `26:15:00` an
 
 ## Requests
 
+Street routes, service areas and accessibility apply the same policy, reading offset-less times in the network's local timezone ([regions and elevation](regions-and-elevation.md)).
+
 Use RFC3339 datetimes with an explicit UTC offset when possible. `2026-03-29T07:59:00+02:00` and `2026-03-29T05:59:00Z` select the same instant.
 
 A datetime without an offset is interpreted in the feed's agency timezone. Ambiguous times during an autumn clock change are rejected with a request to supply an offset. Local times skipped by a spring clock change are also rejected. Datetimes use whole-second precision.

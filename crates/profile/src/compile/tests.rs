@@ -1,6 +1,6 @@
 use super::{compile_profile_bundle, compile_profile_bundle_with_acceleration};
 use crate::ProfileDocument;
-use crate::test_support::{edge, profile, topology};
+use crate::test_support::{edge, profile, topology, with_admin_areas};
 use netweevil_core::{
     AccessMask, CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, CacheBundleId, CompiledProfileBundle,
     DatasetAccelerationBundle, DirectedEdge, EdgeBasedTopology, FeatureAttributeColumn,
@@ -196,6 +196,95 @@ fn rejects_unsupported_match_keys() {
     )
     .expect_err("unsupported matcher should fail");
     assert!(error.to_string().contains("'lanes'"), "{error}");
+}
+
+/// Three 1 km car edges through NL (Groningen), NL (Drenthe) and DE nodes:
+/// edge 0 stays in NL, edge 1 crosses into Germany, edge 2 runs from
+/// Germany to a node outside every area.
+fn border_topology() -> TopologyBundle {
+    with_admin_areas(
+        topology(&[
+            edge(0, RoadClass::Primary, AccessMask::CAR),
+            edge(1, RoadClass::Primary, AccessMask::CAR),
+            edge(2, RoadClass::Primary, AccessMask::CAR),
+        ]),
+        &[
+            ("NL", Some("NL-GR")),
+            ("NL", Some("NL-DR")),
+            ("DE", None),
+            ("", None),
+        ],
+    )
+}
+
+#[test]
+fn country_and_state_keys_select_regional_speeds_and_exclusions() {
+    let topology = border_topology();
+    let profile = profile(
+        "car",
+        "speed_rules:\n  - {match: {country: de, highway: primary}, speed_kph: 100}\n  - {match: {state: NL-DR}, speed_kph: 60}\nexclude_rules:\n  - match: {state: NL-GR}",
+    );
+    let compiled = compile(&profile, &topology);
+    let time = |compiled: &CompiledProfileBundle, edge: usize| {
+        compiled.edge_metrics[edge]
+            .travel_time_s
+            .map(|time| (time * 1e6).round() / 1e6)
+    };
+    // Edge 0 starts in Groningen (excluded); edge 1 in Drenthe (60 km/h);
+    // edge 2 in Germany (100 km/h).
+    assert_eq!(time(&compiled, 0), None);
+    assert_eq!(time(&compiled, 1), Some(60.0));
+    assert_eq!(time(&compiled, 2), Some(36.0));
+
+    // Without admin areas the keys match nothing rather than failing.
+    let compiled = compile(
+        &profile,
+        &crate::test_support::topology(&[edge(0, RoadClass::Primary, AccessMask::CAR)]),
+    );
+    assert_eq!(
+        compiled.edge_metrics[0].travel_time_s,
+        Some(1_000.0 / (70.0 / 3.6))
+    );
+}
+
+#[test]
+fn border_crossings_add_time_and_penalty_or_are_avoided() {
+    let topology = border_topology();
+    let base = compile(&profile("car", "preferences: {}"), &topology);
+    let crossing = |profile: &ProfileDocument| compile(profile, &topology).edge_metrics;
+    let penalized = crossing(&profile(
+        "car",
+        "preferences: {border_crossing_time_s: 600, border_crossing_penalty_s: 900}",
+    ));
+    for edge in [0, 2] {
+        assert_eq!(
+            penalized[edge].generalized_cost,
+            base.edge_metrics[edge].generalized_cost
+        );
+    }
+    let base_time = base.edge_metrics[1].travel_time_s.unwrap();
+    assert_eq!(penalized[1].travel_time_s, Some(base_time + 600.0));
+    let base_cost = base.edge_metrics[1].generalized_cost.unwrap();
+    let cost = penalized[1].generalized_cost.unwrap();
+    assert!(
+        cost > base_cost + 600.0 + 900.0 - 1e-6,
+        "{cost} vs {base_cost}"
+    );
+
+    let avoided = crossing(&profile(
+        "car",
+        "preferences: {avoid_border_crossings: true}",
+    ));
+    assert_eq!(avoided[1].travel_time_s, None);
+    assert!(avoided[0].travel_time_s.is_some() && avoided[2].travel_time_s.is_some());
+
+    let error = crate::test_support::profile("car", "preferences: {border_crossing_time_s: -1}")
+        .validate()
+        .expect_err("negative border time is rejected");
+    assert!(
+        error.to_string().contains("border_crossing_time_s"),
+        "{error}"
+    );
 }
 
 #[test]

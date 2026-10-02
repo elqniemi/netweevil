@@ -244,21 +244,17 @@ pub enum SnapApproach {
     Opposite,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DrivingSide {
-    #[default]
-    Right,
-    Left,
-}
+pub use netweevil_core::DrivingSide;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PointSnapConstraint {
     pub bearing: Option<BearingConstraint>,
     pub approach: SnapApproach,
-    /// Supplied by the caller; the snapper does not infer the country's rule.
-    pub driving_side: DrivingSide,
+    /// Traffic side for `curb`/`opposite` approaches. When omitted, each
+    /// candidate edge uses its country's rule from the dataset's admin areas,
+    /// and right-hand traffic where the country is unknown.
+    pub driving_side: Option<DrivingSide>,
     /// Points within this lateral distance of the road center have no side.
     pub street_side_tolerance_m: f64,
 }
@@ -268,7 +264,7 @@ impl Default for PointSnapConstraint {
         Self {
             bearing: None,
             approach: SnapApproach::Unrestricted,
-            driving_side: DrivingSide::Right,
+            driving_side: None,
             street_side_tolerance_m: 5.0,
         }
     }

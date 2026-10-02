@@ -17,6 +17,10 @@ use netweevil_core::{
     TopologyEdgeLayers, TopologyNode, TravelMode, TurnRestriction, TurnRestrictionKind,
 };
 use netweevil_core::{
+    AdminArea, AdminBoundarySource, DemFormat, DemImportSummary, DemSourceInfo, NO_TIMEZONE,
+    RasterCrs, RasterGrid, TopologyElevation, TopologyRegions,
+};
+use netweevil_core::{
     AdrTunnelCategory, CalendarDate, CompiledTemporalProfile, CompiledTemporalRules, DateRange,
     TurnRestrictionCondition, VehicleRestriction, VehicleRestrictionKind, VehicleRestrictionTable,
 };
@@ -197,6 +201,52 @@ fn round_trips_topology_bundle_binary() {
                 )
             }],
         }],
+        regions: TopologyRegions {
+            admin_source: Some(AdminBoundarySource::SourceExtract),
+            admin_areas: vec![
+                AdminArea {
+                    country_code: "NL".to_string(),
+                    country_name: Some("Nederland".to_string()),
+                    state_code: Some("NL-GR".to_string()),
+                    state_name: Some("Groningen".to_string()),
+                },
+                AdminArea {
+                    country_code: "DE".to_string(),
+                    ..AdminArea::default()
+                },
+            ],
+            node_admin_area: vec![0, 1],
+            timezones: vec!["Europe/Amsterdam".to_string(), "Europe/Berlin".to_string()],
+            node_timezone: vec![0, NO_TIMEZONE],
+        },
+        elevation: TopologyElevation {
+            dem: Some(DemImportSummary {
+                source: DemSourceInfo {
+                    path: "dem.asc".to_string(),
+                    sha256: "def".to_string(),
+                    format: DemFormat::AsciiGrid,
+                    crs: RasterCrs::Proj4 {
+                        definition: "+proj=tmerc".to_string(),
+                        label: Some("EPSG:2326".to_string()),
+                    },
+                    vertical_datum: Some("HKPD".to_string()),
+                    grid: RasterGrid {
+                        columns: 4,
+                        rows: 3,
+                        min_x: 800_000.0,
+                        max_y: 820_000.0,
+                        cell_width: 5.0,
+                        cell_height: 5.0,
+                    },
+                },
+                sample_spacing_m: 10.0,
+                sampled_node_count: 2,
+                missing_node_count: 0,
+                structure_node_count: 0,
+            }),
+            edge_max_uphill_permille: vec![45, 0],
+            edge_max_downhill_permille: vec![0, 45],
+        },
     };
 
     let file = TempFile::new("topology");
@@ -233,6 +283,10 @@ fn round_trips_topology_bundle_binary() {
         bundle.turn_restrictions[0].condition
     );
     assert_eq!(read.names, bundle.names);
+    assert_eq!(read.regions, bundle.regions);
+    assert_eq!(read.elevation, bundle.elevation);
+    assert!(read.edge_crosses_border(0));
+    assert_eq!(read.edge_timezone(1), None);
 }
 
 #[test]
@@ -324,6 +378,8 @@ fn round_trips_source_snapshot_and_rejects_inconsistent_columns() {
         way_attributes: vec![(1_u8, Some(30.5_f32)), (1_u8, Some(30.5_f32))],
         restrictions: vec![("no_left_turn".to_string(), 100_i64, 101_i64)],
         other_way_ids: vec![3, 99],
+        other_way_node_counts: vec![2, 0],
+        other_way_node_ids: vec![7, 9],
         other_relation_ids: vec![8],
         extras: vec![(11_i64, "Exit 3".to_string())],
     };
@@ -456,6 +512,7 @@ fn prune_keeps_the_newest_compile_and_referenced_bundles() {
             topology_bundle: Some(topology.clone()),
             edge_name_bundle: None,
             acceleration_bundle: None,
+            elevation_bundle: None,
             topology_meta: None,
             acceleration_stats: None,
             source_snapshot_bundle: Some(bundle(&paths.source_bundles_dir, "source-a.bin")),

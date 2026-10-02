@@ -562,6 +562,8 @@ fn route_result_from_summary(
         diagnostics: hop_info.diagnostics,
         warnings: hop_info.warnings,
         alternatives: Vec::new(),
+        regions: None,
+        elevation: None,
     }
 }
 

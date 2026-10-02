@@ -9,10 +9,12 @@
 pub mod acceleration;
 pub mod attributes;
 pub mod dataset;
+pub mod elevation;
 pub mod geo;
 pub mod graph;
 pub mod guidance;
 pub mod metrics;
+pub mod regions;
 pub mod temporal;
 pub mod vehicle;
 
@@ -26,6 +28,10 @@ pub use attributes::{
     normalize_attribute_name,
 };
 pub use dataset::{BuildStage, CacheBundleId, DatasetId, SourceFormat, TravelMode};
+pub use elevation::{
+    DemFormat, DemImportSummary, DemSourceInfo, ELEVATION_RASTER_SCHEMA_VERSION,
+    ElevationRasterHeader, RasterCrs, RasterGrid, TopologyElevation,
+};
 pub use graph::{
     AccessMask, ConnectedComponentKind, ConnectedComponentsMeta, DirectedEdge,
     EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW, EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY,
@@ -43,6 +49,10 @@ pub use metrics::{
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
     CompiledTemporalProfile, CompiledTemporalRules, CompiledTurnCostConfig, add_cch_weights,
     decode_cch_weight, encode_cch_weight,
+};
+pub use regions::{
+    AdminArea, AdminBoundarySource, DrivingSide, NO_ADMIN_AREA, NO_TIMEZONE, TopologyRegions,
+    country_driving_side,
 };
 pub use temporal::{
     ALL_WEEKDAYS, CalendarDate, DateRange, EVERY_DAY, FRIDAY, MONDAY, MinuteInterval,

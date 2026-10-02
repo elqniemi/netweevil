@@ -19,6 +19,14 @@ const TAG_VARINT: u8 = 4;
 const TAG_FIXED_E7_DELTA: u8 = 5;
 /// `f64` values that are all exactly representable as `f32`.
 const TAG_F32: u8 = 6;
+/// Elevations in whole decimetres: `f64` stored as zigzag deltas of
+/// `k = round(x * 10)` plus one, decoded as `k as f64 / 10.0`; a zero entry
+/// is `NaN` (unknown elevation). DEM-sampled heights are rounded to this
+/// form at import.
+const TAG_DECIMETRE_DELTA: u8 = 7;
+/// `f32` vertical distances in whole decimetres: zigzag varints of `k`,
+/// decoded as `k as f32 / 10.0`.
+const TAG_F32_DECIMETRE: u8 = 8;
 
 const FIXED_E7_SCALE: f64 = 1e7;
 const FIXED_E7_STEP: f64 = 1e-7;
@@ -407,9 +415,30 @@ fn fixed_e7(value: f64) -> Option<i64> {
     ((scaled as f64 * FIXED_E7_STEP).to_bits() == value.to_bits()).then_some(scaled)
 }
 
-/// Encodes `f64` values losslessly: constant (bitwise), fixed-point 1e-7
-/// deltas when every value round-trips exactly, `f32` when every value is
-/// exactly representable, otherwise raw.
+/// `Some(Some(k))` when `value == k as f64 / 10.0` bitwise, `Some(None)` for
+/// the canonical `NaN`, and `None` otherwise.
+fn decimetres_f64(value: f64) -> Option<Option<i64>> {
+    if value.to_bits() == f64::NAN.to_bits() {
+        return Some(None);
+    }
+    if !value.is_finite() || value.abs() > 1e12 {
+        return None;
+    }
+    let scaled = (value * 10.0).round() as i64;
+    ((scaled as f64 / 10.0).to_bits() == value.to_bits()).then_some(Some(scaled))
+}
+
+fn decimetres_f32(value: f32) -> Option<i64> {
+    if !value.is_finite() || value.abs() > 1e8 {
+        return None;
+    }
+    let scaled = (value * 10.0).round() as i32;
+    ((scaled as f32 / 10.0).to_bits() == value.to_bits()).then_some(i64::from(scaled))
+}
+
+/// Encodes `f64` values losslessly: constant (bitwise), whole decimetres,
+/// fixed-point 1e-7 deltas when every value round-trips exactly, `f32` when
+/// every value is exactly representable, otherwise raw.
 pub(crate) fn encode_f64s(values: &[f64]) -> Vec<u8> {
     if let Some(&first) = values.first()
         && values
@@ -418,6 +447,22 @@ pub(crate) fn encode_f64s(values: &[f64]) -> Vec<u8> {
     {
         let mut out = header(TAG_CONSTANT, values.len(), 8);
         out.extend_from_slice(&first.to_bits().to_le_bytes());
+        return out;
+    }
+    let decimetres: Option<Vec<Option<i64>>> =
+        values.iter().map(|value| decimetres_f64(*value)).collect();
+    if let Some(decimetres) = decimetres {
+        let mut out = header(TAG_DECIMETRE_DELTA, values.len(), values.len() * 2);
+        let mut previous = 0_i64;
+        for value in decimetres {
+            match value {
+                None => put_varint(&mut out, 0),
+                Some(value) => {
+                    put_varint(&mut out, zigzag(value - previous) + 1);
+                    previous = value;
+                }
+            }
+        }
         return out;
     }
     let fixed: Option<Vec<i64>> = values.iter().map(|value| fixed_e7(*value)).collect();
@@ -468,13 +513,28 @@ pub(crate) fn decode_f64s(bytes: &[u8]) -> Result<Vec<f64>> {
             .into_iter()
             .map(f64::from)
             .collect(),
+        TAG_DECIMETRE_DELTA => {
+            let mut values = Vec::with_capacity(count);
+            let mut previous = 0_i64;
+            for _ in 0..count {
+                match cursor.varint()? {
+                    0 => values.push(f64::NAN),
+                    coded => {
+                        previous += unzigzag(coded - 1);
+                        values.push(previous as f64 / 10.0);
+                    }
+                }
+            }
+            values
+        }
         other => bail!("unsupported f64 column encoding {other}"),
     };
     cursor.finish()?;
     Ok(values)
 }
 
-/// Encodes `f32` values: constant (bitwise) or raw.
+/// Encodes `f32` values: constant (bitwise), whole decimetres when that is
+/// smaller, or raw.
 pub(crate) fn encode_f32s(values: &[f32]) -> Vec<u8> {
     if let Some(&first) = values.first()
         && values
@@ -484,6 +544,16 @@ pub(crate) fn encode_f32s(values: &[f32]) -> Vec<u8> {
         let mut out = header(TAG_CONSTANT, values.len(), 4);
         out.extend_from_slice(&first.to_bits().to_le_bytes());
         return out;
+    }
+    let decimetres: Option<Vec<i64>> = values.iter().map(|value| decimetres_f32(*value)).collect();
+    if let Some(decimetres) = decimetres {
+        let mut out = header(TAG_F32_DECIMETRE, values.len(), values.len());
+        for value in decimetres {
+            put_varint(&mut out, zigzag(value));
+        }
+        if out.len() < size_of_val(values) {
+            return out;
+        }
     }
     raw_column(values)
 }
@@ -497,6 +567,15 @@ pub(crate) fn decode_f32s(bytes: &[u8]) -> Result<Vec<f32>> {
         TAG_CONSTANT => {
             let bits = u32::from_le_bytes(cursor.take(4)?.try_into().unwrap());
             vec![f32::from_bits(bits); count]
+        }
+        TAG_F32_DECIMETRE => {
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                let value = i32::try_from(unzigzag(cursor.varint()?))
+                    .map_err(|_| anyhow::anyhow!("decimetre value out of range"))?;
+                values.push(value as f32 / 10.0);
+            }
+            values
         }
         other => bail!("unsupported f32 column encoding {other}"),
     };
@@ -641,5 +720,33 @@ mod tests {
         let decoded = decode_f32s(&encode_f32s(&floats)).unwrap();
         assert_eq!(decoded[1], 1.5);
         assert!(decoded[2].is_nan());
+    }
+
+    #[test]
+    fn decimetre_elevations_use_the_compact_encodings() {
+        let heights = vec![12.3, f64::NAN, 12.4, -3.0, 0.0, 557.9];
+        let encoded = encode_f64s(&heights);
+        assert_eq!(encoded[0], TAG_DECIMETRE_DELTA);
+        assert!(encoded.len() < 16);
+        let decoded = decode_f64s(&encoded).unwrap();
+        assert_eq!(
+            decoded.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            heights.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        // A value off the decimetre grid falls back to an exact encoding.
+        let mixed = vec![12.3, 12.34];
+        assert_ne!(encode_f64s(&mixed)[0], TAG_DECIMETRE_DELTA);
+        assert_eq!(decode_f64s(&encode_f64s(&mixed)).unwrap(), mixed);
+
+        let ascents: Vec<f32> = [0, 3, 0, 127, 2_000, 0, 1]
+            .iter()
+            .map(|k| *k as f32 / 10.0)
+            .collect();
+        let encoded = encode_f32s(&ascents);
+        assert_eq!(encoded[0], TAG_F32_DECIMETRE);
+        assert_eq!(decode_f32s(&encoded).unwrap(), ascents);
+        let precise = vec![0.0_f32, 1.0 / 3.0];
+        assert_eq!(encode_f32s(&precise)[0], TAG_RAW);
+        assert_eq!(decode_f32s(&encode_f32s(&precise)).unwrap(), precise);
     }
 }

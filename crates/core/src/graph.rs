@@ -1,9 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{FeatureAttributeTable, NO_FEATURE_ROW, TemporalRuleSet, VehicleRestrictionTable};
+use crate::{
+    AdminArea, DrivingSide, FeatureAttributeTable, NO_FEATURE_ROW, TemporalRuleSet,
+    TopologyElevation, TopologyRegions, VehicleRestrictionTable,
+};
 
 /// Schema version of [`TopologyBundle`]. Readers accept this value only.
-pub const TOPOLOGY_BUNDLE_SCHEMA_VERSION: u32 = 14;
+pub const TOPOLOGY_BUNDLE_SCHEMA_VERSION: u32 = 15;
 
 pub const EDGE_FLAG_ROUNDABOUT: u32 = 1 << 0;
 pub const EDGE_FLAG_TARGET_TRAFFIC_SIGNAL: u32 = 1 << 1;
@@ -612,6 +615,10 @@ pub struct TopologyBundle {
     /// Dataset-owned opening/direction/speed schedules referenced by routing
     /// edges. Runtime scenario overlays remain request-owned.
     pub temporal_rule_sets: Vec<TemporalRuleSet>,
+    /// Per-node administrative areas and timezones.
+    pub regions: TopologyRegions,
+    /// DEM provenance and per-edge grades; empty without a DEM.
+    pub elevation: TopologyElevation,
 }
 
 impl TopologyBundle {
@@ -690,5 +697,37 @@ impl TopologyBundle {
 
     pub fn edge_component_id(&self, edge_id: u32) -> Option<u32> {
         self.edge_component_ids.get(edge_id as usize).copied()
+    }
+
+    /// Administrative area of an edge: that of its tail node.
+    pub fn edge_admin_area(&self, edge_index: usize) -> Option<&AdminArea> {
+        let from = self.edge_layers.routing.get(edge_index)?.from.0 as usize;
+        self.regions.node_admin_area(from)
+    }
+
+    /// Whether an edge runs between two different known countries.
+    pub fn edge_crosses_border(&self, edge_index: usize) -> bool {
+        let Some(edge) = self.edge_layers.routing.get(edge_index) else {
+            return false;
+        };
+        match (
+            self.regions.node_country(edge.from.0 as usize),
+            self.regions.node_country(edge.to.0 as usize),
+        ) {
+            (Some(from), Some(to)) => from != to,
+            _ => false,
+        }
+    }
+
+    /// IANA timezone of an edge: that of its tail node.
+    pub fn edge_timezone(&self, edge_index: usize) -> Option<&str> {
+        let from = self.edge_layers.routing.get(edge_index)?.from.0 as usize;
+        self.regions.node_timezone(from)
+    }
+
+    /// Traffic side of the country an edge lies in, when known.
+    pub fn edge_driving_side(&self, edge_index: usize) -> Option<DrivingSide> {
+        self.edge_admin_area(edge_index)
+            .and_then(AdminArea::driving_side)
     }
 }

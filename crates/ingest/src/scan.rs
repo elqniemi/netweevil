@@ -6,6 +6,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::access::{ConditionalCounts, classify_way_access};
+use crate::admin::AdminBoundary;
 use crate::classify::{
     classify_smoothness, classify_speed_and_lanes, classify_surface, classify_toll, classify_way,
     conditional_speed_rules, parse_duration_from_tags, tag,
@@ -106,6 +107,21 @@ pub(crate) struct ScanOutput {
     pub(crate) counts: ObjectCounts,
     pub(crate) feature_attributes: FeatureAttributeTable,
     pub(crate) temporal_rule_sets: Vec<TemporalRuleSet>,
+    /// Ways (by `osm_way_id`) on bridges or in tunnels, whose nodes do not
+    /// sit on the terrain.
+    pub(crate) structure_ways: FxHashSet<i64>,
+    /// Admin boundaries assembled from the source extract.
+    pub(crate) admin_boundaries: Vec<AdminBoundary>,
+    /// Admin relations in the extract that could not be assembled.
+    pub(crate) incomplete_admin_relations: Vec<i64>,
+}
+
+/// Whether OSM tags put a way on a bridge or in a tunnel. Building passages
+/// run at ground level.
+pub(crate) fn is_structure_way(tags: &osmpbfreader::Tags) -> bool {
+    let value = |key: &str| tags.get(key).map(|value| value.as_str());
+    value("bridge").is_some_and(|bridge| bridge != "no")
+        || value("tunnel").is_some_and(|tunnel| tunnel != "no" && tunnel != "building_passage")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

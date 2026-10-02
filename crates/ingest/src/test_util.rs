@@ -61,16 +61,19 @@ pub(crate) fn osm_grid() -> Vec<OsmObj> {
             &[],
         ));
     }
+    for (id, (lon, lat)) in BOUNDARY_CORNERS {
+        objects.push(osm_node(id, lon, lat, &[]));
+    }
     for row in 0..GRID_SIDE {
         let nodes = (0..GRID_SIDE)
             .map(|col| grid_node(row, col))
             .collect::<Vec<_>>();
         let name = format!("Row {row}");
-        objects.push(osm_way(
-            100 + row,
-            &nodes,
-            &[("highway", "residential"), ("name", &name)],
-        ));
+        let mut tags = vec![("highway", "residential"), ("name", name.as_str())];
+        if row == 5 {
+            tags.push(("bridge", "yes"));
+        }
+        objects.push(osm_way(100 + row, &nodes, &tags));
     }
     for col in 0..GRID_SIDE {
         let nodes = (0..GRID_SIDE)
@@ -99,6 +102,11 @@ pub(crate) fn osm_grid() -> Vec<OsmObj> {
         &[1000, 1001, 1002, 1003, 1000],
         &[("building", "yes")],
     ));
+    objects.push(osm_way(
+        901,
+        &[2000, 2001, 2002, 2003, 2000],
+        &[("boundary", "administrative")],
+    ));
     objects.push(osm_turn_restriction(
         500,
         "no_left_turn",
@@ -122,14 +130,60 @@ pub(crate) fn osm_grid() -> Vec<OsmObj> {
         tags: osm_tags(&[("type", "route"), ("route", "bus")]),
         refs: Vec::new(),
     }));
+    objects.push(OsmObj::Relation(osmpbfreader::Relation {
+        id: osmpbfreader::RelationId(700),
+        tags: osm_tags(&[
+            ("type", "boundary"),
+            ("boundary", "administrative"),
+            ("admin_level", "2"),
+            ("ISO3166-1", "NL"),
+            ("name", "Nederland"),
+        ]),
+        refs: vec![osmpbfreader::Ref {
+            member: osmpbfreader::OsmId::Way(osmpbfreader::WayId(901)),
+            role: "outer".into(),
+        }],
+    }));
     objects
+}
+
+/// Corners of the country boundary around [`osm_grid`] (way 901).
+const BOUNDARY_CORNERS: [(i64, (i32, i32)); 4] = [
+    (2000, (64_950_000, 531_950_000)),
+    (2001, (65_150_000, 531_950_000)),
+    (2002, (65_150_000, 532_150_000)),
+    (2003, (64_950_000, 532_150_000)),
+];
+
+/// An ESRI ASCII grid DEM over [`osm_grid`] whose height varies along both
+/// axes, so heights and grades differ between nodes.
+pub(crate) const GRID_DEM: &str = "ncols 15
+nrows 15
+xllcorner 6.49
+yllcorner 53.19
+cellsize 0.002
+NODATA_value -9999
+";
+
+/// [`GRID_DEM`] with its cell values.
+pub(crate) fn grid_dem() -> String {
+    let mut dem = GRID_DEM.to_string();
+    for row in 0..15 {
+        let values = (0..15)
+            .map(|col| (10 + (14 - row) * 3 + col * 2).to_string())
+            .collect::<Vec<_>>();
+        dem.push_str(&values.join(" "));
+        dem.push('\n');
+    }
+    dem
 }
 
 /// A realistic day of edits to [`osm_grid`]: a tag and speed change, a
 /// closed road, a new road over new nodes, a moved node, a way split, a
 /// node removed from a way and deleted, a new signal, a new restriction,
 /// a building turned into a service road over nodes that were not part of
-/// the topology, and a restriction relation that becomes a route.
+/// the topology, a restriction relation that becomes a route, and a moved
+/// country boundary corner that leaves part of the grid outside.
 pub(crate) fn osm_grid_edits() -> Vec<OsmEdit> {
     use crate::osm_change::ChangeAction::{Create, Delete, Modify};
     let row = |row: i64, cols: std::ops::RangeInclusive<i64>| {
@@ -143,6 +197,7 @@ pub(crate) fn osm_grid_edits() -> Vec<OsmEdit> {
         .map(|row| grid_node(row, 7))
         .collect::<Vec<_>>();
     vec![
+        (Modify, osm_node(2002, 65_030_000, 532_150_000, &[])),
         (
             Modify,
             osm_way(
@@ -426,6 +481,8 @@ pub(crate) fn topology(nodes: &[(f64, f64, f64)], edges: &[DirectedEdge]) -> Top
         edge_component_ids: vec![0; edges.len()],
         feature_attributes: Default::default(),
         temporal_rule_sets: Vec::new(),
+        regions: Default::default(),
+        elevation: Default::default(),
     }
 }
 

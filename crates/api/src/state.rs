@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use netweevil_core::{
     CacheBundleId, DatasetAccelerationBundle, DatasetId, EdgeNameBundle, TopologyBundle,
 };
+use netweevil_ingest::ElevationSampler;
 use netweevil_manifest::{BundleRef, CompiledProfileManifest, DatasetManifest, now_rfc3339};
 use netweevil_persist::{
     WorkspaceConfig, WorkspacePaths, read_acceleration_bundle, read_compiled_profile_bundle,
@@ -122,9 +123,24 @@ pub(crate) struct ServiceRuntime {
     transit_feeds: RwLock<BTreeMap<String, Arc<LoadedTransitFeed>>>,
     pub(crate) capabilities: ServiceCapabilities,
     pub(crate) engine: EngineDescription,
+    /// The dataset's elevation raster, opened on the first height query.
+    pub(crate) elevation: OnceLock<Result<Option<Arc<ElevationSampler>>, String>>,
 }
 
 impl ServiceRuntime {
+    /// The stored DEM raster, or `None` when the dataset was imported
+    /// without one.
+    pub(crate) fn elevation_sampler(&self) -> Result<Option<Arc<ElevationSampler>>, String> {
+        self.elevation
+            .get_or_init(|| match &self.dataset_manifest.elevation_bundle {
+                None => Ok(None),
+                Some(bundle) => ElevationSampler::open(Path::new(&bundle.path))
+                    .map(|sampler| Some(Arc::new(sampler)))
+                    .map_err(|error| format!("opening elevation raster: {error:#}")),
+            })
+            .clone()
+    }
+
     pub(crate) fn transit_feed(&self, feed_id: &str) -> Option<Arc<LoadedTransitFeed>> {
         self.transit_feeds
             .read()
@@ -212,6 +228,7 @@ fn service_capabilities() -> ServiceCapabilities {
             "accessibility",
             "service_area",
             "service_area_sequence",
+            "height",
             "betweenness",
             "scenario_batch",
             "transit_route",
@@ -371,6 +388,7 @@ pub(crate) fn load_service_runtime(
         transit_feeds: RwLock::new(loaded_transit_feeds),
         capabilities: service_capabilities(),
         engine,
+        elevation: OnceLock::new(),
     })
 }
 

@@ -104,6 +104,9 @@ pub(crate) fn scan_overture(
         counts: state.counts,
         feature_attributes: Default::default(),
         temporal_rule_sets: Vec::new(),
+        structure_ways: state.structure_ways,
+        admin_boundaries: Vec::new(),
+        incomplete_admin_relations: Vec::new(),
     })
 }
 
@@ -295,6 +298,8 @@ struct RawTransition {
 struct OvertureState {
     pending_ways: Vec<PendingWay>,
     node_coords: FxHashMap<i64, (f64, f64, f64)>,
+    /// Chunk way ids flagged `is_bridge` or `is_tunnel`.
+    structure_ways: rustc_hash::FxHashSet<i64>,
     counts: ObjectCounts,
     connector_nodes: FxHashMap<String, i64>,
     segment_topologies: FxHashMap<String, SegmentTopology>,
@@ -459,7 +464,7 @@ fn parse_wkb_linestring(bytes: &[u8]) -> Option<Vec<(f64, f64)>> {
 
 // --- Segment mapping ----------------------------------------------------------
 
-fn ingest_segment(row: SegmentRow, line: &[(f64, f64)], state: &mut OvertureState) {
+fn ingest_segment(mut row: SegmentRow, line: &[(f64, f64)], state: &mut OvertureState) {
     if row.subtype.as_deref() != Some("road") {
         return;
     }
@@ -516,6 +521,7 @@ fn ingest_segment(row: SegmentRow, line: &[(f64, f64)], state: &mut OvertureStat
         cut_connectors.push(connector_id.clone());
     }
 
+    let flag_rules = row.road_flags.take().unwrap_or_default();
     let access_rules = row.access_restrictions.unwrap_or_default();
     let speed_rules = row.speed_limits.unwrap_or_default();
     let surface_rules = row.road_surface.unwrap_or_default();
@@ -556,6 +562,9 @@ fn ingest_segment(row: SegmentRow, line: &[(f64, f64)], state: &mut OvertureStat
             chunk_max_speed(&speed_rules, chunk_start, chunk_end, "backward");
         let (forward_lanes, reverse_lanes) = chunk_lanes(&lane_rules, chunk_start, chunk_end);
 
+        if chunk_is_structure(&flag_rules, chunk_start, chunk_end) {
+            state.structure_ways.insert(way_id);
+        }
         state.pending_ways.push(PendingWay {
             osm_way_id: way_id,
             node_ids,
@@ -613,6 +622,15 @@ fn segment_is_unroutable(row: &SegmentRow) -> bool {
         .filter(|rule| chunk_overlap(between_range(&rule.between), 0.0, 1.0) > 0.5)
         .flat_map(|rule| rule.values.as_deref().unwrap_or_default())
         .any(|flag| flag == "is_under_construction" || flag == "is_abandoned")
+}
+
+/// Whether most of a chunk lies on a bridge or in a tunnel.
+fn chunk_is_structure(rules: &[FlagRule], chunk_start: f64, chunk_end: f64) -> bool {
+    rules
+        .iter()
+        .filter(|rule| chunk_overlap(between_range(&rule.between), chunk_start, chunk_end) > 0.5)
+        .flat_map(|rule| rule.values.as_deref().unwrap_or_default())
+        .any(|flag| flag == "is_bridge" || flag == "is_tunnel")
 }
 
 fn vertex_fractions(line: &[(f64, f64)]) -> Vec<f64> {

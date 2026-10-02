@@ -17,8 +17,8 @@ use netweevil_core::{
 
 use crate::components::{ParsedCostComponent, parse_component_expression};
 use crate::edge_cost::{
-    edge_traversal_cost, ensure_supported_matchers, generalized_cost, is_directionally_excluded,
-    is_excluded, mode_access_bit,
+    RegionMatchKey, edge_traversal_cost, ensure_supported_matchers, generalized_cost,
+    is_directionally_excluded, is_excluded, mode_access_bit, region_match_key,
 };
 use crate::progress::{
     PercentReporter, ProfileCompileProgress, ProfileCompileStage, emit_compile_progress,
@@ -177,6 +177,16 @@ where
         let routing_edge = topology.routing_edge(edge_index);
         let edge_profile = topology.edge_profile(edge_index);
         let attribute_matches = |name: &str, expected: &str| {
+            if topology.regions.has_admin_areas()
+                && let Some(key) = region_match_key(name)
+            {
+                let area = topology.edge_admin_area(edge_index);
+                let value = match key {
+                    RegionMatchKey::Country => area.and_then(|area| area.country()),
+                    RegionMatchKey::State => area.and_then(|area| area.state_code.as_deref()),
+                };
+                return value.is_some_and(|value| value.eq_ignore_ascii_case(expected));
+            }
             if routing_edge.feature_row == NO_FEATURE_ROW {
                 return false;
             }
@@ -193,10 +203,12 @@ where
         let vehicle_excluded = vehicle_excluded_cursor
             .next_if(|&&edge| edge as usize == edge_index)
             .is_some();
+        let crosses_border = topology.edge_crosses_border(edge_index);
         let metric = if !(edge.access_mask.contains(mode_bit)
             || edge_profile.conditional_access.contains(mode_bit))
             || vehicle_excluded
             || (edge.road_class == RoadClass::Ferry && !profile.ferry.allow)
+            || (crosses_border && profile.preferences.avoid_border_crossings)
             || is_directionally_excluded(profile, &edge)
             || is_excluded(profile, &edge, edge_profile.highway, &attribute_matches)
         {
@@ -218,6 +230,10 @@ where
             facility,
             &attribute_matches,
         ) {
+            let mut traversal = traversal;
+            if crosses_border {
+                traversal.travel_time_s += profile.preferences.border_crossing_time_s;
+            }
             let mut values = components
                 .iter()
                 .map(|component| {
@@ -256,6 +272,9 @@ where
                 values[component_index] += *value;
             }
             let mut cost = generalized_cost(profile, &edge, length_m, traversal.travel_time_s);
+            if crosses_border {
+                cost += profile.preferences.border_crossing_penalty_s;
+            }
             for (component, value) in components.iter_mut().zip(values) {
                 component.compiled.edge_values.push(value as f32);
                 let overlay_multiplier = component

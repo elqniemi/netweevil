@@ -391,6 +391,7 @@ pub(crate) fn scan_geopackages(
         },
         feature_attributes,
         temporal_rule_sets,
+        ..ScanOutput::default()
     })
 }
 

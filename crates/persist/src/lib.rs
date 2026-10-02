@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use netweevil_core::{
-    CacheBundleId, CompiledProfileBundle, DatasetAccelerationBundle, EdgeNameBundle, TopologyBundle,
+    CacheBundleId, CompiledProfileBundle, DatasetAccelerationBundle, EdgeNameBundle,
+    ElevationRasterHeader, TopologyBundle,
 };
 use netweevil_manifest::{CompiledProfileManifest, DatasetManifest, RunManifest};
 use serde::de::DeserializeOwned;
@@ -31,6 +32,8 @@ pub struct WorkspacePaths {
     /// Retained OSM source snapshots that `dataset update` applies diffs to.
     pub source_bundles_dir: PathBuf,
     pub metric_bundles_dir: PathBuf,
+    /// Cropped, tiled DEM rasters kept for runtime height queries.
+    pub elevation_bundles_dir: PathBuf,
     pub transit_bundles_dir: PathBuf,
     pub datasets_dir: PathBuf,
     pub transit_feeds_dir: PathBuf,
@@ -59,6 +62,7 @@ impl WorkspacePaths {
             acceleration_bundles_dir: state_dir.join("bundles").join("acceleration"),
             source_bundles_dir: state_dir.join("bundles").join("source"),
             metric_bundles_dir: state_dir.join("bundles").join("metrics"),
+            elevation_bundles_dir: state_dir.join("bundles").join("elevation"),
             transit_bundles_dir: state_dir.join("bundles").join("transit"),
             datasets_dir: state_dir.join("datasets"),
             transit_feeds_dir: state_dir.join("transit_feeds"),
@@ -84,6 +88,7 @@ impl WorkspacePaths {
             &self.acceleration_bundles_dir,
             &self.source_bundles_dir,
             &self.metric_bundles_dir,
+            &self.elevation_bundles_dir,
             &self.transit_bundles_dir,
             &self.datasets_dir,
             &self.transit_feeds_dir,
@@ -256,7 +261,7 @@ pub fn read_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
 }
 
 /// Schema version of [`SourceSnapshot`]. Readers accept this value only.
-pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 /// The OSM source objects a dataset retains so `dataset update` can apply
 /// change files without the original extract.
@@ -288,8 +293,11 @@ pub struct SourceSnapshot<W, R, E> {
     pub names: Vec<String>,
     pub way_attributes: Vec<W>,
     pub restrictions: Vec<R>,
-    /// Ways that are not routable, sorted.
+    /// Ways that are not routable, sorted, with their node lists (admin
+    /// boundaries are assembled from member ways).
     pub other_way_ids: Vec<i64>,
+    pub other_way_node_counts: Vec<u32>,
+    pub other_way_node_ids: Vec<i64>,
     /// Relations that are not turn restrictions, sorted.
     pub other_relation_ids: Vec<i64>,
     pub extras: E,
@@ -319,6 +327,18 @@ where
 pub fn write_topology_bundle(path: impl AsRef<Path>, bundle: &TopologyBundle) -> Result<()> {
     sectioned::write_topology_sectioned(path.as_ref(), bundle)
 }
+
+/// Writes a tiled elevation raster; `tiles` are row-major heights in
+/// metres (`NaN` for nodata), already rounded to whole decimetres.
+pub fn write_elevation_raster(
+    path: impl AsRef<Path>,
+    header: &ElevationRasterHeader,
+    tiles: &[Vec<f64>],
+) -> Result<()> {
+    sectioned::write_elevation_raster_sectioned(path.as_ref(), header, tiles)
+}
+
+pub use sectioned::ElevationRasterReader;
 
 pub fn write_edge_name_bundle(path: impl AsRef<Path>, bundle: &EdgeNameBundle) -> Result<()> {
     sectioned::write_edge_names_sectioned(path.as_ref(), bundle)
@@ -528,6 +548,7 @@ pub fn prune_bundle_cache(paths: &WorkspacePaths, dry_run: bool) -> Result<Cache
             &dataset.edge_name_bundle,
             &dataset.acceleration_bundle,
             &dataset.source_snapshot_bundle,
+            &dataset.elevation_bundle,
         ]
         .into_iter()
         .flatten()
@@ -542,6 +563,7 @@ pub fn prune_bundle_cache(paths: &WorkspacePaths, dry_run: bool) -> Result<Cache
         &paths.acceleration_bundles_dir,
         &paths.source_bundles_dir,
         &paths.metric_bundles_dir,
+        &paths.elevation_bundles_dir,
     ] {
         for entry in
             fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?

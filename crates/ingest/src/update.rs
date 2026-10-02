@@ -30,13 +30,15 @@ use sha2::{Digest, Sha256};
 use crate::acceleration::{
     PatchedOrder, build_with_order, nested_dissection_order, patch_edge_order,
 };
+use crate::dem::DemRaster;
 use crate::import::{
     DatasetBundleRefs, DatasetImportProgress, DatasetImportStage, emit_progress, sha256_source,
     write_dataset_bundles,
 };
+use crate::import::{emit_warnings, enrichment_key};
 use crate::osm_change::{effective_changes, read_osm_change_file};
 use crate::source::{OsmSourceSnapshot, OsmSourceState};
-use crate::topology::build_topology_from_scan;
+use crate::topology::{EnrichmentInputs, build_enriched_topology};
 
 /// Fill growth above which [`ReorderPolicy::Auto`] reorders by default.
 pub const DEFAULT_MAX_FILL_GROWTH: f64 = 1.10;
@@ -158,6 +160,7 @@ where
             options.dataset_id
         );
     }
+    let enrichment = verified_enrichment(snapshot.extras.enrichment())?;
     let previous = PreviousBuild {
         topology_node_ids: snapshot.topology_node_ids.clone(),
         edges: topology
@@ -215,7 +218,11 @@ where
     };
     drop(topology);
 
-    let refs = DatasetBundleRefs::new(paths, &manifest.dataset_id, &source_sha256);
+    let refs = DatasetBundleRefs::new(
+        paths,
+        &manifest.dataset_id,
+        &enrichment_key(&source_sha256, &enrichment),
+    );
     let ordering = manifest.acceleration_ordering.clone().unwrap_or_else(|| {
         // Datasets without an ordering record measure against the build
         // they had.
@@ -235,18 +242,24 @@ where
         &previous,
         Path::new(&manifest.source_path),
         &source_sha256,
+        &enrichment,
         refs.topology.bundle_id.clone(),
         &ordering,
         options.reorder,
         &mut timer,
         &mut progress,
     )?;
-    let snapshot = state.to_snapshot(refs.topology.bundle_id.clone(), &rebuilt.topology_node_ids);
-    write_dataset_bundles(
+    let snapshot = state.to_snapshot(
+        refs.topology.bundle_id.clone(),
+        &rebuilt.topology_node_ids,
+        &enrichment,
+    );
+    let elevation_bundle = write_dataset_bundles(
         &refs,
         &rebuilt.topology,
         &rebuilt.names,
         &rebuilt.acceleration,
+        rebuilt.dem.as_ref(),
         Some(&snapshot),
         &mut progress,
     )?;
@@ -273,6 +286,7 @@ where
     manifest.topology_bundle = Some(refs.topology);
     manifest.edge_name_bundle = Some(refs.edge_names);
     manifest.acceleration_bundle = Some(refs.acceleration);
+    manifest.elevation_bundle = elevation_bundle;
     manifest.source_snapshot_bundle = Some(refs.source);
     manifest.topology_meta = Some(rebuilt.meta);
     manifest.acceleration_stats = Some(stats);
@@ -331,6 +345,8 @@ pub(crate) struct RebuiltDataset {
     pub(crate) names: EdgeNameBundle,
     pub(crate) meta: TopologyBundleMeta,
     pub(crate) acceleration: DatasetAccelerationBundle,
+    /// The cropped DEM when the dataset samples one.
+    pub(crate) dem: Option<DemRaster>,
     pub(crate) topology_node_ids: Vec<i64>,
     pub(crate) patched: PatchedOrder,
     pub(crate) patched_shortcut_arc_count: u64,
@@ -344,15 +360,24 @@ pub(crate) fn rebuild_dataset(
     previous: &PreviousBuild,
     source_path: &Path,
     source_sha256: &str,
+    enrichment: &EnrichmentInputs,
     topology_bundle_id: CacheBundleId,
     ordering: &AccelerationOrdering,
     policy: ReorderPolicy,
     timer: &mut StageTimer,
     progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<RebuiltDataset> {
-    let (scan, topology_node_ids) = state.scan_output();
-    let (topology, names, meta) =
-        build_topology_from_scan(source_path, source_sha256, scan, progress)?;
+    let (scan, topology_node_ids) = state.scan_output(enrichment.admin_boundaries.is_none());
+    let built = build_enriched_topology(
+        source_path,
+        source_sha256,
+        scan,
+        SourceFormat::OsmPbf,
+        enrichment,
+        progress,
+    )?;
+    emit_warnings(&built.warnings, progress);
+    let (topology, names, meta, dem) = (built.bundle, built.names, built.meta, built.dem);
     timer.lap("build topology");
 
     let patched = patch_edge_order(
@@ -403,6 +428,7 @@ pub(crate) fn rebuild_dataset(
         names,
         meta,
         acceleration,
+        dem,
         topology_node_ids,
         patched,
         patched_shortcut_arc_count,
@@ -472,6 +498,34 @@ pub(crate) fn previous_ranks(
         .into_iter()
         .map(|edge| edge.map(|edge| previous.edge_rank[edge as usize]))
         .collect()
+}
+
+/// The boundaries file and DEM the dataset was built with, after checking
+/// that they are unchanged: an update must apply the inputs a full import
+/// would use.
+fn verified_enrichment(enrichment: &EnrichmentInputs) -> Result<EnrichmentInputs> {
+    let check = |what: &str, path: &Path, expected: &str| -> Result<()> {
+        let (digest, _) = sha256_source(path, &mut |_| {}).with_context(|| {
+            format!(
+                "reading the {what} {} the dataset was built with",
+                path.display()
+            )
+        })?;
+        if digest != expected {
+            bail!(
+                "the {what} {} changed since the dataset was built; re-import the dataset with it",
+                path.display()
+            );
+        }
+        Ok(())
+    };
+    if let Some((path, sha256)) = &enrichment.admin_boundaries {
+        check("admin boundaries file", path, sha256)?;
+    }
+    if let Some((dem, sha256)) = &enrichment.dem {
+        check("DEM", &dem.path, sha256)?;
+    }
+    Ok(enrichment.clone())
 }
 
 fn chain_sha256(previous: &str, change: &str) -> String {
