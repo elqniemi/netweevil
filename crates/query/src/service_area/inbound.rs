@@ -405,6 +405,7 @@ fn backward_phast(
     for &edge in source.edge_order.iter().rev() {
         let edge = edge as usize;
         let mut best = dist[edge];
+        #[allow(clippy::needless_range_loop)]
         for slot in
             source.upward_first_out[edge] as usize..source.upward_first_out[edge + 1] as usize
         {
