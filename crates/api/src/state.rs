@@ -439,14 +439,16 @@ fn load_or_compile_profile(
     document.validate()?;
     let profile_hash = document.fingerprint()?;
 
-    // Reuse a cached compiled bundle only when it still reads cleanly and its
-    // acceleration matches the dataset's current CCH bundle; otherwise fall
-    // through to a fresh compile (covers format migrations and re-imports).
+    // Reuse a cached compiled bundle only when it was compiled for the
+    // dataset's current topology, still reads cleanly and its acceleration
+    // matches the dataset's current CCH bundle; otherwise fall through to a
+    // fresh compile (covers format migrations, re-imports and updates).
     let cached = compiled_manifests
         .iter()
         .find(|manifest| {
             manifest.dataset_id.0 == dataset_manifest.dataset_id.0
                 && manifest.profile_hash == profile_hash
+                && manifest.topology_bundle_id.as_ref() == Some(&topology_bundle_id)
         })
         .and_then(|manifest| {
             let bundle = read_compiled_profile_bundle(&manifest.bundle.path).ok()?;
