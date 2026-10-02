@@ -9,6 +9,7 @@
 
 mod accessibility;
 mod alternatives;
+mod avoid;
 mod batch;
 mod betweenness;
 mod diagnostics;
@@ -33,6 +34,8 @@ mod waypoints;
 
 pub use accessibility::*;
 pub(crate) use alternatives::*;
+pub use avoid::{AvoidOptions, AvoidPoint, AvoidPolygon};
+pub(crate) use avoid::{ResolvedAvoid, ensure_no_avoid, resolve_avoid};
 pub use batch::*;
 pub(crate) use betweenness::execute_betweenness_with_graph;
 pub use betweenness::{

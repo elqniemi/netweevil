@@ -62,6 +62,10 @@ pub struct TemporalRequestOptions {
     /// Inline continuous temporal overlays; later overlays take precedence.
     #[serde(default)]
     pub overlays: Vec<TemporalOverlayDocument>,
+    /// Locations, areas and source features to exclude or penalize. Not
+    /// temporal, but request-scoped like the rest of these options.
+    #[serde(default, skip_serializing_if = "AvoidOptions::is_empty")]
+    pub avoid: AvoidOptions,
     /// Per-state nondominated label guard for temporal/generalized searches.
     #[serde(default = "default_max_temporal_labels_per_state")]
     pub max_labels_per_state: usize,
@@ -84,6 +88,7 @@ impl Default for TemporalRequestOptions {
             scenario: None,
             holidays: Vec::new(),
             overlays: Vec::new(),
+            avoid: AvoidOptions::default(),
             max_labels_per_state: default_max_temporal_labels_per_state(),
             arrive_by_lookback_s: default_arrive_by_lookback_s(),
             constraints: Vec::new(),

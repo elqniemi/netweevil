@@ -3,6 +3,10 @@
 `north_nl_match.json` exercises `POST /v1/match` with a timestamped GPS trace.
 See [trace matching](../../docs/trace-matching.md) for scoring, gaps and limits.
 
+`route_avoid.json` routes through central Groningen while excluding the edges
+near a point and penalizing a block; see "Avoid locations, areas and features"
+in the top-level README.
+
 `route_profile_overrides.json` demonstrates request-defined street routing on
 the North Netherlands dataset. Send it to `/v1/route`; the first request compiles
 the effective profile and subsequent identical profiles reuse the cached engine.

@@ -29,6 +29,7 @@ fn execute_route_with_optional_edge_names(
     request: &RouteRequest,
     edge_names: Option<&[String]>,
 ) -> Result<RouteResult> {
+    ensure_no_avoid([&request.temporal.avoid])?;
     if has_failure_modes(&request.fallback) {
         validate_execution_inputs(topology, metrics)?;
         let degraded = cached_failure_mode_bundle(topology, metrics, &request.fallback, None)?;

@@ -150,6 +150,23 @@ pub(crate) fn snap_candidates_with_options(
     options: &SnapOptions,
     is_origin: bool,
 ) -> Result<Vec<SnappedPoint>> {
+    snap_candidates_excluding(topology, routing_graph, point, options, is_origin, &|_| {
+        false
+    })
+}
+
+/// [`snap_candidates_with_options`] on `routing_graph` without the edges
+/// `excluded` accepts. Equals snapping on a graph built without those edges:
+/// edge candidates, node traversability and node component ids all ignore
+/// them.
+pub(crate) fn snap_candidates_excluding(
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    point: &LabeledPoint,
+    options: &SnapOptions,
+    is_origin: bool,
+    excluded: &dyn Fn(usize) -> bool,
+) -> Result<Vec<SnappedPoint>> {
     if !point.lon.is_finite()
         || !(-180.0..=180.0).contains(&point.lon)
         || !point.lat.is_finite()
@@ -190,6 +207,7 @@ pub(crate) fn snap_candidates_with_options(
             directed,
             is_origin,
             radius_m,
+            excluded,
         )?;
         if candidates.len() >= MAX_SNAP_CANDIDATES || radius_m >= options.max_distance_m {
             break candidates;
@@ -224,6 +242,7 @@ pub(crate) fn snap_candidates_single_scan(
         false,
         is_origin,
         options.max_distance_m,
+        &|_| false,
     )?;
     if candidates.is_empty() {
         return Err(route_snap_failure(point, options.max_distance_m).into());
@@ -244,6 +263,7 @@ fn collect_snap_candidates(
     directed: bool,
     is_origin: bool,
     radius_m: f64,
+    excluded: &dyn Fn(usize) -> bool,
 ) -> Result<Vec<SnappedPoint>> {
     let constraint = options.point_constraints.get(&point.id);
     // Node scans without an index are only acceptable on small graphs.
@@ -284,6 +304,7 @@ fn collect_snap_candidates(
                 node_id as usize,
                 is_origin,
                 &options.attribute_filters,
+                excluded,
             )
         {
             continue;
@@ -308,6 +329,7 @@ fn collect_snap_candidates(
                     routing_graph,
                     node_id as usize,
                     is_origin,
+                    excluded,
                 ),
             },
             MAX_SNAP_CANDIDATES,
@@ -319,6 +341,9 @@ fn collect_snap_candidates(
         .candidates(point.lon, point.lat, radius_m);
 
     for edge_index in candidate_edges {
+        if excluded(edge_index as usize) {
+            continue;
+        }
         let edge = topology.routing_edge(edge_index as usize);
         let from = &topology.nodes[edge.from.0 as usize];
         let to = &topology.nodes[edge.to.0 as usize];
@@ -437,15 +462,16 @@ fn node_is_traversable_for_snap(
     node_index: usize,
     is_origin: bool,
     filters: &std::collections::BTreeMap<String, String>,
+    excluded: &dyn Fn(usize) -> bool,
 ) -> bool {
     let edges = if is_origin {
         routing_graph.outgoing_edges(node_index)
     } else {
         routing_graph.incoming_edges(node_index)
     };
-    edges
-        .iter()
-        .any(|edge| edge_matches_filters(topology, *edge as usize, filters))
+    edges.iter().any(|&edge| {
+        !excluded(edge as usize) && edge_matches_filters(topology, edge as usize, filters)
+    })
 }
 
 fn edge_matches_filters(
@@ -480,12 +506,14 @@ fn traversable_node_component_id(
     routing_graph: &RoutingGraph,
     node_index: usize,
     is_origin: bool,
+    excluded: &dyn Fn(usize) -> bool,
 ) -> Option<u32> {
-    let edge_index = if is_origin {
-        routing_graph.outgoing_edges(node_index).first().copied()
+    let edges = if is_origin {
+        routing_graph.outgoing_edges(node_index)
     } else {
-        routing_graph.incoming_edges(node_index).first().copied()
+        routing_graph.incoming_edges(node_index)
     };
+    let edge_index = edges.iter().copied().find(|&edge| !excluded(edge as usize));
     edge_index
         .and_then(|edge_index| topology.edge_component_id(edge_index))
         .or_else(|| topology.node_component_id(node_index as u32))
