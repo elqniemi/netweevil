@@ -254,9 +254,13 @@ pub fn build_sim_network(
         }
         let mut speeds = Vec::with_capacity(edge_count);
         let mut max_speed = 0.0f64;
+        let mode_bit = metrics.mode.access_bit();
         for (edge, metric) in metrics.edge_metrics.iter().take(edge_count).enumerate() {
+            // Edges open to the fleet only under a time condition stay closed
+            // in the simulation, which routes on the static network.
+            let usable = netweevil_profile::is_statically_usable(topology, edge, mode_bit);
             let speed = match metric.travel_time_s {
-                Some(time) if time > 0.0 => {
+                Some(time) if time > 0.0 && usable => {
                     let speed = edge_length_m[edge] as f64 / time;
                     max_speed = max_speed.max(speed);
                     speed as f32

@@ -1,5 +1,6 @@
 use netweevil_core::{
-    AccessMask, DirectedEdge, EdgeId, NodeId, TurnRestriction, TurnRestrictionKind,
+    AccessMask, DirectedEdge, EdgeId, NodeId, TemporalEffect, TemporalRule, TemporalRuleSet,
+    TurnRestriction, TurnRestrictionCondition, TurnRestrictionKind,
 };
 use osmpbfreader::{OsmId, Relation, Tags};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -7,7 +8,8 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use rustc_hash::FxHashMap;
 
 use crate::classify::tag;
-use crate::scan::PendingWay;
+use crate::conditional::parse_conditional;
+use crate::scan::{PendingWay, RuleSetInterner};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RestrictionKind {
@@ -23,7 +25,12 @@ pub(crate) struct TurnRestrictionCandidate {
     pub(crate) to_way_id: i64,
     pub(crate) kind: RestrictionKind,
     pub(crate) mode_mask: AccessMask,
+    /// Time condition, with its rule set already interned into the scan's
+    /// temporal rule sets.
+    pub(crate) condition: Option<TurnRestrictionCondition>,
 }
+
+type RestrictionKey = (Vec<u32>, u16, Option<TurnRestrictionCondition>);
 
 #[derive(Debug, Clone)]
 pub(crate) enum ViaSpec {
@@ -196,7 +203,7 @@ pub(crate) fn build_turn_restrictions(
 
 fn expand_terminal_restrictions(
     restrictions: &mut Vec<TurnRestriction>,
-    seen: &mut HashSet<(Vec<u32>, u16)>,
+    seen: &mut HashSet<RestrictionKey>,
     candidate: &TurnRestrictionCandidate,
     incoming_edges: &[EdgeId],
     via_edges: &[EdgeId],
@@ -236,7 +243,7 @@ fn expand_terminal_restrictions(
 
 fn expand_intermediate_only_turns(
     restrictions: &mut Vec<TurnRestriction>,
-    seen: &mut HashSet<(Vec<u32>, u16)>,
+    seen: &mut HashSet<RestrictionKey>,
     candidate: &TurnRestrictionCandidate,
     incoming_edges: &[EdgeId],
     via_edges: &[EdgeId],
@@ -264,7 +271,7 @@ fn expand_intermediate_only_turns(
 
 fn push_restriction(
     restrictions: &mut Vec<TurnRestriction>,
-    seen: &mut HashSet<(Vec<u32>, u16)>,
+    seen: &mut HashSet<RestrictionKey>,
     candidate: &TurnRestrictionCandidate,
     edge_path: Vec<EdgeId>,
 ) {
@@ -274,6 +281,7 @@ fn push_restriction(
     let key = (
         edge_path.iter().map(|edge| edge.0).collect::<Vec<_>>(),
         candidate.mode_mask.0,
+        candidate.condition,
     );
     if seen.insert(key) {
         restrictions.push(TurnRestriction {
@@ -284,6 +292,7 @@ fn push_restriction(
             },
             edge_path,
             mode_mask: candidate.mode_mask,
+            condition: candidate.condition,
         });
     }
 }
@@ -389,19 +398,49 @@ fn way_edge_sequence_between(
     best
 }
 
+/// Parses a `type=restriction` relation into one candidate per distinct
+/// (kind, modes, condition): the unconditional restriction, the modes for
+/// which `restriction[:mode]:conditional=none @ (...)` lifts it, and
+/// restrictions that only hold under `restriction[:mode]:conditional`.
+/// Condition rule sets are interned into `rule_sets`.
 pub(crate) fn parse_turn_restriction_relation(
     relation: &Relation,
-) -> Option<TurnRestrictionCandidate> {
+    rule_sets: &mut RuleSetInterner,
+) -> Vec<TurnRestrictionCandidate> {
     if tag(&relation.tags, "type") != Some("restriction") {
-        return None;
+        return Vec::new();
     }
+    let rules = parse_restriction_rules(&relation.tags);
+    if rules.is_empty() {
+        return Vec::new();
+    }
+    let Some((from_way_id, via, to_way_id)) = restriction_members(relation) else {
+        return Vec::new();
+    };
+    rules
+        .into_iter()
+        .map(|rule| TurnRestrictionCandidate {
+            relation_id: relation.id.0,
+            from_way_id,
+            via: via.clone(),
+            to_way_id,
+            kind: rule.kind,
+            mode_mask: AccessMask::new(rule.modes),
+            condition: rule
+                .condition
+                .map(|(rules, applies_statically)| TurnRestrictionCondition {
+                    rule_set_id: rule_sets.intern(TemporalRuleSet { rules }),
+                    applies_statically,
+                }),
+        })
+        .collect()
+}
 
-    let (kind, mode_mask) = parse_restriction_rule(&relation.tags)?;
+fn restriction_members(relation: &Relation) -> Option<(i64, ViaSpec, i64)> {
     let mut from_way = None;
     let mut via_node = None;
     let mut via_ways = Vec::new();
     let mut to_way = None;
-
     for reference in &relation.refs {
         match (reference.role.as_str(), reference.member) {
             ("from", OsmId::Way(way_id)) => assign_unique(&mut from_way, way_id.0)?,
@@ -411,70 +450,141 @@ pub(crate) fn parse_turn_restriction_relation(
             _ => {}
         }
     }
-
     let via = match (via_node, via_ways.is_empty()) {
         (Some(node_id), true) => ViaSpec::Node(node_id),
         (None, false) => ViaSpec::Ways(via_ways),
         _ => return None,
     };
-
-    Some(TurnRestrictionCandidate {
-        relation_id: relation.id.0,
-        from_way_id: from_way?,
-        via,
-        to_way_id: to_way?,
-        kind,
-        mode_mask,
-    })
+    Some((from_way?, via, to_way?))
 }
 
-fn parse_restriction_rule(tags: &Tags) -> Option<(RestrictionKind, AccessMask)> {
-    let mut kind = None;
-    let mut mode_bits = 0_u16;
+/// Restriction keys and the modes they bind.
+const RESTRICTION_KEYS: [(&str, u16); 13] = [
+    ("restriction", AccessMask::MOTOR_VEHICLES),
+    ("restriction:motor_vehicle", AccessMask::MOTOR_VEHICLES),
+    ("restriction:vehicle", AccessMask::VEHICLES),
+    ("restriction:motorcar", AccessMask::CAR),
+    ("restriction:motorcycle", AccessMask::MOTORCYCLE),
+    ("restriction:moped", AccessMask::MOPED),
+    ("restriction:hgv", AccessMask::HGV),
+    ("restriction:goods", AccessMask::HGV),
+    ("restriction:bus", AccessMask::BUS),
+    ("restriction:psv", AccessMask::BUS | AccessMask::TAXI),
+    ("restriction:taxi", AccessMask::TAXI),
+    ("restriction:bicycle", AccessMask::BICYCLE),
+    ("restriction:foot", AccessMask::FOOT),
+];
 
-    for (key, default_mask) in [
-        (
-            "restriction",
-            AccessMask::CAR | AccessMask::HGV | AccessMask::TRANSIT,
-        ),
-        (
-            "restriction:motor_vehicle",
-            AccessMask::CAR | AccessMask::HGV | AccessMask::TRANSIT,
-        ),
-        (
-            "restriction:vehicle",
-            AccessMask::CAR | AccessMask::BICYCLE | AccessMask::HGV | AccessMask::TRANSIT,
-        ),
-        ("restriction:motorcar", AccessMask::CAR),
-        ("restriction:motorcycle", AccessMask::CAR),
-        ("restriction:moped", AccessMask::CAR),
-        ("restriction:hgv", AccessMask::HGV),
-        ("restriction:goods", AccessMask::HGV),
-        ("restriction:bus", AccessMask::TRANSIT),
-        ("restriction:psv", AccessMask::TRANSIT),
-        ("restriction:taxi", AccessMask::TRANSIT),
-        ("restriction:bicycle", AccessMask::BICYCLE),
-        ("restriction:foot", AccessMask::FOOT),
-    ] {
+#[derive(Debug, Clone, PartialEq)]
+struct RestrictionRule {
+    kind: RestrictionKind,
+    modes: u16,
+    /// Time rules and whether static routing applies the restriction.
+    condition: Option<(Vec<TemporalRule>, bool)>,
+}
+
+fn parse_restriction_rules(tags: &Tags) -> Vec<RestrictionRule> {
+    let except = parse_except_modes(tag(tags, "except"));
+    let mut static_kind = None;
+    let mut static_modes = 0_u16;
+    for (key, modes) in RESTRICTION_KEYS {
         let Some(value) = tag(tags, key) else {
             continue;
         };
-        let parsed_kind = parse_restriction_kind(value)?;
-        if let Some(existing_kind) = kind {
-            if existing_kind != parsed_kind {
-                return None;
-            }
-        } else {
-            kind = Some(parsed_kind);
+        let Some(kind) = parse_restriction_kind(value) else {
+            return Vec::new();
+        };
+        if static_kind.is_some_and(|existing| existing != kind) {
+            return Vec::new();
         }
-        mode_bits |= default_mask;
+        static_kind = Some(kind);
+        static_modes |= modes;
+    }
+    static_modes &= !except;
+    let static_kind = static_kind.filter(|_| static_modes != 0);
+
+    // (modes, kind or `None` for a lift, time rules)
+    let mut conditionals = Vec::<(u16, Option<RestrictionKind>, Vec<TemporalRule>)>::new();
+    for (key, modes) in RESTRICTION_KEYS {
+        let Some(entries) = tag(tags, &format!("{key}:conditional")).and_then(parse_conditional)
+        else {
+            continue;
+        };
+        let modes = modes & !except;
+        for entry in entries {
+            let kind = if entry.value == "none" {
+                None
+            } else if let Some(kind) = parse_restriction_kind(entry.value) {
+                Some(kind)
+            } else {
+                continue;
+            };
+            let effect = if kind.is_some() {
+                TemporalEffect::Closed
+            } else {
+                TemporalEffect::OpenOnly
+            };
+            let Some(rules) = entry.condition.time_rules(effect, 0) else {
+                continue;
+            };
+            match conditionals
+                .iter_mut()
+                .find(|(existing_modes, existing_kind, _)| {
+                    *existing_modes == modes && *existing_kind == kind
+                }) {
+                Some((_, _, existing)) => existing.extend(rules),
+                None => conditionals.push((modes, kind, rules)),
+            }
+        }
     }
 
-    mode_bits &= !parse_except_modes(tag(tags, "except"));
-    if mode_bits == 0 {
-        return None;
+    let mut result = Vec::new();
+    let mut unlifted = static_modes;
+    for (modes, kind, rules) in conditionals {
+        match (kind, static_kind) {
+            (None, Some(static_kind)) => {
+                let lifted = modes & unlifted;
+                if lifted != 0 {
+                    unlifted &= !lifted;
+                    result.push(RestrictionRule {
+                        kind: static_kind,
+                        modes: lifted,
+                        condition: Some((rules, true)),
+                    });
+                }
+            }
+            (Some(kind), _) => {
+                // Modes already restricted the same way unconditionally gain
+                // nothing from the condition.
+                let modes = if static_kind == Some(kind) {
+                    modes & !static_modes
+                } else {
+                    modes
+                };
+                if modes != 0 {
+                    result.push(RestrictionRule {
+                        kind,
+                        modes,
+                        condition: Some((rules, false)),
+                    });
+                }
+            }
+            (None, None) => {}
+        }
     }
-    Some((kind?, AccessMask::new(mode_bits)))
+    if let Some(kind) = static_kind
+        && unlifted != 0
+    {
+        result.insert(
+            0,
+            RestrictionRule {
+                kind,
+                modes: unlifted,
+                condition: None,
+            },
+        );
+    }
+    result
 }
 
 fn parse_restriction_kind(value: &str) -> Option<RestrictionKind> {
@@ -489,30 +599,24 @@ fn parse_restriction_kind(value: &str) -> Option<RestrictionKind> {
 }
 
 fn parse_except_modes(except: Option<&str>) -> u16 {
-    let mut bits = 0_u16;
-    let Some(except) = except else {
-        return bits;
-    };
-
-    for mode in except
-        .split([';', ','])
+    except
+        .into_iter()
+        .flat_map(|except| except.split([';', ',']))
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        bits |= restriction_mode_bits(mode);
-    }
-
-    bits
+        .fold(0, |bits, mode| bits | restriction_mode_bits(mode))
 }
 
 fn restriction_mode_bits(mode: &str) -> u16 {
     match mode {
-        "motorcar" | "motor_vehicle:conditional" => AccessMask::CAR,
-        "motor_vehicle" => AccessMask::CAR | AccessMask::HGV | AccessMask::TRANSIT,
-        "motorcycle" | "moped" => AccessMask::CAR,
-        "vehicle" => AccessMask::CAR | AccessMask::BICYCLE | AccessMask::HGV | AccessMask::TRANSIT,
+        "motorcar" => AccessMask::CAR,
+        "motor_vehicle" => AccessMask::MOTOR_VEHICLES,
+        "motorcycle" => AccessMask::MOTORCYCLE,
+        "moped" => AccessMask::MOPED,
+        "vehicle" => AccessMask::VEHICLES,
         "hgv" | "goods" => AccessMask::HGV,
-        "bus" | "psv" | "taxi" => AccessMask::TRANSIT,
+        "bus" => AccessMask::BUS,
+        "psv" => AccessMask::BUS | AccessMask::TAXI,
+        "taxi" => AccessMask::TAXI,
         "bicycle" => AccessMask::BICYCLE,
         "foot" | "pedestrian" => AccessMask::FOOT,
         _ => 0,

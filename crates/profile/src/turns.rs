@@ -1,4 +1,34 @@
-use netweevil_core::{EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, TopologyBundle};
+use netweevil_core::{
+    CompiledTurnCostConfig, EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, TopologyBundle,
+};
+
+/// Generalized cost of moving from `previous_edge_index` onto
+/// `next_edge_index` when access to the next edge is destination-only for
+/// `mode_bit` and access to the previous one is not. Routes pay it once per
+/// entry into a destination-only area, never for starting inside one.
+pub fn destination_only_entry_cost(
+    topology: &TopologyBundle,
+    turns: &CompiledTurnCostConfig,
+    mode_bit: u16,
+    previous_edge_index: usize,
+    next_edge_index: usize,
+) -> f64 {
+    if turns.destination_only_penalty_s == 0.0 {
+        return 0.0;
+    }
+    let profiles = &topology.edge_layers.profile;
+    let entering = profiles[next_edge_index]
+        .destination_only
+        .contains(mode_bit)
+        && !profiles[previous_edge_index]
+            .destination_only
+            .contains(mode_bit);
+    if entering {
+        turns.destination_only_penalty_s * turns.cost_time_weight
+    } else {
+        0.0
+    }
+}
 
 pub(crate) fn transition_turn_penalty_cost(
     topology: &TopologyBundle,

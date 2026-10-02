@@ -35,11 +35,7 @@ fn constant_edges_do_not_scan_the_voluntary_wait_horizon() {
 fn public_holiday_bit_replaces_weekday_bit() {
     let friday_noon = at("2026-07-10T12:00:00+08:00");
     let holiday = HashSet::from([friday_noon.date()]);
-    let all_day = |day_mask, effect| TemporalRule {
-        day_mask,
-        intervals: vec![],
-        effect,
-    };
+    let all_day = |day_mask, effect| TemporalRule::new(day_mask, vec![], effect);
     let friday_only = all_day(FRIDAY, TemporalEffect::Closed);
     assert!(rule_active(&friday_only, friday_noon, &HashSet::new()));
     assert!(!rule_active(&friday_only, friday_noon, &holiday));
@@ -355,11 +351,11 @@ fn temporal_scenario_can_enable_a_materialized_direction_hidden_from_static_rout
                 force_closed: false,
                 force_open: false,
                 replace_rules: true,
-                rules: vec![TemporalRule {
-                    day_mask: EVERY_DAY,
-                    intervals: vec![],
-                    effect: TemporalEffect::BackwardOnly,
-                }],
+                rules: vec![TemporalRule::new(
+                    EVERY_DAY,
+                    vec![],
+                    TemporalEffect::BackwardOnly,
+                )],
                 speed_factor: None,
             }],
         }),
@@ -408,14 +404,14 @@ fn at(value: &str) -> OffsetDateTime {
 }
 
 fn every_day(start_minute: u16, end_minute: u16, effect: TemporalEffect) -> TemporalRule {
-    TemporalRule {
-        day_mask: EVERY_DAY,
-        intervals: vec![MinuteInterval {
+    TemporalRule::new(
+        EVERY_DAY,
+        vec![MinuteInterval {
             start_minute,
             end_minute,
         }],
         effect,
-    }
+    )
 }
 
 /// Crawling before 10:00 and fast after it, so entering just before the
@@ -535,6 +531,7 @@ fn test_metrics(allow_wait: bool) -> CompiledProfileBundle {
         temporal: CompiledTemporalProfile {
             allow_wait,
             max_wait_s: 120.0,
+            ..Default::default()
         },
         source_topology_bundle_id: CacheBundleId::new("topology-test"),
         acceleration: None,

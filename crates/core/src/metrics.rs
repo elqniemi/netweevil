@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{CacheBundleId, EdgeId, TravelMode};
+use crate::{CacheBundleId, EdgeId, TemporalRuleSet, TravelMode};
 
 /// Schema version of [`CompiledProfileBundle`]. Readers accept this value only.
-pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 7;
+pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 8;
 
 /// Schema version of [`CompiledAcceleration`] customization data.
 pub const COMPILED_ACCELERATION_SCHEMA_VERSION: u32 = 4;
@@ -16,6 +16,9 @@ pub struct CompiledTurnCostConfig {
     pub traffic_signal_penalty_s: f64,
     pub roundabout_entry_penalty_s: f64,
     pub cost_time_weight: f64,
+    /// Generalized-cost penalty for entering an edge whose access is
+    /// destination-only for the profile's mode from one that is not.
+    pub destination_only_penalty_s: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,10 +48,12 @@ pub struct CompiledCostComponent {
     pub invert_overlay: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompiledTemporalProfile {
     pub allow_wait: bool,
     pub max_wait_s: f64,
+    /// Dataset edge schedules resolved for this profile.
+    pub rules: CompiledTemporalRules,
 }
 
 impl Default for CompiledTemporalProfile {
@@ -56,7 +61,55 @@ impl Default for CompiledTemporalProfile {
         Self {
             allow_wait: false,
             max_wait_s: default_max_wait_s(),
+            rules: CompiledTemporalRules::default(),
         }
+    }
+}
+
+/// Per-profile replacements for dataset edge schedules that carry
+/// posted-speed rules ([`crate::TemporalEffect::MaxSpeed`]): rules of other
+/// modes are dropped and posted speeds become the profile's speed factors.
+/// Other edges use their dataset rule set. Sparse, sorted by edge index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CompiledTemporalRules {
+    pub rule_sets: Vec<TemporalRuleSet>,
+    pub edges: Vec<u32>,
+    pub edge_rule_sets: Vec<u32>,
+}
+
+impl CompiledTemporalRules {
+    pub fn is_empty(&self) -> bool {
+        self.edges.is_empty()
+    }
+
+    pub fn for_edge(&self, edge_index: usize) -> Option<&TemporalRuleSet> {
+        let position = self.edges.binary_search(&(edge_index as u32)).ok()?;
+        self.rule_sets
+            .get(*self.edge_rule_sets.get(position)? as usize)
+    }
+
+    pub fn validate(&self, edge_count: usize) -> Result<(), String> {
+        if self.edges.len() != self.edge_rule_sets.len() {
+            return Err("compiled temporal rule columns differ in length".to_string());
+        }
+        if self.edges.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err("compiled temporal rule edges are not strictly sorted".to_string());
+        }
+        if self
+            .edges
+            .last()
+            .is_some_and(|edge| *edge as usize >= edge_count)
+        {
+            return Err("compiled temporal rules reference a missing edge".to_string());
+        }
+        if self
+            .edge_rule_sets
+            .iter()
+            .any(|id| *id as usize >= self.rule_sets.len())
+        {
+            return Err("compiled temporal rules reference a missing rule set".to_string());
+        }
+        Ok(())
     }
 }
 

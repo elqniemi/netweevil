@@ -205,7 +205,8 @@ layers:
         "each retained row records its source-layer schema"
     );
     assert_eq!(scan.temporal_rule_sets.len(), 1);
-    assert_eq!(staircase.temporal_rule_id, Some(0));
+    assert_eq!(staircase.forward_temporal_rule_id, Some(0));
+    assert_eq!(staircase.reverse_temporal_rule_id, Some(0));
 }
 
 // Mini-station fixture: an outdoor footway reaches a portal, where an

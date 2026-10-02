@@ -18,15 +18,24 @@ impl CacheBundleId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TravelMode {
     #[default]
     Car,
     Bicycle,
     Foot,
-    Transit,
+    /// Buses and other scheduled road public transport (`bus`, `psv`).
+    #[serde(alias = "transit")]
+    Bus,
+    /// Heavy goods vehicles (`hgv`).
+    #[serde(alias = "truck")]
     Hgv,
+    Taxi,
+    Motorcycle,
+    /// Mopeds and motor scooters (`moped`).
+    #[serde(alias = "motor_scooter", alias = "scooter")]
+    Moped,
 }
 
 impl TravelMode {
@@ -35,9 +44,18 @@ impl TravelMode {
             Self::Car => 1 << 0,
             Self::Bicycle => 1 << 1,
             Self::Foot => 1 << 2,
-            Self::Transit => 1 << 3,
+            Self::Bus => 1 << 3,
             Self::Hgv => 1 << 4,
+            Self::Taxi => 1 << 5,
+            Self::Motorcycle => 1 << 6,
+            Self::Moped => 1 << 7,
         }
+    }
+
+    /// Modes that drive on the road network under motor power and obey
+    /// posted speed limits.
+    pub const fn is_motorized(self) -> bool {
+        !matches!(self, Self::Bicycle | Self::Foot)
     }
 }
 

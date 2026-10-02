@@ -8,19 +8,21 @@ use std::sync::{
 use anyhow::{Context, Result};
 use netweevil_core::{
     AccessMask, FeatureAttributeTable, HighwayClass, NO_FEATURE_ROW, RoadClass, SmoothnessClass,
-    SurfaceClass, TemporalRuleSet,
+    SurfaceClass, TemporalRule, TemporalRuleSet, VehicleRestriction,
 };
 use osmpbfreader::{OsmObj, OsmPbfReader};
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::access::{ConditionalCounts, classify_way_access};
 use crate::classify::{
-    classify_directional_access, classify_smoothness, classify_speed_and_lanes, classify_surface,
-    classify_toll, classify_way, is_traffic_signal_node, parse_duration_from_tags, tag,
+    classify_smoothness, classify_speed_and_lanes, classify_surface, classify_toll, classify_way,
+    conditional_speed_rules, is_traffic_signal_node, parse_duration_from_tags, tag,
 };
 use crate::import::{
     CountingReader, DatasetImportProgress, DatasetImportStage, PercentReporter, emit_progress,
 };
 use crate::restrictions::{TurnRestrictionCandidate, ViaSpec, parse_turn_restriction_relation};
+use crate::vehicle_tags::way_vehicle_restrictions;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingWay {
@@ -33,6 +35,10 @@ pub(crate) struct PendingWay {
     pub(crate) smoothness: SmoothnessClass,
     pub(crate) forward_access_mask: AccessMask,
     pub(crate) reverse_access_mask: AccessMask,
+    pub(crate) forward_destination_only: AccessMask,
+    pub(crate) reverse_destination_only: AccessMask,
+    pub(crate) forward_conditional_access: AccessMask,
+    pub(crate) reverse_conditional_access: AccessMask,
     pub(crate) is_toll: bool,
     pub(crate) is_roundabout: bool,
     pub(crate) forward_extra_flags: u32,
@@ -43,7 +49,46 @@ pub(crate) struct PendingWay {
     pub(crate) reverse_lanes: Option<u8>,
     pub(crate) name: Option<String>,
     pub(crate) feature_row: u32,
-    pub(crate) temporal_rule_id: Option<u32>,
+    pub(crate) forward_temporal_rule_id: Option<u32>,
+    pub(crate) reverse_temporal_rule_id: Option<u32>,
+    pub(crate) vehicle_restrictions: Vec<VehicleRestriction>,
+}
+
+impl PendingWay {
+    /// Whether the forward direction becomes an edge.
+    pub(crate) fn has_forward_edge(&self) -> bool {
+        self.forward_access_mask.0 | self.forward_conditional_access.0 != 0
+    }
+
+    pub(crate) fn has_reverse_edge(&self) -> bool {
+        self.reverse_access_mask.0 | self.reverse_conditional_access.0 != 0
+    }
+}
+
+/// Deduplicates temporal rule sets shared by many ways and relations.
+#[derive(Debug, Default)]
+pub(crate) struct RuleSetInterner {
+    sets: Vec<TemporalRuleSet>,
+    lookup: FxHashMap<String, u32>,
+}
+
+impl RuleSetInterner {
+    pub(crate) fn intern(&mut self, set: TemporalRuleSet) -> u32 {
+        let key = serde_json::to_string(&set).expect("rule sets serialize");
+        *self.lookup.entry(key).or_insert_with(|| {
+            self.sets.push(set);
+            (self.sets.len() - 1) as u32
+        })
+    }
+
+    /// Interns `rules` unless empty.
+    pub(crate) fn intern_rules(&mut self, rules: Vec<TemporalRule>) -> Option<u32> {
+        (!rules.is_empty()).then(|| self.intern(TemporalRuleSet { rules }))
+    }
+
+    pub(crate) fn into_sets(self) -> Vec<TemporalRuleSet> {
+        self.sets
+    }
 }
 
 /// Source-agnostic scan result consumed by the topology build. The OSM and
@@ -70,17 +115,81 @@ pub(crate) struct ObjectCounts {
     pub(crate) relations: u64,
 }
 
-pub(crate) fn scan_routable_objects(
+/// First-pass result of an OSM scan.
+struct RoutableObjects {
+    ways: Vec<PendingWay>,
+    restriction_candidates: Vec<TurnRestrictionCandidate>,
+    needed_nodes: FxHashSet<i64>,
+    traffic_signal_nodes: FxHashSet<i64>,
+    counts: ObjectCounts,
+    rule_sets: RuleSetInterner,
+}
+
+/// Classifies one routable way's tags into a pending way.
+pub(crate) fn pending_osm_way(
+    osm_way_id: i64,
+    node_ids: Vec<i64>,
+    tags: &osmpbfreader::Tags,
+    rule_sets: &mut RuleSetInterner,
+    conditionals: &mut ConditionalCounts,
+) -> Option<PendingWay> {
+    let (road_class, highway) = classify_way(tags)?;
+    if node_ids.len() < 2 {
+        return None;
+    }
+    let access = classify_way_access(tags, highway, road_class);
+    let speed_lanes = classify_speed_and_lanes(tags, road_class);
+    let (forward_speed_rules, reverse_speed_rules, speed_counts) = conditional_speed_rules(tags);
+    *conditionals += access.conditionals;
+    *conditionals += speed_counts;
+    let mut vehicle_restrictions = way_vehicle_restrictions(tags);
+    for restriction in access.vehicle_restrictions {
+        if !vehicle_restrictions.contains(&restriction) {
+            vehicle_restrictions.push(restriction);
+        }
+    }
+    let mut direction_rules = |mut rules: Vec<TemporalRule>, speed_rules: Vec<TemporalRule>| {
+        rules.extend(speed_rules);
+        rule_sets.intern_rules(rules)
+    };
+    let forward_temporal_rule_id = direction_rules(access.forward.rules, forward_speed_rules);
+    let reverse_temporal_rule_id = direction_rules(access.reverse.rules, reverse_speed_rules);
+
+    Some(PendingWay {
+        osm_way_id,
+        node_ids,
+        road_class,
+        highway,
+        duration_s: parse_duration_from_tags(tags),
+        surface: classify_surface(tags),
+        smoothness: classify_smoothness(tags),
+        forward_access_mask: access.forward.access,
+        reverse_access_mask: access.reverse.access,
+        forward_destination_only: access.forward.destination_only,
+        reverse_destination_only: access.reverse.destination_only,
+        forward_conditional_access: access.forward.conditional_access,
+        reverse_conditional_access: access.reverse.conditional_access,
+        is_toll: classify_toll(tags),
+        is_roundabout: tag(tags, "junction") == Some("roundabout"),
+        forward_extra_flags: access.forward.flags,
+        reverse_extra_flags: access.reverse.flags,
+        forward_max_speed_kph: speed_lanes.forward_max_speed_kph,
+        reverse_max_speed_kph: speed_lanes.reverse_max_speed_kph,
+        forward_lanes: speed_lanes.forward_lanes,
+        reverse_lanes: speed_lanes.reverse_lanes,
+        name: tags.get("name").map(ToString::to_string),
+        feature_row: NO_FEATURE_ROW,
+        forward_temporal_rule_id,
+        reverse_temporal_rule_id,
+        vehicle_restrictions,
+    })
+}
+
+fn scan_routable_objects(
     source_path: &Path,
     source_size_bytes: u64,
     progress: &mut impl FnMut(DatasetImportProgress),
-) -> Result<(
-    Vec<PendingWay>,
-    Vec<TurnRestrictionCandidate>,
-    FxHashSet<i64>,
-    FxHashSet<i64>,
-    ObjectCounts,
-)> {
+) -> Result<RoutableObjects> {
     let file = File::open(source_path)
         .with_context(|| format!("opening dataset source {}", source_path.display()))?;
     let bytes_read = Arc::new(AtomicU64::new(0));
@@ -88,9 +197,11 @@ pub(crate) fn scan_routable_objects(
     let mut reader = OsmPbfReader::new(counting_file);
     let mut ways = Vec::new();
     let mut restriction_candidates = Vec::new();
-    let mut node_ids = FxHashSet::default();
+    let mut needed_nodes = FxHashSet::default();
     let mut traffic_signal_nodes = FxHashSet::default();
     let mut counts = ObjectCounts::default();
+    let mut rule_sets = RuleSetInterner::default();
+    let mut conditionals = ConditionalCounts::default();
     let mut reporter = PercentReporter::starting_at_zero();
 
     emit_progress(
@@ -110,49 +221,23 @@ pub(crate) fn scan_routable_objects(
             }
             OsmObj::Way(way) => {
                 counts.ways += 1;
-                let Some((road_class, highway, access_mask)) = classify_way(&way.tags) else {
+                let Some(pending) = pending_osm_way(
+                    way.id.0,
+                    way.nodes.iter().map(|node| node.0).collect(),
+                    &way.tags,
+                    &mut rule_sets,
+                    &mut conditionals,
+                ) else {
                     continue;
                 };
-                if way.nodes.len() < 2 {
-                    continue;
-                }
-                let directional_access =
-                    classify_directional_access(&way.tags, highway, road_class, access_mask);
-                let speed_lanes = classify_speed_and_lanes(&way.tags, road_class);
-
-                let pending = PendingWay {
-                    osm_way_id: way.id.0,
-                    node_ids: way.nodes.into_iter().map(|node| node.0).collect(),
-                    road_class,
-                    highway,
-                    duration_s: parse_duration_from_tags(&way.tags),
-                    surface: classify_surface(&way.tags),
-                    smoothness: classify_smoothness(&way.tags),
-                    forward_access_mask: directional_access.forward_access,
-                    reverse_access_mask: directional_access.reverse_access,
-                    is_toll: classify_toll(&way.tags),
-                    is_roundabout: tag(&way.tags, "junction") == Some("roundabout"),
-                    forward_extra_flags: directional_access.forward_flags,
-                    reverse_extra_flags: directional_access.reverse_flags,
-                    forward_max_speed_kph: speed_lanes.forward_max_speed_kph,
-                    reverse_max_speed_kph: speed_lanes.reverse_max_speed_kph,
-                    forward_lanes: speed_lanes.forward_lanes,
-                    reverse_lanes: speed_lanes.reverse_lanes,
-                    name: way.tags.get("name").map(ToString::to_string),
-                    feature_row: NO_FEATURE_ROW,
-                    temporal_rule_id: None,
-                };
-
-                for node_id in &pending.node_ids {
-                    node_ids.insert(*node_id);
-                }
+                needed_nodes.extend(pending.node_ids.iter().copied());
                 ways.push(pending);
             }
             OsmObj::Relation(relation) => {
                 counts.relations += 1;
-                if let Some(candidate) = parse_turn_restriction_relation(&relation) {
+                for candidate in parse_turn_restriction_relation(&relation, &mut rule_sets) {
                     if let ViaSpec::Node(via_node_id) = candidate.via {
-                        node_ids.insert(via_node_id);
+                        needed_nodes.insert(via_node_id);
                     }
                     restriction_candidates.push(candidate);
                 }
@@ -180,19 +265,23 @@ pub(crate) fn scan_routable_objects(
         DatasetImportStage::ScanRoutableObjects,
         Some(100.0),
         format!(
-            "Scanning routable OSM objects 100% ({} ways kept, {} restrictions)",
+            "Scanning routable OSM objects 100% ({} ways kept, {} restrictions, {} conditional \
+             tags imported, {} skipped as unsupported)",
             ways.len(),
-            restriction_candidates.len()
+            restriction_candidates.len(),
+            conditionals.imported,
+            conditionals.skipped
         ),
     );
 
-    Ok((
+    Ok(RoutableObjects {
         ways,
         restriction_candidates,
-        node_ids,
+        needed_nodes,
         traffic_signal_nodes,
         counts,
-    ))
+        rule_sets,
+    })
 }
 
 pub(crate) fn load_node_coords(
@@ -264,16 +353,20 @@ pub(crate) fn scan_osm(
     source_size_bytes: u64,
     progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<ScanOutput> {
-    let (pending_ways, restriction_candidates, needed_nodes, traffic_signal_nodes, counts) =
-        scan_routable_objects(source_path, source_size_bytes, progress)?;
-    let node_coords = load_node_coords(source_path, source_size_bytes, &needed_nodes, progress)?;
+    let objects = scan_routable_objects(source_path, source_size_bytes, progress)?;
+    let node_coords = load_node_coords(
+        source_path,
+        source_size_bytes,
+        &objects.needed_nodes,
+        progress,
+    )?;
     Ok(ScanOutput {
-        pending_ways,
-        restriction_candidates,
+        pending_ways: objects.ways,
+        restriction_candidates: objects.restriction_candidates,
         node_coords,
-        traffic_signal_nodes,
-        counts,
+        traffic_signal_nodes: objects.traffic_signal_nodes,
+        counts: objects.counts,
         feature_attributes: Default::default(),
-        temporal_rule_sets: Vec::new(),
+        temporal_rule_sets: objects.rule_sets.into_sets(),
     })
 }

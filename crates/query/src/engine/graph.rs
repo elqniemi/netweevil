@@ -1,10 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use netweevil_core::{
-    CompiledProfileBundle, DatasetAccelerationBundle, EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION,
-    TopologyBundle,
-};
+use netweevil_core::{CompiledProfileBundle, DatasetAccelerationBundle, TopologyBundle};
 
 use crate::*;
 
@@ -412,11 +409,14 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
     let mut in_degree = vec![0_u32; topology.nodes.len()];
     let mut edge_costs = vec![f64::INFINITY; edge_count];
 
+    let mode_bit = metrics.mode.access_bit();
     for edge_index in 0..edge_count {
         let edge = topology.routing_edge(edge_index);
         let metric = &metrics.edge_metrics[edge_index];
-        if edge.flags & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION != 0
-            && !options.include_temporal_materialized_directions
+        // Scenario-materialized directions and edges the mode may use only
+        // under a time condition belong to time-dependent searches alone.
+        if !options.include_temporal_materialized_directions
+            && !netweevil_profile::is_statically_usable(topology, edge_index, mode_bit)
         {
             continue;
         }
@@ -471,14 +471,11 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
         }
     }
 
-    let mode_bit = metrics.mode.access_bit();
     let mut pairwise_forbidden = Vec::<(u32, u32)>::new();
     let mut restricted_sequences = Vec::new();
-    for restriction in topology
-        .turn_restrictions
-        .iter()
-        .filter(|restriction| restriction.mode_mask.contains(mode_bit))
-    {
+    for restriction in topology.turn_restrictions.iter().filter(|restriction| {
+        restriction.mode_mask.contains(mode_bit) && restriction.applies_statically()
+    }) {
         if restriction.edge_path.len() < 2 {
             continue;
         }

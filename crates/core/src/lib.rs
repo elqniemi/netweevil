@@ -13,6 +13,7 @@ pub mod geo;
 pub mod graph;
 pub mod metrics;
 pub mod temporal;
+pub mod vehicle;
 
 pub use acceleration::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, AccelerationBundleStats, CCH_ALGORITHM,
@@ -32,16 +33,21 @@ pub use graph::{
     EdgePresentation, EdgeProfileAttributes, HighwayClass, NodeId, NodeSpatialIndex, RoadClass,
     RoutingEdge, SmoothnessClass, SpatialIndexCell, SurfaceClass, TOPOLOGY_BUNDLE_SCHEMA_VERSION,
     TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyEdgeLayers, TopologyNode,
-    TurnRestriction, TurnRestrictionKind,
+    TurnRestriction, TurnRestrictionCondition, TurnRestrictionKind,
 };
 pub use metrics::{
     CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, CCH_WEIGHT_SCALE,
     COMPILED_ACCELERATION_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
-    CompiledTemporalProfile, CompiledTurnCostConfig, add_cch_weights, decode_cch_weight,
-    encode_cch_weight,
+    CompiledTemporalProfile, CompiledTemporalRules, CompiledTurnCostConfig, add_cch_weights,
+    decode_cch_weight, encode_cch_weight,
 };
 pub use temporal::{
-    EVERY_DAY, FRIDAY, MONDAY, MinuteInterval, PUBLIC_HOLIDAY, SATURDAY, SUNDAY, THURSDAY, TUESDAY,
-    TemporalEffect, TemporalRule, TemporalRuleSet, WEDNESDAY,
+    ALL_WEEKDAYS, CalendarDate, DateRange, EVERY_DAY, FRIDAY, MONDAY, MinuteInterval,
+    PUBLIC_HOLIDAY, SATURDAY, SUNDAY, THURSDAY, TUESDAY, TemporalEffect, TemporalRule,
+    TemporalRuleSet, WEDNESDAY,
+};
+pub use vehicle::{
+    AdrTunnelCategory, VehicleParams, VehicleRestriction, VehicleRestrictionKind,
+    VehicleRestrictionTable,
 };

@@ -5,6 +5,7 @@ use netweevil_core::{
     ConnectedComponentKind, ConnectedComponentsMeta, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
     EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId, EdgeNameBundle, NodeId,
     TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle, TopologyBundleMeta, TopologyNode,
+    VehicleRestriction, VehicleRestrictionTable,
 };
 use std::collections::BTreeMap;
 
@@ -79,6 +80,9 @@ pub(crate) fn build_topology_from_scan(
 
     let mut edges = Vec::new();
     let mut edge_highways = Vec::new();
+    // (destination-only, conditional access) per edge.
+    let mut edge_masks = Vec::new();
+    let mut vehicle_restrictions = VehicleRestrictionTableBuilder::default();
     let mut skipped_way_count = 0_u64;
     let mut build_reporter = PercentReporter::starting_at_zero();
     for (way_index, way) in pending_ways.iter().enumerate() {
@@ -135,7 +139,9 @@ pub(crate) fn build_topology_from_scan(
                 reverse_flags |= EDGE_FLAG_TARGET_TRAFFIC_SIGNAL;
             }
 
-            if way.forward_access_mask.0 != 0 {
+            if way.has_forward_edge() {
+                edge_masks.push((way.forward_destination_only, way.forward_conditional_access));
+                vehicle_restrictions.add_edge(edges.len(), &way.vehicle_restrictions);
                 edges.push(DirectedEdge {
                     edge_id: EdgeId(edges.len() as u32),
                     from: from_id,
@@ -146,7 +152,7 @@ pub(crate) fn build_topology_from_scan(
                     descent_m,
                     feature_row: way.feature_row,
                     source_direction: 1,
-                    temporal_rule_id: way.temporal_rule_id,
+                    temporal_rule_id: way.forward_temporal_rule_id,
                     duration_s,
                     road_class: way.road_class,
                     surface: way.surface,
@@ -163,7 +169,9 @@ pub(crate) fn build_topology_from_scan(
                 edge_highways.push(way.highway);
             }
 
-            if way.reverse_access_mask.0 != 0 {
+            if way.has_reverse_edge() {
+                edge_masks.push((way.reverse_destination_only, way.reverse_conditional_access));
+                vehicle_restrictions.add_edge(edges.len(), &way.vehicle_restrictions);
                 edges.push(DirectedEdge {
                     edge_id: EdgeId(edges.len() as u32),
                     from: to_id,
@@ -174,7 +182,7 @@ pub(crate) fn build_topology_from_scan(
                     descent_m: ascent_m,
                     feature_row: way.feature_row,
                     source_direction: -1,
-                    temporal_rule_id: way.temporal_rule_id,
+                    temporal_rule_id: way.reverse_temporal_rule_id,
                     duration_s,
                     road_class: way.road_class,
                     surface: way.surface,
@@ -240,9 +248,17 @@ pub(crate) fn build_topology_from_scan(
     let components = label_weak_components(nodes.len(), &edges);
 
     let mut edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges);
-    for (profile, highway) in edge_layers.profile.iter_mut().zip(edge_highways) {
+    for ((profile, highway), (destination_only, conditional_access)) in edge_layers
+        .profile
+        .iter_mut()
+        .zip(edge_highways)
+        .zip(edge_masks)
+    {
         profile.highway = highway;
+        profile.destination_only = destination_only;
+        profile.conditional_access = conditional_access;
     }
+    edge_layers.vehicle_restrictions = vehicle_restrictions.finish();
     let bundle = TopologyBundle {
         schema_version: TOPOLOGY_BUNDLE_SCHEMA_VERSION,
         source_path: source_path.display().to_string(),
@@ -276,6 +292,32 @@ pub(crate) fn build_topology_from_scan(
         skipped_way_count,
     };
     Ok((bundle, edge_name_bundle, meta))
+}
+
+/// Interns way-level restrictions into the sparse per-edge table. Edges are
+/// added in index order, so rows stay sorted.
+#[derive(Default)]
+pub(crate) struct VehicleRestrictionTableBuilder {
+    table: VehicleRestrictionTable,
+    ids: FxHashMap<VehicleRestriction, u32>,
+}
+
+impl VehicleRestrictionTableBuilder {
+    pub(crate) fn add_edge(&mut self, edge_index: usize, restrictions: &[VehicleRestriction]) {
+        for restriction in restrictions {
+            let next_id = self.table.restrictions.len() as u32;
+            let id = *self.ids.entry(*restriction).or_insert_with(|| {
+                self.table.restrictions.push(*restriction);
+                next_id
+            });
+            self.table.edges.push(edge_index as u32);
+            self.table.edge_restrictions.push(id);
+        }
+    }
+
+    pub(crate) fn finish(self) -> VehicleRestrictionTable {
+        self.table
+    }
 }
 
 pub(crate) fn build_edge_based_topology(

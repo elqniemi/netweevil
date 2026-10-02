@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result, bail};
-use netweevil_core::TravelMode;
+use netweevil_core::{TravelMode, VehicleParams};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 // Bump when compilation semantics change without a profile YAML or bundle
 // layout change. This also invalidates transfer tables tied to profile hashes.
-const COST_MODEL_REVISION: &[u8] = b"netweevil-profile-cost-v2\0";
+const COST_MODEL_REVISION: &[u8] = b"netweevil-profile-cost-v3\0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProfileDocument {
@@ -47,6 +47,11 @@ pub struct ProfileDocument {
     pub ferry: FerryConfig,
     #[serde(default)]
     pub preferences: PreferencesConfig,
+    /// Physical vehicle parameters. Edges whose height, weight, hazmat or
+    /// similar restrictions the vehicle violates are excluded at compile
+    /// time; requests may override individual fields.
+    #[serde(default)]
+    pub vehicle: Option<VehicleParams>,
     #[serde(default)]
     pub returns: ReturnConfig,
 }
@@ -100,6 +105,13 @@ impl ProfileDocument {
         }
         if !self.temporal.max_wait_s.is_finite() || self.temporal.max_wait_s < 0.0 {
             bail!("temporal.max_wait_s must be finite and non-negative");
+        }
+        let destination_only_penalty_s = self.preferences.destination_only_penalty_s;
+        if !destination_only_penalty_s.is_finite() || destination_only_penalty_s < 0.0 {
+            bail!("preferences.destination_only_penalty_s must be finite and non-negative");
+        }
+        if let Some(vehicle) = &self.vehicle {
+            vehicle.validate().map_err(anyhow::Error::msg)?;
         }
         Ok(())
     }
@@ -570,7 +582,7 @@ fn default_ferry_speed() -> f64 {
     20.0
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PreferencesConfig {
     #[serde(default = "default_pref")]
     pub use_highways: f64,
@@ -580,10 +592,35 @@ pub struct PreferencesConfig {
     pub use_tracks: f64,
     #[serde(default)]
     pub service_penalty_s: f64,
+    /// Generalized-cost seconds charged when a route enters an edge whose
+    /// access is destination-only for the profile's mode (`destination`,
+    /// `delivery`, `customers`) from one that is not. Routes that start or
+    /// end inside such an area pay it at most once per entry, so through
+    /// traffic avoids it while local access stays possible.
+    #[serde(default = "default_destination_only_penalty_s")]
+    pub destination_only_penalty_s: f64,
 }
 
 fn default_pref() -> f64 {
     0.5
+}
+
+fn default_destination_only_penalty_s() -> f64 {
+    600.0
+}
+
+impl Default for PreferencesConfig {
+    /// Used when a profile omits `preferences` entirely; the zero
+    /// preferences match the previously derived default.
+    fn default() -> Self {
+        Self {
+            use_highways: 0.0,
+            use_tolls: 0.0,
+            use_tracks: 0.0,
+            service_penalty_s: 0.0,
+            destination_only_penalty_s: default_destination_only_penalty_s(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

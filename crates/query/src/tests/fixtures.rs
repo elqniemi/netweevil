@@ -111,6 +111,7 @@ pub(super) fn with_no_turn(
         kind: TurnRestrictionKind::NoTurn,
         edge_path: edge_path.iter().copied().map(EdgeId).collect(),
         mode_mask: AccessMask::new(AccessMask::CAR),
+        condition: None,
     }];
     topology
 }

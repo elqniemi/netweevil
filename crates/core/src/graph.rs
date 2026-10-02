@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{FeatureAttributeTable, NO_FEATURE_ROW, TemporalRuleSet};
+use crate::{FeatureAttributeTable, NO_FEATURE_ROW, TemporalRuleSet, VehicleRestrictionTable};
 
 /// Schema version of [`TopologyBundle`]. Readers accept this value only.
-pub const TOPOLOGY_BUNDLE_SCHEMA_VERSION: u32 = 13;
+pub const TOPOLOGY_BUNDLE_SCHEMA_VERSION: u32 = 14;
 
 pub const EDGE_FLAG_ROUNDABOUT: u32 = 1 << 0;
 pub const EDGE_FLAG_TARGET_TRAFFIC_SIGNAL: u32 = 1 << 1;
@@ -65,6 +65,8 @@ pub enum HighwayClass {
     Pedestrian,
     Steps,
     Bridleway,
+    /// `highway=busway`: a road reserved for buses.
+    Busway,
     Ferry,
     #[default]
     Unknown,
@@ -79,7 +81,7 @@ impl HighwayClass {
             Self::Secondary | Self::SecondaryLink => RoadClass::Secondary,
             Self::Tertiary | Self::TertiaryLink => RoadClass::Tertiary,
             Self::Residential | Self::Unclassified | Self::LivingStreet => RoadClass::Residential,
-            Self::Service => RoadClass::Service,
+            Self::Service | Self::Busway => RoadClass::Service,
             Self::Track => RoadClass::Track,
             Self::Path
             | Self::Cycleway
@@ -123,15 +125,26 @@ pub enum SurfaceClass {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct AccessMask(pub u16);
 
 impl AccessMask {
     pub const CAR: u16 = 1 << 0;
     pub const BICYCLE: u16 = 1 << 1;
     pub const FOOT: u16 = 1 << 2;
-    pub const TRANSIT: u16 = 1 << 3;
+    /// Buses (`bus`, and `psv` together with [`Self::TAXI`]).
+    pub const BUS: u16 = 1 << 3;
     pub const HGV: u16 = 1 << 4;
+    pub const TAXI: u16 = 1 << 5;
+    pub const MOTORCYCLE: u16 = 1 << 6;
+    /// Mopeds and motor scooters (`moped`).
+    pub const MOPED: u16 = 1 << 7;
+    /// Every motorized mode (`motor_vehicle`).
+    pub const MOTOR_VEHICLES: u16 =
+        Self::CAR | Self::BUS | Self::HGV | Self::TAXI | Self::MOTORCYCLE | Self::MOPED;
+    /// Every vehicle (`vehicle`): motorized modes and bicycles.
+    pub const VEHICLES: u16 = Self::MOTOR_VEHICLES | Self::BICYCLE;
+    pub const ALL: u16 = Self::VEHICLES | Self::FOOT;
 
     pub const fn new(bits: u16) -> Self {
         Self(bits)
@@ -139,6 +152,10 @@ impl AccessMask {
 
     pub const fn contains(self, bit: u16) -> bool {
         self.0 & bit != 0
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
     }
 }
 
@@ -242,7 +259,17 @@ pub struct EdgeProfileAttributes {
     pub highway: HighwayClass,
     pub surface: SurfaceClass,
     pub smoothness: SmoothnessClass,
+    /// Modes allowed by the unconditional source tags.
     pub access_mask: AccessMask,
+    /// Subset of `access_mask` whose access is limited to traffic with a
+    /// destination on the edge (`destination`, `delivery`, `customers`).
+    /// Profiles charge entering such an edge from one that is not.
+    pub destination_only: AccessMask,
+    /// Modes the unconditional tags deny but a time condition allows
+    /// (`motor_vehicle=no` + `motor_vehicle:conditional=yes @ (...)`).
+    /// Static routing excludes them; time-dependent routing evaluates the
+    /// edge's temporal rules.
+    pub conditional_access: AccessMask,
     pub is_toll: bool,
     pub max_speed_kph: Option<f32>,
     pub lanes: Option<u8>,
@@ -263,6 +290,10 @@ pub struct TopologyEdgeLayers {
     pub routing: Vec<RoutingEdge>,
     pub profile: Vec<EdgeProfileAttributes>,
     pub presentation: Vec<EdgePresentation>,
+    /// Sparse physical restrictions (height, weight, hazmat, ...) indexed
+    /// by edge.
+    #[serde(default)]
+    pub vehicle_restrictions: VehicleRestrictionTable,
 }
 
 impl TopologyEdgeLayers {
@@ -272,6 +303,7 @@ impl TopologyEdgeLayers {
             routing: Vec::with_capacity(edges.len()),
             profile: Vec::with_capacity(edges.len()),
             presentation: Vec::with_capacity(edges.len()),
+            vehicle_restrictions: VehicleRestrictionTable::default(),
         };
         for edge in edges {
             layers.push_directed_edge(edge);
@@ -301,6 +333,8 @@ impl TopologyEdgeLayers {
             surface: edge.surface,
             smoothness: edge.smoothness,
             access_mask: edge.access_mask,
+            destination_only: AccessMask::default(),
+            conditional_access: AccessMask::default(),
             is_toll: edge.is_toll,
             max_speed_kph: edge.max_speed_kph,
             lanes: edge.lanes,
@@ -326,6 +360,29 @@ pub struct TurnRestriction {
     pub kind: TurnRestrictionKind,
     pub edge_path: Vec<EdgeId>,
     pub mode_mask: AccessMask,
+    /// Time condition (`restriction:conditional`). `None` means the
+    /// restriction always applies.
+    pub condition: Option<TurnRestrictionCondition>,
+}
+
+/// A time-dependent turn restriction. The restriction is in force while
+/// its rule set evaluates *unavailable* (a `closed` rule is active, or no
+/// `open_only` rule is), mirroring edge schedules.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct TurnRestrictionCondition {
+    /// Index into [`TopologyBundle::temporal_rule_sets`].
+    pub rule_set_id: u32,
+    /// Whether static (time-independent) routing applies the restriction:
+    /// true when the unconditional `restriction` tag carries it and the
+    /// condition only lifts it, false for a `restriction:conditional` alone.
+    pub applies_statically: bool,
+}
+
+impl TurnRestriction {
+    pub fn applies_statically(&self) -> bool {
+        self.condition
+            .is_none_or(|condition| condition.applies_statically)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

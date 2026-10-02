@@ -5,6 +5,10 @@ use netweevil_core::{
 };
 use serde::Deserialize;
 
+mod osm;
+
+pub(crate) use osm::{parse_osm_time_domain, strip_outer_parens};
+
 #[derive(Debug, Deserialize)]
 struct SourceInterval {
     day_code: String,
@@ -38,14 +42,14 @@ pub fn parse_access_schedule(details: &str, polarity: &str) -> Result<TemporalRu
             .with_context(|| format!("parsing access schedule item {index} from_time"))?;
         let end_minute = parse_hhmm(&interval.to_time, true)
             .with_context(|| format!("parsing access schedule item {index} to_time"))?;
-        rules.push(TemporalRule {
+        rules.push(TemporalRule::new(
             day_mask,
-            intervals: vec![MinuteInterval {
+            vec![MinuteInterval {
                 start_minute,
                 end_minute,
             }],
             effect,
-        });
+        ));
     }
     Ok(TemporalRuleSet { rules })
 }

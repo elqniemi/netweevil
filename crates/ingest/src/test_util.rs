@@ -19,6 +19,10 @@ pub(crate) fn pending_way(osm_way_id: i64, node_ids: &[i64]) -> PendingWay {
         smoothness: Default::default(),
         forward_access_mask: AccessMask::new(AccessMask::CAR),
         reverse_access_mask: AccessMask::new(AccessMask::CAR),
+        forward_destination_only: AccessMask::default(),
+        reverse_destination_only: AccessMask::default(),
+        forward_conditional_access: AccessMask::default(),
+        reverse_conditional_access: AccessMask::default(),
         is_toll: false,
         is_roundabout: false,
         forward_extra_flags: 0,
@@ -29,8 +33,15 @@ pub(crate) fn pending_way(osm_way_id: i64, node_ids: &[i64]) -> PendingWay {
         reverse_lanes: None,
         name: None,
         feature_row: NO_FEATURE_ROW,
-        temporal_rule_id: None,
+        forward_temporal_rule_id: None,
+        reverse_temporal_rule_id: None,
+        vehicle_restrictions: Vec::new(),
     }
+}
+
+/// OSM tags from `(key, value)` pairs.
+pub(crate) fn tags(pairs: &[(&str, &str)]) -> osmpbfreader::Tags {
+    osmpbfreader::Tags::from_iter(pairs.iter().map(|&(key, value)| (key.into(), value.into())))
 }
 
 pub(crate) fn edge(edge_id: u32, from: u32, to: u32, source_way_id: i64) -> DirectedEdge {

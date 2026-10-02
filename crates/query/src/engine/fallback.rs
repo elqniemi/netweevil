@@ -247,7 +247,9 @@ pub(crate) fn customize_failure_mode_acceleration(
 ) -> Option<netweevil_core::CompiledAcceleration> {
     let mode_bit = metrics.mode.access_bit();
     if topology.turn_restrictions.iter().any(|restriction| {
-        restriction.mode_mask.contains(mode_bit) && restriction.edge_path.len() > 2
+        restriction.mode_mask.contains(mode_bit)
+            && restriction.applies_statically()
+            && restriction.edge_path.len() > 2
     }) {
         return None;
     }

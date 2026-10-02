@@ -57,14 +57,14 @@ fn pareto(component: &str, max_labels_per_state: usize) -> ParetoRouteOptions {
 }
 
 fn open_only(start_minute: u16, end_minute: u16) -> TemporalRule {
-    TemporalRule {
-        day_mask: netweevil_core::EVERY_DAY,
-        intervals: vec![MinuteInterval {
+    TemporalRule::new(
+        netweevil_core::EVERY_DAY,
+        vec![MinuteInterval {
             start_minute,
             end_minute,
         }],
-        effect: TemporalEffect::OpenOnly,
-    }
+        TemporalEffect::OpenOnly,
+    )
 }
 
 fn weighted_point(id: &str, lon: f64, lat: f64, weight: f64) -> WeightedPoint {
@@ -174,11 +174,11 @@ fn component_search_errors_instead_of_pruning_a_nondominated_label() {
 fn temporal_reachability_prepass_returns_unreachable_before_tradeoff_overflow() {
     let (mut topology, mut metrics) = component_label_overflow_fixture();
     topology.temporal_rule_sets = vec![TemporalRuleSet {
-        rules: vec![TemporalRule {
-            day_mask: netweevil_core::EVERY_DAY,
-            intervals: Vec::new(),
-            effect: TemporalEffect::Closed,
-        }],
+        rules: vec![TemporalRule::new(
+            netweevil_core::EVERY_DAY,
+            Vec::new(),
+            TemporalEffect::Closed,
+        )],
     }];
     topology.edge_layers.routing[5].temporal_rule_id = Some(0);
     for (index, (travel_time_s, generalized_cost)) in [
