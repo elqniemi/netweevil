@@ -50,8 +50,10 @@ Profile acceleration stores three `u32` metrics per directed arc, 12 bytes total
 
 ## Final bundle sizes and routing checks
 
-The routing cache uses `NWSECB05`. Car, cycling and pedestrian profiles are
-recompiled against the final hierarchy.
+The measurements in this section used `NWSECB05`; see
+[Compact bundle format](#compact-bundle-format-nwsecb06) for the current
+format. Car, cycling and pedestrian profiles are recompiled against the
+final hierarchy.
 
 | Bundle | Bytes | MiB |
 | --- | ---: | ---: |
@@ -165,3 +167,67 @@ netweevil bench compare \
   --baseline .netweevil/reports/performance-2026-09-07/netweevil-http-c1.json \
   --candidate .netweevil/reports/performance-2026-09-07/osrm-http-c1.json
 ```
+
+## Compact bundle format (NWSECB06)
+
+`NWSECB06` replaced `NWSECB05` after the measurements above; North
+Netherlands has not been re-measured. The format changes:
+
+- Topology and CCH columns use lossless encodings: constants, identity
+  sequences, zigzag-delta and plain varints, OSM coordinates as 1e-7 degree
+  fixed-point deltas (only when every value decodes to the identical `f64`),
+  and interned edge-attribute records. The edge-transition CSR, node grid,
+  edge component ids and CCH ranks are rebuilt at load when the writer
+  verified that the rebuild is identical.
+- Sections of at least 64 KiB are deflated in independent 1 MiB chunks when
+  that saves a tenth of their size; sections decode concurrently.
+- Profile bundles store per-edge metrics only. Engines customize the
+  generalized-cost CCH weights at load, in parallel over elimination
+  subtrees, and the travel-time and distance weights on the first PHAST
+  service area (see the [CCH design](cch-design.md)).
+
+Groningen routing extract (`datasets/groningen-260508-routing.osm.pbf`,
+1,035,995 directed edges, 7,736,816 hierarchy arcs), car profile
+`examples/profiles/car_research_v1.yml`:
+
+| Bundle | `NWSECB05` bytes | `NWSECB06` bytes |
+| --- | ---: | ---: |
+| Topology | 128,536,317 | 6,210,468 |
+| Shared acceleration | 47,523,376 | 8,589,405 |
+| Car profile | 113,562,108 | 552,182 |
+
+Hong Kong 3D pedestrian network (GeoPackage, 3,127,912 directed edges,
+17,970,194 arcs, `pedestrian_multilayer` profile with four cost components):
+topology 510,303,857 to 50,308,562 bytes, acceleration 121,927,567 to
+16,748,731 bytes, profile 353,271,148 to 38,393,292 bytes.
+
+Measured on a shared 10-core Apple M1 Max with other builds running, so
+timings are interleaved A/B runs with noticeable noise. All 25 routes of
+`examples/perf/groningen_routes.csv` return identical duration, distance and
+generalized cost from both formats with the accelerated and the exact
+engine, and Groningen car and pedestrian service-area responses are
+byte-identical.
+
+| Groningen | `NWSECB05` | `NWSECB06` |
+| --- | ---: | ---: |
+| `bench run` engine load, accelerated | 0.50 to 0.70 s | 0.63 to 0.72 s |
+| `bench run` engine load, exact | 0.73 s | 0.47 s |
+| `bench run` peak RSS | 731 to 742 MB | 694 to 698 MB |
+| Route p50 / p95, 20 corpus passes | 1.28 to 1.41 / 1.96 to 5.92 ms | 1.26 to 1.35 / 1.98 to 2.16 ms |
+| `api serve` ready, car | 0.96 to 1.45 s | 0.71 to 0.91 s |
+| `api serve` idle RSS, car | 670 to 673 MB | 614 to 628 MB |
+| `api serve` idle RSS, pedestrian | 579 to 582 MB | 502 to 532 MB |
+| `profile compile`, car | 0.55 to 0.82 s, 460 MB | 0.23 to 0.30 s, 376 to 404 MB |
+
+Accelerated engine load pays for decoding (about 60 to 80 ms more than
+copying raw arrays) and cost customization (about 105 ms with 8 to 10
+threads, 192 ms with one). Persisting the cost weights instead would add
+about 7.9 MB per Groningen profile after deflate to save roughly 80 ms. The
+older API also recompiled and rewrote the profile on every start because its
+cache check compared against a stale acceleration schema; that accounts for
+most of the `api serve` difference. The first PHAST service area per metric
+customizes its weights, about 0.2 to 0.4 s on Groningen pedestrian under
+load; the car profile never needs them because via-way restrictions keep its
+service areas on the exact search. `cache prune` removes superseded and
+stale compiles and unreferenced bundle files.
+

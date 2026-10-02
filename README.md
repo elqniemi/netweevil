@@ -327,12 +327,12 @@ All CLI and API state is under `.netweevil/` in the current workspace:
 - `.netweevil/bundles/topology`: topology bundles
 - `.netweevil/bundles/names`: cold edge-name bundles
 - `.netweevil/bundles/acceleration`: dataset acceleration bundles
-- `.netweevil/bundles/metrics`: compiled profile metric bundles
+- `.netweevil/bundles/metrics`: compiled profile metric bundles (per-edge metrics only; CCH weights are customized when an engine loads the profile)
 - `.netweevil/bundles/transit`: transit bundles
 - `.netweevil/runs`: route, OD, matrix, service-area, experiment, and simulation outputs
 - `.netweevil/reports`: rendered reports
 
-Imports write `.bin` bundles in the sectioned format; a bundle from another format is rejected with a re-import message.
+Imports write `.bin` bundles in the compact sectioned format (`NWSECB06`: lossless column encodings plus deflate); a bundle from another format is rejected with a re-import message. Every profile edit compiles a new metric bundle; `cache prune` removes superseded and stale compiles and any bundle file no manifest references (`--dry-run` lists them first).
 
 ## CLI Commands
 
@@ -353,7 +353,7 @@ Top-level commands:
 - `experiment run`
 - `simulate validate|run`
 - `report render`
-- `cache list`
+- `cache list|prune`
 - `api serve`
 - `bootstrap` (API plus web console in setup mode, for new workspaces)
 
@@ -361,6 +361,7 @@ Useful local examples:
 
 ```bash
 cargo run -p netweevil-cli -- cache list
+cargo run -p netweevil-cli -- cache prune --dry-run
 
 cargo run -p netweevil-cli -- analyze od \
   --dataset groningen_2026_05 \
