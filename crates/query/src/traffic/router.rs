@@ -562,7 +562,7 @@ impl TrafficRouter {
             mut selection,
         } = self.prepare(departure, use_live)?;
         let mut static_request = request.clone();
-        static_request.temporal = TemporalRequestOptions::default();
+        static_request.temporal = static_options(&request.temporal);
         if !request_returns_detailed_path(&static_request.returns) {
             static_request.returns.geometry = ReturnGeometry::Full;
         }
@@ -655,10 +655,15 @@ impl TrafficRouter {
         let live_version = snapshot.as_ref().map_or(0, |live| live.version);
         let context =
             context_from_request(&request.temporal)?.with_traffic(self.temporal_traffic(snapshot));
-        let (graph, _) = self.base.routing_graph_for_mode(EngineMode::Auto);
+        // Avoid areas remove edges from the metric the exact search uses.
+        let avoided = self
+            .base
+            .avoid_target(&request.temporal.avoid, EngineMode::Auto)?;
+        let engine = avoided.as_ref().unwrap_or(&self.base);
+        let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
         let mut result = execute_temporal_route_with_graph(
-            self.base.topology(),
-            self.base.metrics(),
+            engine.topology(),
+            engine.metrics(),
             graph,
             request,
             &context,
@@ -726,7 +731,7 @@ impl TrafficRouter {
             return Ok(None);
         };
         let mut document = document.clone();
-        document.temporal = TemporalRequestOptions::default();
+        document.temporal = static_options(&document.temporal);
         let mut result = prepared.engine.execute_od(&document)?;
         result.departure_time = prepared.selection.departure_time.clone();
         Ok(Some((result, prepared.selection)))
@@ -747,8 +752,8 @@ impl TrafficRouter {
             return Ok(None);
         };
         let (mut origins, mut destinations) = (origins.clone(), destinations.clone());
-        origins.temporal = TemporalRequestOptions::default();
-        destinations.temporal = TemporalRequestOptions::default();
+        origins.temporal = static_options(&origins.temporal);
+        destinations.temporal = static_options(&destinations.temporal);
         let mut result = prepared.engine.execute_matrix(&origins, &destinations)?;
         result.departure_time = prepared.selection.departure_time.clone();
         result.warnings.push(BUCKET_BATCH_WARNING.to_string());
@@ -764,11 +769,20 @@ impl TrafficRouter {
             return Ok(None);
         };
         let mut request = request.clone();
-        request.temporal = TemporalRequestOptions::default();
+        request.temporal = static_options(&request.temporal);
         let mut result = prepared.engine.execute_service_area(&request)?;
         result.departure_time = prepared.selection.departure_time.clone();
         result.warnings.push(BUCKET_BATCH_WARNING.to_string());
         Ok(Some((result, prepared.selection)))
+    }
+}
+
+/// Static options for a departure-bucket engine: timing is baked into the
+/// metric, request-owned avoid areas still apply.
+fn static_options(temporal: &TemporalRequestOptions) -> TemporalRequestOptions {
+    TemporalRequestOptions {
+        avoid: temporal.avoid.clone(),
+        ..TemporalRequestOptions::default()
     }
 }
 

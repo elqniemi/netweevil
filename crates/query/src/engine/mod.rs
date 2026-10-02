@@ -150,6 +150,9 @@ impl PreparedRoutingEngine {
             metrics,
             default_routing_graph,
             ignore_multi_edge_restrictions_graph: None,
+            avoid_engines: AvoidEngineCache::default(),
+            avoid_applied: false,
+            avoid_index: std::sync::OnceLock::new(),
         })
     }
 
