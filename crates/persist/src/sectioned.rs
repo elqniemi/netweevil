@@ -16,8 +16,8 @@ compile_error!("the sectioned bundle format stores raw little-endian arrays");
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{BufWriter, Read, Write};
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -226,12 +226,7 @@ impl SectionWriter {
     }
 
     fn finish(self, path: &Path) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("creating directory {}", parent.display()))?;
-        }
-        let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-        self.finish_into(&mut BufWriter::new(file))
+        crate::write_atomically(path, |writer| self.finish_into(writer))
     }
 }
 
@@ -666,6 +661,166 @@ pub(crate) fn read_compiled_profile_sectioned(
                 distance_downward_weight: Vec::new(),
             }),
         edge_metrics,
+    })
+}
+
+// --- Source snapshot bundle -------------------------------------------------
+
+#[derive(Serialize, Deserialize)]
+struct SourceSnapshotHeader {
+    schema_version: u32,
+    source_topology_bundle_id: CacheBundleId,
+    names: Vec<String>,
+}
+
+pub(crate) fn write_source_snapshot_sectioned<W: Serialize, R: Serialize>(
+    path: &Path,
+    snapshot: &crate::SourceSnapshot<W, R>,
+) -> Result<()> {
+    let other_nodes = snapshot.other_node_ids.len();
+    ensure_len(
+        "other node longitudes",
+        snapshot.other_node_lon_e7.len(),
+        other_nodes,
+    )?;
+    ensure_len(
+        "other node latitudes",
+        snapshot.other_node_lat_e7.len(),
+        other_nodes,
+    )?;
+    let ways = snapshot.way_ids.len();
+    ensure_len("way node counts", snapshot.way_node_counts.len(), ways)?;
+    ensure_len("way names", snapshot.way_name_indexes.len(), ways)?;
+    ensure_len("way attributes", snapshot.way_attributes.len(), ways)?;
+    let node_refs = snapshot
+        .way_node_counts
+        .iter()
+        .map(|count| *count as usize)
+        .sum::<usize>();
+    ensure_len("way node ids", snapshot.way_node_ids.len(), node_refs)?;
+
+    let mut writer = SectionWriter::new();
+    writer.write_bincode(&"source_snapshot")?;
+    writer.write_bincode(&SourceSnapshotHeader {
+        schema_version: snapshot.schema_version,
+        source_topology_bundle_id: snapshot.source_topology_bundle_id.clone(),
+        names: snapshot.names.clone(),
+    })?;
+    let widen = |values: &[i32]| {
+        values
+            .iter()
+            .map(|value| i64::from(*value))
+            .collect::<Vec<_>>()
+    };
+    writer.write_i64s(&snapshot.topology_node_ids)?;
+    writer.write_i64s(&snapshot.other_node_ids)?;
+    writer.write_i64s(&widen(&snapshot.other_node_lon_e7))?;
+    writer.write_i64s(&widen(&snapshot.other_node_lat_e7))?;
+    writer.write_i64s(&snapshot.traffic_signal_node_ids)?;
+    writer.write_i64s(&snapshot.way_ids)?;
+    writer.write_u32s(&snapshot.way_node_counts)?;
+    writer.write_i64s(&snapshot.way_node_ids)?;
+    writer.write_i64s(
+        &snapshot
+            .way_name_indexes
+            .iter()
+            .map(|index| option_u32_to_i64(*index))
+            .collect::<Vec<_>>(),
+    )?;
+    // Classified way records repeat heavily across a network.
+    writer.write_interned(&snapshot.way_attributes)?;
+    writer.write_bincode(&snapshot.restrictions)?;
+    writer.write_i64s(&snapshot.other_way_ids)?;
+    writer.write_i64s(&snapshot.other_relation_ids)?;
+    writer.finish(path)
+}
+
+pub(crate) fn read_source_snapshot_sectioned<W, R>(
+    bytes: &[u8],
+    path: &Path,
+) -> Result<crate::SourceSnapshot<W, R>>
+where
+    W: DeserializeOwned + Clone,
+    R: DeserializeOwned,
+{
+    let mut reader = SectionReader::new(bytes, path)?;
+    let tag: String = reader.read_bincode()?;
+    if tag != "source_snapshot" {
+        bail!("expected a source snapshot bundle, found '{tag}'");
+    }
+    let header: SourceSnapshotHeader = reader.read_bincode()?;
+    if header.schema_version != crate::SOURCE_SNAPSHOT_SCHEMA_VERSION {
+        return Err(unsupported_format_error(path));
+    }
+    let narrow = |values: Vec<i64>| -> Result<Vec<i32>> {
+        values
+            .into_iter()
+            .map(|value| i32::try_from(value).context("source coordinate out of range"))
+            .collect()
+    };
+    let topology_node_ids = reader.read_i64s()?;
+    let other_node_ids = reader.read_i64s()?;
+    let other_node_lon_e7 = narrow(reader.read_i64s()?)?;
+    let other_node_lat_e7 = narrow(reader.read_i64s()?)?;
+    ensure_len(
+        "other node longitudes",
+        other_node_lon_e7.len(),
+        other_node_ids.len(),
+    )?;
+    ensure_len(
+        "other node latitudes",
+        other_node_lat_e7.len(),
+        other_node_ids.len(),
+    )?;
+    let traffic_signal_node_ids = reader.read_i64s()?;
+    let way_ids = reader.read_i64s()?;
+    let way_node_counts = reader.read_u32s()?;
+    let way_node_ids = reader.read_i64s()?;
+    let way_name_indexes = reader
+        .read_i64s()?
+        .into_iter()
+        .map(i64_to_option_u32)
+        .collect::<Result<Vec<_>>>()?;
+    let way_attributes: Vec<W> = reader.read_interned()?;
+    for (name, len) in [
+        ("way node counts", way_node_counts.len()),
+        ("way names", way_name_indexes.len()),
+        ("way attributes", way_attributes.len()),
+    ] {
+        ensure_len(name, len, way_ids.len())?;
+    }
+    let node_refs = way_node_counts
+        .iter()
+        .map(|count| *count as usize)
+        .sum::<usize>();
+    ensure_len("way node ids", way_node_ids.len(), node_refs)?;
+    if way_name_indexes
+        .iter()
+        .flatten()
+        .any(|index| *index as usize >= header.names.len())
+    {
+        bail!("source snapshot way name index out of range");
+    }
+    let restrictions: Vec<R> = reader.read_bincode()?;
+    let other_way_ids = reader.read_i64s()?;
+    let other_relation_ids = reader.read_i64s()?;
+    Ok(crate::SourceSnapshot {
+        schema_version: header.schema_version,
+        source_topology_bundle_id: header.source_topology_bundle_id,
+        topology_node_ids,
+        other_node_ids,
+        other_node_lon_e7,
+        other_node_lat_e7,
+        traffic_signal_node_ids,
+        way_ids,
+        way_node_counts,
+        way_node_ids,
+        way_name_indexes,
+        names: header.names,
+        way_attributes,
+        restrictions,
+        other_way_ids,
+        other_relation_ids,
     })
 }
 

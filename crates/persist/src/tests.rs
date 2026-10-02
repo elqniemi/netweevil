@@ -1,7 +1,8 @@
 use super::{
-    read_acceleration_bundle, read_compiled_profile_bundle, read_edge_name_bundle,
+    SOURCE_SNAPSHOT_SCHEMA_VERSION, SourceSnapshot, read_acceleration_bundle,
+    read_compiled_profile_bundle, read_edge_name_bundle, read_source_snapshot_bundle,
     read_topology_bundle, write_acceleration_bundle, write_compiled_profile_bundle,
-    write_edge_name_bundle, write_topology_bundle,
+    write_edge_name_bundle, write_source_snapshot_bundle, write_topology_bundle,
 };
 use netweevil_core::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, AccessMask, CCH_ALGORITHM, CCH_WEIGHT_INFINITY,
@@ -227,6 +228,36 @@ fn round_trips_acceleration_bundle_binary() {
 }
 
 #[test]
+fn round_trips_source_snapshot_and_rejects_inconsistent_columns() {
+    let mut snapshot = SourceSnapshot {
+        schema_version: SOURCE_SNAPSHOT_SCHEMA_VERSION,
+        source_topology_bundle_id: CacheBundleId::new("topology-test"),
+        topology_node_ids: vec![10, 11, 12_000_000_000],
+        other_node_ids: vec![7, 9],
+        other_node_lon_e7: vec![65_000_000, -1_799_999_999],
+        other_node_lat_e7: vec![532_000_000, 899_999_999],
+        traffic_signal_node_ids: vec![11],
+        way_ids: vec![100, 101],
+        way_node_counts: vec![2, 3],
+        way_node_ids: vec![10, 11, 11, 12_000_000_000, 10],
+        way_name_indexes: vec![Some(0), None],
+        names: vec!["Main Street".to_string()],
+        way_attributes: vec![(1_u8, Some(30.5_f32)), (1_u8, Some(30.5_f32))],
+        restrictions: vec![("no_left_turn".to_string(), 100_i64, 101_i64)],
+        other_way_ids: vec![3, 99],
+        other_relation_ids: vec![8],
+    };
+    let file = TempFile::new("source-snapshot");
+    write_source_snapshot_bundle(file.path(), &snapshot).expect("snapshot should serialize");
+    let read: SourceSnapshot<(u8, Option<f32>), (String, i64, i64)> =
+        read_source_snapshot_bundle(file.path()).expect("snapshot should deserialize");
+    assert_eq!(read, snapshot);
+
+    snapshot.way_node_counts[1] = 4;
+    assert!(write_source_snapshot_bundle(file.path(), &snapshot).is_err());
+}
+
+#[test]
 fn round_trips_compiled_profile_bundle_with_turn_costs() {
     let mut bundle = CompiledProfileBundle {
         schema_version: COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
@@ -331,6 +362,9 @@ fn prune_keeps_the_newest_compile_and_referenced_bundles() {
             acceleration_bundle: None,
             topology_meta: None,
             acceleration_stats: None,
+            source_snapshot_bundle: Some(bundle(&paths.source_bundles_dir, "source-a.bin")),
+            acceleration_ordering: None,
+            last_update: None,
         },
     )
     .expect("dataset manifest");
@@ -356,18 +390,26 @@ fn prune_keeps_the_newest_compile_and_referenced_bundles() {
         .expect("compiled manifest");
     }
     bundle(&paths.acceleration_bundles_dir, "orphan.bin");
+    bundle(&paths.source_bundles_dir, "source-superseded.bin");
 
     let preview = super::prune_bundle_cache(&paths, true).expect("dry run");
     assert_eq!(preview.compiled_manifests.len(), 1);
-    assert_eq!(preview.bundle_files.len(), 2);
+    assert_eq!(preview.bundle_files.len(), 3);
     assert!(paths.metric_bundles_dir.join("metric-old.bin").exists());
 
     let report = super::prune_bundle_cache(&paths, false).expect("prune");
-    assert_eq!(report.reclaimed_bytes(), 16);
+    assert_eq!(report.reclaimed_bytes(), 24);
     assert!(!paths.metric_bundles_dir.join("metric-old.bin").exists());
     assert!(!paths.acceleration_bundles_dir.join("orphan.bin").exists());
     assert!(paths.metric_bundles_dir.join("metric-new.bin").exists());
     assert!(paths.topology_bundles_dir.join("topology-a.bin").exists());
+    assert!(paths.source_bundles_dir.join("source-a.bin").exists());
+    assert!(
+        !paths
+            .source_bundles_dir
+            .join("source-superseded.bin")
+            .exists()
+    );
     assert_eq!(
         super::read_compiled_profile_manifests(&paths)
             .expect("manifests")

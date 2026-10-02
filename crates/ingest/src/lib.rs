@@ -10,10 +10,13 @@ mod geopackage;
 mod import;
 mod mapping;
 mod opening_hours;
+mod osm_change;
 mod overture;
 mod restrictions;
 mod scan;
+mod source;
 mod topology;
+mod update;
 mod wkb;
 
 pub use audit::{
@@ -29,6 +32,10 @@ pub use mapping::{
     GeoPackageLayerMapping, GeoPackageMapping, LayerDefaults, RetainMode, load_gpkg_mapping,
 };
 pub use opening_hours::parse_access_schedule;
+pub use update::{
+    ChangedObjects, DEFAULT_MAX_FILL_GROWTH, DatasetUpdateInput, DatasetUpdateOptions,
+    DatasetUpdateReport, ReorderPolicy, update_dataset,
+};
 
 #[cfg(test)]
 mod test_util;

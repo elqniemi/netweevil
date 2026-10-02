@@ -30,7 +30,7 @@ use crate::analyze::{
 use crate::api::{ApiCommand, BootstrapArgs, api_serve, bootstrap};
 use crate::bench::{BenchCommand, bench_compare, bench_corpus, bench_http, bench_run};
 use crate::cache::{CacheCommand, cache_list, cache_prune};
-use crate::dataset::{DatasetCommand, dataset_audit, dataset_import, dataset_list};
+use crate::dataset::{DatasetCommand, dataset_audit, dataset_import, dataset_list, dataset_update};
 use crate::experiment::{ExperimentCommand, experiment_run};
 use crate::profile::{ProfileCommand, profile_compile, profile_validate};
 use crate::report::{ReportCommand, report_render};
@@ -55,6 +55,7 @@ fn main() -> Result<()> {
         Command::Dataset { command: dataset } => match dataset {
             DatasetCommand::Import(args) => dataset_import(&paths, args),
             DatasetCommand::Audit(args) => dataset_audit(&paths, args),
+            DatasetCommand::Update(args) => dataset_update(&paths, args),
             DatasetCommand::List => dataset_list(&paths),
         },
         Command::Transit { command: transit } => match transit {
