@@ -20,8 +20,10 @@ netweevil-manifest = { path = "../manifest" }
 arrow-array.workspace = true
 arrow-json.workspace = true
 arrow-schema.workspace = true
+flate2.workspace = true
 osmpbfreader.workspace = true
 parquet.workspace = true
+quick-xml.workspace = true
 rayon.workspace = true
 rusqlite.workspace = true
 rustc-hash.workspace = true

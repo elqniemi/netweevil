@@ -7,6 +7,255 @@ use netweevil_core::{
     AccessMask, DirectedEdge, EdgeId, HighwayClass, NO_FEATURE_ROW, NodeId, RoadClass,
     SurfaceClass, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle, TopologyEdgeLayers, TopologyNode,
 };
+use osmpbfreader::OsmObj;
+
+mod osc;
+mod pbf;
+
+pub(crate) use osc::{OsmEdit, apply_edits, write_osc};
+pub(crate) use pbf::write_pbf;
+
+/// Side of [`osm_grid`] in nodes.
+pub(crate) const GRID_SIDE: i64 = 8;
+
+/// Node id of grid position `(row, col)`.
+pub(crate) fn grid_node(row: i64, col: i64) -> i64 {
+    row * GRID_SIDE + col + 1
+}
+
+/// Decimicro position of grid position `(row, col)`, about 70 by 110 m apart.
+fn grid_position(row: i64, col: i64) -> (i32, i32) {
+    (
+        65_000_000 + col as i32 * 10_000,
+        532_000_000 + row as i32 * 10_000,
+    )
+}
+
+/// An 8 by 8 street grid in OSM object form, sorted like a PBF extract:
+/// residential row ways `100 + row` and column ways `200 + col`, traffic
+/// signals at two crossings, a no-left-turn restriction (relation 500), a
+/// building (way 900 over nodes 1000 to 1003) and an unrelated relation.
+pub(crate) fn osm_grid() -> Vec<OsmObj> {
+    let mut objects = Vec::new();
+    for row in 0..GRID_SIDE {
+        for col in 0..GRID_SIDE {
+            let (lon, lat) = grid_position(row, col);
+            let signal: &[(&str, &str)] = if (row, col) == (2, 2) || (row, col) == (5, 4) {
+                &[("highway", "traffic_signals")]
+            } else {
+                &[]
+            };
+            objects.push(osm_node(grid_node(row, col), lon, lat, signal));
+        }
+    }
+    for (offset, (lon, lat)) in [(0, 0), (0, 5_000), (5_000, 5_000), (5_000, 0)]
+        .into_iter()
+        .enumerate()
+    {
+        objects.push(osm_node(
+            1000 + offset as i64,
+            65_120_000 + lon,
+            532_120_000 + lat,
+            &[],
+        ));
+    }
+    for row in 0..GRID_SIDE {
+        let nodes = (0..GRID_SIDE)
+            .map(|col| grid_node(row, col))
+            .collect::<Vec<_>>();
+        let name = format!("Row {row}");
+        objects.push(osm_way(
+            100 + row,
+            &nodes,
+            &[("highway", "residential"), ("name", &name)],
+        ));
+    }
+    for col in 0..GRID_SIDE {
+        let nodes = (0..GRID_SIDE)
+            .map(|row| grid_node(row, col))
+            .collect::<Vec<_>>();
+        let highway = if col == 3 { "secondary" } else { "residential" };
+        objects.push(osm_way(200 + col, &nodes, &[("highway", highway)]));
+    }
+    objects.push(osm_way(
+        900,
+        &[1000, 1001, 1002, 1003, 1000],
+        &[("building", "yes")],
+    ));
+    objects.push(osm_turn_restriction(
+        500,
+        "no_left_turn",
+        102,
+        grid_node(2, 3),
+        203,
+    ));
+    objects.push(OsmObj::Relation(osmpbfreader::Relation {
+        id: osmpbfreader::RelationId(600),
+        tags: osm_tags(&[("type", "route"), ("route", "bus")]),
+        refs: Vec::new(),
+    }));
+    objects
+}
+
+/// A realistic day of edits to [`osm_grid`]: a tag and speed change, a
+/// closed road, a new road over new nodes, a moved node, a way split, a
+/// node removed from a way and deleted, a new signal, a new restriction,
+/// a building turned into a service road over nodes that were not part of
+/// the topology, and a restriction relation that becomes a route.
+pub(crate) fn osm_grid_edits() -> Vec<OsmEdit> {
+    use crate::osm_change::ChangeAction::{Create, Delete, Modify};
+    let row = |row: i64, cols: std::ops::RangeInclusive<i64>| {
+        cols.map(|col| grid_node(row, col)).collect::<Vec<_>>()
+    };
+    let (moved_lon, moved_lat) = grid_position(2, 5);
+    let (signal_lon, signal_lat) = grid_position(4, 4);
+    let (corner_lon, corner_lat) = grid_position(7, 7);
+    let seventh_column = (0..GRID_SIDE - 1)
+        .map(|row| grid_node(row, 7))
+        .collect::<Vec<_>>();
+    vec![
+        (
+            Modify,
+            osm_way(
+                103,
+                &row(3, 0..=7),
+                &[
+                    ("highway", "primary"),
+                    ("maxspeed", "80"),
+                    ("name", "Row 3"),
+                ],
+            ),
+        ),
+        (Delete, osm_way(205, &[], &[])),
+        (Create, osm_node(5001, 65_015_000, 532_015_000, &[])),
+        (Create, osm_node(5002, 65_025_000, 532_025_000, &[])),
+        (
+            Create,
+            osm_way(
+                300,
+                &[grid_node(1, 1), 5001, 5002, grid_node(3, 3)],
+                &[("highway", "tertiary"), ("oneway", "yes")],
+            ),
+        ),
+        (
+            Modify,
+            osm_node(grid_node(2, 5), moved_lon + 1_234, moved_lat - 987, &[]),
+        ),
+        (
+            Modify,
+            osm_way(
+                101,
+                &row(1, 0..=4),
+                &[("highway", "residential"), ("name", "Row 1")],
+            ),
+        ),
+        (
+            Create,
+            osm_way(
+                301,
+                &row(1, 4..=7),
+                &[("highway", "residential"), ("name", "Row 1")],
+            ),
+        ),
+        (
+            Modify,
+            osm_way(207, &seventh_column, &[("highway", "residential")]),
+        ),
+        (
+            Modify,
+            osm_way(
+                107,
+                &row(7, 0..=6),
+                &[("highway", "residential"), ("name", "Row 7")],
+            ),
+        ),
+        (
+            Delete,
+            osm_node(grid_node(7, 7), corner_lon, corner_lat, &[]),
+        ),
+        (
+            Modify,
+            osm_node(
+                grid_node(4, 4),
+                signal_lon,
+                signal_lat,
+                &[("highway", "traffic_signals")],
+            ),
+        ),
+        (
+            Create,
+            osm_turn_restriction(501, "only_straight_on", 104, grid_node(4, 2), 104),
+        ),
+        (
+            Modify,
+            osm_way(900, &[1000, 1001, 1002, 1003], &[("highway", "service")]),
+        ),
+        (
+            Modify,
+            OsmObj::Relation(osmpbfreader::Relation {
+                id: osmpbfreader::RelationId(500),
+                tags: osm_tags(&[("type", "route"), ("route", "bicycle")]),
+                refs: Vec::new(),
+            }),
+        ),
+    ]
+}
+
+fn osm_tags(tags: &[(&str, &str)]) -> osmpbfreader::Tags {
+    tags.iter()
+        .map(|(key, value)| ((*key).into(), (*value).into()))
+        .collect()
+}
+
+/// OSM node at decimicro-degree coordinates.
+pub(crate) fn osm_node(id: i64, lon_e7: i32, lat_e7: i32, tags: &[(&str, &str)]) -> OsmObj {
+    OsmObj::Node(osmpbfreader::Node {
+        id: osmpbfreader::NodeId(id),
+        tags: osm_tags(tags),
+        decimicro_lat: lat_e7,
+        decimicro_lon: lon_e7,
+    })
+}
+
+pub(crate) fn osm_way(id: i64, nodes: &[i64], tags: &[(&str, &str)]) -> OsmObj {
+    OsmObj::Way(osmpbfreader::Way {
+        id: osmpbfreader::WayId(id),
+        tags: osm_tags(tags),
+        nodes: nodes
+            .iter()
+            .map(|node| osmpbfreader::NodeId(*node))
+            .collect(),
+    })
+}
+
+/// `type=restriction` relation from one way over a via node to another.
+pub(crate) fn osm_turn_restriction(
+    id: i64,
+    restriction: &str,
+    from_way: i64,
+    via_node: i64,
+    to_way: i64,
+) -> OsmObj {
+    let member = |member: osmpbfreader::OsmId, role: &str| osmpbfreader::Ref {
+        member,
+        role: role.into(),
+    };
+    OsmObj::Relation(osmpbfreader::Relation {
+        id: osmpbfreader::RelationId(id),
+        tags: osm_tags(&[("type", "restriction"), ("restriction", restriction)]),
+        refs: vec![
+            member(
+                osmpbfreader::OsmId::Way(osmpbfreader::WayId(from_way)),
+                "from",
+            ),
+            member(
+                osmpbfreader::OsmId::Node(osmpbfreader::NodeId(via_node)),
+                "via",
+            ),
+            member(osmpbfreader::OsmId::Way(osmpbfreader::WayId(to_way)), "to"),
+        ],
+    })
+}
 
 pub(crate) fn pending_way(osm_way_id: i64, node_ids: &[i64]) -> PendingWay {
     PendingWay {

@@ -10,11 +10,14 @@ mod geopackage;
 mod import;
 mod mapping;
 mod opening_hours;
+mod osm_change;
 mod overture;
 mod restrictions;
 mod scan;
+mod source;
 mod topology;
 mod traffic;
+mod update;
 mod wkb;
 
 pub use audit::{
@@ -34,6 +37,10 @@ pub use traffic::{
     ImportedTraffic, TrafficAssignmentSource, TrafficBindingStats, TrafficPatternSource,
     TrafficSourceDirection, TrafficSourceDocument, TrafficSynthesisOptions, build_traffic_bundle,
     read_traffic_source, synthesize_traffic_source, traffic_binding_stats,
+};
+pub use update::{
+    ChangedObjects, DEFAULT_MAX_FILL_GROWTH, DatasetUpdateInput, DatasetUpdateOptions,
+    DatasetUpdateReport, ReorderPolicy, update_dataset,
 };
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use memmap2::Mmap;
 use netweevil_core::{
-    CompiledProfileBundle, DatasetAccelerationBundle, EdgeNameBundle, TopologyBundle,
+    CacheBundleId, CompiledProfileBundle, DatasetAccelerationBundle, EdgeNameBundle, TopologyBundle,
 };
 use netweevil_manifest::{CompiledProfileManifest, DatasetManifest, RunManifest};
 use serde::de::DeserializeOwned;
@@ -35,6 +35,8 @@ pub struct WorkspacePaths {
     pub topology_bundles_dir: PathBuf,
     pub edge_name_bundles_dir: PathBuf,
     pub acceleration_bundles_dir: PathBuf,
+    /// Retained OSM source snapshots that `dataset update` applies diffs to.
+    pub source_bundles_dir: PathBuf,
     pub metric_bundles_dir: PathBuf,
     pub transit_bundles_dir: PathBuf,
     pub datasets_dir: PathBuf,
@@ -62,6 +64,7 @@ impl WorkspacePaths {
             topology_bundles_dir: state_dir.join("bundles").join("topology"),
             edge_name_bundles_dir: state_dir.join("bundles").join("names"),
             acceleration_bundles_dir: state_dir.join("bundles").join("acceleration"),
+            source_bundles_dir: state_dir.join("bundles").join("source"),
             metric_bundles_dir: state_dir.join("bundles").join("metrics"),
             transit_bundles_dir: state_dir.join("bundles").join("transit"),
             datasets_dir: state_dir.join("datasets"),
@@ -86,6 +89,7 @@ impl WorkspacePaths {
             &self.topology_bundles_dir,
             &self.edge_name_bundles_dir,
             &self.acceleration_bundles_dir,
+            &self.source_bundles_dir,
             &self.metric_bundles_dir,
             &self.transit_bundles_dir,
             &self.datasets_dir,
@@ -213,24 +217,104 @@ pub fn write_compact_json<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Re
 
 fn write_json_inner<T: Serialize>(path: impl AsRef<Path>, value: &T, pretty: bool) -> Result<()> {
     let path = path.as_ref();
+    write_atomically(path, |writer| {
+        if pretty {
+            serde_json::to_writer_pretty(writer, value).context("serializing JSON")
+        } else {
+            serde_json::to_writer(writer, value).context("serializing JSON")
+        }
+    })
+}
+
+/// Writes `path` through a sibling temporary file renamed into place, so a
+/// concurrent reader (a running API reloading a dataset another process
+/// updates) sees either the previous or the complete new file.
+pub(crate) fn write_atomically(
+    path: &Path,
+    write: impl FnOnce(&mut BufWriter<File>) -> Result<()>,
+) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("creating directory {}", parent.display()))?;
     }
-    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    let writer = BufWriter::new(file);
-    if pretty {
-        serde_json::to_writer_pretty(writer, value).context("serializing JSON")?;
-    } else {
-        serde_json::to_writer(writer, value).context("serializing JSON")?;
+    let mut temporary = path.as_os_str().to_owned();
+    temporary.push(format!(".partial-{}", std::process::id()));
+    let temporary = PathBuf::from(temporary);
+    let result = (|| {
+        let file = File::create(&temporary)
+            .with_context(|| format!("creating {}", temporary.display()))?;
+        let mut writer = BufWriter::new(file);
+        write(&mut writer)?;
+        writer
+            .flush()
+            .with_context(|| format!("flushing {}", temporary.display()))?;
+        fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
     }
-    Ok(())
+    result
 }
 
 pub fn read_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
     let path = path.as_ref();
     let raw = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_str(&raw).with_context(|| format!("parsing {}", path.display()))
+}
+
+/// Schema version of [`SourceSnapshot`]. Readers accept this value only.
+pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+
+/// The OSM source objects a dataset retains so `dataset update` can apply
+/// change files without the original extract.
+///
+/// Node coordinates are split: topology nodes keep theirs in the topology
+/// bundle, so only their OSM ids are stored here, in topology node order;
+/// every other source node carries its decimicro coordinates. Ways are the
+/// routable ones, column by column, with `way_attributes[i]` holding the
+/// ingest's classified way record minus the id, node list and name; the
+/// ids of the other ways and relations keep the source's object counts
+/// exact and tell modifications from creations. `W` and
+/// `R` are the ingest's way and turn-restriction records; they are stored as
+/// interned bincode records and a bincode list.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceSnapshot<W, R> {
+    pub schema_version: u32,
+    pub source_topology_bundle_id: CacheBundleId,
+    pub topology_node_ids: Vec<i64>,
+    pub other_node_ids: Vec<i64>,
+    pub other_node_lon_e7: Vec<i32>,
+    pub other_node_lat_e7: Vec<i32>,
+    pub traffic_signal_node_ids: Vec<i64>,
+    pub way_ids: Vec<i64>,
+    pub way_node_counts: Vec<u32>,
+    pub way_node_ids: Vec<i64>,
+    pub way_name_indexes: Vec<Option<u32>>,
+    pub names: Vec<String>,
+    pub way_attributes: Vec<W>,
+    pub restrictions: Vec<R>,
+    /// Ways that are not routable, sorted.
+    pub other_way_ids: Vec<i64>,
+    /// Relations that are not turn restrictions, sorted.
+    pub other_relation_ids: Vec<i64>,
+}
+
+pub fn write_source_snapshot_bundle<W: Serialize, R: Serialize>(
+    path: impl AsRef<Path>,
+    snapshot: &SourceSnapshot<W, R>,
+) -> Result<()> {
+    sectioned::write_source_snapshot_sectioned(path.as_ref(), snapshot)
+}
+
+pub fn read_source_snapshot_bundle<W, R>(path: impl AsRef<Path>) -> Result<SourceSnapshot<W, R>>
+where
+    W: DeserializeOwned + Clone,
+    R: DeserializeOwned,
+{
+    let path = path.as_ref();
+    let mmap = sectioned::map_file(path)?;
+    sectioned::read_source_snapshot_sectioned(&mmap, path)
+        .with_context(|| format!("parsing source snapshot bundle {}", path.display()))
 }
 
 pub fn write_topology_bundle(path: impl AsRef<Path>, bundle: &TopologyBundle) -> Result<()> {
@@ -282,17 +366,10 @@ pub fn read_compiled_profile_bundle(path: impl AsRef<Path>) -> Result<CompiledPr
 
 fn write_binary<T: Serialize>(path: impl AsRef<Path>, value: &T) -> Result<()> {
     let path = path.as_ref();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating directory {}", parent.display()))?;
-    }
-    let file = File::create(path).with_context(|| format!("creating {}", path.display()))?;
-    let mut writer = BufWriter::new(file);
-    bincode::serialize_into(&mut writer, value)
-        .with_context(|| format!("serializing binary {}", path.display()))?;
-    writer
-        .flush()
-        .with_context(|| format!("flushing binary {}", path.display()))
+    write_atomically(path, |writer| {
+        bincode::serialize_into(writer, value)
+            .with_context(|| format!("serializing binary {}", path.display()))
+    })
 }
 
 fn read_binary_mmap<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
@@ -399,7 +476,7 @@ impl CachePruneReport {
 /// missing or uses an old format, or a newer compile of the same profile id
 /// exists for the dataset (each profile edit gets a new hash and file).
 /// Stale profiles are recompiled on demand. Afterwards, files under the
-/// topology, name, acceleration and metric bundle directories that no
+/// topology, name, acceleration, source and metric bundle directories that no
 /// dataset or compiled-profile manifest references are removed. Transit
 /// bundles are left alone. With `dry_run`, nothing is deleted.
 pub fn prune_bundle_cache(paths: &WorkspacePaths, dry_run: bool) -> Result<CachePruneReport> {
@@ -464,6 +541,7 @@ pub fn prune_bundle_cache(paths: &WorkspacePaths, dry_run: bool) -> Result<Cache
             &dataset.topology_bundle,
             &dataset.edge_name_bundle,
             &dataset.acceleration_bundle,
+            &dataset.source_snapshot_bundle,
         ]
         .into_iter()
         .flatten()
@@ -476,6 +554,7 @@ pub fn prune_bundle_cache(paths: &WorkspacePaths, dry_run: bool) -> Result<Cache
         &paths.topology_bundles_dir,
         &paths.edge_name_bundles_dir,
         &paths.acceleration_bundles_dir,
+        &paths.source_bundles_dir,
         &paths.metric_bundles_dir,
     ] {
         for entry in

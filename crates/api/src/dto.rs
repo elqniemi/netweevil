@@ -38,6 +38,9 @@ pub(crate) struct DatasetInfo {
     pub(crate) source_path: String,
     pub(crate) source_sha256: String,
     pub(crate) imported_at: String,
+    /// When `dataset update` last changed the loaded build.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) updated_at: Option<String>,
     pub(crate) topology_bounds: Option<TopologyBounds>,
     pub(crate) node_count: Option<u64>,
     pub(crate) edge_count: Option<u64>,

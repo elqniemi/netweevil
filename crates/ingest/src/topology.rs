@@ -12,8 +12,19 @@ use rustc_hash::FxHashMap;
 
 use crate::import::{DatasetImportProgress, DatasetImportStage, PercentReporter, emit_progress};
 use crate::restrictions::build_turn_restrictions;
-use crate::scan::{PendingWay, ScanOutput, scan_osm};
+use crate::scan::{PendingWay, ScanOutput};
+use crate::source::OsmSourceState;
 use netweevil_core::SourceFormat;
+
+/// A topology built from a dataset source.
+pub(crate) struct BuiltTopology {
+    pub(crate) bundle: TopologyBundle,
+    pub(crate) names: EdgeNameBundle,
+    pub(crate) meta: TopologyBundleMeta,
+    /// For OSM sources: the scanned source objects and the OSM ids of the
+    /// topology nodes, which become the dataset's source snapshot.
+    pub(crate) osm_source: Option<(OsmSourceState, Vec<i64>)>,
+}
 
 pub(crate) fn build_topology_bundle(
     source_paths: &[PathBuf],
@@ -22,12 +33,18 @@ pub(crate) fn build_topology_bundle(
     source_format: SourceFormat,
     mapping: Option<&crate::GeoPackageMapping>,
     progress: &mut impl FnMut(DatasetImportProgress),
-) -> Result<(TopologyBundle, EdgeNameBundle, TopologyBundleMeta)> {
+) -> Result<BuiltTopology> {
     let source_path = source_paths
         .first()
         .ok_or_else(|| anyhow::anyhow!("dataset import requires at least one source"))?;
+    let mut osm_source = None;
     let scan = match source_format {
-        SourceFormat::OsmPbf => scan_osm(source_path, source_size_bytes, progress)?,
+        SourceFormat::OsmPbf => {
+            let state = OsmSourceState::scan_pbf(source_path, source_size_bytes, progress)?;
+            let (scan, topology_node_ids) = state.scan_output();
+            osm_source = Some((state, topology_node_ids));
+            scan
+        }
         SourceFormat::OvertureParquet => {
             crate::overture::scan_overture(source_path, source_size_bytes, progress)?
         }
@@ -44,7 +61,12 @@ pub(crate) fn build_topology_bundle(
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>()
         .join(";");
-    Ok((bundle, names, meta))
+    Ok(BuiltTopology {
+        bundle,
+        names,
+        meta,
+        osm_source,
+    })
 }
 
 pub(crate) fn build_topology_from_scan(

@@ -41,6 +41,69 @@ pub struct DatasetManifest {
     pub topology_meta: Option<TopologyBundleMeta>,
     #[serde(default)]
     pub acceleration_stats: Option<AccelerationBundleStats>,
+    /// Retained OSM source objects that `dataset update` applies change
+    /// files to. Only OSM PBF imports have one.
+    #[serde(default)]
+    pub source_snapshot_bundle: Option<BundleRef>,
+    /// The last full nested-dissection ordering of the CCH. Updates reuse
+    /// that order and compare their fill against it.
+    #[serde(default)]
+    pub acceleration_ordering: Option<AccelerationOrdering>,
+    /// The most recent `dataset update`, absent until the first one.
+    #[serde(default)]
+    pub last_update: Option<DatasetUpdateRecord>,
+}
+
+/// Shortcut density of the last full CCH ordering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccelerationOrdering {
+    pub ordered_at: String,
+    pub edge_count: u64,
+    pub shortcut_arc_count: u64,
+    /// Updates applied since that ordering, each with a patched order.
+    pub patched_updates: u64,
+}
+
+impl AccelerationOrdering {
+    /// Shortcuts per edge state of the full ordering.
+    pub fn shortcut_density(&self) -> f64 {
+        self.shortcut_arc_count as f64 / self.edge_count.max(1) as f64
+    }
+
+    /// `shortcut_arc_count` over the shortcut count a fresh ordering of
+    /// `edge_count` states is expected to produce at this ordering's
+    /// density: 1.0 means no fill growth.
+    pub fn fill_growth(&self, edge_count: u64, shortcut_arc_count: u64) -> f64 {
+        let expected = self.shortcut_density() * edge_count as f64;
+        if expected <= 0.0 {
+            return if shortcut_arc_count == 0 {
+                1.0
+            } else {
+                f64::INFINITY
+            };
+        }
+        shortcut_arc_count as f64 / expected
+    }
+}
+
+/// What one `dataset update` applied and how its hierarchy compares with
+/// a fresh ordering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DatasetUpdateRecord {
+    pub updated_at: String,
+    /// `osm_change` for change files or `source` for a replacement extract.
+    pub kind: String,
+    pub inputs: Vec<String>,
+    pub previous_source_sha256: String,
+    /// Directed edge states whose CCH rank was carried over.
+    pub reused_edge_states: u64,
+    /// Directed edge states placed next to their neighbours' ranks.
+    pub inserted_edge_states: u64,
+    /// Whether this update ran a full nested-dissection ordering.
+    pub reordered: bool,
+    /// Shortcut count relative to the last full ordering's density.
+    pub fill_growth: f64,
+    pub elapsed_s: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,7 +122,7 @@ pub struct CompiledProfileManifest {
     pub bundle: BundleRef,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundleRef {
     pub bundle_id: CacheBundleId,
     pub path: String,
