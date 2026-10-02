@@ -20,11 +20,11 @@ use time::{Date, Duration, OffsetDateTime, Weekday};
 
 use crate::local_time::{NetworkTimezones, in_zone, parse_local_datetime};
 use crate::{
-    AlternativeRouteOptions, AnalysisOutcome, ConnectivityPolicy, FallbackPolicy, HopSelectionInfo,
-    RouteResult, RouteSegment, RouteSummary, RoutingGraph, SearchStateKey, SnapOptions,
-    SnappedPoint, build_breakdowns, build_route_geometry, hop_info_for_pair, no_route_failure,
-    request_returns_detailed_path, snap_candidates_with_options, transition_access_cost,
-    turn_penalty_seconds,
+    AlternativeRouteOptions, AnalysisOutcome, ConditionalTurns, ConnectivityPolicy, FallbackPolicy,
+    HopSelectionInfo, RouteResult, RouteSegment, RouteSummary, RoutingGraph, SearchStateKey,
+    SnapOptions, SnappedPoint, build_breakdowns, build_route_geometry, hop_info_for_pair,
+    no_route_failure, request_returns_detailed_path, snap_candidates_with_options,
+    transition_access_cost, turn_penalty_seconds,
 };
 
 /// Runtime scenario overlay keyed by source feature id. Requests carry it
@@ -1287,6 +1287,8 @@ fn latest_temporal_route_for_pair(
         end: deadline,
     };
     let mut segment_cache = HashMap::<(usize, u64), Vec<EdgeArrivalSegment>>::new();
+    // Allowed junction times over `range` per conditionally restricted turn.
+    let mut turn_window_cache = HashMap::<(usize, usize), Vec<TimeWindow>>::new();
     let overlay_names = metrics
         .components
         .iter()
@@ -1326,6 +1328,7 @@ fn latest_temporal_route_for_pair(
                     topology,
                     metrics,
                     context,
+                    &routing_graph.conditional_turns,
                     &[(origin_edge as usize, fraction)],
                     window,
                     range,
@@ -1338,6 +1341,7 @@ fn latest_temporal_route_for_pair(
                 topology,
                 metrics,
                 context,
+                &routing_graph.conditional_turns,
                 &[(origin_edge as usize, fraction)],
                 window.end,
                 deadline,
@@ -1433,6 +1437,7 @@ fn latest_temporal_route_for_pair(
                     topology,
                     metrics,
                     context,
+                    &routing_graph.conditional_turns,
                     &path,
                     window,
                     range,
@@ -1441,12 +1446,17 @@ fn latest_temporal_route_for_pair(
                     candidates,
                 );
             }
-            if let Some(candidate) =
-                replay_temporal_edge_path(topology, metrics, context, &path, window.end, deadline)
-                && best.as_ref().is_none_or(|best| {
-                    candidate.0 > best.0 || (candidate.0 == best.0 && candidate.2 < best.2)
-                })
-            {
+            if let Some(candidate) = replay_temporal_edge_path(
+                topology,
+                metrics,
+                context,
+                &routing_graph.conditional_turns,
+                &path,
+                window.end,
+                deadline,
+            ) && best.as_ref().is_none_or(|best| {
+                candidate.0 > best.0 || (candidate.0 == best.0 && candidate.2 < best.2)
+            }) {
                 best = Some(candidate);
             }
         }
@@ -1465,39 +1475,68 @@ fn latest_temporal_route_for_pair(
             let turn_s =
                 turn_penalty_seconds(topology, metrics, previous_edge, label.state.edge_index);
             let exit_window = label.window.shifted(-Duration::seconds_f64(turn_s));
-            let windows = edge_entry_windows_for_exit(
-                topology,
-                metrics,
-                context,
-                previous_edge,
-                1.0,
-                exit_window,
-                range,
-                &mut segment_cache,
-            );
+            // A time-conditional turn restriction leaves only the exit times
+            // at which the turn is allowed; each part is its own label.
+            let turns = &routing_graph.conditional_turns;
+            let exit_windows = if turns
+                .rule_sets(previous_edge, label.state.edge_index)
+                .next()
+                .is_none()
+            {
+                vec![exit_window]
+            } else {
+                turn_window_cache
+                    .entry((previous_edge, label.state.edge_index))
+                    .or_insert_with(|| {
+                        turn_allowed_windows(
+                            topology,
+                            metrics,
+                            context,
+                            turns,
+                            previous_edge,
+                            label.state.edge_index,
+                            range,
+                        )
+                    })
+                    .iter()
+                    .filter_map(|allowed| allowed.intersect(exit_window))
+                    .collect()
+            };
             let reverse_state = routing_graph
                 .reverse_automaton
                 .transition(label.state.automaton_state, previous_edge);
-            for window in windows {
-                let previous = ReverseTemporalLabel {
-                    state: SearchStateKey {
-                        edge_index: previous_edge,
-                        automaton_state: reverse_state,
-                    },
-                    window,
+            for exit_window in exit_windows {
+                let windows = edge_entry_windows_for_exit(
+                    topology,
+                    metrics,
+                    context,
+                    previous_edge,
+                    1.0,
                     exit_window,
-                    fraction: 1.0,
-                    next: Some(entry.label_id),
-                    active: true,
-                };
-                insert_reverse_temporal_label(
-                    &mut labels,
-                    &mut state_labels,
-                    &mut heap,
-                    previous,
-                    origin,
-                    max_labels_per_state,
-                )?;
+                    range,
+                    &mut segment_cache,
+                );
+                for window in windows {
+                    let previous = ReverseTemporalLabel {
+                        state: SearchStateKey {
+                            edge_index: previous_edge,
+                            automaton_state: reverse_state,
+                        },
+                        window,
+                        exit_window,
+                        fraction: 1.0,
+                        next: Some(entry.label_id),
+                        active: true,
+                    };
+                    insert_reverse_temporal_label(
+                        &mut labels,
+                        &mut state_labels,
+                        &mut heap,
+                        previous,
+                        origin,
+                        max_labels_per_state,
+                    )?;
+                }
             }
         }
     }
@@ -1575,6 +1614,7 @@ fn collect_path_overlay_departure_candidates(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     context: &TemporalContext,
+    turns: &ConditionalTurns,
     path: &[(usize, f64)],
     feasible_departures: TimeWindow,
     range: TimeWindow,
@@ -1606,6 +1646,7 @@ fn collect_path_overlay_departure_candidates(
                     topology,
                     metrics,
                     context,
+                    turns,
                     path,
                     position,
                     target,
@@ -1725,6 +1766,7 @@ fn departure_windows_for_path_entry(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     context: &TemporalContext,
+    turns: &ConditionalTurns,
     path: &[(usize, f64)],
     edge_position: usize,
     requested_entry: TimeWindow,
@@ -1738,16 +1780,26 @@ fn departure_windows_for_path_entry(
         let turn_s = turn_penalty_seconds(topology, metrics, previous_edge, current_edge);
         let mut previous_entries = Vec::new();
         for current_entry in entry_windows {
-            previous_entries.extend(edge_entry_windows_for_exit(
+            for exit_window in turn_allowed_windows(
                 topology,
                 metrics,
                 context,
+                turns,
                 previous_edge,
-                previous_fraction,
+                current_edge,
                 current_entry.shifted(-Duration::seconds_f64(turn_s)),
-                range,
-                segment_cache,
-            ));
+            ) {
+                previous_entries.extend(edge_entry_windows_for_exit(
+                    topology,
+                    metrics,
+                    context,
+                    previous_edge,
+                    previous_fraction,
+                    exit_window,
+                    range,
+                    segment_cache,
+                ));
+            }
         }
         entry_windows = merge_time_windows(previous_entries);
         if entry_windows.is_empty() {
@@ -1757,10 +1809,14 @@ fn departure_windows_for_path_entry(
     entry_windows
 }
 
+/// Traverses `path` from `departure`, or `None` when an edge is closed or a
+/// time-conditional turn restriction of `turns` is in force on the way, or
+/// the arrival is after `deadline`.
 pub(crate) fn replay_temporal_edge_path(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     context: &TemporalContext,
+    turns: &ConditionalTurns,
     path: &[(usize, f64)],
     departure: OffsetDateTime,
     deadline: OffsetDateTime,
@@ -1770,6 +1826,19 @@ pub(crate) fn replay_temporal_edge_path(
     let mut traversals = Vec::with_capacity(path.len());
     let mut previous = None;
     for &(edge_index, fraction) in path {
+        if let Some(previous_edge) = previous
+            && turn_restricted_at(
+                topology,
+                metrics,
+                context,
+                turns,
+                previous_edge,
+                edge_index,
+                arrival,
+            )
+        {
+            return None;
+        }
         let turn_time_s = previous.map_or(0.0, |previous_edge| {
             turn_penalty_seconds(topology, metrics, previous_edge, edge_index)
         });
@@ -2122,6 +2191,82 @@ fn edge_rule_evaluation(
     )
 }
 
+/// Whether a time-conditional turn restriction forbids turning from
+/// `from_edge` onto `to_edge` for a vehicle that reaches the junction at
+/// `at`, read on the local clock of `from_edge`. Vehicles do not wait at a
+/// junction for a turn restriction to lift.
+pub(crate) fn turn_restricted_at(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    context: &TemporalContext,
+    turns: &ConditionalTurns,
+    from_edge: usize,
+    to_edge: usize,
+    at: OffsetDateTime,
+) -> bool {
+    if turns.is_empty() {
+        return false;
+    }
+    let mut rule_sets = turns.rule_sets(from_edge, to_edge).peekable();
+    if rule_sets.peek().is_none() {
+        return false;
+    }
+    let zone = context.timezones(topology).edge_zone(topology, from_edge);
+    rule_sets.any(|rule_set| {
+        topology
+            .temporal_rule_sets
+            .get(rule_set)
+            .is_some_and(|rules| {
+                evaluate_rules(
+                    Some(rules),
+                    None,
+                    metrics.mode.access_bit(),
+                    0,
+                    at,
+                    zone,
+                    &context.holidays,
+                ) == RuleEvaluation::Unavailable
+            })
+    })
+}
+
+/// The parts of `window` in which no time-conditional restriction forbids
+/// `from_edge -> to_edge` at the junction. Rules change on whole minutes,
+/// so one evaluation per minute is exact.
+fn turn_allowed_windows(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    context: &TemporalContext,
+    turns: &ConditionalTurns,
+    from_edge: usize,
+    to_edge: usize,
+    window: TimeWindow,
+) -> Vec<TimeWindow> {
+    if turns.rule_sets(from_edge, to_edge).next().is_none() {
+        return vec![window];
+    }
+    let mut allowed = Vec::new();
+    let mut minute = window.start
+        - Duration::seconds(i64::from(window.start.second()))
+        - Duration::nanoseconds(i64::from(window.start.nanosecond()));
+    while minute <= window.end {
+        let next_minute = minute + Duration::minutes(1);
+        let bucket = TimeWindow {
+            start: minute,
+            end: next_minute - Duration::nanoseconds(1),
+        };
+        if let Some(bucket) = bucket.intersect(window)
+            && !turn_restricted_at(
+                topology, metrics, context, turns, from_edge, to_edge, minute,
+            )
+        {
+            allowed.push(bucket);
+        }
+        minute = next_minute;
+    }
+    merge_time_windows(allowed)
+}
+
 fn merge_time_windows(mut windows: Vec<TimeWindow>) -> Vec<TimeWindow> {
     windows.sort_by_key(|window| window.start);
     let mut merged = Vec::<TimeWindow>::new();
@@ -2335,6 +2480,15 @@ fn earliest_arrival_route_for_pair(
                 .automaton
                 .prohibited_sequence_len(current_state.automaton_state, next_edge)
                 .is_some()
+                || turn_restricted_at(
+                    topology,
+                    metrics,
+                    context,
+                    &routing_graph.conditional_turns,
+                    current_state.edge_index,
+                    next_edge,
+                    current_arrival,
+                )
             {
                 continue;
             }
@@ -2553,6 +2707,15 @@ fn temporal_route_for_pair(
                 .automaton
                 .prohibited_sequence_len(current_state.automaton_state, next_edge)
                 .is_some()
+                || turn_restricted_at(
+                    topology,
+                    metrics,
+                    context,
+                    &routing_graph.conditional_turns,
+                    current_state.edge_index,
+                    next_edge,
+                    current_arrival,
+                )
             {
                 continue;
             }

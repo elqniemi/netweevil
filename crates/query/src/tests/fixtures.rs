@@ -158,6 +158,29 @@ pub(crate) fn restricted_topology() -> TopologyBundle {
     with_no_turn(topology, 99, &[1, 2])
 }
 
+/// `restricted_topology` with the 1 -> 2 ban under a time condition: in
+/// force while `rules` evaluate unavailable (a `Closed` rule is active, or
+/// no `OpenOnly` rule is). `applies_statically` marks a ban that static
+/// routing keeps (an unconditional restriction the condition lifts).
+pub(crate) fn conditionally_restricted_topology(
+    rules: Vec<netweevil_core::TemporalRule>,
+    applies_statically: bool,
+) -> TopologyBundle {
+    let mut topology = restricted_topology();
+    topology.temporal_rule_sets = vec![netweevil_core::TemporalRuleSet { rules }];
+    topology.turn_restrictions[0].condition = Some(netweevil_core::TurnRestrictionCondition {
+        rule_set_id: 0,
+        applies_statically,
+    });
+    topology
+}
+
+/// The through route 0, 1, 2 costs 30 and the bypass 3, 2 costs 35, so the
+/// bypass wins only while the 1 -> 2 turn is banned.
+pub(crate) fn conditionally_restricted_metrics() -> CompiledProfileBundle {
+    metrics(&[10.0, 10.0, 10.0, 25.0, 20.0])
+}
+
 /// `restricted_topology` with the pairwise ban replaced by the sequence 0, 1, 2.
 pub(crate) fn multi_edge_restricted_topology() -> TopologyBundle {
     with_no_turn(restricted_topology(), 100, &[0, 1, 2])

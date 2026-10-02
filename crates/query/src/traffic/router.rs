@@ -25,8 +25,8 @@ use crate::temporal::{
     context_from_request, execute_temporal_route_with_graph, replay_temporal_edge_path,
 };
 use crate::{
-    AnalysisOutcome, EngineMode, FallbackPolicy, HopSelectionInfo, MatrixResult, OdPairsDocument,
-    OdResult, PointSetDocument, PreparedRoutingEngine, RouteRequest, RouteResult,
+    AnalysisOutcome, ConditionalTurns, EngineMode, FallbackPolicy, HopSelectionInfo, MatrixResult,
+    OdPairsDocument, OdResult, PointSetDocument, PreparedRoutingEngine, RouteRequest, RouteResult,
     ServiceAreaRequest, ServiceAreaResult, TemporalRequestOptions, TrafficMode,
     edge_traversal_factor, parse_datetime, request_returns_detailed_path,
 };
@@ -179,6 +179,7 @@ impl TrafficService {
                         policy,
                         shared: shared.clone(),
                         cache: EngineCache::new(cache_entries),
+                        conditional_turns: OnceLock::new(),
                     }),
                 ))
             })
@@ -350,6 +351,9 @@ pub struct TrafficRouter {
     policy: TrafficSpeedPolicy,
     shared: Arc<TrafficShared>,
     cache: EngineCache,
+    /// Time-conditional turn restrictions of this profile's mode, for
+    /// replaying departure-bucket paths; built on first use.
+    conditional_turns: OnceLock<ConditionalTurns>,
 }
 
 enum TrafficPlan {
@@ -659,9 +663,14 @@ impl TrafficRouter {
         let topology = replay_engine.topology();
         let metrics = replay_engine.metrics();
         let deadline = departure + time::Duration::days(366);
-        let Some((departure, arrival, generalized_cost, traversals)) =
-            replay_temporal_edge_path(topology, metrics, &context, &path, departure, deadline)
-        else {
+        // The bucket path follows static turn rules; time-conditional turn
+        // restrictions are checked at the times the replay reaches them.
+        let turns = self
+            .conditional_turns
+            .get_or_init(|| ConditionalTurns::for_mode(topology, metrics.mode.access_bit()));
+        let Some((departure, arrival, generalized_cost, traversals)) = replay_temporal_edge_path(
+            topology, metrics, &context, turns, &path, departure, deadline,
+        ) else {
             let (mut result, mut selection) =
                 self.route_time_dependent(request, live, edge_names)?;
             result.warnings.push(CLOSED_PATH_WARNING.to_string());

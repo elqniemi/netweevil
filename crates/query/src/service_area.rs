@@ -796,9 +796,19 @@ pub(crate) fn build_temporal_service_area_expansion(
         };
         for transition_index in routing_graph.transition_range(edge_index) {
             let next_edge = routing_graph.transition_edges[transition_index] as usize;
+            let at_junction = departure + time::Duration::seconds_f64(cost);
             if !routing_graph
                 .automaton
                 .is_transition_allowed(automaton_state, next_edge)
+                || crate::temporal::turn_restricted_at(
+                    topology,
+                    metrics,
+                    context,
+                    &routing_graph.conditional_turns,
+                    edge_index,
+                    next_edge,
+                    at_junction,
+                )
             {
                 continue;
             }

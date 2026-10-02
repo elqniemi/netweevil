@@ -41,8 +41,63 @@ pub(crate) struct RoutingGraph {
     /// for graphs without virtual edges.
     pub(crate) virtual_reverse_of: Arc<[Option<usize>]>,
     pub(crate) includes_temporal_materialized_directions: bool,
+    /// Pairwise turn restrictions under a time condition. Time-dependent
+    /// graphs keep these transitions and searches check the condition when
+    /// the vehicle reaches the junction; static graphs apply such
+    /// restrictions as their `applies_statically` flag says and leave this
+    /// empty.
+    pub(crate) conditional_turns: Arc<ConditionalTurns>,
     /// Turn penalty seconds per forward transition, computed on first use.
     turn_seconds: Arc<std::sync::OnceLock<Option<TransitionTurnSeconds>>>,
+}
+
+/// `(from edge, to edge, temporal rule set)` of time-conditional pairwise
+/// turn restrictions, sorted. The restriction is in force while its rule
+/// set evaluates unavailable, like an edge schedule.
+#[derive(Debug, Default)]
+pub(crate) struct ConditionalTurns {
+    turns: Vec<(u32, u32, u32)>,
+}
+
+impl ConditionalTurns {
+    /// The time-conditional pairwise restrictions of `topology` that bind
+    /// `mode_bit`, whether or not static routing applies them.
+    pub(crate) fn for_mode(topology: &TopologyBundle, mode_bit: u16) -> Self {
+        let mut turns = topology
+            .turn_restrictions
+            .iter()
+            .filter(|restriction| {
+                restriction.mode_mask.contains(mode_bit) && restriction.edge_path.len() == 2
+            })
+            .filter_map(|restriction| {
+                let condition = restriction.condition?;
+                Some((
+                    restriction.edge_path[0].0,
+                    restriction.edge_path[1].0,
+                    condition.rule_set_id,
+                ))
+            })
+            .collect::<Vec<_>>();
+        turns.sort_unstable();
+        turns.dedup();
+        Self { turns }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.turns.is_empty()
+    }
+
+    /// Rule sets of the conditional restrictions on `from -> to`.
+    pub(crate) fn rule_sets(&self, from: usize, to: usize) -> impl Iterator<Item = usize> + '_ {
+        let key = (from as u32, to as u32);
+        let start = self
+            .turns
+            .partition_point(|&(from, to, _)| (from, to) < key);
+        self.turns[start..]
+            .iter()
+            .take_while(move |&&(from, to, _)| (from, to) == key)
+            .map(|&(_, _, rule_set)| rule_set as usize)
+    }
 }
 
 /// Turn penalty seconds per forward transition as an index into the few
@@ -539,10 +594,18 @@ pub(crate) fn build_routing_graph_with_weights(
 
     let mut pairwise_forbidden = Vec::<(u32, u32)>::new();
     let mut restricted_sequences = Vec::new();
+    // Time-dependent graphs keep conditional pairwise turns as transitions
+    // and check them at the junction (see `ConditionalTurns`); conditional
+    // sequences keep their static treatment there too.
+    let time_dependent = options.include_temporal_materialized_directions;
     for restriction in topology.turn_restrictions.iter().filter(|restriction| {
         restriction.mode_mask.contains(mode_bit) && restriction.applies_statically()
     }) {
-        if restriction.edge_path.len() < 2 {
+        if restriction.edge_path.len() < 2
+            || (time_dependent
+                && restriction.condition.is_some()
+                && restriction.edge_path.len() == 2)
+        {
             continue;
         }
         if options.search_time_turn_restrictions {
@@ -710,6 +773,11 @@ pub(crate) fn build_routing_graph_with_weights(
         reverse_automaton: Arc::new(RestrictionAutomaton::build(&reverse_restricted_sequences)),
         virtual_reverse_of: Arc::default(),
         includes_temporal_materialized_directions: options.include_temporal_materialized_directions,
+        conditional_turns: Arc::new(if time_dependent {
+            ConditionalTurns::for_mode(topology, mode_bit)
+        } else {
+            ConditionalTurns::default()
+        }),
         turn_seconds: Arc::default(),
     })
 }
@@ -741,6 +809,7 @@ impl RoutingGraph {
             virtual_reverse_of: self.virtual_reverse_of.clone(),
             includes_temporal_materialized_directions: self
                 .includes_temporal_materialized_directions,
+            conditional_turns: self.conditional_turns.clone(),
             turn_seconds: self.turn_seconds.clone(),
         }
     }
@@ -848,6 +917,7 @@ impl RoutingGraph {
             reverse_automaton: self.reverse_automaton.clone(),
             virtual_reverse_of: self.virtual_reverse_of.clone(),
             includes_temporal_materialized_directions: false,
+            conditional_turns: self.conditional_turns.clone(),
             // Turn seconds depend only on the topology and the turn costs,
             // which `with_metrics` requires to be unchanged.
             turn_seconds: self.turn_seconds.clone(),

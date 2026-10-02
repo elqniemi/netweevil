@@ -634,6 +634,15 @@ fn temporal_component_paths_for_pair(
                 .automaton
                 .prohibited_sequence_len(current.automaton_state, next_edge)
                 .is_some()
+                || crate::temporal::turn_restricted_at(
+                    topology,
+                    metrics,
+                    context,
+                    &routing_graph.conditional_turns,
+                    current.edge_index,
+                    next_edge,
+                    current_arrival,
+                )
             {
                 continue;
             }
