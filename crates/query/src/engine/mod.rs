@@ -1,11 +1,13 @@
 mod acceleration;
 mod automaton;
+mod cch_query;
 mod exact;
 mod fallback;
 mod graph;
 
 pub(crate) use acceleration::*;
 pub(crate) use automaton::*;
+pub(crate) use cch_query::*;
 pub(crate) use exact::*;
 pub(crate) use fallback::*;
 pub(crate) use graph::*;
