@@ -1116,7 +1116,14 @@ pub(crate) fn batch_route_result_for_path(
     hop_info: HopSelectionInfo,
     path: RoutePath,
 ) -> Result<RouteResult> {
-    let path = finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
+    let path = finalize_route_path(
+        topology,
+        metrics,
+        routing_graph,
+        path.edge_indexes,
+        origin,
+        destination,
+    );
     let analysis = analyze_route_path(
         topology,
         metrics,
@@ -1279,7 +1286,6 @@ pub(crate) fn build_single_source_edge_tree(
     let _ = topology;
     let origin_seeds = origin_edge_seeds(routing_graph, origin);
     SINGLE_SOURCE_SEARCH_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
         scratch.prepare(routing_graph.edge_costs.len());
 
         for (edge_index, cost) in origin_seeds {

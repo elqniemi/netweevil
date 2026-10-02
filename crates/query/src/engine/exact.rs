@@ -1,4 +1,3 @@
-use std::cell::RefCell;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use anyhow::Result;
@@ -6,16 +5,14 @@ use netweevil_core::{CompiledProfileBundle, TopologyBundle};
 
 use crate::*;
 
-thread_local! {
-    pub(crate) static EDGE_SEARCH_SCRATCH: RefCell<BidirectionalEdgeSearchScratch> =
-        RefCell::new(BidirectionalEdgeSearchScratch::default());
-    pub(crate) static ACCELERATION_SEARCH_SCRATCH: RefCell<BidirectionalAccelerationScratch> =
-        RefCell::new(BidirectionalAccelerationScratch::default());
-    pub(crate) static RESTRICTED_SEARCH_SCRATCH: RefCell<RestrictedSearchScratch> =
-        RefCell::new(RestrictedSearchScratch::default());
-    pub(crate) static SINGLE_SOURCE_SEARCH_SCRATCH: RefCell<SingleSourceEdgeSearchScratch> =
-        RefCell::new(SingleSourceEdgeSearchScratch::default());
-}
+pub(crate) static EDGE_SEARCH_SCRATCH: ScratchPool<BidirectionalEdgeSearchScratch> =
+    ScratchPool::new();
+pub(crate) static ACCELERATION_SEARCH_SCRATCH: ScratchPool<BidirectionalAccelerationScratch> =
+    ScratchPool::new();
+pub(crate) static RESTRICTED_SEARCH_SCRATCH: ScratchPool<RestrictedSearchScratch> =
+    ScratchPool::new();
+pub(crate) static SINGLE_SOURCE_SEARCH_SCRATCH: ScratchPool<SingleSourceEdgeSearchScratch> =
+    ScratchPool::new();
 
 #[derive(Default)]
 pub(crate) struct BidirectionalEdgeSearchScratch {
@@ -300,8 +297,14 @@ pub(crate) fn route_between_candidates(
                 path
             };
             if let Some(path) = path {
-                let path =
-                    finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
+                let path = finalize_route_path(
+                    topology,
+                    metrics,
+                    routing_graph,
+                    path.edge_indexes,
+                    origin,
+                    destination,
+                );
                 // Failure modes are penalized relaxations, not a separate
                 // selection rule: the orientations of one attachment compete
                 // on cost including illegal-movement penalties, so a legal
@@ -436,8 +439,14 @@ pub(crate) fn route_between_candidates_with_banned_edges(
             else {
                 continue;
             };
-            let path =
-                finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
+            let path = finalize_route_path(
+                topology,
+                metrics,
+                routing_graph,
+                path.edge_indexes,
+                origin,
+                destination,
+            );
             let selection_cost = selection_cost(topology, metrics, routing_graph, fallback, &path);
             if best
                 .as_ref()
@@ -509,7 +518,6 @@ fn seeded_bidirectional_dijkstra_with_banned_edges(
     max_generalized_cost: Option<f64>,
 ) -> Result<Option<RoutePath>> {
     EDGE_SEARCH_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
         scratch.prepare(topology.edge_count());
 
         for &(edge_index, cost) in origin_seeds {

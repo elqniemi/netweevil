@@ -459,7 +459,6 @@ pub(crate) fn dijkstra_between_edge_seeds_with_failure_modes(
     fallback: &FallbackPolicy,
 ) -> Result<Option<RoutePath>> {
     RESTRICTED_SEARCH_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
         scratch.prepare(metrics, routing_graph, origin_seeds, fallback);
         scratch.route_to(
             topology,

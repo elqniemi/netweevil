@@ -925,7 +925,6 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
         // uses the dense thread-local label array; states inside a
         // restriction prefix use a small hash map.
         SINGLE_SOURCE_SEARCH_SCRATCH.with(|scratch| {
-            let mut scratch = scratch.borrow_mut();
             scratch.prepare(edge_count);
             let mut heap = take_radix_heap();
             let mut restricted_dist = FxHashMap::<(u32, u32), f64>::default();
@@ -972,7 +971,7 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
                     let automaton_state = routing_graph.automaton.transition(0, seed.edge_index);
                     if seed.before_cost > max_cost
                         || !improve(
-                            &mut scratch,
+                            scratch,
                             &mut restricted_dist,
                             seed.edge_index,
                             automaton_state,
@@ -1056,7 +1055,7 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
                         .automaton
                         .transition(automaton_state, next_edge);
                     if !improve(
-                        &mut scratch,
+                        scratch,
                         &mut restricted_dist,
                         next_edge,
                         next_state,
@@ -1116,7 +1115,6 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
             usize::MAX
         };
         let aborted = SINGLE_SOURCE_SEARCH_SCRATCH.with(|scratch| {
-            let mut scratch = scratch.borrow_mut();
             scratch.prepare(edge_count);
             let mut heap = take_radix_heap();
             let mut path_components = HashMap::<usize, Vec<f64>>::new();

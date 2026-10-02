@@ -14,30 +14,36 @@ pub(crate) struct RoutePath {
     pub(crate) total_generalized_cost: f64,
 }
 
+/// Search graph of one profile. The adjacency arrays, hierarchy and lazily
+/// built tables are reference counted so graphs that differ only in their
+/// restriction automata share them (see
+/// [`RoutingGraph::without_restriction_sequences`]).
 pub(crate) struct RoutingGraph {
-    pub(crate) edge_spatial_index: crate::edge_spatial_index::EdgeSpatialIndex,
-    first_out: Vec<u32>,
-    edge_order: Vec<u32>,
-    incoming_first_out: Vec<u32>,
-    incoming_edge_order: Vec<u32>,
-    pub(crate) edge_costs: Vec<f64>,
-    transition_first_out: Vec<u32>,
-    pub(crate) transition_edges: Vec<u32>,
-    pub(crate) transition_costs: Vec<f64>,
-    reverse_transition_first_out: Vec<u32>,
-    pub(crate) reverse_transition_edges: Vec<u32>,
-    pub(crate) reverse_transition_costs: Vec<f64>,
-    pub(crate) acceleration: Option<AccelerationGraph>,
+    pub(crate) edge_spatial_index: Arc<crate::edge_spatial_index::EdgeSpatialIndex>,
+    first_out: Arc<[u32]>,
+    edge_order: Arc<[u32]>,
+    incoming_first_out: Arc<[u32]>,
+    incoming_edge_order: Arc<[u32]>,
+    pub(crate) edge_costs: Arc<[f64]>,
+    transition_first_out: Arc<[u32]>,
+    pub(crate) transition_edges: Arc<[u32]>,
+    pub(crate) transition_costs: Arc<[f64]>,
+    reverse_transition_first_out: Arc<[u32]>,
+    pub(crate) reverse_transition_edges: Arc<[u32]>,
+    pub(crate) reverse_transition_costs: Arc<[f64]>,
+    pub(crate) acceleration: Option<Arc<AccelerationGraph>>,
     /// True when the attached acceleration weights were customized with the
     /// request's failure-mode penalties baked in (degraded graphs only);
     /// plain acceleration weights must never serve failure-mode searches.
     pub(crate) acceleration_includes_failure_penalties: bool,
     pub(crate) automaton: RestrictionAutomaton,
     pub(crate) reverse_automaton: RestrictionAutomaton,
+    /// Original edge of each virtual reverse edge, indexed by edge. Empty
+    /// for graphs without virtual edges.
     pub(crate) virtual_reverse_of: Vec<Option<usize>>,
     pub(crate) includes_temporal_materialized_directions: bool,
     /// Turn penalty seconds per forward transition, computed on first use.
-    turn_seconds: std::sync::OnceLock<Option<TransitionTurnSeconds>>,
+    turn_seconds: Arc<std::sync::OnceLock<Option<TransitionTurnSeconds>>>,
 }
 
 /// Turn penalty seconds per forward transition as an index into the few
@@ -53,41 +59,79 @@ impl TransitionTurnSeconds {
     }
 }
 
+impl TransitionTurnSeconds {
+    fn build(
+        graph: &RoutingGraph,
+        topology: &TopologyBundle,
+        metrics: &CompiledProfileBundle,
+    ) -> Option<Self> {
+        use rayon::prelude::*;
+        let seconds = (0..graph.edge_costs.len())
+            .into_par_iter()
+            .flat_map_iter(|edge_index| {
+                graph
+                    .transition_range(edge_index)
+                    .map(move |transition_index| {
+                        let next_edge = graph.transition_edges[transition_index] as usize;
+                        turn_penalty_seconds(topology, metrics, edge_index, next_edge)
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut values = Vec::<f64>::new();
+        let mut classes = Vec::with_capacity(seconds.len());
+        for seconds in seconds {
+            let class = match values
+                .iter()
+                .position(|known| known.to_bits() == seconds.to_bits())
+            {
+                Some(class) => class,
+                None => {
+                    values.push(seconds);
+                    values.len() - 1
+                }
+            };
+            classes.push(u8::try_from(class).ok()?);
+        }
+        Some(Self { values, classes })
+    }
+}
+
 impl RoutingGraph {
-    /// Exact `turn_penalty_seconds` for every forward transition. `None`
-    /// when more than 256 distinct values occur; callers then compute turns
-    /// directly. `topology` and `metrics` must be the ones the graph was
-    /// built from.
+    /// Exact `turn_penalty_seconds` for every forward transition, built on
+    /// first use. `None` when more than 256 distinct values occur; callers
+    /// then compute turns directly. `topology` and `metrics` must be the
+    /// ones the graph was built from.
     pub(crate) fn transition_turn_seconds(
         &self,
         topology: &TopologyBundle,
         metrics: &CompiledProfileBundle,
     ) -> Option<&TransitionTurnSeconds> {
         self.turn_seconds
-            .get_or_init(|| {
-                let mut values = Vec::<f64>::new();
-                let mut classes = vec![0_u8; self.transition_edges.len()];
-                for edge_index in 0..self.edge_costs.len() {
-                    for transition_index in self.transition_range(edge_index) {
-                        let next_edge = self.transition_edges[transition_index] as usize;
-                        let seconds =
-                            turn_penalty_seconds(topology, metrics, edge_index, next_edge);
-                        let class = match values
-                            .iter()
-                            .position(|known| known.to_bits() == seconds.to_bits())
-                        {
-                            Some(class) => class,
-                            None => {
-                                values.push(seconds);
-                                values.len() - 1
-                            }
-                        };
-                        classes[transition_index] = u8::try_from(class).ok()?;
-                    }
-                }
-                Some(TransitionTurnSeconds { values, classes })
-            })
+            .get_or_init(|| TransitionTurnSeconds::build(self, topology, metrics))
             .as_ref()
+    }
+
+    /// `turn_penalty_seconds(previous_edge, next_edge)`, read from the
+    /// transition table when it has already been built and the transition
+    /// belongs to this graph; computed from the turn geometry otherwise.
+    /// The table holds the same values, so both paths agree bit for bit.
+    /// `topology` and `metrics` must be the ones the graph was built from.
+    pub(crate) fn turn_seconds_between(
+        &self,
+        topology: &TopologyBundle,
+        metrics: &CompiledProfileBundle,
+        previous_edge: usize,
+        next_edge: usize,
+    ) -> f64 {
+        if let Some(Some(table)) = self.turn_seconds.get()
+            && previous_edge < self.edge_costs.len()
+            && let Some(transition_index) = self
+                .transition_range(previous_edge)
+                .find(|&index| self.transition_edges[index] as usize == next_edge)
+        {
+            return table.get(transition_index);
+        }
+        turn_penalty_seconds(topology, metrics, previous_edge, next_edge)
     }
 
     pub(crate) fn outgoing_edges(&self, node_index: usize) -> &[u32] {
@@ -620,18 +664,18 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
     let edge_spatial_index =
         crate::edge_spatial_index::EdgeSpatialIndex::build(topology, &edge_costs);
     Ok(RoutingGraph {
-        edge_spatial_index,
-        first_out,
-        edge_order,
-        incoming_first_out,
-        incoming_edge_order,
-        edge_costs,
-        transition_first_out,
-        transition_edges,
-        transition_costs,
-        reverse_transition_first_out,
-        reverse_transition_edges,
-        reverse_transition_costs,
+        edge_spatial_index: Arc::new(edge_spatial_index),
+        first_out: first_out.into(),
+        edge_order: edge_order.into(),
+        incoming_first_out: incoming_first_out.into(),
+        incoming_edge_order: incoming_edge_order.into(),
+        edge_costs: edge_costs.into(),
+        transition_first_out: transition_first_out.into(),
+        transition_edges: transition_edges.into(),
+        transition_costs: transition_costs.into(),
+        reverse_transition_first_out: reverse_transition_first_out.into(),
+        reverse_transition_edges: reverse_transition_edges.into(),
+        reverse_transition_costs: reverse_transition_costs.into(),
         // Temporal-inclusive graphs intentionally run exact searches: their
         // scenario-only directions are absent from the static CCH weights.
         // Do not invoke the acceleration loader here, because a missing
@@ -640,15 +684,47 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
         acceleration: if options.include_temporal_materialized_directions {
             None
         } else {
-            build_acceleration_graph(metrics, acceleration, edge_count)?
+            build_acceleration_graph(metrics, acceleration, edge_count)?.map(Arc::new)
         },
         acceleration_includes_failure_penalties: false,
         automaton: RestrictionAutomaton::build(&restricted_sequences),
         reverse_automaton: RestrictionAutomaton::build(&reverse_restricted_sequences),
-        virtual_reverse_of: vec![None; edge_count],
+        virtual_reverse_of: Vec::new(),
         includes_temporal_materialized_directions: options.include_temporal_materialized_directions,
-        turn_seconds: std::sync::OnceLock::new(),
+        turn_seconds: Arc::default(),
     })
+}
+
+impl RoutingGraph {
+    /// This graph without its multi-edge restriction sequences, sharing
+    /// every array, the hierarchy and the lazily built tables. For graphs
+    /// built without search-time turn restrictions, whose pairwise
+    /// restrictions are removed transitions and so still apply; the result
+    /// matches building with `ignore_multi_edge_restriction_sequences`.
+    pub(crate) fn without_restriction_sequences(&self) -> Self {
+        Self {
+            edge_spatial_index: self.edge_spatial_index.clone(),
+            first_out: self.first_out.clone(),
+            edge_order: self.edge_order.clone(),
+            incoming_first_out: self.incoming_first_out.clone(),
+            incoming_edge_order: self.incoming_edge_order.clone(),
+            edge_costs: self.edge_costs.clone(),
+            transition_first_out: self.transition_first_out.clone(),
+            transition_edges: self.transition_edges.clone(),
+            transition_costs: self.transition_costs.clone(),
+            reverse_transition_first_out: self.reverse_transition_first_out.clone(),
+            reverse_transition_edges: self.reverse_transition_edges.clone(),
+            reverse_transition_costs: self.reverse_transition_costs.clone(),
+            acceleration: self.acceleration.clone(),
+            acceleration_includes_failure_penalties: self.acceleration_includes_failure_penalties,
+            automaton: RestrictionAutomaton::build(&[]),
+            reverse_automaton: RestrictionAutomaton::build(&[]),
+            virtual_reverse_of: self.virtual_reverse_of.clone(),
+            includes_temporal_materialized_directions: self
+                .includes_temporal_materialized_directions,
+            turn_seconds: self.turn_seconds.clone(),
+        }
+    }
 }
 
 /// Compiled profile bundles persist per-edge metrics only. When `metrics`

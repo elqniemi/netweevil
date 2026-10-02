@@ -169,6 +169,7 @@ struct ArcSummary {
 struct SummaryContext<'a> {
     topology: &'a TopologyBundle,
     metrics: &'a CompiledProfileBundle,
+    routing_graph: &'a RoutingGraph,
     acceleration: &'a AccelerationGraph,
     restrictions: Option<RestrictionWindows<'a>>,
     component_multipliers: Vec<f64>,
@@ -183,6 +184,7 @@ impl<'a> SummaryContext<'a> {
         Some(Self {
             topology,
             metrics,
+            routing_graph,
             acceleration: routing_graph.acceleration.as_ref()?,
             restrictions: RestrictionWindows::new(routing_graph),
             component_multipliers: metrics
@@ -294,8 +296,12 @@ impl<'a> ArcSummaryCache<'a> {
                 None => {
                     let tail = arc_tail(context.acceleration, is_upward, slot) as usize;
                     let head = arc_head(context.acceleration, is_upward, slot) as usize;
-                    let turn_s =
-                        turn_penalty_seconds(context.topology, context.metrics, tail, head);
+                    let turn_s = context.routing_graph.turn_seconds_between(
+                        context.topology,
+                        context.metrics,
+                        tail,
+                        head,
+                    );
                     let metric = &context.metrics.edge_metrics[head];
                     let run = context
                         .restrictions

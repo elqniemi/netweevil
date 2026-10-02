@@ -12,7 +12,6 @@
 //! the complete backward search space of the destination seeds), as in
 //! CH-potentials.
 
-use std::cell::RefCell;
 use std::collections::BinaryHeap;
 
 use anyhow::{Context, Result};
@@ -85,9 +84,7 @@ struct AStarScratch {
     heap: BinaryHeap<State>,
 }
 
-thread_local! {
-    static ASTAR_SCRATCH: RefCell<AStarScratch> = RefCell::new(AStarScratch::default());
-}
+static ASTAR_SCRATCH: ScratchPool<AStarScratch> = ScratchPool::new();
 
 impl AStarScratch {
     fn clear(&mut self) {
@@ -217,7 +214,6 @@ pub(crate) fn restricted_astar_route(
         .as_ref()
         .expect("lower-bound weights require acceleration");
     ASTAR_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
         scratch.clear();
         scratch.search_backward(acceleration, weights, destination_seeds);
 

@@ -1208,6 +1208,57 @@ fn single_route_restricted_fallback_matches_the_exact_engine() {
 }
 
 #[test]
+fn graph_without_restriction_sequences_matches_an_ignoring_build() {
+    let topology = multi_edge_restricted_topology();
+    let metrics = restricted_metrics();
+    let graph = build_routing_graph(&topology, &metrics).expect("graph builds");
+    let ignoring = crate::build_routing_graph_with_options(
+        &topology,
+        &metrics,
+        crate::RoutingGraphBuildOptions {
+            ignore_multi_edge_restriction_sequences: true,
+            ..Default::default()
+        },
+    )
+    .expect("ignoring graph builds");
+    let shared = graph.without_restriction_sequences();
+
+    assert!(graph.has_restriction_sequences());
+    assert!(!shared.has_restriction_sequences());
+    assert!(!ignoring.has_restriction_sequences());
+    assert!(Arc::ptr_eq(
+        &shared.transition_edges,
+        &graph.transition_edges
+    ));
+    let transitions = |graph: &RoutingGraph| {
+        (0..topology.edge_count())
+            .map(|edge| {
+                let forward = graph
+                    .transition_range(edge)
+                    .map(|index| {
+                        (
+                            graph.transition_edges[index],
+                            graph.transition_costs[index].to_bits(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let backward = graph
+                    .reverse_transition_range(edge)
+                    .map(|index| {
+                        (
+                            graph.reverse_transition_edges[index],
+                            graph.reverse_transition_costs[index].to_bits(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (forward, backward)
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(transitions(&shared), transitions(&ignoring));
+}
+
+#[test]
 fn builds_pairwise_turn_table_without_automaton_for_two_edge_restrictions() {
     let graph =
         build_routing_graph(&restricted_topology(), &restricted_metrics()).expect("graph builds");
@@ -1286,6 +1337,40 @@ fn applies_roundabout_entry_penalties() {
         execute_route(&topology, &metrics, &request).expect("route with roundabout penalty");
     assert_eq!(with_penalty.edge_path, vec![2, 3]);
     assert_eq!(with_penalty.summary.total_travel_time_s, 12.0);
+}
+
+#[test]
+fn transition_turn_table_matches_turn_geometry() {
+    let topology = traffic_signal_penalty_topology();
+    let mut metrics = turn_penalty_metrics();
+    metrics.turn_costs.left_penalty_s = 10.0;
+    metrics.turn_costs.right_penalty_s = 5.0;
+    metrics.turn_costs.uturn_penalty_s = 30.0;
+    metrics.turn_costs.traffic_signal_penalty_s = 7.0;
+    metrics.turn_costs.roundabout_entry_penalty_s = 3.0;
+    let graph = build_routing_graph(&topology, &metrics).expect("routing graph");
+    let edge_count = topology.edge_count();
+    let pairs = (0..edge_count)
+        .flat_map(|from| (0..edge_count).map(move |to| (from, to)))
+        .collect::<Vec<_>>();
+    let geometry = pairs
+        .iter()
+        .map(|&(from, to)| crate::turn_penalty_seconds(&topology, &metrics, from, to).to_bits())
+        .collect::<Vec<_>>();
+    let lookup = |graph: &RoutingGraph| {
+        pairs
+            .iter()
+            .map(|&(from, to)| {
+                graph
+                    .turn_seconds_between(&topology, &metrics, from, to)
+                    .to_bits()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(lookup(&graph), geometry);
+    assert!(graph.transition_turn_seconds(&topology, &metrics).is_some());
+    assert_eq!(lookup(&graph), geometry);
 }
 
 #[test]

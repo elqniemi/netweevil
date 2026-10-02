@@ -204,8 +204,7 @@ fn backward_dijkstra(
         }
         ServiceAreaMetricKind::DistanceM => None,
     };
-    SINGLE_SOURCE_SEARCH_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
+    SINGLE_SOURCE_SEARCH_SCRATCH.with(|mut scratch| {
         scratch.prepare(topology.edge_count());
         let mut heap = take_radix_heap();
         let mut restricted_dist = FxHashMap::<(u32, u32), f64>::default();

@@ -8,6 +8,7 @@ mod graph;
 mod many_to_many;
 mod radix_heap;
 mod restricted_astar;
+mod scratch_pool;
 mod state_heap;
 
 pub(crate) use acceleration::*;
@@ -20,6 +21,7 @@ pub(crate) use graph::*;
 pub(crate) use many_to_many::*;
 pub(crate) use radix_heap::*;
 pub(crate) use restricted_astar::*;
+pub(crate) use scratch_pool::*;
 pub(crate) use state_heap::*;
 
 use std::cmp::Ordering;
@@ -72,36 +74,25 @@ impl PreparedRoutingEngine {
             metrics.clone(),
             acceleration.clone(),
         )?;
+        if customized_at_load
+            && let Some(acceleration) = default_routing_graph
+                .acceleration
+                .as_mut()
+                .and_then(Arc::get_mut)
+        {
+            acceleration.deferred_metric_weights = Some(Arc::default());
+        }
         // Build the rank-ordered query arrays now rather than on the first
         // route request (~40 ms on a province-sized graph).
         if let Some(acceleration) = default_routing_graph.acceleration.as_ref() {
             acceleration.ranked.get(acceleration);
         }
-        let mut ignore_multi_edge_restrictions_graph =
-            if with_ignore_mode_graph && default_routing_graph.has_restriction_sequences() {
-                Some(build_routing_graph_with_options_from_shared(
-                    topology.as_ref(),
-                    metrics.clone(),
-                    acceleration.clone(),
-                    RoutingGraphBuildOptions {
-                        ignore_multi_edge_restriction_sequences: true,
-                        search_time_turn_restrictions: false,
-                        include_temporal_materialized_directions: false,
-                    },
-                )?)
-            } else {
-                None
-            };
-        if customized_at_load {
-            let deferred = Arc::new(DeferredMetricWeights::default());
-            for graph in std::iter::once(&mut default_routing_graph)
-                .chain(ignore_multi_edge_restrictions_graph.as_mut())
-            {
-                if let Some(acceleration) = graph.acceleration.as_mut() {
-                    acceleration.deferred_metric_weights = Some(deferred.clone());
-                }
-            }
-        }
+        // Route finalization and analysis read turn penalties from this
+        // table once it exists; build it before the first request.
+        default_routing_graph.transition_turn_seconds(topology.as_ref(), metrics.as_ref());
+        let ignore_multi_edge_restrictions_graph = (with_ignore_mode_graph
+            && default_routing_graph.has_restriction_sequences())
+        .then(|| default_routing_graph.without_restriction_sequences());
         Ok(Self {
             topology,
             metrics,
@@ -630,6 +621,7 @@ fn effective_engine_description(routing_graph: &RoutingGraph) -> EffectiveEngine
 pub(crate) fn finalize_route_path(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
     edge_indexes: Vec<usize>,
     origin: &SnappedPoint,
     destination: &SnappedPoint,
@@ -647,9 +639,12 @@ pub(crate) fn finalize_route_path(
         );
         total_generalized_cost += metric.generalized_cost.unwrap_or_default() * factor;
         if let Some(previous_edge_index) = previous_edge_index {
-            total_generalized_cost +=
-                turn_penalty_seconds(topology, metrics, previous_edge_index, edge_index)
-                    * metrics.turn_costs.cost_time_weight;
+            total_generalized_cost += routing_graph.turn_seconds_between(
+                topology,
+                metrics,
+                previous_edge_index,
+                edge_index,
+            ) * metrics.turn_costs.cost_time_weight;
         }
         previous_edge_index = Some(edge_index);
     }

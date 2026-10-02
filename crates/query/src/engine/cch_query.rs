@@ -7,7 +7,6 @@
 //! state holds both directions' costs and parents, and both queues are 4-ary
 //! [`StateHeap`]s of 16-byte entries.
 
-use std::cell::RefCell;
 use std::sync::OnceLock;
 
 use anyhow::Result;
@@ -15,10 +14,7 @@ use netweevil_core::{TopologyBundle, decode_cch_weight};
 
 use crate::*;
 
-thread_local! {
-    static PAIRWISE_CCH_SCRATCH: RefCell<PairwiseCchScratch> =
-        RefCell::new(PairwiseCchScratch::default());
-}
+static PAIRWISE_CCH_SCRATCH: ScratchPool<PairwiseCchScratch> = ScratchPool::new();
 
 /// The hierarchy arcs used by the pairwise query, with states renumbered by
 /// rank. Rows keep the original row order, so relaxations happen in the
@@ -199,8 +195,6 @@ pub(crate) fn accelerated_route_query_seeded(
     let minimum_destination_cost = minimum_seed_cost(destination_seeds);
 
     PAIRWISE_CCH_SCRATCH.with(|scratch| {
-        let mut scratch = scratch.borrow_mut();
-        let scratch = &mut *scratch;
         scratch.prepare(topology.edge_count());
 
         // Queue entries carry the edge index for tie-breaking (lowest cost,

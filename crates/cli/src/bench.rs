@@ -1479,8 +1479,47 @@ fn parse_osrm_route(body: &serde_json::Value) -> Outcome {
     }
 }
 
-fn http_agent(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::config_builder()
+/// Resolves every request to the benchmarked server's addresses, looked up
+/// once. With a timeout configured, ureq's default resolver spawns a lookup
+/// thread per request, which added tens of microseconds of client time to
+/// every measured request.
+#[derive(Debug)]
+struct FixedResolver(Vec<std::net::SocketAddr>);
+
+impl ureq::unversioned::resolver::Resolver for FixedResolver {
+    fn resolve(
+        &self,
+        _uri: &ureq::http::Uri,
+        _config: &ureq::config::Config,
+        _timeout: ureq::unversioned::transport::NextTimeout,
+    ) -> Result<ureq::unversioned::resolver::ResolvedSocketAddrs, ureq::Error> {
+        let mut addrs = self.empty();
+        for &addr in &self.0 {
+            addrs.push(addr);
+        }
+        Ok(addrs)
+    }
+}
+
+fn http_agent(url: &str, timeout: Duration) -> Result<ureq::Agent> {
+    let authority = url
+        .trim_start_matches("http://")
+        .split('/')
+        .next()
+        .unwrap_or_default();
+    let authority = if authority.contains(':') {
+        authority.to_string()
+    } else {
+        format!("{authority}:80")
+    };
+    let addrs = std::net::ToSocketAddrs::to_socket_addrs(&authority)
+        .with_context(|| format!("resolving {authority}"))?
+        .take(16)
+        .collect::<Vec<_>>();
+    if addrs.is_empty() {
+        bail!("{authority} resolved to no addresses");
+    }
+    let config = ureq::Agent::config_builder()
         .timeout_global(Some(timeout))
         .user_agent(concat!(
             "NetWeevil/",
@@ -1488,8 +1527,12 @@ fn http_agent(timeout: Duration) -> ureq::Agent {
             " routing-research"
         ))
         .http_status_as_error(false)
-        .build()
-        .into()
+        .build();
+    Ok(ureq::Agent::with_parts(
+        config,
+        ureq::unversioned::transport::DefaultConnector::default(),
+        FixedResolver(addrs),
+    ))
 }
 
 fn execute_http(
@@ -1515,7 +1558,17 @@ fn execute_http(
             if !(200..300).contains(&status) {
                 Outcome::status_failure(format!("HTTP {status}"))
             } else {
-                match response.body_mut().read_json::<serde_json::Value>() {
+                // Parsing from a buffer avoids serde_json's byte-at-a-time
+                // reader over the response stream.
+                let body = response
+                    .body_mut()
+                    .read_to_vec()
+                    .map_err(|error| error.to_string())
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<serde_json::Value>(&bytes)
+                            .map_err(|error| error.to_string())
+                    });
+                match body {
                     Err(error) => Outcome::status_failure(format!("decoding body: {error}")),
                     Ok(body) => match args.backend {
                         HttpBackend::Netweevil => parse_netweevil_route(&body),
@@ -1778,7 +1831,7 @@ pub(crate) fn bench_http(args: BenchHttpArgs) -> Result<()> {
     }
     let request_interval = Duration::from_millis(args.request_interval_ms);
     let timeout = Duration::from_secs(args.timeout_s);
-    let warmup_agent = http_agent(timeout);
+    let warmup_agent = http_agent(&args.url, timeout)?;
     for index in 0..args.warmup {
         let started = Instant::now();
         let _ = execute_http(&warmup_agent, &args, &rows[index % rows.len()]);
@@ -1789,8 +1842,8 @@ pub(crate) fn bench_http(args: BenchHttpArgs) -> Result<()> {
     // One agent per worker so each concurrent request holds its own keep-alive
     // connection rather than queueing on a shared pool.
     let agents: Vec<ureq::Agent> = (0..args.concurrency.max(1))
-        .map(|_| http_agent(timeout))
-        .collect();
+        .map(|_| http_agent(&args.url, timeout))
+        .collect::<Result<_>>()?;
     let next_agent = AtomicUsize::new(0);
     let worker_agent = || {
         let index = next_agent.fetch_add(1, Ordering::Relaxed);
