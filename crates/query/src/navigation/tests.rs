@@ -1188,4 +1188,3 @@ fn cycle_path_jogs_with_little_heading_change_get_no_turn_step() {
         ]
     );
 }
-

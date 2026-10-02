@@ -420,8 +420,13 @@ Route `fallback` flags (`allow_reverse_oneway`, `allow_illegal_turn`,
 illegal movements available at their `penalties`. The route minimizes cost plus
 penalties, so a legal route is returned whenever it costs no more than the
 cheapest penalized one; a returned route is `degraded` only if it uses an
-illegal movement. `auto_relax_unreachable` instead routes strictly first and
-relaxes only when no legal route exists.
+illegal movement. `max_illegal_distance_m` (reverse-oneway metres) and
+`max_illegal_turns` (relaxed turn restrictions) cap a route's illegal
+movements. When the cheapest penalized route breaks a cap, the cheapest route
+and snapped orientation within the caps is returned. Only when no route stays
+within the caps does the request fail. Alternatives over a cap are dropped.
+`auto_relax_unreachable` instead routes strictly first and relaxes only when no
+legal route exists.
 
 ## Transit
 

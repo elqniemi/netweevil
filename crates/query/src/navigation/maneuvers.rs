@@ -820,8 +820,7 @@ impl ManeuverBuilder<'_> {
             _ => turn_maneuver(rotation, self.driving_side),
         };
         let second = drafts.remove(index + 1);
-        if kind == ManeuverType::Continue && !announces_street(&drafts[index - 1], &second.street)
-        {
+        if kind == ManeuverType::Continue && !announces_street(&drafts[index - 1], &second.street) {
             let first = drafts.remove(index);
             drafts[index - 1].end = second.end.max(first.end);
             return true;

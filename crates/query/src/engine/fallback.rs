@@ -265,6 +265,222 @@ pub(crate) fn path_failure_mode_penalty_cost(
     total
 }
 
+/// Whether `fallback` caps the illegal movements a degraded route may use.
+pub(crate) fn has_failure_mode_limits(fallback: &FallbackPolicy) -> bool {
+    has_failure_modes(fallback)
+        && (fallback.max_illegal_distance_m.is_some() || fallback.max_illegal_turns.is_some())
+}
+
+/// One partial route of [`limited_failure_mode_route`].
+struct LimitedLabel {
+    edge_index: usize,
+    automaton_state: usize,
+    cost: f64,
+    /// Reverse-oneway metres travelled so far.
+    illegal_distance_m: f64,
+    /// Relaxed turn restrictions so far.
+    illegal_turns: u32,
+    previous: Option<usize>,
+}
+
+impl LimitedLabel {
+    /// No worse in both illegal-movement counts; with labels settled in
+    /// cost order this makes `self` dominate `other`.
+    fn covers(&self, other: &LimitedLabel) -> bool {
+        self.illegal_distance_m <= other.illegal_distance_m + 1e-9
+            && self.illegal_turns <= other.illegal_turns
+    }
+}
+
+/// Cheapest failure-mode route from `origin` to `destination` whose
+/// reverse-oneway distance and relaxed turn restrictions stay within
+/// `fallback.max_illegal_distance_m` and `fallback.max_illegal_turns`,
+/// counted the way the route analysis counts them.
+///
+/// The penalized search minimizes cost alone, so its route may break a
+/// limit while a costlier one does not. This label-setting search keeps,
+/// for each edge and restriction state, every label that no cheaper label
+/// matches in both illegal distance and illegal turns. Labels leave the
+/// queue in cost order, so the first route within the limits that cannot
+/// be undercut is optimal. It runs only after the penalized route broke a
+/// limit.
+pub(crate) fn limited_failure_mode_route(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    fallback: &FallbackPolicy,
+    origin: &SnappedPoint,
+    destination: &SnappedPoint,
+    initial_upper_bound: Option<RoutePath>,
+) -> Result<Option<RoutePath>> {
+    let max_distance_m = fallback.max_illegal_distance_m.unwrap_or(f64::INFINITY) + f64::EPSILON;
+    let max_turns = fallback.max_illegal_turns.unwrap_or(u32::MAX);
+    let illegal_length_m = |edge_index: usize| {
+        let reversed = routing_graph
+            .virtual_reverse_of
+            .get(edge_index)
+            .is_some_and(Option::is_some);
+        if reversed {
+            f64::from(topology.routing_edge(edge_index).length_m)
+        } else {
+            0.0
+        }
+    };
+    // Destination edges: the cost adjustment and the reverse-oneway metres
+    // beyond the snapped position, which the route does not travel.
+    let mut destinations = Vec::<(usize, f64, f64)>::new();
+    for (edge_index, adjustment) in destination_edge_seeds(routing_graph, destination) {
+        let untravelled = match (
+            destination.snapped_edge_id,
+            destination.snapped_edge_fraction,
+        ) {
+            (Some(edge), Some(fraction)) if edge as usize == edge_index => {
+                illegal_length_m(edge_index) * (1.0 - fraction)
+            }
+            _ => 0.0,
+        };
+        match destinations
+            .iter_mut()
+            .find(|(edge, _, _)| *edge == edge_index)
+        {
+            Some((_, known, _)) => *known = known.min(adjustment),
+            None => destinations.push((edge_index, adjustment, untravelled)),
+        }
+    }
+    let destination_of = |edge_index: usize| {
+        destinations
+            .iter()
+            .find(|(edge, _, _)| *edge == edge_index)
+            .map(|&(_, adjustment, untravelled)| (adjustment, untravelled))
+    };
+    let minimum_adjustment = destinations
+        .iter()
+        .map(|&(_, adjustment, _)| adjustment)
+        .fold(0.0, f64::min);
+
+    let mut labels = Vec::<LimitedLabel>::new();
+    let mut settled = FxHashMap::<SearchStateKey, Vec<usize>>::default();
+    let mut heap = StateHeap::default();
+    let mut best_cost = initial_upper_bound
+        .as_ref()
+        .map_or(f64::INFINITY, |path| path.total_generalized_cost);
+    let mut best_label = None;
+    let dominated = |settled: &FxHashMap<SearchStateKey, Vec<usize>>,
+                     labels: &[LimitedLabel],
+                     label: &LimitedLabel| {
+        let key = SearchStateKey {
+            edge_index: label.edge_index,
+            automaton_state: label.automaton_state,
+        };
+        settled
+            .get(&key)
+            .is_some_and(|known| known.iter().any(|&index| labels[index].covers(label)))
+    };
+    // A label over the distance limit may still end within it on its
+    // destination edge; it is kept for that check but not expanded.
+    let push = |labels: &mut Vec<LimitedLabel>, heap: &mut StateHeap, label: LimitedLabel| {
+        let over = label.illegal_distance_m > max_distance_m || label.illegal_turns > max_turns;
+        if !label.cost.is_finite() || (over && destination_of(label.edge_index).is_none()) {
+            return;
+        }
+        heap.push(label.edge_index, labels.len(), label.cost);
+        labels.push(label);
+    };
+
+    for (edge_index, cost) in origin_edge_seeds(routing_graph, origin) {
+        let travelled = match (origin.snapped_edge_id, origin.snapped_edge_fraction) {
+            (Some(edge), Some(fraction)) if edge as usize == edge_index => 1.0 - fraction,
+            _ => 1.0,
+        };
+        let (_, penalty_cost) =
+            edge_failure_mode_penalty(metrics, routing_graph, fallback, edge_index);
+        push(
+            &mut labels,
+            &mut heap,
+            LimitedLabel {
+                edge_index,
+                automaton_state: routing_graph.automaton.transition(0, edge_index),
+                cost: cost + penalty_cost,
+                illegal_distance_m: illegal_length_m(edge_index) * travelled,
+                illegal_turns: 0,
+                previous: None,
+            },
+        );
+    }
+
+    while heap.peek_cost() + minimum_adjustment < best_cost {
+        let (_, index, _) = heap.pop().unwrap();
+        if dominated(&settled, &labels, &labels[index]) {
+            continue;
+        }
+        let label = &labels[index];
+        let key = SearchStateKey {
+            edge_index: label.edge_index,
+            automaton_state: label.automaton_state,
+        };
+        settled.entry(key).or_default().push(index);
+        if let Some((adjustment, untravelled)) = destination_of(label.edge_index)
+            && label.illegal_distance_m - untravelled <= max_distance_m
+            && label.illegal_turns <= max_turns
+            && label.cost + adjustment < best_cost
+        {
+            best_cost = label.cost + adjustment;
+            best_label = Some(index);
+        }
+        if label.illegal_distance_m > max_distance_m || label.illegal_turns > max_turns {
+            continue;
+        }
+        let (edge_index, automaton_state) = (label.edge_index, label.automaton_state);
+        let (cost, illegal_distance_m, illegal_turns) =
+            (label.cost, label.illegal_distance_m, label.illegal_turns);
+        for transition_index in routing_graph.transition_range(edge_index) {
+            let next_edge = routing_graph.transition_edges[transition_index] as usize;
+            let Some((_, penalty_cost)) = transition_failure_mode_penalty(
+                topology,
+                metrics,
+                routing_graph,
+                automaton_state,
+                edge_index,
+                next_edge,
+                fallback,
+            ) else {
+                continue;
+            };
+            let relaxed = routing_graph
+                .automaton
+                .prohibited_sequence_len(automaton_state, next_edge)
+                .is_some();
+            let next = LimitedLabel {
+                edge_index: next_edge,
+                automaton_state: routing_graph
+                    .automaton
+                    .transition(automaton_state, next_edge),
+                cost: cost + routing_graph.transition_costs[transition_index] + penalty_cost,
+                illegal_distance_m: illegal_distance_m + illegal_length_m(next_edge),
+                illegal_turns: illegal_turns + u32::from(relaxed),
+                previous: Some(index),
+            };
+            if next.cost < best_cost && !dominated(&settled, &labels, &next) {
+                push(&mut labels, &mut heap, next);
+            }
+        }
+    }
+
+    let Some(mut cursor) = best_label else {
+        return Ok(initial_upper_bound);
+    };
+    let mut edge_indexes = vec![labels[cursor].edge_index];
+    while let Some(previous) = labels[cursor].previous {
+        edge_indexes.push(labels[previous].edge_index);
+        cursor = previous;
+    }
+    edge_indexes.reverse();
+    Ok(Some(RoutePath {
+        edge_indexes,
+        total_generalized_cost: best_cost,
+    }))
+}
+
 /// Customizes CCH weights for a degraded (failure-mode) graph so requests
 /// with failure modes route accelerated instead of via graph-wide Dijkstra.
 ///

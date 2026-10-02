@@ -153,6 +153,9 @@ pub(crate) fn route_between_candidates(
     let mut attachment: Option<(usize, usize)> = None;
     let mut best: Option<(SnappedPoint, SnappedPoint, RoutePath, HopSelectionInfo, f64)> = None;
     let mut failed_pairs = HashSet::<((u32, u64, u64), (u32, u64, u64))>::new();
+    // The limit error of the first penalized route that broke a limit,
+    // returned when no orientation has a route within the limits.
+    let mut limit_failure = None;
 
     for (origin_index, origin) in origin_candidates.iter().enumerate() {
         if let Some((first_origin, _)) = attachment
@@ -181,8 +184,8 @@ pub(crate) fn route_between_candidates(
             if failed_pairs.contains(&key) {
                 continue;
             }
+            let direct_path = direct_same_edge_path(routing_graph, origin, destination);
             let path = {
-                let direct_path = direct_same_edge_path(routing_graph, origin, destination);
                 let path = if routing_graph.has_restriction_sequences() {
                     let origin_seeds = origin_edge_seeds(routing_graph, origin);
                     let destination_seeds = destination_edge_seeds(routing_graph, destination);
@@ -305,6 +308,28 @@ pub(crate) fn route_between_candidates(
                     origin,
                     destination,
                 );
+                // The cheapest penalized route may break the illegal-movement
+                // limits while a costlier route for the same orientation
+                // keeps within them. The orientation counts as unroutable
+                // only when no route does.
+                let path = if has_failure_mode_limits(fallback) {
+                    match route_within_failure_mode_limits(
+                        topology,
+                        metrics,
+                        routing_graph,
+                        fallback,
+                        origin,
+                        destination,
+                        path,
+                        direct_path,
+                        &mut limit_failure,
+                    )? {
+                        Some(path) => path,
+                        None => continue,
+                    }
+                } else {
+                    path
+                };
                 // Failure modes are penalized relaxations, not a separate
                 // selection rule: the orientations of one attachment compete
                 // on cost including illegal-movement penalties, so a legal
@@ -329,8 +354,86 @@ pub(crate) fn route_between_candidates(
         }
     }
 
-    best.map(|(origin, destination, path, hop_info, _)| (origin, destination, path, hop_info))
-        .ok_or_else(|| no_route_failure(topology, origin_candidates, destination_candidates).into())
+    match best {
+        Some((origin, destination, path, hop_info, _)) => Ok((origin, destination, path, hop_info)),
+        None => Err(limit_failure.unwrap_or_else(|| {
+            no_route_failure(topology, origin_candidates, destination_candidates).into()
+        })),
+    }
+}
+
+/// `path` when its illegal movements are within the fallback limits;
+/// otherwise the cheapest route for the same orientation that is, if any.
+/// The first limit error is kept in `limit_failure` for the case that no
+/// orientation has a route within the limits.
+#[allow(clippy::too_many_arguments)]
+fn route_within_failure_mode_limits(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    fallback: &FallbackPolicy,
+    origin: &SnappedPoint,
+    destination: &SnappedPoint,
+    path: RoutePath,
+    direct_path: Option<RoutePath>,
+    limit_failure: &mut Option<anyhow::Error>,
+) -> Result<Option<RoutePath>> {
+    let within_limits = |path: &RoutePath| {
+        analyze_route_path(
+            topology,
+            metrics,
+            routing_graph,
+            fallback,
+            path,
+            origin,
+            destination,
+        )
+    };
+    let Err(error) = within_limits(&path) else {
+        return Ok(Some(path));
+    };
+    limit_failure.get_or_insert(error);
+    let direct_path = direct_path
+        .map(|path| {
+            finalize_route_path(
+                topology,
+                metrics,
+                routing_graph,
+                path.edge_indexes,
+                origin,
+                destination,
+            )
+        })
+        .filter(|path| within_limits(path).is_ok())
+        .map(|path| RoutePath {
+            total_generalized_cost: selection_cost(
+                topology,
+                metrics,
+                routing_graph,
+                fallback,
+                &path,
+            ),
+            ..path
+        });
+    let limited = limited_failure_mode_route(
+        topology,
+        metrics,
+        routing_graph,
+        fallback,
+        origin,
+        destination,
+        direct_path,
+    )?;
+    Ok(limited.map(|path| {
+        finalize_route_path(
+            topology,
+            metrics,
+            routing_graph,
+            path.edge_indexes,
+            origin,
+            destination,
+        )
+    }))
 }
 
 /// Cost used to choose between candidate attachments: the route's generalized
