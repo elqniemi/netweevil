@@ -15,6 +15,7 @@ mod router;
 mod runtime;
 mod service_area;
 mod stop_context;
+mod timetable_pack;
 mod timetable_time;
 mod transfer_pack;
 mod transfer_rules;

@@ -459,7 +459,7 @@ identify exact instants; naive datetimes use the agency timezone and reject
 ambiguous or skipped clock times. Results include `time_context` with
 `agency_timezone` and `time_origin_unix_s`; add the origin to any returned
 `departure_s` or `arrival_s` to obtain its Unix timestamp. Exported QGIS and
-GeoJSON features retain both fields. Transit bundles use schema 6 and require
+GeoJSON features retain both fields. Transit bundles use schema 7 and require
 re-import after this change. See [transit time and service days](docs/transit-time.md).
 
 GTFS `transfers.txt` rules apply to depart-at, arrive-by, and service-area queries,
