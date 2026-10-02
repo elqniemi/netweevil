@@ -230,6 +230,41 @@ pub(crate) fn transition_failure_mode_penalty(
     ))
 }
 
+/// Sum of the illegal-movement penalty costs a failure-mode search paid
+/// along `edge_indexes`: the reverse-oneway penalty of every virtual edge and
+/// the turn penalty of every relaxed restriction, replaying the automaton.
+pub(crate) fn path_failure_mode_penalty_cost(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    fallback: &FallbackPolicy,
+    edge_indexes: &[usize],
+) -> f64 {
+    let Some((&first, rest)) = edge_indexes.split_first() else {
+        return 0.0;
+    };
+    let mut total = edge_failure_mode_penalty(metrics, routing_graph, fallback, first).1;
+    let mut automaton_state = routing_graph.automaton.transition(0, first);
+    let mut previous = first;
+    for &edge_index in rest {
+        total += transition_failure_mode_penalty(
+            topology,
+            metrics,
+            routing_graph,
+            automaton_state,
+            previous,
+            edge_index,
+            fallback,
+        )
+        .map_or(f64::INFINITY, |(_, cost)| cost);
+        automaton_state = routing_graph
+            .automaton
+            .transition(automaton_state, edge_index);
+        previous = edge_index;
+    }
+    total
+}
+
 /// Customizes CCH weights for a degraded (failure-mode) graph so requests
 /// with failure modes route accelerated instead of via graph-wide Dijkstra.
 ///

@@ -36,6 +36,7 @@ import type { createThreeDOverlay } from "./ThreeDOverlay";
 import type { StationGeometryResponse } from "../geo/stationGeometry";
 import { StationGeometryCache } from "../geo/stationGeometryCache";
 import { applyTerrain, selectedTerrain, terrainTileError, TERRAIN_SOURCE } from "./terrain";
+import { applyNetworkTiles, networkTileUrl } from "./networkTiles";
 
 const RESULT_SOURCE = "results";
 const INPUT_SOURCE = "inputs";
@@ -450,6 +451,7 @@ export function MapView({ service }: Props) {
       apply3dPresentation(map, !!overlayRef.current && getState().mapStyle.view3d);
       setState({ terrainError: null });
       applyTerrainPresentation(map);
+      applyNetworkTilePresentation(map);
       overlayRef.current?.update(combinedFeatures(), getState().mapStyle, getState().selectedRun);
       syncViewport();
     });
@@ -660,6 +662,11 @@ export function MapView({ service }: Props) {
   const baseFeedId = tool === "transit_editor" ? (editor.scenario?.base_feed_id ?? null) : null;
   const viewport = useStore((s) => s.viewport.bbox);
   const apiBase = useStore((s) => s.apiBase);
+  const profileId = useStore((s) => s.profileId);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (map && styleReady.current) applyNetworkTilePresentation(map);
+  }, [apiBase, profileId, mapStyle.networkTiles]);
   const terrainCatalogScope = useRef<string | null>(null);
   const terrainScope = JSON.stringify([apiBase, service?.workspace_root ?? null]);
   useEffect(() => {
@@ -851,6 +858,11 @@ function apply3dPresentation(map: MapLibreMap, active: boolean) {
   // canvas for x-ray inspection without changing any source elevations.
   const opacity = String(active && style.xray ? style.basemapOpacity : 1);
   if (map.getCanvas().style.opacity !== opacity) map.getCanvas().style.opacity = opacity;
+}
+
+function applyNetworkTilePresentation(map: MapLibreMap) {
+  const state = getState();
+  applyNetworkTiles(map, state.mapStyle.networkTiles ? networkTileUrl(state.apiBase, state.profileId) : null, "results-fill");
 }
 
 function applyTerrainPresentation(map: MapLibreMap) {

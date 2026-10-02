@@ -97,6 +97,10 @@ export function MapTools() {
       </div>
       {open && (
         <div className="style-panel">
+          <Section title="Routing network">
+            <label className="style-check"><input type="checkbox" checked={style.networkTiles} onChange={(e) => set({ networkTiles: e.target.checked })} /> Network tiles of the selected profile</label>
+            <p className="style-note">Edges the profile can traverse, coloured by road class, from /v1/tiles. Minor roads appear from zoom 12, all edges from zoom 14.</p>
+          </Section>
           <Section title="Local reference layers">
             <label className="style-row">Load platform / exit GeoJSON<input type="file" accept=".geojson,.json,application/geo+json" multiple onChange={(e) => { void importReferences(e.target.files); e.target.value = ""; }} /></label>
             <p className="style-note">Local files stay in this browser tab. Platforms are purple; files named "exit" are green. Use 3D to see their source heights.</p>

@@ -20,6 +20,7 @@ mod console;
 mod dto;
 mod dynamic_profiles;
 mod error;
+mod expansion;
 mod geojson;
 mod gtfs_editor;
 mod handlers;
@@ -30,6 +31,7 @@ mod simulation;
 mod state;
 mod station_geometry;
 mod terrain;
+mod tiles;
 mod trace_matching;
 mod transit;
 mod transit_directions;
@@ -138,6 +140,7 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
         .route("/v1/directions", post(handlers::directions_handler))
         .route("/v1/match", post(trace_matching::trace_match_handler))
         .route("/v1/locate", post(locate::locate_handler))
+        .route("/v1/expansion", post(expansion::expansion_handler))
         .route("/v1/waypoints", post(waypoints::waypoints_handler))
         .route("/v1/transit-route", post(transit::transit_route_handler))
         .route(
@@ -163,6 +166,7 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
         .route("/v1/betweenness", post(handlers::betweenness_handler))
         .route("/v1/scenario-batch", post(handlers::scenario_batch_handler))
         .route("/v1/network/edges", post(network::network_edges_handler))
+        .route("/v1/tiles/{z}/{x}/{tile}", get(tiles::network_tile_handler))
         .route(
             "/v1/simulation",
             get(simulation::list_simulations).post(simulation::create_simulation),

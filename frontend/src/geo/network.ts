@@ -19,7 +19,7 @@ export interface NetworkLegend {
 }
 
 const ROAD_CLASS_ORDER = ["motorway", "trunk", "primary", "secondary", "tertiary", "residential", "service", "track", "path", "ferry", "unknown"];
-const ROAD_CLASS_COLORS: Record<string, string> = {
+export const ROAD_CLASS_COLORS: Record<string, string> = {
   motorway: "#8B1A2B",
   trunk: "#C8102E",
   primary: "#E8632B",

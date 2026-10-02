@@ -721,9 +721,21 @@ const serviceAreaFields: Field[] = [
       { value: "cut", label: "cut" },
     ],
   },
+  {
+    key: "direction",
+    label: "Direction",
+    type: "select",
+    default: "outbound",
+    options: [
+      { value: "outbound", label: "from origins" },
+      { value: "inbound", label: "to origins" },
+    ],
+  },
   { key: "hull_aggressiveness", label: "Hull aggressiveness", type: "number", default: 1, min: 0, step: 0.1, group: "Polygon" },
   { key: "simplification_tolerance_m", label: "Simplification (m)", type: "number", min: 0, step: 5, group: "Polygon", placeholder: "none" },
   { key: "cell_size_m", label: "Cell size (m)", type: "number", min: 1, step: 10, group: "Polygon", placeholder: "auto" },
+  { key: "denoise", label: "Denoise (fraction of largest part)", type: "number", min: 0, step: 0.1, group: "Polygon", placeholder: "keep all", hint: "0..1; 1 keeps only the largest part" },
+  { key: "min_hole_area_m2", label: "Min hole area (m²)", type: "number", min: 0, step: 1000, group: "Polygon", placeholder: "keep all" },
   { key: "segments", label: "Return segments", type: "checkbox", default: false, group: "Returns" },
   { key: "max_features", label: "Max features", type: "number", min: 1, step: 100, group: "Returns", placeholder: "default" },
   { key: "max_geometry_points", label: "Max geometry points", type: "number", min: 1, step: 1000, group: "Returns", placeholder: "default" },
@@ -740,6 +752,10 @@ function serviceAreaRequest(ctx: BuildContext) {
   if (simplification !== undefined) polygon.simplification_tolerance_m = simplification;
   const cell = num(form, "cell_size_m");
   if (cell !== undefined) polygon.cell_size_m = cell;
+  const denoise = num(form, "denoise");
+  if (denoise !== undefined) polygon.denoise = denoise;
+  const minHole = num(form, "min_hole_area_m2");
+  if (minHole !== undefined) polygon.min_hole_area_m2 = minHole;
   const returns: Record<string, unknown> = { geometry: true, attributes: true, per_threshold_summary: true, diagnostics: true, segments: bool(form, "segments") };
   const maxFeatures = num(form, "max_features");
   if (maxFeatures !== undefined) returns.max_features = maxFeatures;
@@ -756,6 +772,7 @@ function serviceAreaRequest(ctx: BuildContext) {
     band_mode: str(form, "band_mode") ?? "cumulative",
     boundary_mode: str(form, "boundary_mode") ?? "overlap",
     multi_origin_mode: str(form, "multi_origin_mode") ?? "merge",
+    direction: str(form, "direction") ?? "outbound",
     polygon,
     returns,
     ...temporal(form),

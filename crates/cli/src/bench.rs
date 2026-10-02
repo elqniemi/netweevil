@@ -1237,6 +1237,7 @@ fn service_area_request(
         band_mode: ServiceAreaBandMode::default(),
         boundary_mode: ServiceAreaBoundaryMode::default(),
         multi_origin_mode: ServiceAreaMultiOriginMode::default(),
+        direction: Default::default(),
         polygon: ServiceAreaPolygonOptions::default(),
         returns: ServiceAreaReturnOptions {
             geometry: output == ServiceAreaBenchOutput::Polygon,

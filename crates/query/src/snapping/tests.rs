@@ -52,3 +52,46 @@ fn finite_global_snap_radius_is_bounded_by_the_node_grid() {
         assert_eq!(candidates[0].0, 0);
     }
 }
+
+#[test]
+fn nearest_segments_group_directions_and_rank_by_distance() {
+    use crate::tests::fixtures::{forbidden_uturn_topology, point, snap_within, uniform_metrics};
+    // Two-way segment 0 <-> 1 along the latitude, one-way edge 2 north.
+    let topology = forbidden_uturn_topology();
+    let metrics = uniform_metrics(topology.edge_count(), 10.0);
+    let graph = build_routing_graph(&topology, &metrics).unwrap();
+    let located = point("p", 6.0004, 53.0001);
+
+    let nearest = nearest_segments(&topology, &graph, &located, &snap_within(500.0), 5).unwrap();
+    let edges = nearest
+        .iter()
+        .map(|segment| {
+            let mut edges = segment
+                .edges
+                .iter()
+                .map(|edge| edge.edge_index)
+                .collect::<Vec<_>>();
+            edges.sort_unstable();
+            edges
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(edges, vec![vec![0, 1], vec![2]]);
+    assert!(nearest[0].distance_m < nearest[1].distance_m);
+    let fractions = nearest[0]
+        .edges
+        .iter()
+        .map(|edge| edge.fraction)
+        .sum::<f64>();
+    assert!(
+        (fractions - 1.0).abs() < 1e-9,
+        "opposite directions mirror the fraction"
+    );
+
+    let only = nearest_segments(&topology, &graph, &located, &snap_within(500.0), 1).unwrap();
+    assert_eq!(only.len(), 1);
+    assert!(
+        nearest_segments(&topology, &graph, &located, &snap_within(1.0), 3)
+            .unwrap()
+            .is_empty()
+    );
+}

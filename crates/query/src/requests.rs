@@ -321,6 +321,12 @@ pub struct IllegalMovementPenaltyPolicy {
     pub forbidden_uturn_penalty_s: Option<f64>,
 }
 
+/// Failure modes relax legality at a price. Explicit `allow_*` /
+/// `ignore_turn_restrictions` flags make the relaxed movements available
+/// with their `penalties` added to the generalized cost; the route minimizes
+/// cost plus penalties, so a legal route wins whenever it is no more
+/// expensive than the cheapest penalized illegal one. `auto_relax_unreachable`
+/// instead routes strictly first and relaxes only when no legal route exists.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct FallbackPolicy {
     #[serde(default)]
@@ -392,10 +398,21 @@ pub enum ServiceAreaMultiOriginMode {
     Cut,
 }
 
+/// `outbound` covers what the origins reach; `inbound` covers every position
+/// that reaches the origins (used as destinations) within the thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaDirection {
+    #[default]
+    Outbound,
+    Inbound,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceAreaPolygonOptions {
     #[serde(default = "default_hull_aggressiveness")]
     pub hull_aggressiveness: f64,
+    /// Douglas-Peucker tolerance applied to every traced ring, in metres.
     #[serde(default)]
     pub simplification_tolerance_m: Option<f64>,
     /// Grid cell size used to trace the concave polygon boundary. Smaller
@@ -403,6 +420,16 @@ pub struct ServiceAreaPolygonOptions {
     /// 25m x hull_aggressiveness (minimum 10m).
     #[serde(default)]
     pub cell_size_m: Option<f64>,
+    /// Drop polygon parts whose exterior area is below this fraction (0..=1)
+    /// of the band's largest part; 1 keeps only the largest part.
+    #[serde(default)]
+    pub denoise: Option<f64>,
+    /// Drop polygon parts whose exterior area is below this many m2.
+    #[serde(default)]
+    pub min_part_area_m2: Option<f64>,
+    /// Fill holes smaller than this many m2.
+    #[serde(default)]
+    pub min_hole_area_m2: Option<f64>,
 }
 
 impl Default for ServiceAreaPolygonOptions {
@@ -411,6 +438,9 @@ impl Default for ServiceAreaPolygonOptions {
             hull_aggressiveness: default_hull_aggressiveness(),
             simplification_tolerance_m: None,
             cell_size_m: None,
+            denoise: None,
+            min_part_area_m2: None,
+            min_hole_area_m2: None,
         }
     }
 }
@@ -491,6 +521,8 @@ pub struct ServiceAreaRequest {
     pub boundary_mode: ServiceAreaBoundaryMode,
     #[serde(default)]
     pub multi_origin_mode: ServiceAreaMultiOriginMode,
+    #[serde(default)]
+    pub direction: ServiceAreaDirection,
     #[serde(default)]
     pub polygon: ServiceAreaPolygonOptions,
     #[serde(default)]

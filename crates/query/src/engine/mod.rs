@@ -223,6 +223,50 @@ impl PreparedRoutingEngine {
         )
     }
 
+    /// The `count` nearest routable road segments to `point`; see
+    /// [`nearest_segments`].
+    pub fn nearest_segments(
+        &self,
+        point: &LabeledPoint,
+        options: &SnapOptions,
+        count: usize,
+    ) -> Result<Vec<NearestSegment>> {
+        nearest_segments(
+            self.topology.as_ref(),
+            &self.default_routing_graph,
+            point,
+            options,
+            count,
+        )
+    }
+
+    /// Settled edges of the exact search behind a route or service area,
+    /// in settle order; see [`ExpansionRequest`].
+    pub fn execute_expansion(&self, request: &ExpansionRequest) -> Result<ExpansionResult> {
+        crate::expansion::execute_expansion_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            request,
+        )
+    }
+
+    /// Edges this profile can traverse whose extent intersects
+    /// `[west, south, east, north]`, in ascending edge order.
+    pub fn routable_edges_in_bbox(&self, bbox: [f64; 4]) -> Vec<u32> {
+        self.default_routing_graph
+            .edge_spatial_index
+            .edges_in_bbox(self.topology.as_ref(), bbox)
+    }
+
+    /// Whether this profile can traverse `edge_index`.
+    pub fn is_routable_edge(&self, edge_index: usize) -> bool {
+        self.default_routing_graph
+            .edge_costs
+            .get(edge_index)
+            .is_some_and(|cost| cost.is_finite())
+    }
+
     /// Execute a route between pre-snapped candidate sets produced by
     /// [`Self::snap_route_candidates`]. Requests with failure modes or exact
     /// temporal/component labels fall back to the full snap-and-route path so

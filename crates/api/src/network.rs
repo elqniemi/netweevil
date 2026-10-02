@@ -326,11 +326,11 @@ fn vertical_properties(
     properties
 }
 
-fn enum_label<T: Serialize>(value: &T) -> Value {
+pub(crate) fn enum_label<T: Serialize>(value: &T) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
-fn mode_bit(profile: &LoadedProfile) -> u16 {
+pub(crate) fn mode_bit(profile: &LoadedProfile) -> u16 {
     match profile.document.profile.mode {
         netweevil_core::TravelMode::Car => AccessMask::CAR,
         netweevil_core::TravelMode::Bicycle => AccessMask::BICYCLE,
@@ -340,16 +340,16 @@ fn mode_bit(profile: &LoadedProfile) -> u16 {
     }
 }
 
-struct ProfileValues {
-    allowed: bool,
-    access: bool,
-    travel_time_s: Option<f64>,
-    speed_kph: Option<f64>,
-    cost: Option<f64>,
-    cost_per_km: Option<f64>,
+pub(crate) struct ProfileValues {
+    pub(crate) allowed: bool,
+    pub(crate) access: bool,
+    pub(crate) travel_time_s: Option<f64>,
+    pub(crate) speed_kph: Option<f64>,
+    pub(crate) cost: Option<f64>,
+    pub(crate) cost_per_km: Option<f64>,
 }
 
-fn profile_values(
+pub(crate) fn profile_values(
     metric: &netweevil_core::CompiledEdgeMetric,
     length_m: f64,
     access_mask: AccessMask,
@@ -373,7 +373,7 @@ fn profile_values(
 }
 
 /// Whether the same source way also runs from `to` back to `from`.
-fn has_reverse_edge(topology: &TopologyBundle, edge_index: usize) -> bool {
+pub(crate) fn has_reverse_edge(topology: &TopologyBundle, edge_index: usize) -> bool {
     let routing = topology.routing_edge(edge_index);
     let ebt = &topology.edge_based_topology;
     let to = routing.to.0 as usize;
