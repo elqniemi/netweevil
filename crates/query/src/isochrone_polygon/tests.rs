@@ -27,7 +27,11 @@ fn ring_contains(ring: &[[f64; 2]], point: [f64; 2]) -> bool {
 
 #[test]
 fn traces_a_single_segment_into_one_polygon() {
-    let polygons = trace_reachable_polygons(&[(offset(0.0, 0.0), offset(500.0, 0.0))], 25.0, 0.0);
+    let polygons = trace_reachable_polygons(
+        &[(offset(0.0, 0.0), offset(500.0, 0.0))],
+        25.0,
+        &RingCleanup::default(),
+    );
     assert_eq!(polygons.len(), 1);
     let polygon = &polygons[0];
     assert!(polygon.holes.is_empty());
@@ -57,7 +61,7 @@ fn a_ring_road_produces_a_hole_over_the_unreachable_middle() {
     let segments = (0..4)
         .map(|side| (corners[side], corners[(side + 1) % 4]))
         .collect::<Vec<_>>();
-    let polygons = trace_reachable_polygons(&segments, 25.0, 0.0);
+    let polygons = trace_reachable_polygons(&segments, 25.0, &RingCleanup::default());
     assert_eq!(polygons.len(), 1);
     assert_eq!(polygons[0].holes.len(), 1);
     assert!(
@@ -70,7 +74,10 @@ fn a_ring_road_produces_a_hole_over_the_unreachable_middle() {
 fn disconnected_segments_produce_separate_polygons() {
     let near = (offset(0.0, 0.0), offset(200.0, 0.0));
     let far = (offset(5_000.0, 0.0), offset(5_200.0, 0.0));
-    assert_eq!(trace_reachable_polygons(&[near, far], 25.0, 0.0).len(), 2);
+    assert_eq!(
+        trace_reachable_polygons(&[near, far], 25.0, &RingCleanup::default()).len(),
+        2
+    );
 }
 
 #[test]
@@ -88,7 +95,7 @@ fn thin_cavities_become_holes_regardless_of_ring_start() {
         let segments = (0..4)
             .map(|side| (corners[side], corners[(side + 1) % 4]))
             .collect::<Vec<_>>();
-        let polygons = trace_reachable_polygons(&segments, 25.0, 0.0);
+        let polygons = trace_reachable_polygons(&segments, 25.0, &RingCleanup::default());
         assert_eq!(polygons.len(), 1);
         assert_eq!(
             polygons[0].holes.len(),
@@ -96,4 +103,100 @@ fn thin_cavities_become_holes_regardless_of_ring_start() {
             "the thin cavity of a {height_m} m loop must be a hole"
         );
     }
+}
+
+/// Metres east and north of (6.0, 53.0); inverse of `offset`.
+fn local_m(point: [f64; 2]) -> (f64, f64) {
+    (
+        (point[0] - 6.0) * METERS_PER_DEGREE_LAT * LAT.to_radians().cos(),
+        (point[1] - LAT) * METERS_PER_DEGREE_LAT,
+    )
+}
+
+fn distance_to_ring_m(ring: &[[f64; 2]], point: [f64; 2]) -> f64 {
+    let p = local_m(point);
+    ring.windows(2)
+        .map(|pair| {
+            let (a, b) = (local_m(pair[0]), local_m(pair[1]));
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let t = (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+            ((p.0 - a.0 - t * dx).powi(2) + (p.1 - a.1 - t * dy).powi(2)).sqrt()
+        })
+        .fold(f64::INFINITY, f64::min)
+}
+
+#[test]
+fn generalization_keeps_rings_within_tolerance() {
+    // A diagonal road traces into a staircase with a corner every cell.
+    let segment = [(offset(0.0, 0.0), offset(1_000.0, 700.0))];
+    let raw = trace_reachable_polygons(&segment, 25.0, &RingCleanup::default());
+    let cleanup = RingCleanup {
+        simplification_tolerance_m: 30.0,
+        ..Default::default()
+    };
+    let simplified = trace_reachable_polygons(&segment, 25.0, &cleanup);
+    assert_eq!((raw.len(), simplified.len()), (1, 1));
+    let (raw, simplified) = (&raw[0].exterior, &simplified[0].exterior);
+    assert!(
+        simplified.len() * 4 < raw.len(),
+        "{} vs {}",
+        simplified.len(),
+        raw.len()
+    );
+    assert_eq!(simplified.first(), simplified.last());
+    for vertex in raw {
+        assert!(distance_to_ring_m(simplified, *vertex) <= 30.0 + 1e-6);
+    }
+    assert!(ring_contains(simplified, offset(500.0, 350.0)));
+}
+
+#[test]
+fn denoise_drops_small_parts_and_holes() {
+    let large = (offset(0.0, 0.0), offset(2_000.0, 0.0));
+    let small = (offset(5_000.0, 0.0), offset(5_100.0, 0.0));
+    let parts =
+        |cleanup: RingCleanup| trace_reachable_polygons(&[large, small], 25.0, &cleanup).len();
+    assert_eq!(parts(RingCleanup::default()), 2);
+    assert_eq!(
+        parts(RingCleanup {
+            denoise: 1.0,
+            ..Default::default()
+        }),
+        1
+    );
+    assert_eq!(
+        parts(RingCleanup {
+            denoise: 0.01,
+            ..Default::default()
+        }),
+        2
+    );
+    assert_eq!(
+        parts(RingCleanup {
+            min_part_area_m2: 20_000.0,
+            ..Default::default()
+        }),
+        1
+    );
+
+    // The 1 km ring road encloses a hole of roughly 0.85 km2.
+    let corners = [
+        offset(0.0, 0.0),
+        offset(1_000.0, 0.0),
+        offset(1_000.0, 1_000.0),
+        offset(0.0, 1_000.0),
+    ];
+    let ring_road = (0..4)
+        .map(|side| (corners[side], corners[(side + 1) % 4]))
+        .collect::<Vec<_>>();
+    let holes = |min_hole_area_m2| {
+        let cleanup = RingCleanup {
+            min_hole_area_m2,
+            ..Default::default()
+        };
+        trace_reachable_polygons(&ring_road, 25.0, &cleanup)[0]
+            .holes
+            .len()
+    };
+    assert_eq!((holes(500_000.0), holes(1_000_000.0)), (1, 0));
 }

@@ -386,8 +386,31 @@ cargo run -p netweevil-cli -- analyze service-area \
 Street-analysis commands also accept `--departure-time`, `--scenario`,
 `--holiday-calendar`, and repeatable `--overlay` overrides. Scalars replace
 only the matching request-file field; CLI overlays append to any overlays
-already in the document. See the multilayer runbook for matrix and
+already in the document. The CLI reads these files itself and sends their
+content inline: API requests carry `scenario`, `holidays`, and `overlays` as
+JSON and never name server-side files. Request documents may reference local
+files with `scenario_file`, `holiday_calendar_file`, and `overlay_files`,
+resolved relative to the document. See the multilayer runbook for matrix and
 service-area-sequence semantics.
+
+Service areas expand outbound from their origins by default. Set
+`"direction": "inbound"` to get every position that reaches an origin within
+the thresholds instead ("who can get here in ten minutes"); the backward search
+applies the same turn costs and turn restrictions as forward routes. Inbound
+service areas are static (no `departure_time`) and omit component vectors.
+Polygon output takes `polygon.simplification_tolerance_m` (Douglas-Peucker, in
+metres), `polygon.denoise` (drop parts smaller than this fraction of the
+largest part; `1` keeps only the largest), `polygon.min_part_area_m2` and
+`polygon.min_hole_area_m2`. See
+[`service_area_inbound.json`](examples/requests/service_area_inbound.json).
+
+Route `fallback` flags (`allow_reverse_oneway`, `allow_illegal_turn`,
+`ignore_turn_restrictions`, `allow_uturn_where_normally_forbidden`) make the
+illegal movements available at their `penalties`. The route minimizes cost plus
+penalties, so a legal route is returned whenever it costs no more than the
+cheapest penalized one; a returned route is `degraded` only if it uses an
+illegal movement. `auto_relax_unreachable` instead routes strictly first and
+relaxes only when no legal route exists.
 
 ## Transit
 
@@ -600,6 +623,7 @@ Discovery endpoints:
 - `GET /v1/profiles/{profile_id}`
 - `GET /v1/terrain-sources`: prepared DEM metadata and local terrain tile URLs
 - `GET /v1/terrain/{source}/{version}/{z}/{x}/{y}.png`: immutable local DEM tiles
+- `GET /v1/tiles/{z}/{x}/{y}.mvt?profile_id=...`: the profile's routable network as Mapbox Vector Tiles (see [examples/api](examples/api/README.md#network-vector-tiles))
 
 Execution endpoints:
 
@@ -607,7 +631,8 @@ Execution endpoints:
 - `POST /v1/directions`
 - `POST /v1/match`
 - `POST /v1/waypoints`
-- `POST /v1/locate`
+- `POST /v1/locate`: routing snap candidates plus the `count` nearest road segments with edge attributes
+- `POST /v1/expansion`: settled edges of the exact search behind a route or service area, in order, as GeoJSON
 - `POST /v1/od`
 - `POST /v1/matrix`
 - `POST /v1/accessibility`
@@ -626,10 +651,10 @@ stays under `.netweevil/`):
 
 - `GET /v1/workspace`: folders and their purpose, saved and active selection, datasets, profile files, feeds, uploads, running jobs
 - `POST /v1/workspace/uploads?name=<file>` (raw body, streamed to `.netweevil/uploads/`), `DELETE /v1/workspace/uploads/{name}`
-- `POST /v1/workspace/datasets/import` `{sources, name, format?}` → job; `DELETE /v1/workspace/datasets/{id}`
+- `POST /v1/workspace/datasets/import` `{sources, name, format?, mapping?}` → job; sources and mapping are upload names in `.netweevil/uploads/`, never server paths (import other files with the CLI); `DELETE /v1/workspace/datasets/{id}`
 - `GET /v1/workspace/profile-templates`; `POST /v1/workspace/profiles` `{yaml, file_name?}`; `GET|DELETE /v1/workspace/profiles/{file}`
-- `POST /v1/workspace/transit/import` `{source, name, service_start, service_days}` → job; `DELETE /v1/workspace/transit-feeds/{id}`
-- `POST /v1/workspace/activate` `{dataset_id, default_profile, profiles, transit_feeds}` → job that compiles missing profiles, swaps the loaded runtime, and writes `workspace.json`
+- `POST /v1/workspace/transit/import` `{source, name, service_start, service_days}` → job; `source` is an upload name; `DELETE /v1/workspace/transit-feeds/{id}`
+- `POST /v1/workspace/activate` `{dataset_id, default_profile, profiles, transit_feeds}` → job that compiles missing profiles, swaps the loaded runtime, and writes `workspace.json`; profiles are files in `.netweevil/profiles/` or `examples/profiles/` (by name, `examples/<file>`, or the path `/v1/workspace` lists)
 - `GET /v1/workspace/jobs`, `GET /v1/workspace/jobs/{id}`
 
 Until a dataset is loaded, `/readyz`, `/v1/service` and the analysis endpoints
@@ -695,6 +720,40 @@ or an inline `profile` document. The API compiles and caches these profiles in
 memory on first use. Requests selecting a prepared profile keep the existing
 fast path. See [request-defined profiles](docs/request-profiles.md) for request
 examples, cache limits, cold preparation costs and benchmarking.
+
+### Avoid locations, areas and features
+
+Route, directions, waypoints, OD, matrix, accessibility, service-area,
+service-area-sequence, betweenness and trace-match requests accept an `avoid`
+object next to `snap` and `returns` (for matrices and accessibility, on either
+point set; the sets are merged):
+
+```json
+"avoid": {
+  "points": [{"lon": 6.5690, "lat": 53.2178, "radius_m": 30}],
+  "polygons": [{"rings": [[[6.565, 53.216], [6.570, 53.216], [6.570, 53.219], [6.565, 53.219]]], "penalty_factor": 4.0}],
+  "source_feature_ids": [7064211]
+}
+```
+
+- `points`: edges within `radius_m` (default 10 m, at most 10 km) of the point,
+  measured like snapping.
+- `polygons`: edges touching the polygon; `rings` are GeoJSON polygon
+  coordinates (outer ring, then holes).
+- `source_feature_ids`: every edge of these OSM ways.
+
+Without `penalty_factor` the matching edges are excluded: routes never use
+them and endpoints never snap onto them. A `penalty_factor` in `[1, 1000]`
+multiplies their generalized cost instead (travel times stay unchanged).
+
+Results stay exact. An avoid set is applied by re-customizing the CCH with
+the excluded edges at infinity and the penalized ones scaled; the prepared
+engine keeps the four most recent avoid sets per profile, keyed by the edges
+they resolve to. A single route first runs on the unmodified hierarchy
+between the endpoints the avoid engine would snap to; when that best path
+touches no avoided edge it is also optimal with the edges avoided (removing or
+penalizing edges never makes a path cheaper), so no re-customization happens.
+See `examples/api/route_avoid.json`.
 
 Performance notes:
 

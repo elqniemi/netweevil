@@ -9,8 +9,6 @@
 
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use crate::geometry::simplify_polygon_ring;
-
 /// One traced polygon: an outer ring plus the holes it encloses, all closed
 /// and in lon/lat coordinates (outer counter-clockwise, holes clockwise).
 pub(crate) struct TracedPolygon {
@@ -22,13 +20,25 @@ pub(crate) struct TracedPolygon {
 const METERS_PER_DEGREE_LAT: f64 =
     netweevil_core::geo::EARTH_RADIUS_M * std::f64::consts::PI / 180.0;
 
+/// Post-processing of traced rings. Areas are measured on the trace grid
+/// over exterior rings (holes not subtracted).
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct RingCleanup {
+    /// Douglas-Peucker tolerance; 0 keeps every grid corner.
+    pub(crate) simplification_tolerance_m: f64,
+    /// Drop parts smaller than this fraction of the largest part (0..=1).
+    pub(crate) denoise: f64,
+    pub(crate) min_part_area_m2: f64,
+    pub(crate) min_hole_area_m2: f64,
+}
+
 /// Rasterizes segment polylines onto a grid of `cell_size_m` cells and
 /// traces the marked region's boundary into concave polygons with holes.
 /// `segments` supplies straight sub-segments as (start, end) lon/lat pairs.
 pub(crate) fn trace_reachable_polygons(
     segments: &[([f64; 2], [f64; 2])],
     cell_size_m: f64,
-    simplification_tolerance_m: f64,
+    cleanup: &RingCleanup,
 ) -> Vec<TracedPolygon> {
     if segments.is_empty() {
         return Vec::new();
@@ -162,9 +172,8 @@ pub(crate) fn trace_reachable_polygons(
         }
     }
 
-    // Split into outer rings (positive area) and holes (negative area) and
-    // convert to lon/lat, dropping collinear lattice points along straight
-    // grid runs first.
+    // Split into outer rings (positive area) and holes (negative area),
+    // dropping collinear lattice points along straight grid runs first.
     struct GridRing {
         ring: Vec<(i32, i32)>,
         area: f64,
@@ -181,38 +190,13 @@ pub(crate) fn trace_reachable_polygons(
         }
     }
 
-    let to_lonlat = |corner: (i32, i32)| -> [f64; 2] {
-        [
-            origin_lon + corner.0 as f64 * lon_step,
-            origin_lat + corner.1 as f64 * lat_step,
-        ]
-    };
-    let finish_ring = |ring: &[(i32, i32)]| -> Option<Vec<[f64; 2]>> {
-        simplify_polygon_ring(
-            ring.iter().map(|&corner| to_lonlat(corner)).collect(),
-            simplification_tolerance_m,
-        )
-    };
-
-    let mut polygons = outers
-        .iter()
-        .filter_map(|outer| {
-            Some((
-                outer,
-                TracedPolygon {
-                    exterior: finish_ring(&outer.ring)?,
-                    holes: Vec::new(),
-                },
-            ))
-        })
-        .collect::<Vec<_>>();
-
     // Attach each hole to the smallest outer ring containing it. The hole
     // interior (unmarked cavity) lies to the right of the hole's first
     // edge: the centre of the cavity cell beside its first unit step is a
     // test point strictly inside the cavity and never on a lattice line,
     // whatever the edge length after collinear points were dropped.
-    for hole in &holes {
+    let mut holes_of = vec![Vec::<usize>::new(); outers.len()];
+    for (hole_index, hole) in holes.iter().enumerate() {
         let first = hole.ring[0];
         let second = hole.ring[1];
         let direction = ((second.0 - first.0).signum(), (second.1 - first.1).signum());
@@ -222,21 +206,124 @@ pub(crate) fn trace_reachable_polygons(
             first.1 as f64 + direction.1 as f64 * 0.5 + right_normal.1 as f64 * 0.5,
         );
         let mut best: Option<usize> = None;
-        for (position, (outer, _)) in polygons.iter().enumerate() {
+        for (position, outer) in outers.iter().enumerate() {
             if grid_ring_contains(&outer.ring, test_point)
-                && best.is_none_or(|known| outer.area < polygons[known].0.area)
+                && best.is_none_or(|known| outer.area < outers[known].area)
             {
                 best = Some(position);
             }
         }
-        if let Some(position) = best
-            && let Some(ring) = finish_ring(&hole.ring)
-        {
-            polygons[position].1.holes.push(ring);
+        if let Some(position) = best {
+            holes_of[position].push(hole_index);
         }
     }
 
-    polygons.into_iter().map(|(_, polygon)| polygon).collect()
+    // Denoise on grid areas (cells), after holes found their owners so a
+    // dropped part takes its own holes with it.
+    let cell_area_m2 = cell_size_m * cell_size_m;
+    let largest_part = outers.iter().map(|outer| outer.area).fold(0.0, f64::max);
+    let min_part_cells = (cleanup.denoise.clamp(0.0, 1.0) * largest_part)
+        .max(cleanup.min_part_area_m2.max(0.0) / cell_area_m2);
+    let min_hole_cells = cleanup.min_hole_area_m2.max(0.0) / cell_area_m2;
+
+    let to_lonlat = |corner: (f64, f64)| -> [f64; 2] {
+        [
+            origin_lon + corner.0 * lon_step,
+            origin_lat + corner.1 * lat_step,
+        ]
+    };
+    // Grid units are isotropic metres scaled by the cell size.
+    let tolerance_cells = cleanup.simplification_tolerance_m.max(0.0) / cell_size_m;
+    let finish_ring = |ring: &[(i32, i32)]| -> Option<Vec<[f64; 2]>> {
+        let points = ring
+            .iter()
+            .map(|&(col, row)| (f64::from(col), f64::from(row)))
+            .collect::<Vec<_>>();
+        let mut simplified = simplify_closed_ring(&points, tolerance_cells)?;
+        simplified.push(simplified[0]);
+        Some(simplified.into_iter().map(to_lonlat).collect())
+    };
+
+    outers
+        .iter()
+        .zip(&holes_of)
+        .filter(|(outer, _)| outer.area >= min_part_cells)
+        .filter_map(|(outer, hole_indexes)| {
+            Some(TracedPolygon {
+                exterior: finish_ring(&outer.ring)?,
+                holes: hole_indexes
+                    .iter()
+                    .map(|&index| &holes[index])
+                    .filter(|hole| -hole.area >= min_hole_cells)
+                    .filter_map(|hole| finish_ring(&hole.ring))
+                    .collect(),
+            })
+        })
+        .collect()
+}
+
+/// Douglas-Peucker generalization of a closed ring given without its
+/// closing vertex. The ring is split at the vertex farthest from the first
+/// one and both halves are simplified, so a closed loop keeps its extent.
+/// `None` when fewer than three vertices survive.
+fn simplify_closed_ring(ring: &[(f64, f64)], tolerance: f64) -> Option<Vec<(f64, f64)>> {
+    if ring.len() < 3 {
+        return None;
+    }
+    if tolerance <= 0.0 {
+        return Some(ring.to_vec());
+    }
+    let squared = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0).powi(2) + (a.1 - b.1).powi(2);
+    let split = (1..ring.len())
+        .max_by(|&left, &right| {
+            squared(ring[0], ring[left]).total_cmp(&squared(ring[0], ring[right]))
+        })
+        .expect("ring has more than one vertex");
+    let mut closed = ring.to_vec();
+    closed.push(ring[0]);
+    let mut keep = vec![false; closed.len()];
+    keep[0] = true;
+    keep[split] = true;
+    douglas_peucker(&closed, 0, split, tolerance, &mut keep);
+    douglas_peucker(&closed, split, closed.len() - 1, tolerance, &mut keep);
+    let simplified = ring
+        .iter()
+        .zip(&keep)
+        .filter(|(_, kept)| **kept)
+        .map(|(point, _)| *point)
+        .collect::<Vec<_>>();
+    (simplified.len() >= 3).then_some(simplified)
+}
+
+fn douglas_peucker(
+    points: &[(f64, f64)],
+    first: usize,
+    last: usize,
+    tolerance: f64,
+    keep: &mut [bool],
+) {
+    if last <= first + 1 {
+        return;
+    }
+    let (a, b) = (points[first], points[last]);
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let length = (dx * dx + dy * dy).sqrt();
+    let distance = |point: (f64, f64)| {
+        if length <= f64::EPSILON {
+            ((point.0 - a.0).powi(2) + (point.1 - a.1).powi(2)).sqrt()
+        } else {
+            ((point.0 - a.0) * dy - (point.1 - a.1) * dx).abs() / length
+        }
+    };
+    let (farthest, max_distance) = (first + 1..last)
+        .map(|index| (index, distance(points[index])))
+        .max_by(|left, right| left.1.total_cmp(&right.1))
+        .expect("segment has interior points");
+    if max_distance > tolerance {
+        keep[farthest] = true;
+        douglas_peucker(points, first, farthest, tolerance, keep);
+        douglas_peucker(points, farthest, last, tolerance, keep);
+    }
 }
 
 /// Dense grids above this many cells fall back to sparse cell sets.

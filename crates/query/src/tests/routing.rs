@@ -261,12 +261,10 @@ fn enforces_temporal_exposure_budget_and_returns_dynamic_pareto_frontier() {
         overlay_name: Some("exposure_factor".to_string()),
         ..cost_component("exposure", &[10.0, 20.0, 100.0])
     }];
-    let overlay_path = write_temp_file(
+    let overlay = overlay_csv(
         "temporal-exposure.csv",
         "feature_id,t_start,t_end,exposure_factor\n10,2026-07-10T00:00:00Z,2026-07-11T00:00:00Z,1\n11,2026-07-10T00:00:00Z,2026-07-11T00:00:00Z,0\n",
     );
-    let scenario_path = write_temp_file("temporal-exposure-scenario.yml", "id: exposure_test\n");
-    let holiday_path = write_temp_file("temporal-exposure-holidays.yml", "- 2026-07-10\n");
     let mut request = a_to_c("temporal-exposure-budget");
     request.snap = snap_within(20.0);
     request.returns = ReturnConfig {
@@ -275,9 +273,9 @@ fn enforces_temporal_exposure_budget_and_returns_dynamic_pareto_frontier() {
     };
     request.temporal = TemporalRequestOptions {
         departure_time: Some("2026-07-10T10:00:00Z".to_string()),
-        scenario: Some(scenario_path.clone()),
-        holiday_calendar: Some(holiday_path.clone()),
-        overlays: vec![overlay_path.clone()],
+        scenario: Some(scenario_yaml("id: exposure_test\n")),
+        holidays: vec!["2026-07-10".to_string()],
+        overlays: vec![overlay],
         constraints: vec![zero_budget("exposure")],
         ..Default::default()
     };
@@ -307,10 +305,6 @@ fn enforces_temporal_exposure_budget_and_returns_dynamic_pareto_frontier() {
     assert_eq!(frontier.alternatives.len(), 1);
     assert_eq!(frontier.alternatives[0].edge_path, vec![2]);
     assert_eq!(frontier.alternatives[0].summary.components["exposure"], 0.0);
-
-    let _ = fs::remove_file(overlay_path);
-    let _ = fs::remove_file(scenario_path);
-    let _ = fs::remove_file(holiday_path);
 }
 
 /// Arrive at c by 12:00 (4 h lookback) without any exposure.
@@ -373,9 +367,11 @@ fn temporal_component_arrive_by_pulls_overlay_boundary_through_path_prefix() {
         overlay_name: Some("exposure_factor".to_string()),
         ..cost_component("exposure", &[10.0, 10.0, 0.0])
     }];
-    let overlay_path = write_temp_file("arrive-by-overlay-boundary.csv", EXPOSED_FROM_ELEVEN);
     let mut request = exposure_free_arrive_by_noon("overlay-boundary-arrive-by");
-    request.temporal.overlays = vec![overlay_path.clone()];
+    request.temporal.overlays = vec![overlay_csv(
+        "arrive-by-overlay-boundary.csv",
+        EXPOSED_FROM_ELEVEN,
+    )];
     request.temporal.pareto = Some(pareto("exposure", 16));
 
     let result = execute_route(&topology, &metrics, &request)
@@ -386,8 +382,6 @@ fn temporal_component_arrive_by_pulls_overlay_boundary_through_path_prefix() {
         .expect("departure timestamp parses");
     assert!(departure >= crate::parse_datetime("2026-07-10T10:59:49Z").unwrap());
     assert!(departure < crate::parse_datetime("2026-07-10T10:59:50Z").unwrap());
-
-    let _ = fs::remove_file(overlay_path);
 }
 
 #[test]
@@ -405,9 +399,11 @@ fn temporal_component_arrive_by_maps_overlay_boundary_across_edge_waiting() {
         overlay_name: Some("exposure_factor".to_string()),
         ..cost_component("exposure", &[0.0, 10.0, 0.0])
     }];
-    let overlay_path = write_temp_file("arrive-by-overlay-waiting.csv", EXPOSED_FROM_ELEVEN);
     let mut request = exposure_free_arrive_by_noon("overlay-waiting-arrive-by");
-    request.temporal.overlays = vec![overlay_path.clone()];
+    request.temporal.overlays = vec![overlay_csv(
+        "arrive-by-overlay-waiting.csv",
+        EXPOSED_FROM_ELEVEN,
+    )];
 
     let result = execute_route(&topology, &metrics, &request)
         .expect("the last non-waiting pre-overlay departure remains discoverable");
@@ -418,8 +414,6 @@ fn temporal_component_arrive_by_maps_overlay_boundary_across_edge_waiting() {
         .expect("departure timestamp parses");
     assert!(departure >= crate::parse_datetime("2026-07-10T10:54:49Z").unwrap());
     assert!(departure < crate::parse_datetime("2026-07-10T10:54:50Z").unwrap());
-
-    let _ = fs::remove_file(overlay_path);
 }
 
 #[test]
@@ -431,14 +425,13 @@ fn executes_scenario_batch_and_diffs_rerouting_burden() {
     topology.feature_attributes =
         string_attribute_table("AssetGroup", "asset_group", &["mall", "street"]);
     let engine = exact_engine(topology, test_metrics());
-    let scenario_path = write_temp_file(
-        "scenario-batch-closure.yml",
+    let closure = scenario_yaml(
         "id: close_short_path\nfeatures:\n  - source_feature_id: 10\n    force_closed: true\n",
     );
-    let ranking_path = write_temp_file(
-        "scenario-batch-ranking.csv",
-        "source_feature_id,score\n10,9\n11,1\n",
-    );
+    let score = |source_feature_id, score| crate::ScenarioFeatureScore {
+        source_feature_id,
+        score,
+    };
     let origin = point("a", 6.0, 53.0);
     let destination = point("c", 6.002, 53.0);
     let snap = snap_within(20.0);
@@ -453,7 +446,7 @@ fn executes_scenario_batch_and_diffs_rerouting_burden() {
             case(
                 "closure",
                 ScenarioBatchSelector::Overlay {
-                    overlay: scenario_path.clone(),
+                    overlay: closure.clone(),
                 },
             ),
             case(
@@ -469,7 +462,7 @@ fn executes_scenario_batch_and_diffs_rerouting_burden() {
                 "top_ranked",
                 ScenarioBatchSelector::TopK {
                     top_k: crate::ScenarioTopKSelector {
-                        ranking: ranking_path.clone(),
+                        ranking: vec![score(10, 9.0), score(11, 1.0)],
                         count: 1,
                     },
                 },
@@ -572,51 +565,25 @@ fn executes_scenario_batch_and_diffs_rerouting_burden() {
         Some("close_short_path")
     );
 
-    // Feature ids must exist in the active topology, and explicit overlays
-    // must load before any baseline work starts.
-    let stale_ranking_path = write_temp_file(
-        "scenario-batch-stale-ranking.csv",
-        "source_feature_id,score\n999,9\n",
-    );
-    let stale_overlay_path = write_temp_file(
-        "scenario-batch-stale-overlay.yml",
-        "id: stale_overlay\nfeatures:\n  - source_feature_id: 10\n    force_closed: true\n  - source_feature_id: 999\n    force_closed: true\n",
-    );
-    let missing_overlay_path = write_temp_file("scenario-batch-missing-overlay.yml", "");
-    fs::remove_file(&missing_overlay_path).expect("remove missing-overlay placeholder");
-    for (scenario, expected) in [
-        (
-            case(
-                "stale_top_ranked",
-                ScenarioBatchSelector::TopK {
-                    top_k: crate::ScenarioTopKSelector {
-                        ranking: stale_ranking_path.clone(),
-                        count: 1,
-                    },
+    // Feature ids must exist in the active topology before any baseline
+    // work starts.
+    for scenario in [
+        case(
+            "stale_top_ranked",
+            ScenarioBatchSelector::TopK {
+                top_k: crate::ScenarioTopKSelector {
+                    ranking: vec![score(999, 9.0)],
+                    count: 1,
                 },
-            ),
-            ["not present in the active topology", "999"],
+            },
         ),
-        (
-            case(
-                "stale_explicit_overlay",
-                ScenarioBatchSelector::Overlay {
-                    overlay: stale_overlay_path.clone(),
-                },
-            ),
-            ["not present in the active topology", "999"],
-        ),
-        (
-            case(
-                "missing_explicit_overlay",
-                ScenarioBatchSelector::Overlay {
-                    overlay: missing_overlay_path,
-                },
-            ),
-            [
-                "validating scenario 'missing_explicit_overlay' overlay",
-                "scenario-batch-missing-overlay.yml",
-            ],
+        case(
+            "stale_explicit_overlay",
+            ScenarioBatchSelector::Overlay {
+                overlay: scenario_yaml(
+                    "id: stale_overlay\nfeatures:\n  - source_feature_id: 10\n    force_closed: true\n  - source_feature_id: 999\n    force_closed: true\n",
+                ),
+            },
         ),
     ] {
         let mut invalid = request.clone();
@@ -624,25 +591,18 @@ fn executes_scenario_batch_and_diffs_rerouting_burden() {
         let error = crate::execute_scenario_batch(&engine, &invalid)
             .expect_err("invalid scenario must be rejected");
         assert!(
-            expected.iter().all(|text| error.to_string().contains(text)),
+            ["not present in the active topology", "999"]
+                .iter()
+                .all(|text| error.to_string().contains(text)),
             "unexpected error: {error}"
         );
     }
-
-    let _ = fs::remove_file(scenario_path);
-    let _ = fs::remove_file(ranking_path);
-    let _ = fs::remove_file(stale_ranking_path);
-    let _ = fs::remove_file(stale_overlay_path);
 }
 
 #[test]
 fn temporal_accessibility_prices_a_mid_edge_destination_at_edge_entry_time() {
     let topology = test_topology();
     let metrics = test_metrics();
-    let scenario_path = write_temp_file(
-        "accessibility-mid-edge-speed.yml",
-        "id: speed_up\nfeatures:\n  - source_feature_id: 10\n    speed_factor: 2.0\n",
-    );
     let mut request = crate::AccessibilityRequest {
         origins: PointSetDocument {
             snap: snap_within(5.0),
@@ -666,15 +626,15 @@ fn temporal_accessibility_prices_a_mid_edge_destination_at_edge_entry_time() {
 
     request.origins.temporal = TemporalRequestOptions {
         departure_time: Some("2026-07-10T10:00:00Z".to_string()),
-        scenario: Some(scenario_path.clone()),
+        scenario: Some(scenario_yaml(
+            "id: speed_up\nfeatures:\n  - source_feature_id: 10\n    speed_factor: 2.0\n",
+        )),
         ..Default::default()
     };
     let temporal_result = crate::execute_accessibility(&topology, &metrics, &request)
         .expect("temporal accessibility succeeds");
     assert!((temporal_result.rows[0].nearest_travel_time_s.unwrap() - 2.5).abs() < 1.0e-6);
     assert_eq!(temporal_result.rows[0].counts_within_threshold_s["3"], 1);
-
-    let _ = fs::remove_file(scenario_path);
 }
 
 #[test]

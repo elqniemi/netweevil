@@ -8,7 +8,7 @@ fn accessibility_execution_request_accepts_temporal_origin_options() {
             "origins": {
                 "points": [{"id":"origin","lon":114.15,"lat":22.28,"z":12.0}],
                 "departure_time": "2026-07-10T09:55:00+08:00",
-                "scenario": "central.yml"
+                "scenario": {"id": "central", "features": []}
             },
             "categories": [{
                 "category_id": "stations",
@@ -25,6 +25,62 @@ fn accessibility_execution_request_accepts_temporal_origin_options() {
         Some("2026-07-10T09:55:00+08:00")
     );
     assert_eq!(payload.request.categories.len(), 1);
+}
+
+/// Request bodies carry scenario, holiday and overlay content inline. A
+/// server path in any of those fields is a type error, and the CLI-only
+/// `*_file` keys are not request fields, so no payload can make the server
+/// open a file.
+#[test]
+fn analysis_payloads_cannot_name_server_files() {
+    let route = |extra: serde_json::Value| {
+        let mut request = serde_json::json!({
+            "route_id": "r",
+            "origin": {"id": "o", "lon": 6.0, "lat": 53.0},
+            "destination": {"id": "d", "lon": 6.1, "lat": 53.0}
+        });
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value::<RouteExecutionRequest>(serde_json::json!({"request": request}))
+    };
+    for rejected in [
+        serde_json::json!({"scenario": "/etc/passwd"}),
+        serde_json::json!({"overlays": ["/etc/passwd"]}),
+        serde_json::json!({"holidays": "/etc/passwd"}),
+    ] {
+        assert!(
+            route(rejected.clone()).is_err(),
+            "{rejected} must be rejected"
+        );
+    }
+    let ignored = route(serde_json::json!({
+        "scenario_file": "/etc/passwd",
+        "holiday_calendar_file": "/etc/passwd",
+        "overlay_files": ["/etc/passwd"]
+    }))
+    .expect("unknown keys are ignored");
+    assert_eq!(
+        ignored.request.temporal,
+        netweevil_query::TemporalRequestOptions::default()
+    );
+
+    let batch = |scenario: serde_json::Value| {
+        serde_json::from_value::<ScenarioBatchExecutionRequest>(serde_json::json!({
+            "request": {"batch_id": "b", "scenarios": [scenario]}
+        }))
+    };
+    for rejected in [
+        serde_json::json!({"id": "s", "overlay": "/etc/passwd"}),
+        serde_json::json!({"id": "s", "overlay_file": "/etc/passwd"}),
+        serde_json::json!({"id": "s", "top_k": {"ranking": "/etc/passwd", "count": 1}}),
+    ] {
+        assert!(
+            batch(rejected.clone()).is_err(),
+            "{rejected} must be rejected"
+        );
+    }
 }
 
 #[test]

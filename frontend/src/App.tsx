@@ -15,7 +15,7 @@ import { ToolPanel } from "./ui/ToolPanel";
 import { fmtValue } from "./ui/format";
 import { transitTimeContext } from "./api/time";
 import { ApiError } from "./api/client";
-import { hongKongTransitDefaults, TRANSIT_ANALYSIS_TOOLS } from "./state/transitDefaults";
+import { hongKongTransitDefaults, mergeTransitDefaults, TRANSIT_ANALYSIS_TOOLS } from "./state/transitDefaults";
 
 let autoOpenedSetup = false;
 
@@ -49,7 +49,7 @@ export function App() {
     const transitDefaults = hongKongTransitDefaults(info);
     if (transitDefaults) {
       patch.form = { ...current.form };
-      for (const tool of TRANSIT_ANALYSIS_TOOLS) patch.form[tool] = { ...transitDefaults, ...current.form[tool] };
+      for (const tool of TRANSIT_ANALYSIS_TOOLS) patch.form[tool] = mergeTransitDefaults(transitDefaults, current.form[tool], info);
     }
     setState(patch);
   }, [info]);

@@ -4,9 +4,9 @@ departure_time: "2026-07-10T09:55:00+08:00"
 
 scenarios:
   - id: central_escalator_direction
-    overlay: ../scenarios/hong_kong_central_escalator_example.yml
+    overlay_file: ../scenarios/hong_kong_central_escalator_example.yml
   - id: asset_failure
-    overlay: ../scenarios/generic_asset_failure.yml
+    overlay_file: ../scenarios/generic_asset_failure.yml
 
 routes:
   - route_id: illustrative_hillside_to_station
@@ -23,8 +23,8 @@ routes:
     snap:
       max_distance_m: 300.0
       z_window_m: 5.0
-    holiday_calendar: ../temporal/example_holidays.yml
-    overlay:
+    holiday_calendar_file: ../temporal/example_holidays.yml
+    overlay_files:
       - ../temporal/shade_fraction.csv
     returns:
       geometry: full
@@ -44,7 +44,7 @@ routes:
     snap:
       max_distance_m: 300.0
       z_window_m: 5.0
-    holiday_calendar: ../temporal/example_holidays.yml
+    holiday_calendar_file: ../temporal/example_holidays.yml
     returns:
       geometry: full
 
@@ -61,7 +61,7 @@ od:
       snap:
         max_distance_m: 300.0
         z_window_m: 5.0
-      holiday_calendar: ../temporal/example_holidays.yml
+      holiday_calendar_file: ../temporal/example_holidays.yml
 
 matrices:
   - analysis_id: illustrative_hillside_station_matrix
@@ -72,7 +72,7 @@ matrices:
       snap:
         max_distance_m: 300.0
         z_window_m: 5.0
-      holiday_calendar: ../temporal/example_holidays.yml
+      holiday_calendar_file: ../temporal/example_holidays.yml
     destinations:
       points:
         - {id: station, lon: 114.1577, lat: 22.2820, z: 3.0}
@@ -90,5 +90,5 @@ betweenness:
     snap:
       max_distance_m: 300.0
       z_window_m: 5.0
-    holiday_calendar: ../temporal/example_holidays.yml
+    holiday_calendar_file: ../temporal/example_holidays.yml
     max_od_pairs: 10000

@@ -3,96 +3,149 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use netweevil_profile::ReturnConfig;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::*;
 
-pub fn load_route_request(path: impl AsRef<Path>) -> Result<RouteRequest> {
-    let path = path.as_ref();
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("reading route request {}", path.display()))?;
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some("json") => serde_json::from_str(&raw).context("parsing JSON route request"),
+/// Reads a JSON/YAML request document from a local file (CLI side) and
+/// inlines the local files it references (see [`inline_file_references`]).
+pub fn read_request_document<T: DeserializeOwned>(path: &Path, label: &str) -> Result<T> {
+    let raw =
+        fs::read_to_string(path).with_context(|| format!("reading {label} {}", path.display()))?;
+    let mut value: Value = match path.extension().and_then(|ext| ext.to_str()) {
+        Some("json") => {
+            serde_json::from_str(&raw).with_context(|| format!("parsing JSON {label}"))?
+        }
         Some("yaml") | Some("yml") => {
-            serde_yaml::from_str(&raw).context("parsing YAML route request")
+            serde_yaml::from_str(&raw).with_context(|| format!("parsing YAML {label}"))?
         }
         other => bail!(
-            "unsupported route request extension {:?}; use .json, .yml, or .yaml",
+            "unsupported {label} extension {:?}; use .json, .yml, or .yaml",
             other
         ),
+    };
+    inline_file_references(&mut value, path.parent().unwrap_or_else(|| Path::new(".")))
+        .with_context(|| format!("inlining files referenced by {label} {}", path.display()))?;
+    serde_json::from_value(value).with_context(|| format!("parsing {label} {}", path.display()))
+}
+
+/// Request documents on disk may name local files that the API never reads.
+/// This replaces every such reference, anywhere in the document, with the
+/// file's content; relative paths resolve against `base` (the document's
+/// directory):
+///
+/// - `scenario_file` -> `scenario` (scenario overlay, JSON/YAML)
+/// - `holiday_calendar_file` -> appended to `holidays` (JSON/YAML dates)
+/// - `overlay_files` -> appended to `overlays` (CSV/Parquet temporal overlays)
+/// - `overlay_file` -> `overlay` (scenario-batch case overlay, JSON/YAML)
+/// - `ranking_file` -> `ranking` (scenario-batch top-k feature scores)
+pub fn inline_file_references(value: &mut Value, base: &Path) -> Result<()> {
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                inline_file_references(item, base)?;
+            }
+        }
+        Value::Object(object) => {
+            for item in object.values_mut() {
+                inline_file_references(item, base)?;
+            }
+            let path_value = |value: Value, key: &str| -> Result<std::path::PathBuf> {
+                let Value::String(path) = value else {
+                    bail!("'{key}' must be a file path string");
+                };
+                Ok(base.join(path))
+            };
+            if let Some(path) = object.remove("scenario_file") {
+                let path = path_value(path, "scenario_file")?;
+                object.insert(
+                    "scenario".into(),
+                    serde_json::to_value(load_scenario_overlay(&path)?)?,
+                );
+            }
+            if let Some(path) = object.remove("holiday_calendar_file") {
+                let path = path_value(path, "holiday_calendar_file")?;
+                let dates = load_holiday_calendar(&path)?;
+                append_array(object, "holidays", dates.into_iter().map(Value::String))?;
+            }
+            if let Some(paths) = object.remove("overlay_files") {
+                let Value::Array(paths) = paths else {
+                    bail!("'overlay_files' must be a list of file paths");
+                };
+                let overlays = paths
+                    .into_iter()
+                    .map(|path| {
+                        let path = path_value(path, "overlay_files")?;
+                        Ok(serde_json::to_value(load_temporal_overlay(&path)?)?)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                append_array(object, "overlays", overlays)?;
+            }
+            if let Some(path) = object.remove("overlay_file") {
+                let path = path_value(path, "overlay_file")?;
+                object.insert(
+                    "overlay".into(),
+                    serde_json::to_value(load_scenario_overlay(&path)?)?,
+                );
+            }
+            if let Some(path) = object.remove("ranking_file") {
+                let path = path_value(path, "ranking_file")?;
+                object.insert(
+                    "ranking".into(),
+                    serde_json::to_value(load_scenario_feature_ranking(&path)?)?,
+                );
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn append_array(
+    object: &mut serde_json::Map<String, Value>,
+    key: &str,
+    values: impl IntoIterator<Item = Value>,
+) -> Result<()> {
+    match object
+        .entry(key)
+        .or_insert_with(|| Value::Array(Vec::new()))
+    {
+        Value::Array(items) => {
+            items.extend(values);
+            Ok(())
+        }
+        _ => bail!("'{key}' must be a list"),
     }
 }
 
+pub fn load_route_request(path: impl AsRef<Path>) -> Result<RouteRequest> {
+    read_request_document(path.as_ref(), "route request")
+}
+
 pub fn load_route_batch(path: impl AsRef<Path>) -> Result<RouteBatchDocument> {
-    let path = path.as_ref();
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("reading route batch {}", path.display()))?;
-    let document = match path.extension().and_then(|ext| ext.to_str()) {
-        Some("json") => serde_json::from_str(&raw).context("parsing JSON route batch")?,
-        Some("yaml") | Some("yml") => {
-            serde_yaml::from_str(&raw).context("parsing YAML route batch")?
-        }
-        other => bail!(
-            "unsupported route batch extension {:?}; use .json, .yml, or .yaml",
-            other
-        ),
-    };
-    Ok(document)
+    read_request_document(path.as_ref(), "route batch")
 }
 
 pub fn load_service_area_request(path: impl AsRef<Path>) -> Result<ServiceAreaRequest> {
-    let path = path.as_ref();
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("reading service-area request {}", path.display()))?;
-    let request = match path.extension().and_then(|ext| ext.to_str()) {
-        Some("json") => serde_json::from_str(&raw).context("parsing JSON service-area request")?,
-        Some("yaml") | Some("yml") => {
-            serde_yaml::from_str(&raw).context("parsing YAML service-area request")?
-        }
-        other => bail!(
-            "unsupported service-area request extension {:?}; use .json, .yml, or .yaml",
-            other
-        ),
-    };
-    validate_service_area_request(request)
+    validate_service_area_request(read_request_document(
+        path.as_ref(),
+        "service-area request",
+    )?)
 }
 
 pub fn load_service_area_sequence_request(
     path: impl AsRef<Path>,
 ) -> Result<ServiceAreaSequenceRequest> {
-    let path = path.as_ref();
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("reading service-area sequence request {}", path.display()))?;
-    let request: ServiceAreaSequenceRequest = match path.extension().and_then(|ext| ext.to_str()) {
-        Some("json") => {
-            serde_json::from_str(&raw).context("parsing JSON service-area sequence request")?
-        }
-        Some("yaml") | Some("yml") => {
-            serde_yaml::from_str(&raw).context("parsing YAML service-area sequence request")?
-        }
-        other => bail!(
-            "unsupported service-area sequence extension {:?}; use .json, .yml, or .yaml",
-            other
-        ),
-    };
+    let request: ServiceAreaSequenceRequest =
+        read_request_document(path.as_ref(), "service-area sequence request")?;
     request.expanded_departure_times()?;
     Ok(request)
 }
 
 pub fn load_betweenness_request(path: impl AsRef<Path>) -> Result<BetweennessRequest> {
-    let path = path.as_ref();
-    let raw = fs::read_to_string(path)
-        .with_context(|| format!("reading betweenness request {}", path.display()))?;
-    match path.extension().and_then(|ext| ext.to_str()) {
-        Some("json") => serde_json::from_str(&raw).context("parsing JSON betweenness request"),
-        Some("yaml") | Some("yml") => {
-            serde_yaml::from_str(&raw).context("parsing YAML betweenness request")
-        }
-        other => bail!(
-            "unsupported betweenness request extension {:?}; use .json, .yml, or .yaml",
-            other
-        ),
-    }
+    read_request_document(path.as_ref(), "betweenness request")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -156,10 +209,7 @@ pub fn load_od_pairs(path: impl AsRef<Path>) -> Result<OdPairsDocument> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("reading OD pairs file {}", path.display()))?;
     let document = match path.extension().and_then(|ext| ext.to_str()) {
-        Some("json") => serde_json::from_str(&raw).context("parsing JSON OD pairs")?,
-        Some("yaml") | Some("yml") => {
-            serde_yaml::from_str(&raw).context("parsing YAML OD pairs")?
-        }
+        Some("json") | Some("yaml") | Some("yml") => read_request_document(path, "OD pairs")?,
         Some("csv") => load_od_pairs_csv(&raw)?,
         other => bail!(
             "unsupported OD pairs extension {:?}; use .json, .yml, .yaml, or .csv",
@@ -177,10 +227,7 @@ pub fn load_point_set(path: impl AsRef<Path>) -> Result<PointSetDocument> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("reading point set {}", path.display()))?;
     let document = match path.extension().and_then(|ext| ext.to_str()) {
-        Some("json") => serde_json::from_str(&raw).context("parsing JSON point set")?,
-        Some("yaml") | Some("yml") => {
-            serde_yaml::from_str(&raw).context("parsing YAML point set")?
-        }
+        Some("json") | Some("yaml") | Some("yml") => read_request_document(path, "point set")?,
         Some("csv") => load_point_set_csv(&raw)?,
         other => bail!(
             "unsupported point-set extension {:?}; use .json, .yml, .yaml, or .csv",

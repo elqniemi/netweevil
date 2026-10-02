@@ -154,7 +154,7 @@ pub(crate) fn route_between_candidates(
     // remain bounded by snapping, and other locations/floors are not searched
     // after an attachment succeeds.
     let mut attachment: Option<(usize, usize)> = None;
-    let mut best: Option<(SnappedPoint, SnappedPoint, RoutePath, HopSelectionInfo)> = None;
+    let mut best: Option<(SnappedPoint, SnappedPoint, RoutePath, HopSelectionInfo, f64)> = None;
     let mut failed_pairs = HashSet::<((u32, u64, u64), (u32, u64, u64))>::new();
 
     for (origin_index, origin) in origin_candidates.iter().enumerate() {
@@ -302,20 +302,54 @@ pub(crate) fn route_between_candidates(
             if let Some(path) = path {
                 let path =
                     finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
-                if has_failure_modes(fallback) {
-                    return Ok((origin.clone(), destination.clone(), path, hop_info));
-                }
+                // Failure modes are penalized relaxations, not a separate
+                // selection rule: the orientations of one attachment compete
+                // on cost including illegal-movement penalties, so a legal
+                // orientation wins whenever it is no more expensive than a
+                // penalized illegal one.
+                let selection_cost =
+                    selection_cost(topology, metrics, routing_graph, fallback, &path);
                 attachment.get_or_insert((origin_index, destination_index));
-                if best.as_ref().is_none_or(|(_, _, previous, _)| {
-                    path.total_generalized_cost < previous.total_generalized_cost
-                }) {
-                    best = Some((origin.clone(), destination.clone(), path, hop_info));
+                if best
+                    .as_ref()
+                    .is_none_or(|(_, _, _, _, previous)| selection_cost < *previous)
+                {
+                    best = Some((
+                        origin.clone(),
+                        destination.clone(),
+                        path,
+                        hop_info,
+                        selection_cost,
+                    ));
                 }
             }
         }
     }
 
-    best.ok_or_else(|| no_route_failure(topology, origin_candidates, destination_candidates).into())
+    best.map(|(origin, destination, path, hop_info, _)| (origin, destination, path, hop_info))
+        .ok_or_else(|| no_route_failure(topology, origin_candidates, destination_candidates).into())
+}
+
+/// Cost used to choose between candidate attachments: the route's generalized
+/// cost plus any illegal-movement penalties its failure-mode search paid.
+fn selection_cost(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    fallback: &FallbackPolicy,
+    path: &RoutePath,
+) -> f64 {
+    if !has_failure_modes(fallback) {
+        return path.total_generalized_cost;
+    }
+    path.total_generalized_cost
+        + path_failure_mode_penalty_cost(
+            topology,
+            metrics,
+            routing_graph,
+            fallback,
+            &path.edge_indexes,
+        )
 }
 
 pub(crate) fn same_physical_attachment(left: &SnappedPoint, right: &SnappedPoint) -> bool {
@@ -362,7 +396,7 @@ pub(crate) fn route_between_candidates_with_banned_edges(
     banned_edges: &HashSet<usize>,
     max_generalized_cost: Option<f64>,
 ) -> Result<Option<(SnappedPoint, SnappedPoint, RoutePath, HopSelectionInfo)>> {
-    let mut best: Option<(SnappedPoint, SnappedPoint, RoutePath, HopSelectionInfo)> = None;
+    let mut best: Option<(SnappedPoint, SnappedPoint, RoutePath, HopSelectionInfo, f64)> = None;
     for origin in origin_candidates {
         for destination in destination_candidates {
             if same_edge_reverse_pair(origin, destination) {
@@ -404,15 +438,22 @@ pub(crate) fn route_between_candidates_with_banned_edges(
             };
             let path =
                 finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
-            let replace = best.as_ref().is_none_or(|(_, _, best_path, _)| {
-                path.total_generalized_cost < best_path.total_generalized_cost
-            });
-            if replace {
-                best = Some((origin.clone(), destination.clone(), path, hop_info));
+            let selection_cost = selection_cost(topology, metrics, routing_graph, fallback, &path);
+            if best
+                .as_ref()
+                .is_none_or(|(_, _, _, _, previous)| selection_cost < *previous)
+            {
+                best = Some((
+                    origin.clone(),
+                    destination.clone(),
+                    path,
+                    hop_info,
+                    selection_cost,
+                ));
             }
         }
     }
-    Ok(best)
+    Ok(best.map(|(origin, destination, path, hop_info, _)| (origin, destination, path, hop_info)))
 }
 
 fn seeded_route_with_banned_edges(

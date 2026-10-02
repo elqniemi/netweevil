@@ -100,6 +100,8 @@ export interface MapStyle {
   altitudeSlice: boolean;
   minAltitude: number;
   maxAltitude: number;
+  /** Routing-network vector tiles of the selected profile under results. */
+  networkTiles: boolean;
 }
 
 export const DEFAULT_MAP_STYLE: MapStyle = {
@@ -126,6 +128,7 @@ export const DEFAULT_MAP_STYLE: MapStyle = {
   altitudeSlice: false,
   minAltitude: -100,
   maxAltitude: 100,
+  networkTiles: false,
 };
 
 export interface ResultRecord {

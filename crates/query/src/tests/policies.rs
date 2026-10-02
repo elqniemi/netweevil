@@ -1,12 +1,12 @@
 use std::fs;
 
 use crate::{
-    AnalysisDiagnosticCode, AnalysisOutcome, ConnectivityPolicy, DisconnectedNetworkMode,
-    FallbackPolicy, HopEndpoint, IllegalMovementPenaltyPolicy, LabeledPoint, RouteRequest,
-    RouteViolationType, ServiceAreaBandMode, ServiceAreaBoundaryMode, ServiceAreaMultiOriginMode,
-    ServiceAreaOutputMode, ServiceAreaRequest, ServiceAreaReturnOptions, ServiceAreaThreshold,
-    ServiceAreaThresholdMetric, analysis_failure, execute_od, execute_route, execute_service_area,
-    load_service_area_request,
+    AnalysisDiagnosticCode, AnalysisOutcome, BearingConstraint, ConnectivityPolicy,
+    DisconnectedNetworkMode, FallbackPolicy, HopEndpoint, IllegalMovementPenaltyPolicy,
+    LabeledPoint, PointSnapConstraint, RouteRequest, RouteViolationType, ServiceAreaBandMode,
+    ServiceAreaBoundaryMode, ServiceAreaMultiOriginMode, ServiceAreaOutputMode, ServiceAreaRequest,
+    ServiceAreaReturnOptions, ServiceAreaThreshold, ServiceAreaThresholdMetric, analysis_failure,
+    execute_od, execute_route, execute_service_area, load_service_area_request,
 };
 use netweevil_core::CompiledProfileBundle;
 
@@ -65,6 +65,7 @@ fn service_area(
         band_mode: ServiceAreaBandMode::Cumulative,
         boundary_mode: ServiceAreaBoundaryMode::CutAtBoundary,
         multi_origin_mode: ServiceAreaMultiOriginMode::Overlap,
+        direction: Default::default(),
         polygon: Default::default(),
         returns: Default::default(),
         temporal: Default::default(),
@@ -327,27 +328,100 @@ fn ignores_multi_edge_restriction_only_when_explicitly_requested() {
     );
 }
 
-#[test]
-fn allows_forbidden_uturn_when_requested() {
-    let topology = forbidden_uturn_topology();
-    let metrics = uniform_metrics(topology.edge_count(), 10.0);
-    let mut request = route("forbidden-uturn", (6.0009, 53.0), (6.0, 53.001), 40.0);
-    request.fallback = FallbackPolicy {
+fn allow_forbidden_uturn() -> FallbackPolicy {
+    FallbackPolicy {
         allow_uturn_where_normally_forbidden: true,
         penalties: IllegalMovementPenaltyPolicy {
             forbidden_uturn_penalty_s: Some(15.0),
             ..Default::default()
         },
         ..Default::default()
-    };
-    let result = execute_route(&topology, &metrics, &request).expect("uturn route succeeds");
-    assert_eq!(result.outcome, AnalysisOutcome::Degraded);
+    }
+}
+
+/// Failure modes are penalized relaxations: with the u-turn allowed, the
+/// legal orientation of the origin edge (19 s) still beats the u-turn route
+/// (1 + 10 + 10 s plus the 15 s penalty).
+#[test]
+fn forbidden_uturn_fallback_keeps_cheaper_legal_route() {
+    let topology = forbidden_uturn_topology();
+    let metrics = uniform_metrics(topology.edge_count(), 10.0);
+    let strict = route("forbidden-uturn", (6.0009, 53.0), (6.0, 53.001), 40.0);
+    let legal = execute_route(&topology, &metrics, &strict).expect("legal route succeeds");
+    assert_eq!(legal.outcome, AnalysisOutcome::Legal);
+
+    let mut relaxed = strict.clone();
+    relaxed.fallback = allow_forbidden_uturn();
+    let result = execute_route(&topology, &metrics, &relaxed).expect("route succeeds");
+    assert_eq!(result.outcome, AnalysisOutcome::Legal);
+    assert!(result.violations.is_empty());
+    assert!((result.summary.total_generalized_cost - 19.0).abs() < 1e-6);
     assert!(
-        result
-            .summary
-            .violation_types
-            .contains(&RouteViolationType::ForbiddenUturn)
+        (result.summary.total_generalized_cost - legal.summary.total_generalized_cost).abs() < 1e-9
     );
+}
+
+/// A bearing pins the origin to edge 0, so node 2 is only reachable through
+/// the forbidden u-turn: strict routing fails, the relaxation degrades.
+#[test]
+fn forbidden_uturn_fallback_degrades_only_without_legal_route() {
+    let topology = forbidden_uturn_topology();
+    let metrics = uniform_metrics(topology.edge_count(), 10.0);
+    let mut strict = route("forbidden-uturn", (6.0009, 53.0), (6.0, 53.001), 40.0);
+    strict.snap.point_constraints.insert(
+        "origin".to_string(),
+        PointSnapConstraint {
+            bearing: Some(BearingConstraint {
+                degrees: 90.0,
+                tolerance_degrees: 10.0,
+            }),
+            ..Default::default()
+        },
+    );
+    assert!(execute_route(&topology, &metrics, &strict).is_err());
+
+    let mut relaxed = strict;
+    relaxed.fallback = allow_forbidden_uturn();
+    let result = execute_route(&topology, &metrics, &relaxed).expect("u-turn route succeeds");
+    assert_eq!(result.outcome, AnalysisOutcome::Degraded);
+    assert_eq!(
+        result.summary.violation_types,
+        vec![RouteViolationType::ForbiddenUturn]
+    );
+    assert!((result.summary.total_generalized_cost - 36.0).abs() < 1e-6);
+}
+
+/// The same rule for reverse-oneway travel: a short legal detour beats a
+/// penalized reverse traversal, and a cheap enough penalty flips the choice.
+#[test]
+fn reverse_oneway_fallback_competes_on_penalized_cost() {
+    let topology = oneway_with_detour_topology();
+    let metrics = uniform_metrics(topology.edge_count(), 10.0);
+    let mut request = route("reverse-or-detour", (6.001, 53.0), (6.0, 53.0), 5.0);
+    let legal = execute_route(&topology, &metrics, &request).expect("detour is legal");
+    assert_eq!(legal.outcome, AnalysisOutcome::Legal);
+
+    for (penalty_s, expected) in [
+        (30.0, AnalysisOutcome::Legal),
+        (5.0, AnalysisOutcome::Degraded),
+    ] {
+        request.fallback = FallbackPolicy {
+            allow_reverse_oneway: true,
+            penalties: IllegalMovementPenaltyPolicy {
+                reverse_oneway_penalty_s: Some(penalty_s),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
+        assert_eq!(result.outcome, expected, "penalty {penalty_s}");
+        let expected_cost = if expected == AnalysisOutcome::Legal {
+            legal.summary.total_generalized_cost
+        } else {
+            10.0 + penalty_s
+        };
+        assert!((result.summary.total_generalized_cost - expected_cost).abs() < 1e-6);
+    }
 }
 
 #[test]

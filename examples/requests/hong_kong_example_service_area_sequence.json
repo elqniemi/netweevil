@@ -63,10 +63,10 @@
       "diagnostics": true,
       "segments": true
     },
-    "scenario": "examples/scenarios/hong_kong_central_escalator_example.yml",
-    "holiday_calendar": "examples/temporal/example_holidays.yml",
-    "overlay": [
-      "examples/temporal/shade_fraction.csv"
+    "scenario_file": "../scenarios/hong_kong_central_escalator_example.yml",
+    "holiday_calendar_file": "../temporal/example_holidays.yml",
+    "overlay_files": [
+      "../temporal/shade_fraction.csv"
     ],
     "max_labels_per_state": 24
   },

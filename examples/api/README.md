@@ -3,6 +3,10 @@
 `north_nl_match.json` exercises `POST /v1/match` with a timestamped GPS trace.
 See [trace matching](../../docs/trace-matching.md) for scoring, gaps and limits.
 
+`route_avoid.json` routes through central Groningen while excluding the edges
+near a point and penalizing a block; see "Avoid locations, areas and features"
+in the top-level README.
+
 `route_profile_overrides.json` demonstrates request-defined street routing on
 the North Netherlands dataset. Send it to `/v1/route`; the first request compiles
 the effective profile and subsequent identical profiles reuse the cached engine.
@@ -264,17 +268,73 @@ python3 examples/api/run_groningen_routes_every_10th_to_gpkg.py
 
 ## Inspect routing locations
 
-`POST /v1/locate` returns profile-accessible snap candidates for each input point.
-Use `direction: "origin"` for outgoing routes or `"destination"` for incoming
-routes. The response includes snapped coordinates, directed edge IDs, position
-along the edge, component IDs, and snap distance. Candidates use the same
-spatial index, elevation window, and attribute filters as route requests.
-A point with no candidate fails the request with the route snapping diagnostic.
+`POST /v1/locate` reports, for each input point:
+
+- `candidates`: the snap candidates a route would start from (`direction:
+  "origin"`) or end at (`"destination"`), with snapped coordinates, directed
+  edge IDs, position along the edge, component IDs and snap distance.
+- `nearest`: the `count` (1 to 100, default 1) nearest road segments the
+  profile can traverse, nearest first. Each segment has its distance and
+  projected point, and lists its directed edges with `fraction`, way ID,
+  name, road class, highway tag, surface, posted speed, lanes, length,
+  profile-aware `oneway`, source access flags, and the profile's travel
+  time, speed and generalized cost.
+
+Both use the same spatial index, elevation window, attribute filters and
+`snap.point_constraints` as route requests. A point that matches nothing
+within `snap.max_distance_m` gets empty lists; invalid input fails the request.
 
 ```bash
 curl -X POST http://127.0.0.1:8080/v1/locate \
   -H 'Content-Type: application/json' \
   --data @examples/api/locate.json
+```
+
+## Search expansion
+
+`POST /v1/expansion` returns the edges the exact edge-based Dijkstra settles,
+in settle order, as a GeoJSON `FeatureCollection` for debugging or animation.
+Each feature has `order`, `edge_index`, `edge_id`, `cost` and
+`previous_edge_index`; `meta` carries `settled_edge_count`, `truncated` and,
+for routes, `route_cost`.
+
+- `action: "route"` searches forward on generalized cost from `origin` until
+  `destination` is settled. Production routes run on the contraction
+  hierarchy, whose search space is shortcuts, so this shows the exact
+  reference search over the same graph, turn costs and restrictions; it
+  reaches the same optimal cost.
+- `action: "service_area"` searches up to `limit` on `metric` (`travel_time_s`
+  or `distance_m`), outbound from `origin` or, with `direction: "inbound"`,
+  toward it.
+
+`max_edges` (default 50,000, at most 500,000) stops the search; `truncated`
+reports it. Failure modes and departure times are not applied.
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/expansion \
+  -H 'Content-Type: application/json' \
+  --data @examples/api/expansion_route.json
+```
+
+## Network vector tiles
+
+`GET /v1/tiles/{z}/{x}/{y}.mvt?profile_id=...` serves the edges the profile
+can traverse as Mapbox Vector Tiles (layer `network`, extent 4096, 64-unit
+buffer). Two-way segments are one feature; one-way segments are drawn in their
+travel direction. Properties: `edge_id`, `way_id`, `road_class`, `highway`,
+`oneway` (profile-aware), `access_car`, `access_bicycle`, `access_foot`,
+`max_speed_kph`, `speed_kph`, and for two-way segments `reverse_edge_id` and
+`reverse_speed_kph`, plus `name`. Zoom 14 and above includes every edge, 12-13
+drop service roads, tracks and paths, 10-11 keep motorways, trunks, primaries
+and ferries, and lower zooms keep motorways and trunks. A tile holds at most
+100,000 features; the `X-NetWeevil-Truncated` header reports a cut.
+
+The web console's map tools have a "Routing network" toggle that draws these
+tiles for the selected profile. Other clients can use the URL template as a
+MapLibre or QGIS vector tile source:
+
+```bash
+curl -o tile.mvt 'http://127.0.0.1:8080/v1/tiles/15/16981/10640.mvt?profile_id=car_research_v1'
 ```
 
 ## Routes with intermediate locations

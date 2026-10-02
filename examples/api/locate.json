@@ -5,6 +5,7 @@
       {"id": "groningen", "lon": 6.5665, "lat": 53.2194}
     ],
     "direction": "origin",
+    "count": 3,
     "snap": {"max_distance_m": 500.0}
   }
 }

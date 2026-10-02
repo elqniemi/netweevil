@@ -387,15 +387,30 @@ async fn locate_candidates_match_route_snapping_and_reject_invalid_requests() {
             );
         }
     }
+    // Points that match nothing report empty lists instead of failing the
+    // whole request.
+    for request in [
+        json!({"points":[{"id":"far","lon":0,"lat":0}]}),
+        json!({"points":[{"id":"high","lon":6,"lat":53,"z":50}], "snap":{"z_window_m":1}}),
+        json!({"points":[{"id":"west","lon":6.0005,"lat":53}], "snap":{"point_constraints":{"west":{"bearing":{"degrees":270,"tolerance_degrees":10}}}}}),
+    ] {
+        let Json(response) = crate::locate::locate_handler(
+            State(state.clone()),
+            json_payload(json!({"request":request})),
+        )
+        .await
+        .unwrap();
+        let response = serde_json::to_value(response).unwrap();
+        assert_eq!(response["result"][0]["candidates"], json!([]));
+        assert_eq!(response["result"][0]["nearest"], json!([]));
+    }
     for request in [
         json!({"points":[]}),
         json!({"points":[{"id":"bad","lon":181,"lat":53}]}),
         json!({"points":[{"id":"bad","lon":6,"lat":91}]}),
-        json!({"points":[{"id":"far","lon":0,"lat":0}]}),
+        json!({"points":[{"id":"bad","lon":6,"lat":53}], "count":0}),
         json!({"points":[{"id":"bad","lon":6,"lat":53}], "snap":{"max_distance_m":-1}}),
-        json!({"points":[{"id":"bad","lon":6,"lat":53,"z":50}], "snap":{"z_window_m":1}}),
         json!({"points":[{"id":"bad","lon":6.0005,"lat":53}], "snap":{"point_constraints":{"bad":{"bearing":{"degrees":361,"tolerance_degrees":10}}}}}),
-        json!({"points":[{"id":"bad","lon":6.0005,"lat":53}], "snap":{"point_constraints":{"bad":{"bearing":{"degrees":270,"tolerance_degrees":10}}}}}),
     ] {
         let error = crate::locate::locate_handler(
             State(state.clone()),
@@ -414,6 +429,142 @@ async fn locate_candidates_match_route_snapping_and_reject_invalid_requests() {
     .await
     .unwrap_err();
     assert_eq!(status(error), StatusCode::NOT_FOUND);
+}
+
+/// `count` nearest segments, nearest first, with edge attributes and the
+/// profile's view of each direction.
+#[tokio::test]
+async fn locate_reports_k_nearest_segments_with_attributes() {
+    let state = ApiState::for_test(fixture());
+    let payload = json!({"request": {
+        "points": [{"id":"p","lon":6.0015,"lat":53.0001}],
+        "snap": {"max_distance_m": 100}, "count": 2
+    }});
+    let Json(response) = crate::locate::locate_handler(State(state), json_payload(payload))
+        .await
+        .unwrap();
+    let response = serde_json::to_value(response).unwrap();
+    let nearest = response["result"][0]["nearest"].as_array().unwrap();
+    assert_eq!(nearest.len(), 2);
+    // Edge 1 (1 -> 2) and the 0 -> 2 service road overlap at the point.
+    let edges = nearest
+        .iter()
+        .map(|segment| segment["edges"][0]["edge_index"].as_u64().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(edges, vec![1, 2]);
+    assert!(
+        nearest[0]["distance_m"].as_f64().unwrap() <= nearest[1]["distance_m"].as_f64().unwrap()
+    );
+    let first = &nearest[0]["edges"][0];
+    assert_eq!(first["road_class"], "residential");
+    assert_eq!(first["oneway"], true);
+    assert_eq!(first["access_car"], true);
+    assert!((first["fraction"].as_f64().unwrap() - 0.5).abs() < 0.01);
+    assert!(first["travel_time_s"].as_f64().unwrap() > 0.0);
+    assert!(first["speed_kph"].as_f64().unwrap() > 0.0);
+}
+
+/// Feature ids per layer name of an encoded vector tile.
+fn mvt_feature_ids(bytes: &[u8]) -> std::collections::BTreeMap<String, Vec<u64>> {
+    fn varint(bytes: &[u8], at: &mut usize) -> u64 {
+        let mut value = 0_u64;
+        for shift in (0..64).step_by(7) {
+            let byte = bytes[*at];
+            *at += 1;
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+        }
+        value
+    }
+    /// (field, varint value or length-delimited payload) pairs.
+    fn fields(bytes: &[u8]) -> Vec<(u64, Result<u64, &[u8]>)> {
+        let mut at = 0;
+        let mut fields = Vec::new();
+        while at < bytes.len() {
+            let key = varint(bytes, &mut at);
+            match key & 7 {
+                0 => fields.push((key >> 3, Ok(varint(bytes, &mut at)))),
+                2 => {
+                    let length = varint(bytes, &mut at) as usize;
+                    fields.push((key >> 3, Err(&bytes[at..at + length])));
+                    at += length;
+                }
+                wire => panic!("unexpected wire type {wire}"),
+            }
+        }
+        fields
+    }
+    let mut layers = std::collections::BTreeMap::new();
+    for (_, layer) in fields(bytes).into_iter().filter(|(field, _)| *field == 3) {
+        let layer = fields(layer.unwrap_err());
+        let name = layer
+            .iter()
+            .find(|(field, _)| *field == 1)
+            .map(|(_, name)| String::from_utf8(name.unwrap_err().to_vec()).unwrap())
+            .unwrap();
+        let ids = layer
+            .iter()
+            .filter(|(field, _)| *field == 2)
+            .map(|(_, feature)| {
+                fields(feature.unwrap_err())
+                    .into_iter()
+                    .find(|(field, _)| *field == 1)
+                    .map(|(_, id)| id.unwrap())
+                    .unwrap()
+            })
+            .collect();
+        layers.insert(name, ids);
+    }
+    layers
+}
+
+#[tokio::test]
+async fn network_tiles_serve_routable_edges_by_zoom() {
+    let state = ApiState::for_test(fixture());
+    let tile_of = |z: u8| {
+        let scale = f64::from(1_u32 << z);
+        let lat = 53.0_f64.to_radians();
+        let x = ((6.001 + 180.0) / 360.0 * scale).floor() as u32;
+        let y = ((1.0 - (lat.tan() + 1.0 / lat.cos()).ln() / std::f64::consts::PI) / 2.0 * scale)
+            .floor() as u32;
+        (z, x, format!("{y}.mvt"))
+    };
+    let fetch = |z: u8| {
+        let state = state.clone();
+        async move {
+            let response = crate::tiles::network_tile_handler(
+                State(state),
+                axum::extract::Path(tile_of(z)),
+                Query(crate::tiles::TileQuery { profile_id: None }),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                response.headers()["content-type"],
+                "application/vnd.mapbox-vector-tile"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            mvt_feature_ids(&bytes)
+        }
+    };
+    let mut detailed = fetch(16).await.remove("network").unwrap();
+    detailed.sort_unstable();
+    assert_eq!(detailed, vec![0, 1, 2]);
+    // Residential and service roads are hidden at zoom 11.
+    assert_eq!(fetch(11).await["network"], Vec::<u64>::new());
+
+    let error = crate::tiles::network_tile_handler(
+        State(state),
+        axum::extract::Path((3, 9, "0.mvt".to_string())),
+        Query(crate::tiles::TileQuery { profile_id: None }),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(status(error), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]

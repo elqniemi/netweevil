@@ -190,52 +190,62 @@ pub(crate) struct BetweennessArgs {
 ///
 /// Optional scalar flags replace only their matching request-file field. CLI
 /// overlays are appended so request-file overlays remain active and the later
-/// CLI entries retain their precedence.
+/// CLI entries retain their precedence. Files are read here and sent inline;
+/// the engine never opens paths named by a request.
 #[derive(Args, Debug, Clone, Default)]
 pub(crate) struct TemporalOverrideArgs {
     /// Override the request departure time (RFC 3339).
     #[arg(long)]
     departure_time: Option<String>,
-    /// Override the request scenario file.
+    /// Override the request scenario with a local scenario file (JSON/YAML).
     #[arg(long)]
     scenario: Option<PathBuf>,
-    /// Override the request holiday calendar file.
+    /// Replace the request holidays with a local holiday calendar (JSON/YAML).
     #[arg(long)]
     holiday_calendar: Option<PathBuf>,
-    /// Append a temporal overlay file; may be specified more than once.
+    /// Append a local temporal overlay file (CSV/Parquet); repeatable.
     #[arg(long = "overlay")]
     overlays: Vec<PathBuf>,
 }
 
 impl TemporalOverrideArgs {
-    fn apply_to(&self, temporal: &mut TemporalRequestOptions) {
+    fn apply_to(&self, temporal: &mut TemporalRequestOptions) -> Result<()> {
         if let Some(departure_time) = &self.departure_time {
             temporal.departure_time = Some(departure_time.clone());
             // `departure_time` and `arrive_by` are alternative time anchors;
             // an explicit CLI departure must be able to override either form.
             temporal.arrive_by = None;
         }
-        self.apply_non_departure_to(temporal);
+        self.apply_non_departure_to(temporal)
     }
 
-    fn apply_non_departure_to(&self, temporal: &mut TemporalRequestOptions) {
+    fn apply_non_departure_to(&self, temporal: &mut TemporalRequestOptions) -> Result<()> {
         if let Some(scenario) = &self.scenario {
-            temporal.scenario = Some(scenario.clone());
+            temporal.scenario = Some(netweevil_query::load_scenario_overlay(scenario)?);
         }
         if let Some(holiday_calendar) = &self.holiday_calendar {
-            temporal.holiday_calendar = Some(holiday_calendar.clone());
+            temporal.holidays = netweevil_query::load_holiday_calendar(holiday_calendar)?;
         }
-        temporal.overlays.extend(self.overlays.iter().cloned());
+        for overlay in &self.overlays {
+            temporal
+                .overlays
+                .push(netweevil_query::load_temporal_overlay(overlay)?);
+        }
+        Ok(())
     }
 
-    fn apply_to_service_area_sequence(&self, request: &mut ServiceAreaSequenceRequest) {
-        self.apply_non_departure_to(&mut request.request.temporal);
+    fn apply_to_service_area_sequence(
+        &self,
+        request: &mut ServiceAreaSequenceRequest,
+    ) -> Result<()> {
+        self.apply_non_departure_to(&mut request.request.temporal)?;
         if let Some(departure_time) = &self.departure_time {
             request.departure_times = vec![departure_time.clone()];
             request.start_time = None;
             request.end_time = None;
             request.step_s = None;
         }
+        Ok(())
     }
 }
 
@@ -243,14 +253,14 @@ fn apply_matrix_temporal_overrides(
     overrides: &TemporalOverrideArgs,
     origins: &mut netweevil_query::PointSetDocument,
     destinations: &mut netweevil_query::PointSetDocument,
-) {
+) -> Result<()> {
     match (
         origins.temporal.requires_exact_labels(),
         destinations.temporal.requires_exact_labels(),
     ) {
         (true, true) => {
-            overrides.apply_to(&mut origins.temporal);
-            overrides.apply_to(&mut destinations.temporal);
+            overrides.apply_to(&mut origins.temporal)?;
+            overrides.apply_to(&mut destinations.temporal)
         }
         (false, true) => overrides.apply_to(&mut destinations.temporal),
         _ => overrides.apply_to(&mut origins.temporal),
@@ -335,7 +345,7 @@ pub(crate) fn analyze_route(paths: &WorkspacePaths, args: RouteArgs) -> Result<(
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
     let mut request = load_route_request(&args.request)?;
-    args.temporal.apply_to(&mut request.temporal);
+    args.temporal.apply_to(&mut request.temporal)?;
     let stored = match run_route_analysis(
         paths,
         &args.dataset,
@@ -360,7 +370,7 @@ pub(crate) fn analyze_route_batch(paths: &WorkspacePaths, args: RouteBatchArgs) 
     profile.validate()?;
     let mut requests = load_route_batch(&args.requests)?;
     for entry in &mut requests.requests {
-        args.temporal.apply_to(&mut entry.request.temporal);
+        args.temporal.apply_to(&mut entry.request.temporal)?;
     }
     if args.out.as_deref().is_some_and(output_needs_geometry) {
         for entry in &mut requests.requests {
@@ -395,7 +405,7 @@ pub(crate) fn analyze_od(paths: &WorkspacePaths, args: OdArgs) -> Result<()> {
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
     let mut request = load_od_pairs(&args.pairs)?;
-    args.temporal.apply_to(&mut request.temporal);
+    args.temporal.apply_to(&mut request.temporal)?;
     if args.out.as_deref().is_some_and(output_needs_geometry)
         && matches!(request.returns.geometry, ReturnGeometry::None)
     {
@@ -425,7 +435,7 @@ pub(crate) fn analyze_matrix(paths: &WorkspacePaths, args: MatrixArgs) -> Result
     profile.validate()?;
     let mut origins = load_point_set(&args.origins)?;
     let mut destinations = load_point_set(&args.destinations)?;
-    apply_matrix_temporal_overrides(&args.temporal, &mut origins, &mut destinations);
+    apply_matrix_temporal_overrides(&args.temporal, &mut origins, &mut destinations)?;
     if args.out.as_deref().is_some_and(output_needs_geometry) {
         if matches!(origins.returns.geometry, ReturnGeometry::None) {
             origins.returns.geometry = ReturnGeometry::Full;
@@ -459,7 +469,7 @@ pub(crate) fn analyze_accessibility(paths: &WorkspacePaths, args: AccessibilityA
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
     let mut origins = load_point_set(&args.origins)?;
-    args.temporal.apply_to(&mut origins.temporal);
+    args.temporal.apply_to(&mut origins.temporal)?;
     let categories = load_accessibility_categories(&args.destinations)?;
     let request = AccessibilityRequest {
         origins,
@@ -493,7 +503,7 @@ pub(crate) fn analyze_service_area(paths: &WorkspacePaths, args: ServiceAreaArgs
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
     let mut request = load_service_area_request(&args.request)?;
-    args.temporal.apply_to(&mut request.temporal);
+    args.temporal.apply_to(&mut request.temporal)?;
     if args.out.as_deref().is_some_and(output_needs_geometry) {
         request.returns.geometry = true;
     }
@@ -520,7 +530,7 @@ pub(crate) fn analyze_service_area_sequence(
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
     let mut request = load_service_area_sequence_request(&args.request)?;
-    args.temporal.apply_to_service_area_sequence(&mut request);
+    args.temporal.apply_to_service_area_sequence(&mut request)?;
     if args.out.as_deref().is_some_and(output_needs_geometry) {
         request.request.returns.geometry = true;
     }
@@ -544,7 +554,7 @@ pub(crate) fn analyze_betweenness(paths: &WorkspacePaths, args: BetweennessArgs)
     let profile = load_profile(&args.profile)?;
     profile.validate()?;
     let mut request = load_betweenness_request(&args.request)?;
-    args.temporal.apply_to(&mut request.temporal);
+    args.temporal.apply_to(&mut request.temporal)?;
     let stored = run_betweenness_analysis(
         paths,
         &args.dataset,

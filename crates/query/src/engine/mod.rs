@@ -1,5 +1,6 @@
 mod acceleration;
 mod automaton;
+mod avoid_engine;
 mod cch_query;
 mod exact;
 mod fallback;
@@ -11,6 +12,7 @@ mod state_heap;
 
 pub(crate) use acceleration::*;
 pub(crate) use automaton::*;
+pub(crate) use avoid_engine::*;
 pub(crate) use cch_query::*;
 pub(crate) use exact::*;
 pub(crate) use fallback::*;
@@ -37,6 +39,11 @@ pub struct PreparedRoutingEngine {
     metrics: Arc<CompiledProfileBundle>,
     default_routing_graph: RoutingGraph,
     ignore_multi_edge_restrictions_graph: Option<RoutingGraph>,
+    /// Engines for recent request avoid sets (see `avoid_engine`).
+    avoid_engines: AvoidEngineCache,
+    /// Set on engines built for an avoid set; their metric already applies it.
+    avoid_applied: bool,
+    avoid_index: std::sync::OnceLock<Option<crate::edge_spatial_index::EdgeSpatialIndex>>,
 }
 
 impl PreparedRoutingEngine {
@@ -44,6 +51,18 @@ impl PreparedRoutingEngine {
         topology: Arc<TopologyBundle>,
         metrics: Arc<CompiledProfileBundle>,
         acceleration: Option<Arc<DatasetAccelerationBundle>>,
+    ) -> Result<Self> {
+        Self::build(topology, metrics, acceleration, true)
+    }
+
+    /// `with_ignore_mode_graph = false` skips the graph that serves
+    /// [`EngineMode::IgnoreMultiEdgeRestrictions`]; such an engine must only
+    /// be asked for [`EngineMode::Auto`] work.
+    fn build(
+        topology: Arc<TopologyBundle>,
+        metrics: Arc<CompiledProfileBundle>,
+        acceleration: Option<Arc<DatasetAccelerationBundle>>,
+        with_ignore_mode_graph: bool,
     ) -> Result<Self> {
         validate_execution_inputs(topology.as_ref(), metrics.as_ref())?;
         let (metrics, customized_at_load) =
@@ -59,7 +78,7 @@ impl PreparedRoutingEngine {
             acceleration.ranked.get(acceleration);
         }
         let mut ignore_multi_edge_restrictions_graph =
-            if default_routing_graph.has_restriction_sequences() {
+            if with_ignore_mode_graph && default_routing_graph.has_restriction_sequences() {
                 Some(build_routing_graph_with_options_from_shared(
                     topology.as_ref(),
                     metrics.clone(),
@@ -88,6 +107,9 @@ impl PreparedRoutingEngine {
             metrics,
             default_routing_graph,
             ignore_multi_edge_restrictions_graph,
+            avoid_engines: AvoidEngineCache::default(),
+            avoid_applied: false,
+            avoid_index: std::sync::OnceLock::new(),
         })
     }
 
@@ -159,6 +181,9 @@ impl PreparedRoutingEngine {
         &self,
         request: &crate::TraceMatchRequest,
     ) -> Result<crate::TraceMatchResult> {
+        if let Some(engine) = self.avoid_target(&request.temporal.avoid, EngineMode::Auto)? {
+            return engine.execute_trace_match(request);
+        }
         crate::trace_matching::execute_trace_match_with_graph(
             self.topology.as_ref(),
             &self.default_routing_graph,
@@ -170,6 +195,9 @@ impl PreparedRoutingEngine {
         &self,
         request: &crate::WaypointRequest,
     ) -> Result<crate::WaypointResult> {
+        if let Some(engine) = self.avoid_target(&request.temporal.avoid, EngineMode::Auto)? {
+            return engine.execute_waypoints(request);
+        }
         crate::waypoints::execute_waypoints_with_graph(
             self.topology.as_ref(),
             self.metrics.as_ref(),
@@ -243,6 +271,50 @@ impl PreparedRoutingEngine {
         )
     }
 
+    /// The `count` nearest routable road segments to `point`; see
+    /// [`nearest_segments`].
+    pub fn nearest_segments(
+        &self,
+        point: &LabeledPoint,
+        options: &SnapOptions,
+        count: usize,
+    ) -> Result<Vec<NearestSegment>> {
+        nearest_segments(
+            self.topology.as_ref(),
+            &self.default_routing_graph,
+            point,
+            options,
+            count,
+        )
+    }
+
+    /// Settled edges of the exact search behind a route or service area,
+    /// in settle order; see [`ExpansionRequest`].
+    pub fn execute_expansion(&self, request: &ExpansionRequest) -> Result<ExpansionResult> {
+        crate::expansion::execute_expansion_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            request,
+        )
+    }
+
+    /// Edges this profile can traverse whose extent intersects
+    /// `[west, south, east, north]`, in ascending edge order.
+    pub fn routable_edges_in_bbox(&self, bbox: [f64; 4]) -> Vec<u32> {
+        self.default_routing_graph
+            .edge_spatial_index
+            .edges_in_bbox(self.topology.as_ref(), bbox)
+    }
+
+    /// Whether this profile can traverse `edge_index`.
+    pub fn is_routable_edge(&self, edge_index: usize) -> bool {
+        self.default_routing_graph
+            .edge_costs
+            .get(edge_index)
+            .is_some_and(|cost| cost.is_finite())
+    }
+
     /// Execute a route between pre-snapped candidate sets produced by
     /// [`Self::snap_route_candidates`]. Requests with failure modes or exact
     /// temporal/component labels fall back to the full snap-and-route path so
@@ -254,7 +326,10 @@ impl PreparedRoutingEngine {
         origin_candidates: &[SnappedPoint],
         destination_candidates: &[SnappedPoint],
     ) -> Result<RouteResult> {
-        if has_failure_modes(&request.fallback) || request.temporal.requires_exact_labels() {
+        if has_failure_modes(&request.fallback)
+            || request.temporal.requires_exact_labels()
+            || !request.temporal.avoid.is_empty()
+        {
             return self.execute_route(request);
         }
         execute_route_with_candidates(
@@ -279,6 +354,14 @@ impl PreparedRoutingEngine {
         edge_names: Option<&[String]>,
         mode: EngineMode,
     ) -> Result<RouteResult> {
+        if let Some(resolved) = self.resolve_request_avoid(&request.temporal.avoid)? {
+            if let Some(result) = self.try_route_avoiding(request, &resolved, edge_names, mode)? {
+                return Ok(result);
+            }
+            return self
+                .avoid_engine(&resolved, mode)?
+                .execute_route_with_optional_edge_names(request, edge_names, mode);
+        }
         if has_failure_modes(&request.fallback) {
             let degraded = cached_failure_mode_bundle(
                 self.topology.as_ref(),
@@ -313,6 +396,9 @@ impl PreparedRoutingEngine {
         document: &OdPairsDocument,
         mode: EngineMode,
     ) -> Result<OdResult> {
+        if let Some(engine) = self.avoid_target(&document.temporal.avoid, mode)? {
+            return engine.execute_od_with_mode(document, mode);
+        }
         if has_failure_modes(&document.fallback) {
             let degraded = cached_failure_mode_bundle(
                 self.topology.as_ref(),
@@ -350,6 +436,10 @@ impl PreparedRoutingEngine {
         destinations: &PointSetDocument,
         mode: EngineMode,
     ) -> Result<MatrixResult> {
+        let avoid = AvoidOptions::union([&origins.temporal.avoid, &destinations.temporal.avoid]);
+        if let Some(engine) = self.avoid_target(&avoid, mode)? {
+            return engine.execute_matrix_with_mode(origins, destinations, mode);
+        }
         let fallback = merge_point_set_fallback_policy(&origins.fallback, &destinations.fallback);
         if has_failure_modes(&fallback) {
             let degraded = cached_failure_mode_bundle(
@@ -388,6 +478,17 @@ impl PreparedRoutingEngine {
         request: &AccessibilityRequest,
         mode: EngineMode,
     ) -> Result<AccessibilityResult> {
+        let avoid = AvoidOptions::union(
+            std::iter::once(&request.origins.temporal.avoid).chain(
+                request
+                    .categories
+                    .iter()
+                    .map(|category| &category.destinations.temporal.avoid),
+            ),
+        );
+        if let Some(engine) = self.avoid_target(&avoid, mode)? {
+            return engine.execute_accessibility_with_mode(request, mode);
+        }
         if has_failure_modes(&request.origins.fallback) {
             let degraded = cached_failure_mode_bundle(
                 self.topology.as_ref(),
@@ -441,6 +542,11 @@ impl PreparedRoutingEngine {
         &self,
         request: &ServiceAreaSequenceRequest,
     ) -> Result<ServiceAreaSequenceResult> {
+        if let Some(engine) =
+            self.avoid_target(&request.request.temporal.avoid, EngineMode::Auto)?
+        {
+            return engine.execute_service_area_sequence(request);
+        }
         execute_service_area_sequence_with_graph(
             self.topology.as_ref(),
             self.metrics.as_ref(),
@@ -450,6 +556,9 @@ impl PreparedRoutingEngine {
     }
 
     pub fn execute_betweenness(&self, request: &BetweennessRequest) -> Result<BetweennessResult> {
+        if let Some(engine) = self.avoid_target(&request.temporal.avoid, EngineMode::Auto)? {
+            return engine.execute_betweenness(request);
+        }
         execute_betweenness_with_graph(
             self.topology.as_ref(),
             self.metrics.as_ref(),
@@ -463,6 +572,9 @@ impl PreparedRoutingEngine {
         &self,
         request: &BetweennessRequest,
     ) -> Result<BetweennessResult> {
+        if let Some(engine) = self.avoid_target(&request.temporal.avoid, EngineMode::Auto)? {
+            return engine.execute_betweenness_with_pair_results(request);
+        }
         execute_betweenness_with_graph(
             self.topology.as_ref(),
             self.metrics.as_ref(),
@@ -477,6 +589,9 @@ impl PreparedRoutingEngine {
         request: &ServiceAreaRequest,
         mode: EngineMode,
     ) -> Result<ServiceAreaResult> {
+        if let Some(engine) = self.avoid_target(&request.temporal.avoid, mode)? {
+            return engine.execute_service_area_with_mode(request, mode);
+        }
         let (routing_graph, _) = self.routing_graph_for_mode(mode);
         execute_service_area_with_graph(
             self.topology.as_ref(),

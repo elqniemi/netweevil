@@ -1,0 +1,37 @@
+{
+  "analysis_id": "groningen_inbound_service_area_demo",
+  "origins": [
+    {
+      "id": "station",
+      "lon": 6.5665,
+      "lat": 53.2194
+    }
+  ],
+  "thresholds": [
+    {
+      "id": "five_minutes",
+      "limit": 300.0,
+      "metric": "travel_time_s"
+    },
+    {
+      "id": "ten_minutes",
+      "limit": 600.0,
+      "metric": "travel_time_s"
+    }
+  ],
+  "direction": "inbound",
+  "output_mode": "polygon",
+  "band_mode": "ring",
+  "boundary_mode": "cut_at_boundary",
+  "multi_origin_mode": "overlap",
+  "polygon": {
+    "simplification_tolerance_m": 20.0,
+    "denoise": 0.2,
+    "min_hole_area_m2": 20000.0
+  },
+  "returns": {
+    "geometry": true,
+    "attributes": true,
+    "per_threshold_summary": true
+  }
+}

@@ -1,7 +1,8 @@
 //! Workspace setup through the API: where state lives, file uploads, dataset
 //! and GTFS imports, profile files, and activating a dataset/profile/feed
-//! selection without restarting the server. Every write stays under
-//! `.netweevil/`; files referenced by path are read in place.
+//! selection without restarting the server. Every read and write stays under
+//! `.netweevil/` (plus the repository's example profiles): requests name
+//! uploads, profiles, datasets and feeds by name, never by server path.
 
 use std::collections::HashSet;
 use std::fs;
@@ -454,24 +455,54 @@ fn sanitize_file_name(raw: &str) -> Result<String, ApiError> {
     Ok(cleaned)
 }
 
-/// Resolves a source given as an upload name, a path relative to the
-/// workspace root, or an absolute path.
-fn resolve_source(paths: &WorkspacePaths, raw: &str) -> Result<PathBuf> {
+/// Resolves an import source given as the name of a file in
+/// `.netweevil/uploads/`. Paths are rejected: the API never reads files
+/// outside the state directory on a caller's behalf.
+fn resolve_upload(paths: &WorkspacePaths, raw: &str) -> Result<PathBuf> {
     let raw = raw.trim();
     if raw.is_empty() {
-        bail!("source path is empty");
+        bail!("source is empty; upload a file and pass its name");
     }
-    let candidates = [
-        paths.uploads_dir.join(raw),
-        PathBuf::from(raw),
-        paths.root.join(raw),
+    if sanitize_file_name(raw).ok().as_deref() != Some(raw) {
+        bail!(
+            "source '{raw}' must be the name of an upload in .netweevil/uploads/, not a path; upload the file first or import it with the CLI"
+        );
+    }
+    let path = paths.uploads_dir.join(raw);
+    if !path.is_file() {
+        bail!("no upload named '{raw}'; upload the file first");
+    }
+    Ok(path)
+}
+
+/// Resolves a profile given as a file name in `.netweevil/profiles/`, as
+/// `examples/<file>`, or as a path that already lies inside one of those two
+/// directories (the form `/v1/workspace` lists and `workspace.json` saves).
+fn resolve_profile_source(paths: &WorkspacePaths, raw: &str) -> Result<PathBuf> {
+    let raw = raw.trim();
+    let candidate = if Path::new(raw).is_absolute() {
+        PathBuf::from(raw)
+    } else {
+        profile_file_path(paths, raw).map_err(|_| anyhow!("invalid profile name '{raw}'"))?
+    };
+    let allowed = [
+        paths.profiles_dir.clone(),
+        paths.root.join("examples").join("profiles"),
     ];
-    candidates
-        .into_iter()
-        .find(|candidate| candidate.exists())
-        .ok_or_else(|| {
-            anyhow!("source '{raw}' was not found as an upload or a path on this machine")
-        })
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|_| anyhow!("profile '{raw}' was not found"))?;
+    let contained = canonical.is_file()
+        && allowed.iter().any(|dir| {
+            dir.canonicalize()
+                .is_ok_and(|dir| canonical.parent() == Some(dir.as_path()))
+        });
+    if !contained {
+        bail!(
+            "profile '{raw}' must be a file in .netweevil/profiles/ or examples/profiles/; save it with POST /v1/workspace/profiles first"
+        );
+    }
+    Ok(canonical)
 }
 
 // --- Datasets ---------------------------------------------------------------
@@ -507,7 +538,7 @@ pub(crate) async fn import_dataset_handler(
     let sources = payload
         .sources
         .iter()
-        .map(|source| resolve_source(&paths, source))
+        .map(|source| resolve_upload(&paths, source))
         .collect::<Result<Vec<_>>>()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if sources.is_empty() {
@@ -521,7 +552,7 @@ pub(crate) async fn import_dataset_handler(
     let mapping = payload
         .mapping
         .as_deref()
-        .map(|mapping| resolve_source(&paths, mapping))
+        .map(|mapping| resolve_upload(&paths, mapping))
         .transpose()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let name = payload.name.clone();
@@ -578,6 +609,9 @@ pub(crate) async fn delete_dataset(
 }
 
 fn remove_dataset(paths: &WorkspacePaths, dataset_id: &str) -> Result<()> {
+    if !is_identifier(dataset_id) {
+        bail!("'{dataset_id}' is not a valid dataset id");
+    }
     let manifest_path = paths.datasets_dir.join(format!("{dataset_id}.json"));
     let manifest: netweevil_manifest::DatasetManifest = read_json(&manifest_path)
         .with_context(|| format!("dataset '{dataset_id}' was not found"))?;
@@ -613,19 +647,27 @@ fn remove_dataset(paths: &WorkspacePaths, dataset_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Deletes derived files only when they live inside `.netweevil/`.
+/// Deletes derived files only when they resolve inside `.netweevil/`; the
+/// check follows `..` and symlinks, so a manifest cannot point outside it.
 pub(crate) fn remove_workspace_file(paths: &WorkspacePaths, path: &Path) {
-    if path.starts_with(&paths.state_dir) {
+    let (Ok(path), Ok(state_dir)) = (path.canonicalize(), paths.state_dir.canonicalize()) else {
+        return;
+    };
+    if path.starts_with(&state_dir) {
         let _ = fs::remove_file(path);
     }
 }
 
-fn validate_identifier(name: &str) -> Result<(), ApiError> {
-    if name.is_empty()
-        || !name
+/// Names that are safe as a single path component: letters, digits, `_`, `-`.
+pub(crate) fn is_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
-    {
+}
+
+fn validate_identifier(name: &str) -> Result<(), ApiError> {
+    if !is_identifier(name) {
         return Err(ApiError::bad_request(format!(
             "'{name}' is not a valid name; use letters, digits, '_' and '-'"
         )));
@@ -693,7 +735,7 @@ pub(crate) async fn create_profile(
         .map_err(|error| ApiError::bad_request(format!("profile is invalid: {error:#}")))?;
     let file_name = match payload.file_name {
         Some(name) => sanitize_file_name(&name)?,
-        None => format!("{}.yml", document.profile.id),
+        None => sanitize_file_name(&format!("{}.yml", document.profile.id))?,
     };
     if !file_name.ends_with(".yml") && !file_name.ends_with(".yaml") {
         return Err(ApiError::bad_request(
@@ -812,7 +854,7 @@ pub(crate) async fn import_transit_handler(
             payload.name
         )));
     }
-    let source = resolve_source(&paths, &payload.source)
+    let source = resolve_upload(&paths, &payload.source)
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
     if state.workspace.jobs.is_running("transit-import") {
         return Err(ApiError::conflict(
@@ -919,6 +961,9 @@ pub(crate) async fn delete_transit_feed(
 /// Unloads a feed if it is loaded, forgets it in the saved selection, and
 /// deletes its manifest and bundle. The source GTFS file is left alone.
 pub(crate) fn remove_transit_feed(workspace: &Workspace, feed_id: &str) -> Result<()> {
+    if !is_identifier(feed_id) {
+        bail!("'{feed_id}' is not a valid feed id");
+    }
     let paths = &workspace.paths;
     let manifest_path = paths.transit_feeds_dir.join(format!("{feed_id}.json"));
     let manifest: TransitFeedManifest = read_json(&manifest_path)
@@ -990,6 +1035,10 @@ pub(crate) async fn activate(
     Json(payload): Json<ActivateRequest>,
 ) -> Result<Json<JobStarted>, ApiError> {
     let paths = state.workspace.paths.clone();
+    validate_identifier(&payload.dataset_id)?;
+    for feed_id in &payload.transit_feeds {
+        validate_identifier(feed_id)?;
+    }
     if !paths
         .datasets_dir
         .join(format!("{}.json", payload.dataset_id))
@@ -1001,7 +1050,7 @@ pub(crate) async fn activate(
         )));
     }
     let resolve_profile = |raw: &str| -> Result<String, ApiError> {
-        let path = resolve_source(&paths, raw)
+        let path = resolve_profile_source(&paths, raw)
             .map_err(|error| ApiError::bad_request(error.to_string()))?;
         Ok(path.display().to_string())
     };
@@ -1059,3 +1108,6 @@ pub(crate) async fn activate(
     );
     Ok(Json(JobStarted { job_id }))
 }
+
+#[cfg(test)]
+mod tests;

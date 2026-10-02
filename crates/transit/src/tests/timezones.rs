@@ -238,3 +238,19 @@ fn overnight_service_routes_beyond_last_imported_date_across_both_dst_changes() 
         assert_eq!(reverse.summary.boarding_count, 1);
     }
 }
+
+#[test]
+fn datetimes_outside_the_imported_service_window_name_the_window() {
+    let router = year_round_router(
+        "2026-10-02",
+        7,
+        &["T1,08:00:00,08:00:00,A,1", "T1,09:00:00,09:00:00,C,2"],
+    );
+    for datetime in ["2026-09-10T08:30:00+08:00", "2026-10-10T08:30:00+08:00"] {
+        let error = router
+            .execute_route(&route_request(datetime, false))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("2026-10-02 to 2026-10-08"), "{error}");
+    }
+}

@@ -36,25 +36,36 @@ pub struct RouteRequest {
     pub returns: ReturnConfig,
     #[serde(default)]
     pub alternatives: AlternativeRouteOptions,
-    /// Exact time-dependent routing options. Flattening keeps request files
-    /// ergonomic (`departure_time: ...`, `scenario: ...`) while grouping the
-    /// runtime contract in Rust.
+    /// Request-level runtime options (time, scenario, overlays, avoid areas,
+    /// component constraints). Flattening keeps request bodies ergonomic
+    /// (`departure_time: ...`, `avoid: ...`) while grouping the runtime
+    /// contract in Rust.
     #[serde(default, flatten)]
     pub temporal: TemporalRequestOptions,
 }
 
+/// Runtime options shared by every street analysis request. All content is
+/// carried inline: requests never name server-side files. The CLI reads
+/// local files and inlines them before execution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TemporalRequestOptions {
     #[serde(default)]
     pub departure_time: Option<String>,
     #[serde(default)]
     pub arrive_by: Option<String>,
+    /// Inline runtime scenario overlay keyed by source feature id.
     #[serde(default)]
-    pub scenario: Option<PathBuf>,
+    pub scenario: Option<ScenarioOverlay>,
+    /// Public-holiday dates (`YYYY-MM-DD`) for holiday temporal rules.
     #[serde(default)]
-    pub holiday_calendar: Option<PathBuf>,
-    #[serde(default, rename = "overlay")]
-    pub overlays: Vec<PathBuf>,
+    pub holidays: Vec<String>,
+    /// Inline continuous temporal overlays; later overlays take precedence.
+    #[serde(default)]
+    pub overlays: Vec<TemporalOverlayDocument>,
+    /// Locations, areas and source features to exclude or penalize. Not
+    /// temporal, but request-scoped like the rest of these options.
+    #[serde(default, skip_serializing_if = "AvoidOptions::is_empty")]
+    pub avoid: AvoidOptions,
     /// Per-state nondominated label guard for temporal/generalized searches.
     #[serde(default = "default_max_temporal_labels_per_state")]
     pub max_labels_per_state: usize,
@@ -104,8 +115,9 @@ impl Default for TemporalRequestOptions {
             departure_time: None,
             arrive_by: None,
             scenario: None,
-            holiday_calendar: None,
+            holidays: Vec::new(),
             overlays: Vec::new(),
+            avoid: AvoidOptions::default(),
             max_labels_per_state: default_max_temporal_labels_per_state(),
             arrive_by_lookback_s: default_arrive_by_lookback_s(),
             constraints: Vec::new(),
@@ -339,6 +351,12 @@ pub struct IllegalMovementPenaltyPolicy {
     pub forbidden_uturn_penalty_s: Option<f64>,
 }
 
+/// Failure modes relax legality at a price. Explicit `allow_*` /
+/// `ignore_turn_restrictions` flags make the relaxed movements available
+/// with their `penalties` added to the generalized cost; the route minimizes
+/// cost plus penalties, so a legal route wins whenever it is no more
+/// expensive than the cheapest penalized illegal one. `auto_relax_unreachable`
+/// instead routes strictly first and relaxes only when no legal route exists.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct FallbackPolicy {
     #[serde(default)]
@@ -410,10 +428,21 @@ pub enum ServiceAreaMultiOriginMode {
     Cut,
 }
 
+/// `outbound` covers what the origins reach; `inbound` covers every position
+/// that reaches the origins (used as destinations) within the thresholds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceAreaDirection {
+    #[default]
+    Outbound,
+    Inbound,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceAreaPolygonOptions {
     #[serde(default = "default_hull_aggressiveness")]
     pub hull_aggressiveness: f64,
+    /// Douglas-Peucker tolerance applied to every traced ring, in metres.
     #[serde(default)]
     pub simplification_tolerance_m: Option<f64>,
     /// Grid cell size used to trace the concave polygon boundary. Smaller
@@ -421,6 +450,16 @@ pub struct ServiceAreaPolygonOptions {
     /// 25m x hull_aggressiveness (minimum 10m).
     #[serde(default)]
     pub cell_size_m: Option<f64>,
+    /// Drop polygon parts whose exterior area is below this fraction (0..=1)
+    /// of the band's largest part; 1 keeps only the largest part.
+    #[serde(default)]
+    pub denoise: Option<f64>,
+    /// Drop polygon parts whose exterior area is below this many m2.
+    #[serde(default)]
+    pub min_part_area_m2: Option<f64>,
+    /// Fill holes smaller than this many m2.
+    #[serde(default)]
+    pub min_hole_area_m2: Option<f64>,
 }
 
 impl Default for ServiceAreaPolygonOptions {
@@ -429,6 +468,9 @@ impl Default for ServiceAreaPolygonOptions {
             hull_aggressiveness: default_hull_aggressiveness(),
             simplification_tolerance_m: None,
             cell_size_m: None,
+            denoise: None,
+            min_part_area_m2: None,
+            min_hole_area_m2: None,
         }
     }
 }
@@ -509,6 +551,8 @@ pub struct ServiceAreaRequest {
     pub boundary_mode: ServiceAreaBoundaryMode,
     #[serde(default)]
     pub multi_origin_mode: ServiceAreaMultiOriginMode,
+    #[serde(default)]
+    pub direction: ServiceAreaDirection,
     #[serde(default)]
     pub polygon: ServiceAreaPolygonOptions,
     #[serde(default)]

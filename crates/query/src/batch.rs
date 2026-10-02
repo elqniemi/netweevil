@@ -672,6 +672,7 @@ pub fn execute_od(
     metrics: &CompiledProfileBundle,
     document: &OdPairsDocument,
 ) -> Result<OdResult> {
+    ensure_no_avoid([&document.temporal.avoid])?;
     if has_failure_modes(&document.fallback) {
         validate_execution_inputs(topology, metrics)?;
         let degraded = cached_failure_mode_bundle(topology, metrics, &document.fallback, None)?;
@@ -693,6 +694,7 @@ pub fn execute_matrix(
     origins: &PointSetDocument,
     destinations: &PointSetDocument,
 ) -> Result<MatrixResult> {
+    ensure_no_avoid([&origins.temporal.avoid, &destinations.temporal.avoid])?;
     let fallback = merge_point_set_fallback_policy(&origins.fallback, &destinations.fallback);
     if has_failure_modes(&fallback) {
         validate_execution_inputs(topology, metrics)?;

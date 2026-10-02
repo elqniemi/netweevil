@@ -9,12 +9,14 @@
 
 mod accessibility;
 mod alternatives;
+mod avoid;
 mod batch;
 mod betweenness;
 mod diagnostics;
 mod documents;
 mod edge_spatial_index;
 mod engine;
+mod expansion;
 mod geometry;
 mod isochrone_polygon;
 mod navigation;
@@ -34,6 +36,8 @@ mod waypoints;
 
 pub use accessibility::*;
 pub(crate) use alternatives::*;
+pub use avoid::{AvoidOptions, AvoidPoint, AvoidPolygon};
+pub(crate) use avoid::{ResolvedAvoid, ensure_no_avoid, resolve_avoid};
 pub use batch::*;
 pub(crate) use betweenness::execute_betweenness_with_graph;
 pub use betweenness::{
@@ -43,6 +47,7 @@ pub use betweenness::{
 pub use diagnostics::*;
 pub use documents::*;
 pub use engine::*;
+pub use expansion::*;
 pub(crate) use geometry::*;
 pub use navigation::*;
 pub(crate) use pareto::*;
@@ -56,8 +61,8 @@ pub use service_area_sequence::*;
 pub(crate) use snapping::*;
 pub use temporal::{
     HolidayCalendarDocument, ScenarioFeatureOverride, ScenarioOverlay, TemporalContext,
-    TemporalOverlaySeries, everyday_mask, load_holiday_calendar, load_scenario_overlay,
-    load_temporal_overlay, parse_datetime,
+    TemporalOverlayDocument, TemporalOverlayRow, TemporalOverlaySeries, everyday_mask,
+    load_holiday_calendar, load_scenario_overlay, load_temporal_overlay, parse_datetime,
 };
 pub use trace_matching::*;
 pub use traffic::{

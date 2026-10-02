@@ -33,3 +33,12 @@ test("resetting either Hong Kong transit tool restores network access and feed-l
     globalThis.window = previousWindow;
   }
 });
+
+test("a saved transit datetime outside a re-imported feed window falls back to the feed start", async () => {
+  const { mergeTransitDefaults } = await import("../src/state/transitDefaults.ts");
+  const reimported = { ...service, loaded_transit_feeds: [{ ...service.loaded_transit_feeds[0], service_start_date: "2026-10-02", service_days: 7 }] };
+  const defaults = { datetime: "2026-10-02T08:30:00+08:00", street_access: "network" };
+  assert.equal(mergeTransitDefaults(defaults, { datetime: "2026-09-10T08:30:00+08:00" }, reimported).datetime, "2026-10-02T08:30:00+08:00");
+  assert.equal(mergeTransitDefaults(defaults, { datetime: "2026-10-08T18:00:00+08:00" }, reimported).datetime, "2026-10-08T18:00:00+08:00");
+  assert.equal(mergeTransitDefaults(defaults, { street_access: "straight_line" }, reimported).street_access, "straight_line");
+});
