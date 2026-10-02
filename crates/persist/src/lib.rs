@@ -192,6 +192,9 @@ pub struct WorkspaceConfig {
     pub profiles: Vec<String>,
     #[serde(default)]
     pub transit_feeds: Vec<String>,
+    /// Imported historical traffic set (`netweevil traffic import`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traffic: Option<String>,
     #[serde(default)]
     pub updated_at: Option<String>,
 }

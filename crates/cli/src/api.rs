@@ -27,6 +27,10 @@ pub(crate) struct ApiServeArgs {
     profiles: Vec<PathBuf>,
     #[arg(long = "transit-feed")]
     transit_feeds: Vec<String>,
+    /// Historical traffic set (`netweevil traffic import`) for departure
+    /// times; live updates work without one.
+    #[arg(long, requires = "dataset")]
+    traffic: Option<String>,
     /// Built web console (`frontend/dist`) to serve at `/`; auto-detected.
     #[arg(long)]
     console_dir: Option<PathBuf>,
@@ -57,6 +61,7 @@ pub(crate) fn api_serve(paths: WorkspacePaths, args: ApiServeArgs) -> Result<()>
             default_profile: args.default_profile,
             profiles: args.profiles,
             transit_feeds: args.transit_feeds,
+            traffic: args.traffic,
             console_dir: args.console_dir,
         },
         false,
@@ -75,6 +80,7 @@ pub(crate) fn bootstrap(paths: WorkspacePaths, args: BootstrapArgs) -> Result<()
             default_profile: None,
             profiles: Vec::new(),
             transit_feeds: Vec::new(),
+            traffic: None,
             console_dir: args.console_dir,
         },
         true,

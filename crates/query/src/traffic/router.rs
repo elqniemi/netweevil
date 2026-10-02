@@ -250,6 +250,41 @@ impl TrafficService {
         Ok(report)
     }
 
+    /// Re-applies the unexpired live entries of `previous` (a service over
+    /// an earlier load of the same dataset) so a runtime reload keeps the
+    /// live state. Entries are re-resolved by source feature id.
+    pub fn carry_live_from(
+        &self,
+        previous: &TrafficService,
+        now: OffsetDateTime,
+    ) -> Result<Option<LiveSwapReport>> {
+        let previous = previous.live_snapshot();
+        let updates = previous
+            .entries
+            .iter()
+            .filter(|entry| entry.expires_at > now.unix_timestamp())
+            .map(|entry| LiveTrafficUpdate {
+                feature_id: entry.feature_id,
+                direction: if entry.direction < 0 {
+                    super::LiveTrafficDirection::Backward
+                } else {
+                    super::LiveTrafficDirection::Forward
+                },
+                speed_kph: entry.speed_kph,
+                closed: entry.closed,
+                clear: false,
+                expires_at: OffsetDateTime::from_unix_timestamp(entry.expires_at)
+                    .ok()
+                    .map(format_time),
+                ttl_s: None,
+            })
+            .collect::<Vec<_>>();
+        if updates.is_empty() {
+            return Ok(None);
+        }
+        self.apply_live(&updates, true, now).map(Some)
+    }
+
     /// Customizes, ahead of time, the engines that requests departing at
     /// `at` will select (for example just before a bucket boundary or a
     /// live expiry). Returns how many engines were built.

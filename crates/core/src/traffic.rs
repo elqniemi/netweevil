@@ -93,7 +93,7 @@ impl TrafficSpeedBundle {
             ));
         }
         let width = self.buckets_per_week();
-        if self.pattern_speeds.len() % width != 0 {
+        if !self.pattern_speeds.len().is_multiple_of(width) {
             return Err("pattern speeds are not a whole number of weekly patterns".into());
         }
         let feature_count = self.feature_ids.len();

@@ -253,6 +253,44 @@ pub struct LiveTrafficUpdate {
 
 const DEFAULT_LIVE_TTL_S: f64 = 900.0;
 
+impl LiveTrafficUpdate {
+    /// Checks the update against `now` (its receipt time) and returns its
+    /// expiry, or `None` for a `clear` update.
+    pub fn validated_expiry(&self, now: OffsetDateTime) -> Result<Option<OffsetDateTime>> {
+        let context = || format!("live update for feature {}", self.feature_id);
+        if self.clear {
+            if self.closed || self.speed_kph.is_some() {
+                bail!(
+                    "{}: clear cannot be combined with closed or speed_kph",
+                    context()
+                );
+            }
+            return Ok(None);
+        }
+        match (self.closed, self.speed_kph) {
+            (true, None) => {}
+            (false, Some(speed)) if speed.is_finite() && speed > 0.0 && speed <= 1000.0 => {}
+            (false, Some(_)) => bail!("{}: speed_kph must be in (0, 1000]", context()),
+            _ => bail!("{}: set exactly one of closed=true or speed_kph", context()),
+        }
+        let expires_at = match (&self.expires_at, self.ttl_s) {
+            (Some(_), Some(_)) => bail!("{}: set only one of expires_at or ttl_s", context()),
+            (Some(raw), None) => crate::parse_datetime(raw).with_context(context)?,
+            (None, ttl) => {
+                let ttl = ttl.unwrap_or(DEFAULT_LIVE_TTL_S);
+                if !ttl.is_finite() || ttl <= 0.0 {
+                    bail!("{}: ttl_s must be positive", context());
+                }
+                now + time::Duration::seconds_f64(ttl)
+            }
+        };
+        if expires_at <= now {
+            bail!("{}: expiry is not in the future", context());
+        }
+        Ok(Some(expires_at))
+    }
+}
+
 /// A validated live entry for one directed source feature.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LiveTrafficEntry {
@@ -399,39 +437,12 @@ fn next_live_snapshot(
             LiveTrafficDirection::Backward => &[-1],
             LiveTrafficDirection::Both => &[-1, 1],
         };
-        let context = || format!("live update for feature {}", update.feature_id);
-        if update.clear {
-            if update.closed || update.speed_kph.is_some() {
-                bail!(
-                    "{}: clear cannot be combined with closed or speed_kph",
-                    context()
-                );
-            }
+        let Some(expires_at) = update.validated_expiry(now)? else {
             for direction in directions {
                 entries.remove(&(update.feature_id, *direction));
             }
             continue;
-        }
-        match (update.closed, update.speed_kph) {
-            (true, None) => {}
-            (false, Some(speed)) if speed.is_finite() && speed > 0.0 && speed <= 1000.0 => {}
-            (false, Some(_)) => bail!("{}: speed_kph must be in (0, 1000]", context()),
-            _ => bail!("{}: set exactly one of closed=true or speed_kph", context()),
-        }
-        let expires_at = match (&update.expires_at, update.ttl_s) {
-            (Some(_), Some(_)) => bail!("{}: set only one of expires_at or ttl_s", context()),
-            (Some(raw), None) => crate::parse_datetime(raw).with_context(context)?,
-            (None, ttl) => {
-                let ttl = ttl.unwrap_or(DEFAULT_LIVE_TTL_S);
-                if !ttl.is_finite() || ttl <= 0.0 {
-                    bail!("{}: ttl_s must be positive", context());
-                }
-                now + time::Duration::seconds_f64(ttl)
-            }
         };
-        if expires_at <= now {
-            bail!("{}: expiry is not in the future", context());
-        }
         let expires_at = expires_at.unix_timestamp() + i64::from(expires_at.nanosecond() > 0);
         let expires_at = expires_at + (60 - expires_at.rem_euclid(60)) % 60;
         let mut matched = false;
