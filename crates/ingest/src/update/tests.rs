@@ -459,14 +459,15 @@ fn previous_ranks_follow_edge_identity_through_way_splits() {
     assert!(ranks.iter().flatten().count() > before.edge_count() * 3 / 4);
 }
 
-/// Groningen with a realistic synthetic day of edits: incremental update
-/// against a full import of the edited extract. Needs the routing extract
-/// (`NETWEEVIL_GRONINGEN_PBF`, default `datasets/groningen-260508-routing.osm.pbf`);
-/// run with `cargo test --release -p netweevil-ingest groningen -- --ignored --nocapture`.
+/// A real extract with a synthetic day of edits: incremental update against
+/// a full import of the edited extract. Reads `NETWEEVIL_UPDATE_TEST_PBF`,
+/// by default the Groningen routing extract
+/// `datasets/groningen-260508-routing.osm.pbf`; run with
+/// `cargo test --release -p netweevil-ingest extract_update -- --ignored --nocapture`.
 #[test]
-#[ignore = "needs the Groningen routing extract and a release build"]
-fn groningen_incremental_update_matches_a_full_import() {
-    let source = std::env::var_os("NETWEEVIL_GRONINGEN_PBF")
+#[ignore = "needs an OSM routing extract and a release build"]
+fn extract_update_matches_a_full_import() {
+    let source = std::env::var_os("NETWEEVIL_UPDATE_TEST_PBF")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -477,8 +478,8 @@ fn groningen_incremental_update_matches_a_full_import() {
         .iter()
         .collect::<Result<Vec<_>, _>>()
         .expect("extract reads");
-    let edits = groningen_edits(&base);
-    let dir = TempDir::new("update-groningen");
+    let edits = extract_edits(&base);
+    let dir = TempDir::new("update-extract");
     let paths = WorkspacePaths::discover(dir.path()).expect("workspace");
     let edited = dir.join("edited.osm.pbf");
     let change = dir.join("day.osc");
@@ -486,14 +487,14 @@ fn groningen_incremental_update_matches_a_full_import() {
     std::fs::write(&change, write_osc(&edits)).unwrap();
 
     let started = Instant::now();
-    import(&paths, &source, "groningen");
+    import(&paths, &source, "extract");
     let import_s = started.elapsed().as_secs_f64();
     let started = Instant::now();
-    let full = import(&paths, &edited, "groningen_full");
+    let full = import(&paths, &edited, "extract_full");
     let full_import_s = started.elapsed().as_secs_f64();
     let report = update(
         &paths,
-        "groningen",
+        "extract",
         DatasetUpdateInput::OsmChanges(vec![change]),
         ReorderPolicy::Never,
     );
@@ -518,20 +519,17 @@ fn groningen_incremental_update_matches_a_full_import() {
     let profile = car_profile();
     let incremental = engines(updated, &profile);
     let reference = engines(&full, &profile);
-    let pairs = groningen_pairs(&base, &edits);
+    let pairs = extract_pairs(&base, &edits);
     let routable = assert_same_routes(&incremental.accelerated, &reference.exact, &pairs);
     assert_same_routes(&incremental.accelerated, &reference.accelerated, &pairs);
-    eprintln!(
-        "{} pairs agree, {routable} of them routable",
-        pairs.len()
-    );
+    eprintln!("{} pairs agree, {routable} of them routable", pairs.len());
     assert!(routable > pairs.len() / 2);
 }
 
 /// Deterministic edits spread over the extract: speed and class changes,
 /// closures, way splits, moved nodes, new signals, new roads over new
 /// nodes, and new and deleted turn restrictions.
-fn groningen_edits(base: &[OsmObj]) -> Vec<OsmEdit> {
+fn extract_edits(base: &[OsmObj]) -> Vec<OsmEdit> {
     use ChangeAction::{Create, Delete, Modify};
     let nodes = base
         .iter()
@@ -663,8 +661,8 @@ fn osm_node_at(id: i64, lon_e7: i32, lat_e7: i32) -> OsmObj {
     crate::test_util::osm_node(id, lon_e7, lat_e7, &[])
 }
 
-/// Routes between edited places and across the extract.
-fn groningen_pairs(base: &[OsmObj], edits: &[OsmEdit]) -> Vec<(Point, Point)> {
+/// The Groningen route corpus plus routes between edited places.
+fn extract_pairs(base: &[OsmObj], edits: &[OsmEdit]) -> Vec<(Point, Point)> {
     let nodes = base
         .iter()
         .filter_map(|object| object.node())
