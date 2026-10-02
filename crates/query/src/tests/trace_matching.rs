@@ -1,55 +1,31 @@
-use std::sync::Arc;
+use netweevil_core::CompiledEdgeMetric;
+use netweevil_core::geo::haversine_meters;
 
-use super::fixtures::{test_metrics, test_topology, with_edge_based_topology};
+use super::fixtures::{edge, exact_engine, metrics, topology, with_no_turn};
 use crate::{PreparedRoutingEngine, TraceGapReason, TraceMatchRequest};
-use netweevil_core::{
-    AccessMask, CompiledEdgeMetric, EdgeId, NodeId, TopologyEdgeLayers, TopologyNode,
-    TurnRestriction, TurnRestrictionKind,
-};
 
+/// Edges are as long as the great-circle distance between their nodes, cost
+/// one unit per metre and take a tenth of that in seconds.
 fn engine(
     nodes: &[(f64, f64)],
     connections: &[(u32, u32)],
     restriction: Option<&[u32]>,
 ) -> PreparedRoutingEngine {
-    let mut topology = test_topology();
-    let template = topology.edge(0);
-    topology.nodes = nodes
-        .iter()
-        .enumerate()
-        .map(|(index, &(lon, lat))| TopologyNode {
-            node_id: NodeId(index as u32),
-            lon,
-            lat,
-            z: 0.0,
-        })
-        .collect();
     let edges = connections
         .iter()
         .enumerate()
         .map(|(index, &(from, to))| {
-            let mut edge = template;
-            edge.edge_id = EdgeId(index as u32);
-            edge.from = NodeId(from);
-            edge.to = NodeId(to);
             let (a, b) = (nodes[from as usize], nodes[to as usize]);
-            edge.length_m =
-                netweevil_core::geo::haversine_meters(a.0, a.1, b.0, b.1).round() as u32;
-            edge
+            let length_m = haversine_meters(a.0, a.1, b.0, b.1).round() as u32;
+            edge(index as u32, from, to, 10, length_m)
         })
         .collect::<Vec<_>>();
-    topology.edge_layers = TopologyEdgeLayers::from_directed_edges(&edges);
+    let mut topology = topology("test", nodes, &edges);
     topology.spatial_index = None;
     if let Some(restriction) = restriction {
-        topology.turn_restrictions = vec![TurnRestriction {
-            relation_id: 1,
-            kind: TurnRestrictionKind::NoTurn,
-            edge_path: restriction.iter().copied().map(EdgeId).collect(),
-            mode_mask: AccessMask::new(AccessMask::CAR),
-        }];
+        topology = with_no_turn(topology, 1, restriction);
     }
-    topology = with_edge_based_topology(topology);
-    let mut metrics = test_metrics();
+    let mut metrics = metrics(&[]);
     metrics.edge_metrics = edges
         .iter()
         .map(|edge| CompiledEdgeMetric {
@@ -58,13 +34,24 @@ fn engine(
             generalized_cost: Some(f64::from(edge.length_m)),
         })
         .collect();
-    PreparedRoutingEngine::new(Arc::new(topology), Arc::new(metrics), None).unwrap()
+    exact_engine(topology, metrics)
 }
 
 fn request(points: &[(f64, f64)]) -> TraceMatchRequest {
-    serde_json::from_value(serde_json::json!({"trace_id":"test", "snap":{"max_distance_m":40},
-        "max_transition_distance_m":2000,
-        "observations":points.iter().enumerate().map(|(index, &(lon, lat))| serde_json::json!({"point":{"id":index.to_string(),"lon":lon,"lat":lat}})).collect::<Vec<_>>() })).unwrap()
+    let observations = points
+        .iter()
+        .enumerate()
+        .map(|(index, &(lon, lat))| {
+            serde_json::json!({"point": {"id": index.to_string(), "lon": lon, "lat": lat}})
+        })
+        .collect::<Vec<_>>();
+    serde_json::from_value(serde_json::json!({
+        "trace_id": "test",
+        "snap": {"max_distance_m": 40},
+        "max_transition_distance_m": 2000,
+        "observations": observations,
+    }))
+    .unwrap()
 }
 
 #[test]

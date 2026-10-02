@@ -9,6 +9,8 @@ mod edge_cost;
 mod load;
 mod progress;
 mod schema;
+#[cfg(test)]
+mod test_support;
 mod turns;
 
 pub use compile::{

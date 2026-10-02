@@ -193,31 +193,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn run_manifest_omits_an_absent_effective_request() {
-        let raw = r#"{
-            "run_id":"run-1",
-            "run_kind":"route",
-            "status":"succeeded",
-            "created_at":"2026-07-10T00:00:00Z",
-            "dataset_id":"dataset",
-            "profile_id":"profile",
-            "request_source":"request.json",
-            "software":{"executable":"netweevil","version":"0.1.0","git_commit":null},
-            "algorithm":{"engine":"exact","graph_model":"directed_edge_graph","acceleration":"none"},
-            "methods_summary":{"plain_language":"shortest path"},
-            "message":"ok"
-        }"#;
-        let manifest: RunManifest = serde_json::from_str(raw).expect("manifest parses");
-        assert!(manifest.effective_request.is_none());
-        assert!(
-            !serde_json::to_string(&manifest)
-                .expect("manifest serializes")
-                .contains("effective_request")
-        );
-    }
-
-    #[test]
-    fn structured_effective_request_round_trips() {
+    fn effective_request_is_omitted_when_absent_and_round_trips_when_present() {
         let mut manifest: RunManifest = serde_json::from_value(serde_json::json!({
             "run_id": "run",
             "run_kind": "matrix",
@@ -226,19 +202,22 @@ mod tests {
             "dataset_id": "dataset",
             "profile_id": "profile",
             "request_source": "origins.json | destinations.json",
-            "software": {"executable":"netweevil","version":"0.1.0","git_commit":null},
-            "algorithm": {"engine":"exact","graph_model":"directed_edge_graph","acceleration":"none"},
-            "methods_summary": {"plain_language":"test"},
+            "software": {"executable": "netweevil", "version": "0.1.0", "git_commit": null},
+            "algorithm": {"engine": "exact", "graph_model": "directed_edge_graph", "acceleration": "none"},
+            "methods_summary": {"plain_language": "test"},
             "message": "ok"
         }))
-        .expect("manifest parses");
+        .expect("manifest without effective_request parses");
+        assert!(manifest.effective_request.is_none());
+        let json = serde_json::to_string(&manifest).expect("manifest serializes");
+        assert!(!json.contains("effective_request"));
+
         manifest.effective_request = Some(serde_json::json!({
-            "origins": {"departure_time":"2026-07-10T09:00:00+08:00"},
-            "destinations": {"points":[]}
+            "origins": {"departure_time": "2026-07-10T09:00:00+08:00"},
+            "destinations": {"points": []}
         }));
-        let decoded: RunManifest =
-            serde_json::from_str(&serde_json::to_string(&manifest).expect("manifest serializes"))
-                .expect("manifest re-parses");
+        let json = serde_json::to_string(&manifest).expect("manifest serializes");
+        let decoded: RunManifest = serde_json::from_str(&json).expect("manifest re-parses");
         assert_eq!(decoded.effective_request, manifest.effective_request);
     }
 }

@@ -13,7 +13,8 @@ use netweevil_core::{
 use netweevil_query::PreparedRoutingEngine;
 use netweevil_simulate::{
     DemandConfig, DepartureConfig, EndpointDistribution, FleetConfig, ScenarioHeader,
-    SimulationRunner, SimulationScenario, TimeConfig, WeightedPoint, ZoneConfig, ZoneEffect,
+    SimulationResult, SimulationRunner, SimulationScenario, TimeConfig, WeightedPoint, ZoneConfig,
+    ZoneEffect,
 };
 
 const GRID: usize = 7;
@@ -194,6 +195,20 @@ fn profiles() -> BTreeMap<String, Arc<PreparedRoutingEngine>> {
     map
 }
 
+fn run_with(
+    scenario: SimulationScenario,
+    engines: BTreeMap<String, Arc<PreparedRoutingEngine>>,
+) -> SimulationResult {
+    SimulationRunner::new(scenario, grid_engine().topology_arc(), engines)
+        .expect("runner builds")
+        .run()
+        .expect("run succeeds")
+}
+
+fn run(scenario: SimulationScenario) -> SimulationResult {
+    run_with(scenario, profiles())
+}
+
 fn point(x: usize, y: usize) -> EndpointDistribution {
     EndpointDistribution::Points {
         points: vec![WeightedPoint {
@@ -239,10 +254,7 @@ fn base_scenario(agent_count: u32) -> SimulationScenario {
 
 #[test]
 fn single_agent_crosses_the_grid() {
-    let scenario = base_scenario(1);
-    let runner = SimulationRunner::new(scenario, grid_engine().topology_arc(), profiles())
-        .expect("runner builds");
-    let result = runner.run().expect("run succeeds");
+    let result = run(base_scenario(1));
 
     assert_eq!(result.summary.agents_total, 1);
     assert_eq!(result.summary.agents_arrived, 1);
@@ -269,36 +281,23 @@ fn single_agent_crosses_the_grid() {
 
 #[test]
 fn runs_are_deterministic() {
-    let run = |seed: u64| {
+    let trajectories = |seed: u64| {
         let mut scenario = base_scenario(40);
         scenario.scenario.seed = seed;
-        let runner = SimulationRunner::new(scenario, grid_engine().topology_arc(), profiles())
-            .expect("runner builds");
-        let result = runner.run().expect("run succeeds");
-        serde_json::to_string(&result.trajectories).expect("serializes")
+        serde_json::to_string(&run(scenario).trajectories).expect("serializes")
     };
-    let first = run(7);
-    let second = run(7);
+    let first = trajectories(7);
+    let second = trajectories(7);
     assert_eq!(first, second, "same seed must reproduce identical runs");
-    let other_seed = run(8);
+    let other_seed = trajectories(8);
     assert_ne!(first, other_seed, "different seed should differ");
 }
 
 #[test]
 fn congestion_delays_a_platoon() {
     // One agent free-flowing vs 80 agents pushed through the same corridor.
-    let solo = {
-        let runner =
-            SimulationRunner::new(base_scenario(1), grid_engine().topology_arc(), profiles())
-                .expect("runner builds");
-        runner.run().expect("run succeeds")
-    };
-    let crowd = {
-        let runner =
-            SimulationRunner::new(base_scenario(80), grid_engine().topology_arc(), profiles())
-                .expect("runner builds");
-        runner.run().expect("run succeeds")
-    };
+    let solo = run(base_scenario(1));
+    let crowd = run(base_scenario(80));
 
     assert_eq!(crowd.summary.agents_arrived, crowd.summary.agents_total);
     let solo_time = solo.fleets[0].mean_travel_time_s.expect("solo arrives");
@@ -341,9 +340,7 @@ fn no_access_zone_forces_reroute_around() {
         ],
         effect: ZoneEffect::NoAccess { modes: Vec::new() },
     });
-    let runner = SimulationRunner::new(scenario, grid_engine().topology_arc(), profiles())
-        .expect("runner builds");
-    let result = runner.run().expect("run succeeds");
+    let result = run(scenario);
 
     assert!(
         result.summary.agents_arrived >= 1,
@@ -386,9 +383,7 @@ fn car_and_bicycle_fleets_run_simultaneously() {
         "bike_test".to_string(),
         grid_engine_for("bike_test", TravelMode::Bicycle, 5.5),
     );
-    let runner = SimulationRunner::new(scenario, grid_engine().topology_arc(), engines)
-        .expect("runner builds");
-    let result = runner.run().expect("run succeeds");
+    let result = run_with(scenario, engines);
 
     assert_eq!(result.summary.agents_total, 20);
     assert_eq!(result.summary.agents_arrived, 20, "{:?}", result.summary);

@@ -162,28 +162,14 @@ mod tests {
     use super::*;
 
     fn request() -> ServiceAreaSequenceRequest {
-        ServiceAreaSequenceRequest {
-            sequence_id: "flip".to_string(),
-            request: ServiceAreaRequest {
-                analysis_id: "area".to_string(),
-                origins: Vec::new(),
-                thresholds: Vec::new(),
-                snap: Default::default(),
-                connectivity: Default::default(),
-                boundary_mode: Default::default(),
-                output_mode: Default::default(),
-                band_mode: Default::default(),
-                multi_origin_mode: Default::default(),
-                polygon: Default::default(),
-                fallback: Default::default(),
-                returns: Default::default(),
-                temporal: Default::default(),
-            },
-            departure_times: Vec::new(),
-            start_time: Some("2026-07-10T09:40:00+08:00".to_string()),
-            end_time: Some("2026-07-10T10:20:00+08:00".to_string()),
-            step_s: Some(300),
-        }
+        serde_json::from_value(serde_json::json!({
+            "sequence_id": "flip",
+            "request": {"analysis_id": "area"},
+            "start_time": "2026-07-10T09:40:00+08:00",
+            "end_time": "2026-07-10T10:20:00+08:00",
+            "step_s": 300
+        }))
+        .unwrap()
     }
 
     #[test]

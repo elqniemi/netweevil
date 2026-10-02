@@ -1,55 +1,183 @@
-use crate::{
-    AlternativeRouteOptions, AnalysisKind, EngineMode, OdPair, OdPairsDocument, PointSetDocument,
-    PreparedRoutingEngine, RouteRequest, SnapOptions, build_routing_graph, execute_matrix,
-    execute_od, execute_route, execute_route_with_edge_names, load_experiment, load_od_pairs,
-    load_point_set,
-};
-use netweevil_core::{
-    CacheBundleId, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
-    CompiledTurnCostConfig, EdgeId, TravelMode,
-};
-use netweevil_profile::{BreakdownMetric, ReturnConfig, ReturnGeometry};
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::fixtures::*;
-use super::fixtures_disconnected::*;
+use netweevil_core::{
+    AccessMask, CacheBundleId, CompiledCostComponent, CompiledProfileBundle, DirectedEdge, EdgeId,
+    FeatureAttributeColumn, FeatureAttributeColumnData, FeatureAttributeDefinition,
+    FeatureAttributeTable, FeatureAttributeType, MinuteInterval, NodeId, RoadClass, TemporalEffect,
+    TemporalRule, TemporalRuleSet, TopologyBundle, TopologyEdgeLayers,
+};
+use netweevil_profile::{BreakdownMetric, ReturnConfig};
 
-#[test]
-fn static_component_search_errors_instead_of_pruning_a_nondominated_label() {
-    let (topology, metrics) = component_label_overflow_fixture();
-    let request = component_label_overflow_request(None);
-    let error = execute_route(&topology, &metrics, &request)
-        .expect_err("an exact static frontier must not be truncated at the label guard");
-    assert!(
-        error
-            .to_string()
-            .contains("component search exceeded max_labels_per_state=1")
+use super::fixtures::*;
+use crate::service_area::{ServiceAreaMetricKind, build_service_area_expansion_with_settle_limit};
+use crate::{
+    AlternativeRouteOptions, AnalysisKind, ComponentConstraint, EngineMode, LabeledPoint,
+    ParetoRouteOptions, PointSetDocument, RouteRequest, RoutingGraph, ScenarioBatchCase,
+    ScenarioBatchSelector, TemporalRequestOptions, WeightedPoint, build_routing_graph,
+    execute_matrix, execute_od, execute_route, execute_route_with_edge_names, load_experiment,
+    load_od_pairs, load_point_set,
+};
+
+/// a -> c across `test_topology`; the cheapest path is edges 0, 1.
+fn a_to_c(route_id: &str) -> RouteRequest {
+    route_request(route_id, point("a", 6.0, 53.0), point("c", 6.002, 53.0))
+}
+
+/// Full-geometry route from node 0 to node 3 of `restricted_topology`.
+fn restricted_a_to_d(route_id: &str) -> RouteRequest {
+    RouteRequest {
+        returns: full_geometry(),
+        ..route_request(route_id, point("a", 6.0, 53.0), point("d", 6.003, 53.0))
+    }
+}
+
+/// Full-geometry route from node 0 to node 3 of the turn penalty fixtures.
+fn penalty_route(route_id: &str) -> RouteRequest {
+    RouteRequest {
+        returns: full_geometry(),
+        ..route_request(route_id, point("a", 6.0, 53.0), point("d", 6.002, 53.001))
+    }
+}
+
+fn zero_budget(component: &str) -> ComponentConstraint {
+    ComponentConstraint {
+        component: component.to_string(),
+        max_value: 0.0,
+    }
+}
+
+fn pareto(component: &str, max_labels_per_state: usize) -> ParetoRouteOptions {
+    ParetoRouteOptions {
+        component: component.to_string(),
+        max_routes: 4,
+        max_labels_per_state,
+    }
+}
+
+fn open_only(start_minute: u16, end_minute: u16) -> TemporalRule {
+    TemporalRule {
+        day_mask: netweevil_core::EVERY_DAY,
+        intervals: vec![MinuteInterval {
+            start_minute,
+            end_minute,
+        }],
+        effect: TemporalEffect::OpenOnly,
+    }
+}
+
+fn weighted_point(id: &str, lon: f64, lat: f64, weight: f64) -> WeightedPoint {
+    WeightedPoint {
+        id: id.to_string(),
+        lon,
+        lat,
+        z: None,
+        weight,
+    }
+}
+
+/// One string attribute column whose row `i` holds `values[i]`.
+fn string_attribute_table(
+    name: &str,
+    semantic_role: &str,
+    values: &[&str],
+) -> FeatureAttributeTable {
+    FeatureAttributeTable {
+        row_count: values.len() as u32,
+        strings: values.iter().map(|value| value.to_string()).collect(),
+        columns: vec![FeatureAttributeColumn {
+            definition: FeatureAttributeDefinition {
+                name: name.to_string(),
+                semantic_role: Some(semantic_role.to_string()),
+                value_type: FeatureAttributeType::String,
+                domain: Default::default(),
+            },
+            data: FeatureAttributeColumnData::String((0..values.len() as u32).map(Some).collect()),
+        }],
+    }
+}
+
+/// A routing graph accelerated by the independent test CCH, plus the metrics
+/// carrying its customized weights.
+fn cch_graph(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+) -> (RoutingGraph, Arc<CompiledProfileBundle>) {
+    let (bundle, metrics) = build_test_cch(topology, metrics);
+    let metrics = Arc::new(metrics);
+    let graph = crate::build_routing_graph_from_shared(topology, metrics.clone(), Some(bundle))
+        .expect("accelerated graph builds");
+    (graph, metrics)
+}
+
+/// Exposure is free on edge 1 before 11:00 and charged from 11:00.
+const EXPOSED_FROM_ELEVEN: &str = "feature_id,t_start,t_end,exposure_factor\n10,2026-07-10T08:00:00Z,2026-07-10T11:00:00Z,0\n10,2026-07-10T11:00:00Z,2026-07-10T13:00:00Z,1\n";
+
+/// Diamond 0 -> {1, 2} -> 3 with a tail 3 -> 4 -> 5. The fast upper branch
+/// carries exposure, so the exact frontier needs two labels at node 3.
+fn component_label_overflow_fixture() -> (TopologyBundle, CompiledProfileBundle) {
+    let edges = [(0, 1), (1, 3), (0, 2), (2, 3), (3, 4), (4, 5)]
+        .into_iter()
+        .enumerate()
+        .map(|(index, (from, to))| edge(index as u32, from, to, index as i64 + 100, 10))
+        .collect::<Vec<_>>();
+    let mut topology = topology(
+        "test",
+        &[
+            (6.0, 53.0),
+            (6.001, 53.0),
+            (6.0, 53.001),
+            (6.001, 53.001),
+            (6.002, 53.001),
+            (6.003, 53.001),
+        ],
+        &edges,
     );
+    topology.spatial_index = None;
+    let mut metrics = metrics(&[1.0, 1.0, 10.0, 1.0, 1.0, 1.0]);
+    metrics.components = vec![cost_component("exposure", &[10.0, 0.0, 0.0, 0.0, 0.0, 0.0])];
+    (topology, metrics)
+}
+
+fn component_label_overflow_request(departure_time: Option<&str>) -> RouteRequest {
+    let mut request = route_request(
+        "component-label-overflow",
+        point("origin", 6.0, 53.0),
+        point("destination", 6.003, 53.001),
+    );
+    request.snap = snap_within(20.0);
+    request.returns = full_geometry();
+    request.temporal.departure_time = departure_time.map(str::to_string);
+    request.temporal.pareto = Some(pareto("exposure", 1));
+    request
 }
 
 #[test]
-fn temporal_component_search_errors_instead_of_pruning_a_nondominated_label() {
+fn component_search_errors_instead_of_pruning_a_nondominated_label() {
     let (topology, metrics) = component_label_overflow_fixture();
-    let request = component_label_overflow_request(Some("2026-07-10T10:00:00Z"));
-    let error = execute_route(&topology, &metrics, &request)
-        .expect_err("an exact temporal frontier must not be truncated at the label guard");
-    assert!(
-        error
-            .to_string()
-            .contains("temporal component search exceeded max_labels_per_state=1")
-    );
+    for (departure_time, expected) in [
+        (None, "component search exceeded max_labels_per_state=1"),
+        (
+            Some("2026-07-10T10:00:00Z"),
+            "temporal component search exceeded max_labels_per_state=1",
+        ),
+    ] {
+        let request = component_label_overflow_request(departure_time);
+        let error = execute_route(&topology, &metrics, &request)
+            .expect_err("an exact frontier must not be truncated at the label guard");
+        assert!(error.to_string().contains(expected), "{error}");
+    }
 }
 
 #[test]
 fn temporal_reachability_prepass_returns_unreachable_before_tradeoff_overflow() {
     let (mut topology, mut metrics) = component_label_overflow_fixture();
-    topology.temporal_rule_sets = vec![netweevil_core::TemporalRuleSet {
-        rules: vec![netweevil_core::TemporalRule {
+    topology.temporal_rule_sets = vec![TemporalRuleSet {
+        rules: vec![TemporalRule {
             day_mask: netweevil_core::EVERY_DAY,
             intervals: Vec::new(),
-            effect: netweevil_core::TemporalEffect::Closed,
+            effect: TemporalEffect::Closed,
         }],
     }];
     topology.edge_layers.routing[5].temporal_rule_id = Some(0);
@@ -84,198 +212,45 @@ fn temporal_reachability_prepass_returns_unreachable_before_tradeoff_overflow() 
 fn enforces_component_budget_and_returns_pareto_frontier() {
     let topology = test_topology();
     let mut metrics = test_metrics();
-    metrics.components = vec![CompiledCostComponent {
-        name: "uncovered_time".to_string(),
-        weight: 0.0,
-        edge_values: vec![100.0, 100.0, 0.0],
-        scales_with_travel_time: false,
-        overlay_name: None,
-        invert_overlay: false,
-    }];
-    let base_request = RouteRequest {
-        route_id: "covered-budget".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 20.0,
-            ..Default::default()
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..Default::default()
-        },
-        alternatives: Default::default(),
-        temporal: crate::TemporalRequestOptions {
-            constraints: vec![crate::ComponentConstraint {
-                component: "uncovered_time".to_string(),
-                max_value: 0.0,
-            }],
-            ..Default::default()
-        },
-    };
-    let covered = execute_route(&topology, &metrics, &base_request)
-        .expect("covered component budget has a route");
+    metrics.components = vec![cost_component("uncovered_time", &[100.0, 100.0, 0.0])];
+    let mut request = a_to_c("covered-budget");
+    request.snap = snap_within(20.0);
+    request.returns = full_geometry();
+    request.temporal.constraints = vec![zero_budget("uncovered_time")];
+
+    let covered =
+        execute_route(&topology, &metrics, &request).expect("covered component budget has a route");
     assert_eq!(covered.edge_path, vec![2]);
     assert_eq!(covered.summary.components["uncovered_time"], 0.0);
 
-    let prepared =
-        PreparedRoutingEngine::new(Arc::new(topology.clone()), Arc::new(metrics.clone()), None)
-            .expect("prepared component routing engine");
+    let prepared = exact_engine(topology.clone(), metrics.clone());
     let origin_candidates = prepared
-        .snap_route_candidates_with_options(&base_request.origin, &base_request.snap, true)
+        .snap_route_candidates_with_options(&request.origin, &request.snap, true)
         .expect("origin candidates");
     let destination_candidates = prepared
-        .snap_route_candidates_with_options(&base_request.destination, &base_request.snap, false)
+        .snap_route_candidates_with_options(&request.destination, &request.snap, false)
         .expect("destination candidates");
     let covered_from_candidates = prepared
-        .execute_route_between_candidates(
-            &base_request,
-            &origin_candidates,
-            &destination_candidates,
-        )
+        .execute_route_between_candidates(&request, &origin_candidates, &destination_candidates)
         .expect("candidate API preserves component constraints");
     assert_eq!(covered_from_candidates.edge_path, vec![2]);
     assert_eq!(
         prepared
-            .effective_route_engine_description(&base_request, EngineMode::Auto)
+            .effective_route_engine_description(&request, EngineMode::Auto)
             .route_engine,
         "component_nondominated_label_setting"
     );
 
-    let pareto_request = RouteRequest {
-        route_id: "covered-pareto".to_string(),
-        temporal: crate::TemporalRequestOptions {
-            pareto: Some(crate::ParetoRouteOptions {
-                component: "uncovered_time".to_string(),
-                max_routes: 4,
-                max_labels_per_state: 16,
-            }),
-            ..Default::default()
-        },
-        ..base_request
+    request.route_id = "covered-pareto".to_string();
+    request.temporal = TemporalRequestOptions {
+        pareto: Some(pareto("uncovered_time", 16)),
+        ..Default::default()
     };
     let frontier =
-        execute_route(&topology, &metrics, &pareto_request).expect("Pareto frontier has routes");
+        execute_route(&topology, &metrics, &request).expect("Pareto frontier has routes");
     assert_eq!(frontier.edge_path, vec![0, 1]);
     assert_eq!(frontier.alternatives.len(), 1);
     assert_eq!(frontier.alternatives[0].edge_path, vec![2]);
-}
-
-fn component_label_overflow_fixture() -> (
-    netweevil_core::TopologyBundle,
-    netweevil_core::CompiledProfileBundle,
-) {
-    let mut topology = test_topology();
-    let node_template = topology.nodes[0].clone();
-    let coordinates = [
-        (6.0, 53.0),
-        (6.001, 53.0),
-        (6.0, 53.001),
-        (6.001, 53.001),
-        (6.002, 53.001),
-        (6.003, 53.001),
-    ];
-    topology.nodes = coordinates
-        .into_iter()
-        .enumerate()
-        .map(|(index, (lon, lat))| netweevil_core::TopologyNode {
-            node_id: netweevil_core::NodeId(index as u32),
-            lon,
-            lat,
-            ..node_template
-        })
-        .collect();
-    let edge_template = topology.edge(0);
-    let edge = |edge_id: u32, from: u32, to: u32| netweevil_core::DirectedEdge {
-        edge_id: EdgeId(edge_id),
-        from: netweevil_core::NodeId(from),
-        to: netweevil_core::NodeId(to),
-        source_way_id: i64::from(edge_id) + 100,
-        length_m: 10,
-        ..edge_template
-    };
-    topology.edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&[
-        edge(0, 0, 1),
-        edge(1, 1, 3),
-        edge(2, 0, 2),
-        edge(3, 2, 3),
-        edge(4, 3, 4),
-        edge(5, 4, 5),
-    ]);
-    topology.edge_based_topology = crate::build_edge_based_topology_fallback(&topology);
-    topology.spatial_index = None;
-    topology.node_component_ids = vec![0; topology.nodes.len()];
-    topology.edge_component_ids = vec![0; topology.edge_count()];
-
-    let mut metrics = test_metrics();
-    metrics.edge_metrics = [1.0, 1.0, 10.0, 1.0, 1.0, 1.0]
-        .into_iter()
-        .enumerate()
-        .map(|(index, cost)| CompiledEdgeMetric {
-            edge_id: EdgeId(index as u32),
-            travel_time_s: Some(cost),
-            generalized_cost: Some(cost),
-        })
-        .collect();
-    metrics.components = vec![CompiledCostComponent {
-        name: "exposure".to_string(),
-        weight: 0.0,
-        edge_values: vec![10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        scales_with_travel_time: false,
-        overlay_name: None,
-        invert_overlay: false,
-    }];
-    (topology, metrics)
-}
-
-fn component_label_overflow_request(departure_time: Option<&str>) -> RouteRequest {
-    RouteRequest {
-        route_id: "component-label-overflow".to_string(),
-        origin: crate::LabeledPoint {
-            id: "origin".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "destination".to_string(),
-            lon: 6.003,
-            lat: 53.001,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 20.0,
-            ..Default::default()
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..Default::default()
-        },
-        alternatives: Default::default(),
-        temporal: crate::TemporalRequestOptions {
-            departure_time: departure_time.map(str::to_string),
-            pareto: Some(crate::ParetoRouteOptions {
-                component: "exposure".to_string(),
-                max_routes: 4,
-                max_labels_per_state: 1,
-            }),
-            ..Default::default()
-        },
-    }
 }
 
 #[test]
@@ -283,12 +258,8 @@ fn enforces_temporal_exposure_budget_and_returns_dynamic_pareto_frontier() {
     let topology = test_topology();
     let mut metrics = test_metrics();
     metrics.components = vec![CompiledCostComponent {
-        name: "exposure".to_string(),
-        weight: 0.0,
-        edge_values: vec![10.0, 20.0, 100.0],
-        scales_with_travel_time: false,
         overlay_name: Some("exposure_factor".to_string()),
-        invert_overlay: false,
+        ..cost_component("exposure", &[10.0, 20.0, 100.0])
     }];
     let overlay_path = write_temp_file(
         "temporal-exposure.csv",
@@ -296,43 +267,19 @@ fn enforces_temporal_exposure_budget_and_returns_dynamic_pareto_frontier() {
     );
     let scenario_path = write_temp_file("temporal-exposure-scenario.yml", "id: exposure_test\n");
     let holiday_path = write_temp_file("temporal-exposure-holidays.yml", "- 2026-07-10\n");
-    let request = RouteRequest {
-        route_id: "temporal-exposure-budget".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 20.0,
-            ..Default::default()
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            segment_rows: true,
-            ..Default::default()
-        },
-        alternatives: Default::default(),
-        temporal: crate::TemporalRequestOptions {
-            departure_time: Some("2026-07-10T10:00:00Z".to_string()),
-            scenario: Some(scenario_path.clone()),
-            holiday_calendar: Some(holiday_path.clone()),
-            overlays: vec![overlay_path.clone()],
-            constraints: vec![crate::ComponentConstraint {
-                component: "exposure".to_string(),
-                max_value: 0.0,
-            }],
-            ..Default::default()
-        },
+    let mut request = a_to_c("temporal-exposure-budget");
+    request.snap = snap_within(20.0);
+    request.returns = ReturnConfig {
+        segment_rows: true,
+        ..full_geometry()
+    };
+    request.temporal = TemporalRequestOptions {
+        departure_time: Some("2026-07-10T10:00:00Z".to_string()),
+        scenario: Some(scenario_path.clone()),
+        holiday_calendar: Some(holiday_path.clone()),
+        overlays: vec![overlay_path.clone()],
+        constraints: vec![zero_budget("exposure")],
+        ..Default::default()
     };
 
     let constrained = execute_route(&topology, &metrics, &request)
@@ -350,24 +297,11 @@ fn enforces_temporal_exposure_budget_and_returns_dynamic_pareto_frontier() {
             .all(|segment| segment.entry_time.is_some() && segment.exit_time.is_some())
     }));
 
-    let pareto_request = RouteRequest {
-        route_id: "temporal-exposure-pareto".to_string(),
-        temporal: crate::TemporalRequestOptions {
-            departure_time: Some("2026-07-10T10:00:00Z".to_string()),
-            scenario: Some(scenario_path.clone()),
-            holiday_calendar: Some(holiday_path.clone()),
-            overlays: vec![overlay_path.clone()],
-            pareto: Some(crate::ParetoRouteOptions {
-                component: "exposure".to_string(),
-                max_routes: 4,
-                max_labels_per_state: 16,
-            }),
-            ..Default::default()
-        },
-        ..request
-    };
-    let frontier = execute_route(&topology, &metrics, &pareto_request)
-        .expect("temporal exposure Pareto frontier");
+    request.route_id = "temporal-exposure-pareto".to_string();
+    request.temporal.constraints.clear();
+    request.temporal.pareto = Some(pareto("exposure", 16));
+    let frontier =
+        execute_route(&topology, &metrics, &request).expect("temporal exposure Pareto frontier");
     assert_eq!(frontier.edge_path, vec![0, 1]);
     assert_eq!(frontier.summary.components["exposure"], 30.0);
     assert_eq!(frontier.alternatives.len(), 1);
@@ -379,82 +313,34 @@ fn enforces_temporal_exposure_budget_and_returns_dynamic_pareto_frontier() {
     let _ = fs::remove_file(holiday_path);
 }
 
+/// Arrive at c by 12:00 (4 h lookback) without any exposure.
+fn exposure_free_arrive_by_noon(route_id: &str) -> RouteRequest {
+    let mut request = a_to_c(route_id);
+    request.snap = snap_within(20.0);
+    request.returns = full_geometry();
+    request.temporal = TemporalRequestOptions {
+        arrive_by: Some("2026-07-10T12:00:00Z".to_string()),
+        arrive_by_lookback_s: 4.0 * 3_600.0,
+        constraints: vec![zero_budget("exposure")],
+        ..Default::default()
+    };
+    request
+}
+
 #[test]
 fn temporal_component_arrive_by_finds_narrow_later_window_without_waiting() {
     let mut topology = test_topology();
-    topology.temporal_rule_sets = vec![netweevil_core::TemporalRuleSet {
-        rules: vec![
-            netweevil_core::TemporalRule {
-                day_mask: netweevil_core::EVERY_DAY,
-                intervals: vec![netweevil_core::MinuteInterval {
-                    start_minute: 9 * 60,
-                    end_minute: 10 * 60,
-                }],
-                effect: netweevil_core::TemporalEffect::OpenOnly,
-            },
-            netweevil_core::TemporalRule {
-                day_mask: netweevil_core::EVERY_DAY,
-                intervals: vec![netweevil_core::MinuteInterval {
-                    start_minute: 11 * 60,
-                    end_minute: 11 * 60 + 1,
-                }],
-                effect: netweevil_core::TemporalEffect::OpenOnly,
-            },
-        ],
+    topology.temporal_rule_sets = vec![TemporalRuleSet {
+        rules: vec![open_only(9 * 60, 10 * 60), open_only(11 * 60, 11 * 60 + 1)],
     }];
     for edge in &mut topology.edge_layers.routing {
         edge.temporal_rule_id = Some(0);
     }
     let mut metrics = test_metrics();
-    metrics.components = vec![CompiledCostComponent {
-        name: "exposure".to_string(),
-        weight: 0.0,
-        edge_values: vec![0.0, 0.0, 10.0],
-        scales_with_travel_time: false,
-        overlay_name: None,
-        invert_overlay: false,
-    }];
+    metrics.components = vec![cost_component("exposure", &[0.0, 0.0, 10.0])];
     metrics.temporal.allow_wait = false;
-    let request = RouteRequest {
-        route_id: "late-opening-component-arrive-by".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 20.0,
-            ..Default::default()
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..Default::default()
-        },
-        alternatives: Default::default(),
-        temporal: crate::TemporalRequestOptions {
-            arrive_by: Some("2026-07-10T12:00:00Z".to_string()),
-            arrive_by_lookback_s: 4.0 * 3_600.0,
-            constraints: vec![crate::ComponentConstraint {
-                component: "exposure".to_string(),
-                max_value: 0.0,
-            }],
-            pareto: Some(crate::ParetoRouteOptions {
-                component: "exposure".to_string(),
-                max_routes: 4,
-                max_labels_per_state: 16,
-            }),
-            ..Default::default()
-        },
-    };
+    let mut request = exposure_free_arrive_by_noon("late-opening-component-arrive-by");
+    request.temporal.pareto = Some(pareto("exposure", 16));
 
     let result = execute_route(&topology, &metrics, &request)
         .expect("late opening constrained route arrives by deadline");
@@ -482,61 +368,15 @@ fn temporal_component_arrive_by_finds_narrow_later_window_without_waiting() {
 fn temporal_component_arrive_by_pulls_overlay_boundary_through_path_prefix() {
     let topology = test_topology();
     let mut metrics = test_metrics();
-    metrics.edge_metrics[2].travel_time_s = None;
-    metrics.edge_metrics[2].generalized_cost = None;
+    set_edge_cost(&mut metrics, 2, None);
     metrics.components = vec![CompiledCostComponent {
-        name: "exposure".to_string(),
-        weight: 0.0,
-        edge_values: vec![10.0, 10.0, 0.0],
-        scales_with_travel_time: false,
         overlay_name: Some("exposure_factor".to_string()),
-        invert_overlay: false,
+        ..cost_component("exposure", &[10.0, 10.0, 0.0])
     }];
-    let overlay_path = write_temp_file(
-        "arrive-by-overlay-boundary.csv",
-        "feature_id,t_start,t_end,exposure_factor\n10,2026-07-10T08:00:00Z,2026-07-10T11:00:00Z,0\n10,2026-07-10T11:00:00Z,2026-07-10T13:00:00Z,1\n",
-    );
-    let request = RouteRequest {
-        route_id: "overlay-boundary-arrive-by".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 20.0,
-            ..Default::default()
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..Default::default()
-        },
-        alternatives: Default::default(),
-        temporal: crate::TemporalRequestOptions {
-            arrive_by: Some("2026-07-10T12:00:00Z".to_string()),
-            arrive_by_lookback_s: 4.0 * 3_600.0,
-            overlays: vec![overlay_path.clone()],
-            constraints: vec![crate::ComponentConstraint {
-                component: "exposure".to_string(),
-                max_value: 0.0,
-            }],
-            pareto: Some(crate::ParetoRouteOptions {
-                component: "exposure".to_string(),
-                max_routes: 4,
-                max_labels_per_state: 16,
-            }),
-            ..Default::default()
-        },
-    };
+    let overlay_path = write_temp_file("arrive-by-overlay-boundary.csv", EXPOSED_FROM_ELEVEN);
+    let mut request = exposure_free_arrive_by_noon("overlay-boundary-arrive-by");
+    request.temporal.overlays = vec![overlay_path.clone()];
+    request.temporal.pareto = Some(pareto("exposure", 16));
 
     let result = execute_route(&topology, &metrics, &request)
         .expect("the last pre-overlay departure remains discoverable");
@@ -553,80 +393,21 @@ fn temporal_component_arrive_by_pulls_overlay_boundary_through_path_prefix() {
 #[test]
 fn temporal_component_arrive_by_maps_overlay_boundary_across_edge_waiting() {
     let mut topology = test_topology();
-    topology.temporal_rule_sets = vec![netweevil_core::TemporalRuleSet {
-        rules: vec![
-            netweevil_core::TemporalRule {
-                day_mask: netweevil_core::EVERY_DAY,
-                intervals: vec![netweevil_core::MinuteInterval {
-                    start_minute: 8 * 60,
-                    end_minute: 10 * 60 + 55,
-                }],
-                effect: netweevil_core::TemporalEffect::OpenOnly,
-            },
-            netweevil_core::TemporalRule {
-                day_mask: netweevil_core::EVERY_DAY,
-                intervals: vec![netweevil_core::MinuteInterval {
-                    start_minute: 11 * 60,
-                    end_minute: 13 * 60,
-                }],
-                effect: netweevil_core::TemporalEffect::OpenOnly,
-            },
-        ],
+    topology.temporal_rule_sets = vec![TemporalRuleSet {
+        rules: vec![open_only(8 * 60, 10 * 60 + 55), open_only(11 * 60, 13 * 60)],
     }];
     topology.edge_layers.routing[1].temporal_rule_id = Some(0);
     let mut metrics = test_metrics();
-    metrics.edge_metrics[2].travel_time_s = None;
-    metrics.edge_metrics[2].generalized_cost = None;
+    set_edge_cost(&mut metrics, 2, None);
     metrics.temporal.allow_wait = true;
     metrics.temporal.max_wait_s = 10.0 * 60.0;
     metrics.components = vec![CompiledCostComponent {
-        name: "exposure".to_string(),
-        weight: 0.0,
-        edge_values: vec![0.0, 10.0, 0.0],
-        scales_with_travel_time: false,
         overlay_name: Some("exposure_factor".to_string()),
-        invert_overlay: false,
+        ..cost_component("exposure", &[0.0, 10.0, 0.0])
     }];
-    let overlay_path = write_temp_file(
-        "arrive-by-overlay-waiting.csv",
-        "feature_id,t_start,t_end,exposure_factor\n10,2026-07-10T08:00:00Z,2026-07-10T11:00:00Z,0\n10,2026-07-10T11:00:00Z,2026-07-10T13:00:00Z,1\n",
-    );
-    let request = RouteRequest {
-        route_id: "overlay-waiting-arrive-by".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 20.0,
-            ..Default::default()
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..Default::default()
-        },
-        alternatives: Default::default(),
-        temporal: crate::TemporalRequestOptions {
-            arrive_by: Some("2026-07-10T12:00:00Z".to_string()),
-            arrive_by_lookback_s: 4.0 * 3_600.0,
-            overlays: vec![overlay_path.clone()],
-            constraints: vec![crate::ComponentConstraint {
-                component: "exposure".to_string(),
-                max_value: 0.0,
-            }],
-            ..Default::default()
-        },
-    };
+    let overlay_path = write_temp_file("arrive-by-overlay-waiting.csv", EXPOSED_FROM_ELEVEN);
+    let mut request = exposure_free_arrive_by_noon("overlay-waiting-arrive-by");
+    request.temporal.overlays = vec![overlay_path.clone()];
 
     let result = execute_route(&topology, &metrics, &request)
         .expect("the last non-waiting pre-overlay departure remains discoverable");
@@ -647,148 +428,82 @@ fn executes_scenario_batch_and_diffs_rerouting_burden() {
     topology.edge_layers.routing[0].feature_row = 0;
     topology.edge_layers.routing[1].feature_row = 0;
     topology.edge_layers.routing[2].feature_row = 1;
-    topology.feature_attributes = netweevil_core::FeatureAttributeTable {
-        row_count: 2,
-        strings: vec!["mall".to_string(), "street".to_string()],
-        columns: vec![netweevil_core::FeatureAttributeColumn {
-            definition: netweevil_core::FeatureAttributeDefinition {
-                name: "AssetGroup".to_string(),
-                semantic_role: Some("asset_group".to_string()),
-                value_type: netweevil_core::FeatureAttributeType::String,
-                domain: Default::default(),
-            },
-            data: netweevil_core::FeatureAttributeColumnData::String(vec![Some(0), Some(1)]),
-        }],
-    };
-    let metrics = test_metrics();
-    let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(metrics), None)
-        .expect("prepared scenario routing engine");
+    topology.feature_attributes =
+        string_attribute_table("AssetGroup", "asset_group", &["mall", "street"]);
+    let engine = exact_engine(topology, test_metrics());
     let scenario_path = write_temp_file(
         "scenario-batch-closure.yml",
-        r#"id: close_short_path
-features:
-  - source_feature_id: 10
-    force_closed: true
-"#,
+        "id: close_short_path\nfeatures:\n  - source_feature_id: 10\n    force_closed: true\n",
     );
     let ranking_path = write_temp_file(
         "scenario-batch-ranking.csv",
         "source_feature_id,score\n10,9\n11,1\n",
     );
-    let origin = crate::LabeledPoint {
-        id: "a".to_string(),
-        lon: 6.0,
-        lat: 53.0,
-        z: None,
-    };
-    let destination = crate::LabeledPoint {
-        id: "c".to_string(),
-        lon: 6.002,
-        lat: 53.0,
-        z: None,
-    };
-    let snap = SnapOptions {
-        max_distance_m: 20.0,
-        ..Default::default()
+    let origin = point("a", 6.0, 53.0);
+    let destination = point("c", 6.002, 53.0);
+    let snap = snap_within(20.0);
+    let case = |id: &str, selector| ScenarioBatchCase {
+        id: id.to_string(),
+        selector,
     };
     let request = crate::ScenarioBatchRequest {
         batch_id: "reroute".to_string(),
         departure_time: Some("2026-07-10T10:00:00Z".to_string()),
         scenarios: vec![
-            crate::ScenarioBatchCase {
-                id: "closure".to_string(),
-                selector: crate::ScenarioBatchSelector::Overlay {
+            case(
+                "closure",
+                ScenarioBatchSelector::Overlay {
                     overlay: scenario_path.clone(),
                 },
-            },
-            crate::ScenarioBatchCase {
-                id: "mall_group".to_string(),
-                selector: crate::ScenarioBatchSelector::Group {
+            ),
+            case(
+                "mall_group",
+                ScenarioBatchSelector::Group {
                     group: crate::ScenarioGroupSelector {
                         attribute: "asset_group".to_string(),
                         value: "mall".to_string(),
                     },
                 },
-            },
-            crate::ScenarioBatchCase {
-                id: "top_ranked".to_string(),
-                selector: crate::ScenarioBatchSelector::TopK {
+            ),
+            case(
+                "top_ranked",
+                ScenarioBatchSelector::TopK {
                     top_k: crate::ScenarioTopKSelector {
                         ranking: ranking_path.clone(),
                         count: 1,
                     },
                 },
-            },
+            ),
         ],
         routes: vec![RouteRequest {
-            route_id: "a_to_c".to_string(),
-            origin: origin.clone(),
-            destination: destination.clone(),
             snap: snap.clone(),
-            connectivity: Default::default(),
-            fallback: Default::default(),
-            returns: ReturnConfig {
-                geometry: ReturnGeometry::Full,
-                ..Default::default()
-            },
-            alternatives: Default::default(),
-            temporal: Default::default(),
+            returns: full_geometry(),
+            ..a_to_c("a_to_c")
         }],
         service_areas: Vec::new(),
         accessibility: Vec::new(),
         od: vec![crate::ScenarioOdRequest {
             analysis_id: "od".to_string(),
             request: crate::OdPairsDocument {
-                pairs: vec![crate::OdPair {
-                    pair_id: "a_to_c".to_string(),
-                    origin: origin.clone(),
-                    destination: destination.clone(),
-                }],
                 snap: snap.clone(),
-                connectivity: Default::default(),
-                fallback: Default::default(),
-                returns: Default::default(),
-                alternatives: Default::default(),
-                temporal: Default::default(),
+                ..od_pairs(vec![od_pair("a_to_c", origin.clone(), destination.clone())])
             },
         }],
         matrices: vec![crate::ScenarioMatrixRequest {
             analysis_id: "matrix".to_string(),
-            origins: crate::PointSetDocument {
-                points: vec![origin.clone()],
+            origins: PointSetDocument {
                 snap: snap.clone(),
-                connectivity: Default::default(),
-                fallback: Default::default(),
-                returns: Default::default(),
-                alternatives: Default::default(),
-                temporal: Default::default(),
+                ..point_set(vec![origin])
             },
-            destinations: crate::PointSetDocument {
-                points: vec![destination.clone()],
+            destinations: PointSetDocument {
                 snap: snap.clone(),
-                connectivity: Default::default(),
-                fallback: Default::default(),
-                returns: Default::default(),
-                alternatives: Default::default(),
-                temporal: Default::default(),
+                ..point_set(vec![destination])
             },
         }],
         betweenness: vec![crate::BetweennessRequest {
             analysis_id: "usage".to_string(),
-            origins: vec![crate::WeightedPoint {
-                id: origin.id.clone(),
-                lon: origin.lon,
-                lat: origin.lat,
-                z: origin.z,
-                weight: 2.0,
-            }],
-            destinations: vec![crate::WeightedPoint {
-                id: destination.id.clone(),
-                lon: destination.lon,
-                lat: destination.lat,
-                z: destination.z,
-                weight: 3.0,
-            }],
+            origins: vec![weighted_point("a", 6.0, 53.0, 2.0)],
+            destinations: vec![weighted_point("c", 6.002, 53.0, 3.0)],
             snap,
             temporal: Default::default(),
             max_od_pairs: 10,
@@ -797,11 +512,12 @@ features:
     };
 
     let result = crate::execute_scenario_batch(&engine, &request).expect("scenario batch result");
+    let closure = &result.scenarios[0];
     let baseline = result.baseline.routes[0]
         .result
         .as_ref()
         .expect("baseline route");
-    let scenario = result.scenarios[0].analyses.routes[0]
+    let scenario = closure.analyses.routes[0]
         .result
         .as_ref()
         .expect("scenario route");
@@ -811,16 +527,13 @@ features:
         scenario.summary.scenario_id.as_deref(),
         Some("close_short_path")
     );
-    let scenario_od = result.scenarios[0].analyses.od[0]
-        .result
-        .as_ref()
-        .expect("scenario OD");
+    let scenario_od = closure.analyses.od[0].result.as_ref().expect("scenario OD");
     assert_eq!(
         scenario_od.departure_time.as_deref(),
         Some("2026-07-10T10:00:00Z")
     );
     assert_eq!(scenario_od.scenario_id.as_deref(), Some("close_short_path"));
-    let scenario_matrix = result.scenarios[0].analyses.matrices[0]
+    let scenario_matrix = closure.analyses.matrices[0]
         .result
         .as_ref()
         .expect("scenario matrix");
@@ -832,30 +545,21 @@ features:
         scenario_matrix.scenario_id.as_deref(),
         Some("close_short_path")
     );
-    assert_eq!(result.scenarios[0].diff.rerouting_burden_s, 70.0);
-    assert_eq!(result.scenarios[0].diff.od_rerouting_burden_s, 70.0);
-    assert_eq!(result.scenarios[0].diff.matrix_rerouting_burden_s, 70.0);
-    assert_eq!(
-        result.scenarios[0]
-            .diff
-            .betweenness_edge_score_absolute_change,
-        18.0
-    );
-    assert_eq!(result.scenarios[0].diff.weighted_disconnected_demand, 0.0);
+    assert_eq!(closure.diff.rerouting_burden_s, 70.0);
+    assert_eq!(closure.diff.od_rerouting_burden_s, 70.0);
+    assert_eq!(closure.diff.matrix_rerouting_burden_s, 70.0);
+    assert_eq!(closure.diff.betweenness_edge_score_absolute_change, 18.0);
+    assert_eq!(closure.diff.weighted_disconnected_demand, 0.0);
     assert_eq!(result.scenarios[1].closed_source_feature_ids, vec![10]);
     assert_eq!(result.scenarios[1].diff.rerouting_burden_s, 70.0);
     assert_eq!(result.scenarios[2].closed_source_feature_ids, vec![10]);
     assert_eq!(result.scenarios[2].diff.rerouting_burden_s, 70.0);
-    assert_eq!(
-        result.baseline.betweenness[0]
-            .result
-            .as_ref()
-            .expect("baseline betweenness")
-            .pairs
-            .len(),
-        1
-    );
-    let scenario_betweenness = result.scenarios[0].analyses.betweenness[0]
+    let baseline_betweenness = result.baseline.betweenness[0]
+        .result
+        .as_ref()
+        .expect("baseline betweenness");
+    assert_eq!(baseline_betweenness.pairs.len(), 1);
+    let scenario_betweenness = closure.analyses.betweenness[0]
         .result
         .as_ref()
         .expect("scenario betweenness");
@@ -868,77 +572,62 @@ features:
         Some("close_short_path")
     );
 
+    // Feature ids must exist in the active topology, and explicit overlays
+    // must load before any baseline work starts.
     let stale_ranking_path = write_temp_file(
         "scenario-batch-stale-ranking.csv",
         "source_feature_id,score\n999,9\n",
     );
-    let mut stale_request = request.clone();
-    stale_request.scenarios = vec![crate::ScenarioBatchCase {
-        id: "stale_top_ranked".to_string(),
-        selector: crate::ScenarioBatchSelector::TopK {
-            top_k: crate::ScenarioTopKSelector {
-                ranking: stale_ranking_path.clone(),
-                count: 1,
-            },
-        },
-    }];
-    let error = crate::execute_scenario_batch(&engine, &stale_request)
-        .expect_err("stale ranked feature ids must be rejected");
-    assert!(
-        error
-            .to_string()
-            .contains("not present in the active topology")
-            && error.to_string().contains("999"),
-        "unexpected error: {error}"
-    );
-
     let stale_overlay_path = write_temp_file(
         "scenario-batch-stale-overlay.yml",
-        r#"id: stale_overlay
-features:
-  - source_feature_id: 10
-    force_closed: true
-  - source_feature_id: 999
-    force_closed: true
-"#,
+        "id: stale_overlay\nfeatures:\n  - source_feature_id: 10\n    force_closed: true\n  - source_feature_id: 999\n    force_closed: true\n",
     );
-    let mut stale_overlay_request = request.clone();
-    stale_overlay_request.scenarios = vec![crate::ScenarioBatchCase {
-        id: "stale_explicit_overlay".to_string(),
-        selector: crate::ScenarioBatchSelector::Overlay {
-            overlay: stale_overlay_path.clone(),
-        },
-    }];
-    let error = crate::execute_scenario_batch(&engine, &stale_overlay_request)
-        .expect_err("every explicit overlay feature id must exist in the active topology");
-    assert!(
-        error
-            .to_string()
-            .contains("not present in the active topology")
-            && error.to_string().contains("999"),
-        "unexpected error: {error}"
-    );
-
     let missing_overlay_path = write_temp_file("scenario-batch-missing-overlay.yml", "");
     fs::remove_file(&missing_overlay_path).expect("remove missing-overlay placeholder");
-    let mut missing_overlay_request = request.clone();
-    missing_overlay_request.scenarios = vec![crate::ScenarioBatchCase {
-        id: "missing_explicit_overlay".to_string(),
-        selector: crate::ScenarioBatchSelector::Overlay {
-            overlay: missing_overlay_path.clone(),
-        },
-    }];
-    let error = crate::execute_scenario_batch(&engine, &missing_overlay_request)
-        .expect_err("explicit overlays must load before baseline execution");
-    assert!(
-        error
-            .to_string()
-            .contains("validating scenario 'missing_explicit_overlay' overlay")
-            && error
-                .to_string()
-                .contains("scenario-batch-missing-overlay.yml"),
-        "unexpected error: {error}"
-    );
+    for (scenario, expected) in [
+        (
+            case(
+                "stale_top_ranked",
+                ScenarioBatchSelector::TopK {
+                    top_k: crate::ScenarioTopKSelector {
+                        ranking: stale_ranking_path.clone(),
+                        count: 1,
+                    },
+                },
+            ),
+            ["not present in the active topology", "999"],
+        ),
+        (
+            case(
+                "stale_explicit_overlay",
+                ScenarioBatchSelector::Overlay {
+                    overlay: stale_overlay_path.clone(),
+                },
+            ),
+            ["not present in the active topology", "999"],
+        ),
+        (
+            case(
+                "missing_explicit_overlay",
+                ScenarioBatchSelector::Overlay {
+                    overlay: missing_overlay_path,
+                },
+            ),
+            [
+                "validating scenario 'missing_explicit_overlay' overlay",
+                "scenario-batch-missing-overlay.yml",
+            ],
+        ),
+    ] {
+        let mut invalid = request.clone();
+        invalid.scenarios = vec![scenario];
+        let error = crate::execute_scenario_batch(&engine, &invalid)
+            .expect_err("invalid scenario must be rejected");
+        assert!(
+            expected.iter().all(|text| error.to_string().contains(text)),
+            "unexpected error: {error}"
+        );
+    }
 
     let _ = fs::remove_file(scenario_path);
     let _ = fs::remove_file(ranking_path);
@@ -952,46 +641,18 @@ fn temporal_accessibility_prices_a_mid_edge_destination_at_edge_entry_time() {
     let metrics = test_metrics();
     let scenario_path = write_temp_file(
         "accessibility-mid-edge-speed.yml",
-        r#"id: speed_up
-features:
-  - source_feature_id: 10
-    speed_factor: 2.0
-"#,
+        "id: speed_up\nfeatures:\n  - source_feature_id: 10\n    speed_factor: 2.0\n",
     );
-    let snap = SnapOptions {
-        max_distance_m: 5.0,
-        ..Default::default()
-    };
     let mut request = crate::AccessibilityRequest {
         origins: PointSetDocument {
-            points: vec![crate::LabeledPoint {
-                id: "origin".to_string(),
-                lon: 6.0,
-                lat: 53.0,
-                z: None,
-            }],
-            snap: snap.clone(),
-            connectivity: Default::default(),
-            fallback: Default::default(),
-            returns: Default::default(),
-            alternatives: Default::default(),
-            temporal: Default::default(),
+            snap: snap_within(5.0),
+            ..point_set(vec![point("origin", 6.0, 53.0)])
         },
         categories: vec![crate::AccessibilityCategoryRequest {
             category_id: "mid_edge".to_string(),
             destinations: PointSetDocument {
-                points: vec![crate::LabeledPoint {
-                    id: "destination".to_string(),
-                    lon: 6.0005,
-                    lat: 53.0,
-                    z: None,
-                }],
-                snap,
-                connectivity: Default::default(),
-                fallback: Default::default(),
-                returns: Default::default(),
-                alternatives: Default::default(),
-                temporal: Default::default(),
+                snap: snap_within(5.0),
+                ..point_set(vec![point("destination", 6.0005, 53.0)])
             },
         }],
         thresholds_s: vec![3.0],
@@ -1003,7 +664,7 @@ features:
     assert!((static_result.rows[0].nearest_travel_time_s.unwrap() - 5.0).abs() < 1.0e-6);
     assert_eq!(static_result.rows[0].counts_within_threshold_s["3"], 0);
 
-    request.origins.temporal = crate::TemporalRequestOptions {
+    request.origins.temporal = TemporalRequestOptions {
         departure_time: Some("2026-07-10T10:00:00Z".to_string()),
         scenario: Some(scenario_path.clone()),
         ..Default::default()
@@ -1018,70 +679,16 @@ features:
 
 #[test]
 fn executes_exact_route_and_breakdowns() {
-    let topology = test_topology();
-    let metrics = CompiledProfileBundle {
-        schema_version: 2,
-        profile_id: "test".to_string(),
-        profile_hash: "abc".to_string(),
-        mode: TravelMode::Car,
-        turn_costs: CompiledTurnCostConfig::default(),
-        components: Vec::new(),
-        temporal: Default::default(),
-        source_topology_bundle_id: CacheBundleId::new("topology-test"),
-        acceleration: None,
-        edge_metrics: vec![
-            CompiledEdgeMetric {
-                edge_id: EdgeId(0),
-                travel_time_s: Some(10.0),
-                generalized_cost: Some(10.0),
-            },
-            CompiledEdgeMetric {
-                edge_id: EdgeId(1),
-                travel_time_s: Some(20.0),
-                generalized_cost: Some(20.0),
-            },
-            CompiledEdgeMetric {
-                edge_id: EdgeId(2),
-                travel_time_s: Some(100.0),
-                generalized_cost: Some(100.0),
-            },
-        ],
-    };
-    let request = RouteRequest {
-        route_id: "route".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            segment_rows: true,
-            road_type_breakdown: vec![BreakdownMetric::DistanceM, BreakdownMetric::TimeS],
-            surface_breakdown: vec![BreakdownMetric::DistanceM],
-            penalty_breakdown: false,
-            explain_cost_derivation: false,
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
+    let mut request = a_to_c("route");
+    request.returns = ReturnConfig {
+        segment_rows: true,
+        road_type_breakdown: vec![BreakdownMetric::DistanceM, BreakdownMetric::TimeS],
+        surface_breakdown: vec![BreakdownMetric::DistanceM],
+        ..full_geometry()
     };
 
-    let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
+    let result =
+        execute_route(&test_topology(), &test_metrics(), &request).expect("route succeeds");
     assert_eq!(result.edge_path, vec![0, 1]);
     assert_eq!(result.summary.segment_count, 2);
     assert_eq!(result.summary.total_distance_m, 300);
@@ -1100,43 +707,16 @@ fn executes_exact_route_and_breakdowns() {
 
 #[test]
 fn returns_opt_in_alternative_routes() {
-    let topology = test_topology();
-    let metrics = test_metrics();
-    let request = RouteRequest {
-        route_id: "route_alternatives".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: AlternativeRouteOptions {
-            max_routes: 2,
-            max_cost_ratio: 4.0,
-            ..AlternativeRouteOptions::default()
-        },
-        temporal: Default::default(),
+    let mut request = a_to_c("route_alternatives");
+    request.returns = full_geometry();
+    request.alternatives = AlternativeRouteOptions {
+        max_routes: 2,
+        max_cost_ratio: 4.0,
+        ..Default::default()
     };
 
-    let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
+    let result =
+        execute_route(&test_topology(), &test_metrics(), &request).expect("route succeeds");
     assert_eq!(result.edge_path, vec![0, 1]);
     assert_eq!(result.alternatives.len(), 1);
     assert_eq!(result.alternatives[0].rank, 1);
@@ -1150,36 +730,8 @@ fn uses_external_edge_name_bundle_for_segment_rows() {
     topology.names.clear();
     topology.set_edge_name_index(0, Some(0));
     topology.set_edge_name_index(1, Some(1));
-    let request = RouteRequest {
-        route_id: "route".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::None,
-            segment_rows: true,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
+    let mut request = a_to_c("route");
+    request.returns.segment_rows = true;
 
     let result = execute_route_with_edge_names(
         &topology,
@@ -1195,51 +747,9 @@ fn uses_external_edge_name_bundle_for_segment_rows() {
 }
 
 #[test]
-fn prepared_engine_reuses_prebuilt_graph() {
-    let engine =
-        PreparedRoutingEngine::new(Arc::new(test_topology()), Arc::new(test_metrics()), None)
-            .expect("prepared engine builds");
-    let request = RouteRequest {
-        route_id: "prepared-route".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
-
-    let route = engine.execute_route(&request).expect("route succeeds");
-    assert_eq!(route.edge_path, vec![0, 1]);
-    assert_eq!(route.summary.total_distance_m, 300);
-}
-
-#[test]
 fn accelerated_query_returns_an_unpacked_path() {
     let topology = test_topology();
-    let (bundle, metrics) = build_test_cch(&topology, &test_metrics());
-    let graph = crate::build_routing_graph_from_shared(&topology, Arc::new(metrics), Some(bundle))
-        .expect("graph builds");
+    let (graph, _) = cch_graph(&topology, &test_metrics());
     assert!(graph.acceleration.is_some(), "test CCH must be active");
 
     let path = crate::accelerated_route_query(&topology, &graph, 0, 2)
@@ -1252,34 +762,8 @@ fn accelerated_query_returns_an_unpacked_path() {
 
 #[test]
 fn pure_summary_routes_omit_path_payloads() {
-    let request = RouteRequest {
-        route_id: "summary-route".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig::default(),
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
-
-    let route = execute_route(&test_topology(), &test_metrics(), &request).expect("route succeeds");
+    let route = execute_route(&test_topology(), &test_metrics(), &a_to_c("summary-route"))
+        .expect("route succeeds");
     assert!(route.node_path.is_empty());
     assert!(route.edge_path.is_empty());
     assert!(route.geometry.is_none());
@@ -1292,35 +776,14 @@ fn routes_between_phantom_edge_snaps_with_partial_edge_costs() {
     topology.nodes[0].z = 10.0;
     topology.nodes[1].z = 20.0;
     topology.nodes[2].z = 30.0;
-    let request = RouteRequest {
-        route_id: "phantom-route".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a_mid".to_string(),
-            lon: 6.0005,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "b_mid".to_string(),
-            lon: 6.0015,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            segment_rows: true,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
+    let mut request = route_request(
+        "phantom-route",
+        point("a_mid", 6.0005, 53.0),
+        point("b_mid", 6.0015, 53.0),
+    );
+    request.returns = ReturnConfig {
+        segment_rows: true,
+        ..full_geometry()
     };
 
     let route = execute_route(&topology, &test_metrics(), &request).expect("route succeeds");
@@ -1348,32 +811,8 @@ fn routes_between_phantom_edge_snaps_with_partial_edge_costs() {
 
 #[test]
 fn rejects_snap_beyond_threshold() {
-    let request = RouteRequest {
-        route_id: "route".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 0.0,
-            lat: 0.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 10.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig::default(),
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
+    let mut request = route_request("route", point("a", 0.0, 0.0), point("c", 6.002, 53.0));
+    request.snap = snap_within(10.0);
 
     let error =
         execute_route(&test_topology(), &test_metrics(), &request).expect_err("snap should fail");
@@ -1394,43 +833,22 @@ fn snap_respects_elevation_window_and_feature_attribute_filters() {
     topology.edge_layers.routing[0].feature_row = 0;
     topology.edge_layers.routing[1].feature_row = 1;
     topology.edge_layers.routing[2].feature_row = 0;
-    topology.feature_attributes = netweevil_core::FeatureAttributeTable {
-        row_count: 2,
-        strings: vec!["outdoor".to_string(), "indoor".to_string()],
-        columns: vec![netweevil_core::FeatureAttributeColumn {
-            definition: netweevil_core::FeatureAttributeDefinition {
-                name: "Location".to_string(),
-                semantic_role: Some("indoor_location".to_string()),
-                value_type: netweevil_core::FeatureAttributeType::String,
-                domain: Default::default(),
-            },
-            data: netweevil_core::FeatureAttributeColumnData::String(vec![Some(0), Some(1)]),
-        }],
-    };
-    let metrics = test_metrics();
-    let graph = build_routing_graph(&topology, &metrics).expect("graph builds");
-    let point = crate::LabeledPoint {
-        id: "platform".to_string(),
-        lon: 6.0,
-        lat: 53.0,
+    topology.feature_attributes =
+        string_attribute_table("Location", "indoor_location", &["outdoor", "indoor"]);
+    let graph = build_routing_graph(&topology, &test_metrics()).expect("graph builds");
+    let point = LabeledPoint {
         z: Some(20.0),
+        ..point("platform", 6.0, 53.0)
     };
-    let candidates = crate::snapping::snap_candidates_with_options(
-        &topology,
-        &graph,
-        &point,
-        &SnapOptions {
-            max_distance_m: 50.0,
-            z_window_m: Some(2.0),
-            attribute_filters: std::collections::BTreeMap::from([(
-                "indoor_location".to_string(),
-                "indoor".to_string(),
-            )]),
-            point_constraints: Default::default(),
-        },
-        true,
-    )
-    .expect("filtered snap succeeds");
+    let snap = crate::SnapOptions {
+        max_distance_m: 50.0,
+        z_window_m: Some(2.0),
+        attribute_filters: [("indoor_location".to_string(), "indoor".to_string())].into(),
+        point_constraints: Default::default(),
+    };
+    let candidates =
+        crate::snapping::snap_candidates_with_options(&topology, &graph, &point, &snap, true)
+            .expect("filtered snap succeeds");
 
     assert!(!candidates.is_empty());
     assert!(
@@ -1447,30 +865,13 @@ fn snap_respects_elevation_window_and_feature_attribute_filters() {
 
 #[test]
 fn accumulates_demand_weighted_edge_betweenness() {
-    let engine = PreparedRoutingEngine::new(
-        std::sync::Arc::new(test_topology()),
-        std::sync::Arc::new(test_metrics()),
-        None,
-    )
-    .expect("engine builds");
+    let engine = exact_engine(test_topology(), test_metrics());
     let result = engine
         .execute_betweenness(&crate::BetweennessRequest {
             analysis_id: "usage".to_string(),
-            origins: vec![crate::WeightedPoint {
-                id: "a".to_string(),
-                lon: 6.0,
-                lat: 53.0,
-                z: None,
-                weight: 2.0,
-            }],
-            destinations: vec![crate::WeightedPoint {
-                id: "c".to_string(),
-                lon: 6.002,
-                lat: 53.0,
-                z: None,
-                weight: 3.0,
-            }],
-            snap: SnapOptions::default(),
+            origins: vec![weighted_point("a", 6.0, 53.0, 2.0)],
+            destinations: vec![weighted_point("c", 6.002, 53.0, 3.0)],
+            snap: Default::default(),
             temporal: Default::default(),
             max_od_pairs: 10,
             include_zero: false,
@@ -1491,44 +892,17 @@ fn accumulates_demand_weighted_edge_betweenness() {
 
 #[test]
 fn betweenness_honors_static_component_constraints() {
-    let topology = test_topology();
     let mut metrics = test_metrics();
-    metrics.components = vec![CompiledCostComponent {
-        name: "uncovered_time".to_string(),
-        weight: 0.0,
-        edge_values: vec![100.0, 100.0, 0.0],
-        scales_with_travel_time: false,
-        overlay_name: None,
-        invert_overlay: false,
-    }];
-    let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(metrics), None)
-        .expect("engine builds");
+    metrics.components = vec![cost_component("uncovered_time", &[100.0, 100.0, 0.0])];
+    let engine = exact_engine(test_topology(), metrics);
     let result = engine
         .execute_betweenness(&crate::BetweennessRequest {
             analysis_id: "covered_usage".to_string(),
-            origins: vec![crate::WeightedPoint {
-                id: "a".to_string(),
-                lon: 6.0,
-                lat: 53.0,
-                z: None,
-                weight: 2.0,
-            }],
-            destinations: vec![crate::WeightedPoint {
-                id: "c".to_string(),
-                lon: 6.002,
-                lat: 53.0,
-                z: None,
-                weight: 3.0,
-            }],
-            snap: SnapOptions {
-                max_distance_m: 20.0,
-                ..Default::default()
-            },
-            temporal: crate::TemporalRequestOptions {
-                constraints: vec![crate::ComponentConstraint {
-                    component: "uncovered_time".to_string(),
-                    max_value: 0.0,
-                }],
+            origins: vec![weighted_point("a", 6.0, 53.0, 2.0)],
+            destinations: vec![weighted_point("c", 6.002, 53.0, 3.0)],
+            snap: snap_within(20.0),
+            temporal: TemporalRequestOptions {
+                constraints: vec![zero_budget("uncovered_time")],
                 ..Default::default()
             },
             max_od_pairs: 10,
@@ -1549,15 +923,10 @@ fn snap_candidates_keep_only_the_nearest_eight() {
     let topology = snap_test_topology();
     let metrics = uniform_metrics(topology.edge_count(), 1.0);
     let graph = build_routing_graph(&topology, &metrics).expect("graph builds");
-    let point = crate::LabeledPoint {
-        id: "snap".to_string(),
-        lon: 6.0,
-        lat: 53.0,
-        z: None,
-    };
 
     let candidates =
-        crate::snap_candidates(&topology, &graph, &point, 500.0, true).expect("snap works");
+        crate::snap_candidates(&topology, &graph, &point("snap", 6.0, 53.0), 500.0, true)
+            .expect("snap works");
 
     assert_eq!(candidates.len(), 8);
     assert!(
@@ -1571,53 +940,12 @@ fn snap_candidates_keep_only_the_nearest_eight() {
 
 #[test]
 fn executes_od_batch_with_failures() {
-    let document = OdPairsDocument {
-        pairs: vec![
-            OdPair {
-                pair_id: "ok".to_string(),
-                origin: crate::LabeledPoint {
-                    id: "a".to_string(),
-                    lon: 6.0,
-                    lat: 53.0,
-                    z: None,
-                },
-                destination: crate::LabeledPoint {
-                    id: "c".to_string(),
-                    lon: 6.002,
-                    lat: 53.0,
-                    z: None,
-                },
-            },
-            OdPair {
-                pair_id: "bad".to_string(),
-                origin: crate::LabeledPoint {
-                    id: "far".to_string(),
-                    lon: 0.0,
-                    lat: 0.0,
-                    z: None,
-                },
-                destination: crate::LabeledPoint {
-                    id: "c".to_string(),
-                    lon: 6.002,
-                    lat: 53.0,
-                    z: None,
-                },
-            },
-        ],
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
+    let document = crate::OdPairsDocument {
+        returns: full_geometry(),
+        ..od_pairs(vec![
+            od_pair("ok", point("a", 6.0, 53.0), point("c", 6.002, 53.0)),
+            od_pair("bad", point("far", 0.0, 0.0), point("c", 6.002, 53.0)),
+        ])
     };
 
     let result = execute_od(&test_topology(), &test_metrics(), &document).expect("OD succeeds");
@@ -1634,135 +962,14 @@ fn executes_od_batch_with_failures() {
 }
 
 #[test]
-fn executes_matrix_batch() {
-    let origins = PointSetDocument {
-        points: vec![
-            crate::LabeledPoint {
-                id: "a".to_string(),
-                lon: 6.0,
-                lat: 53.0,
-                z: None,
-            },
-            crate::LabeledPoint {
-                id: "b".to_string(),
-                lon: 6.001,
-                lat: 53.0,
-                z: None,
-            },
-        ],
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
-    let destinations = PointSetDocument {
-        points: vec![crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        }],
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
-
-    let result = execute_matrix(&test_topology(), &test_metrics(), &origins, &destinations)
-        .expect("matrix succeeds");
-    assert_eq!(result.cell_count, 2);
-    assert_eq!(result.succeeded_count, 2);
-    assert_eq!(result.cells[0].total_distance_m, Some(300));
-    assert_eq!(result.cells[1].total_distance_m, Some(200));
-    assert!(
-        result.cells[0]
-            .geometry
-            .as_ref()
-            .is_some_and(|coords| coords.len() >= 2)
-    );
-}
-
-#[test]
 fn executes_matrix_batch_with_presnapped_failures() {
     let origins = PointSetDocument {
-        points: vec![
-            crate::LabeledPoint {
-                id: "a".to_string(),
-                lon: 6.0,
-                lat: 53.0,
-                z: None,
-            },
-            crate::LabeledPoint {
-                id: "far".to_string(),
-                lon: 0.0,
-                lat: 0.0,
-                z: None,
-            },
-        ],
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
+        returns: full_geometry(),
+        ..point_set(vec![point("a", 6.0, 53.0), point("far", 0.0, 0.0)])
     };
     let destinations = PointSetDocument {
-        points: vec![
-            crate::LabeledPoint {
-                id: "c".to_string(),
-                lon: 6.002,
-                lat: 53.0,
-                z: None,
-            },
-            crate::LabeledPoint {
-                id: "b".to_string(),
-                lon: 6.001,
-                lat: 53.0,
-                z: None,
-            },
-        ],
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
+        returns: full_geometry(),
+        ..point_set(vec![point("c", 6.002, 53.0), point("b", 6.001, 53.0)])
     };
 
     let result = execute_matrix(&test_topology(), &test_metrics(), &origins, &destinations)
@@ -1788,96 +995,43 @@ fn matrix_matches_repeated_exact_route_execution() {
     let topology = test_topology();
     let metrics = test_metrics();
     let origins = PointSetDocument {
-        points: vec![
-            crate::LabeledPoint {
-                id: "a".to_string(),
-                lon: 6.0,
-                lat: 53.0,
-                z: None,
-            },
-            crate::LabeledPoint {
-                id: "b".to_string(),
-                lon: 6.001,
-                lat: 53.0,
-                z: None,
-            },
-        ],
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
+        returns: full_geometry(),
+        ..point_set(vec![point("a", 6.0, 53.0), point("b", 6.001, 53.0)])
     };
     let destinations = PointSetDocument {
-        points: vec![
-            crate::LabeledPoint {
-                id: "b".to_string(),
-                lon: 6.001,
-                lat: 53.0,
-                z: None,
-            },
-            crate::LabeledPoint {
-                id: "c".to_string(),
-                lon: 6.002,
-                lat: 53.0,
-                z: None,
-            },
-        ],
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
+        returns: full_geometry(),
+        ..point_set(vec![point("b", 6.001, 53.0), point("c", 6.002, 53.0)])
     };
 
     let matrix =
         execute_matrix(&topology, &metrics, &origins, &destinations).expect("matrix succeeds");
+    assert_eq!(matrix.cell_count, 4);
+    assert_eq!(matrix.succeeded_count, 4);
+    assert_eq!(matrix.cells[1].total_distance_m, Some(300));
+    assert_eq!(matrix.cells[3].total_distance_m, Some(200));
+    assert!(
+        matrix.cells[1]
+            .geometry
+            .as_ref()
+            .is_some_and(|coords| coords.len() >= 2)
+    );
 
-    for (cell, (origin, destination)) in
-        matrix
-            .cells
+    let pairs = origins.points.iter().flat_map(|origin| {
+        destinations
+            .points
             .iter()
-            .zip(origins.points.iter().flat_map(|origin| {
-                destinations
-                    .points
-                    .iter()
-                    .map(move |destination| (origin, destination))
-            }))
-    {
-        let route = execute_route(
-            &topology,
-            &metrics,
-            &RouteRequest {
-                route_id: format!("{}__{}", origin.id, destination.id),
-                origin: origin.clone(),
-                destination: destination.clone(),
-                snap: origins.snap.clone(),
-                connectivity: origins.connectivity.clone(),
-                fallback: origins.fallback.clone(),
-                returns: origins.returns.clone(),
-                alternatives: origins.alternatives.clone(),
-                temporal: Default::default(),
-            },
-        )
-        .expect("route succeeds");
+            .map(move |destination| (origin, destination))
+    });
+    for (cell, (origin, destination)) in matrix.cells.iter().zip(pairs) {
+        let request = RouteRequest {
+            returns: origins.returns.clone(),
+            ..route_request(
+                &format!("{}__{}", origin.id, destination.id),
+                origin.clone(),
+                destination.clone(),
+            )
+        };
+        let route = execute_route(&topology, &metrics, &request).expect("route succeeds");
         assert_eq!(cell.total_distance_m, Some(route.summary.total_distance_m));
         assert_eq!(
             cell.total_travel_time_s,
@@ -1893,81 +1047,19 @@ fn matrix_matches_repeated_exact_route_execution() {
 
 #[test]
 fn accelerated_engine_matches_exact_engine_on_small_topology() {
-    let topology = test_topology();
-    let (bundle, accelerated_metrics) = build_test_cch(&topology, &test_metrics());
-    let exact_engine =
-        PreparedRoutingEngine::new(Arc::new(topology.clone()), Arc::new(test_metrics()), None)
-            .expect("exact engine builds");
-    let accelerated_engine = PreparedRoutingEngine::new(
-        Arc::new(topology),
-        Arc::new(accelerated_metrics),
-        Some(bundle),
-    )
-    .expect("accelerated engine builds");
-
+    let exact = exact_engine(test_topology(), test_metrics());
+    let accelerated = cch_engine(test_topology(), &test_metrics());
     let requests = [
         RouteRequest {
-            route_id: "a_to_c".to_string(),
-            origin: crate::LabeledPoint {
-                id: "a".to_string(),
-                lon: 6.0,
-                lat: 53.0,
-                z: None,
-            },
-            destination: crate::LabeledPoint {
-                id: "c".to_string(),
-                lon: 6.002,
-                lat: 53.0,
-                z: None,
-            },
-            snap: SnapOptions {
-                max_distance_m: 500.0,
-                z_window_m: None,
-                attribute_filters: Default::default(),
-                point_constraints: Default::default(),
-            },
-            connectivity: Default::default(),
-            fallback: Default::default(),
-            returns: ReturnConfig {
-                geometry: ReturnGeometry::Full,
-                ..ReturnConfig::default()
-            },
-            alternatives: Default::default(),
-            temporal: Default::default(),
+            returns: full_geometry(),
+            ..a_to_c("a_to_c")
         },
-        RouteRequest {
-            route_id: "a_to_b".to_string(),
-            origin: crate::LabeledPoint {
-                id: "a".to_string(),
-                lon: 6.0,
-                lat: 53.0,
-                z: None,
-            },
-            destination: crate::LabeledPoint {
-                id: "b".to_string(),
-                lon: 6.001,
-                lat: 53.0,
-                z: None,
-            },
-            snap: SnapOptions {
-                max_distance_m: 500.0,
-                z_window_m: None,
-                attribute_filters: Default::default(),
-                point_constraints: Default::default(),
-            },
-            connectivity: Default::default(),
-            fallback: Default::default(),
-            returns: ReturnConfig::default(),
-            alternatives: Default::default(),
-            temporal: Default::default(),
-        },
+        route_request("a_to_b", point("a", 6.0, 53.0), point("b", 6.001, 53.0)),
     ];
 
     for request in requests {
-        let exact = exact_engine
-            .execute_route(&request)
-            .expect("exact route succeeds");
-        let accelerated = accelerated_engine
+        let exact = exact.execute_route(&request).expect("exact route succeeds");
+        let accelerated = accelerated
             .execute_route(&request)
             .expect("accelerated route succeeds");
         assert_eq!(
@@ -1989,46 +1081,12 @@ fn accelerated_engine_matches_exact_engine_on_small_topology() {
 
 #[test]
 fn accelerated_engine_excludes_profile_pruned_edges() {
-    let topology = test_topology();
     let mut sparse_metrics = test_metrics();
-    sparse_metrics.edge_metrics[2].travel_time_s = None;
-    sparse_metrics.edge_metrics[2].generalized_cost = None;
-    let (bundle, accelerated_metrics) = build_test_cch(&topology, &sparse_metrics);
-    let engine = PreparedRoutingEngine::new(
-        Arc::new(topology),
-        Arc::new(accelerated_metrics),
-        Some(bundle),
-    )
-    .expect("accelerated engine builds");
-    let request = RouteRequest {
-        route_id: "a_to_c_sparse_acceleration".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "c".to_string(),
-            lon: 6.002,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig::default(),
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
+    set_edge_cost(&mut sparse_metrics, 2, None);
+    let engine = cch_engine(test_topology(), &sparse_metrics);
 
     let route = engine
-        .execute_route(&request)
+        .execute_route(&a_to_c("a_to_c_sparse_acceleration"))
         .expect("accelerated route succeeds");
     assert_eq!(route.summary.total_distance_m, 300);
     assert_eq!(route.summary.total_travel_time_s, 30.0);
@@ -2037,17 +1095,8 @@ fn accelerated_engine_excludes_profile_pruned_edges() {
 #[test]
 fn accelerated_engine_matches_exact_engine_under_pairwise_restrictions() {
     let topology = restricted_topology();
-    let metrics = restricted_metrics();
-    let (bundle, accelerated_metrics) = build_test_cch(&topology, &metrics);
-    let exact_engine =
-        PreparedRoutingEngine::new(Arc::new(topology.clone()), Arc::new(metrics), None)
-            .expect("exact engine builds");
-    let accelerated_engine = PreparedRoutingEngine::new(
-        Arc::new(topology.clone()),
-        Arc::new(accelerated_metrics),
-        Some(bundle),
-    )
-    .expect("accelerated engine builds");
+    let exact_engine = exact_engine(topology.clone(), restricted_metrics());
+    let accelerated_engine = cch_engine(topology.clone(), &restricted_metrics());
 
     // All-pairs differential against the exact engine, including the pair
     // affected by the pairwise turn restriction.
@@ -2056,38 +1105,19 @@ fn accelerated_engine_matches_exact_engine_under_pairwise_restrictions() {
             if origin.node_id == destination.node_id {
                 continue;
             }
+            let (from, to) = (origin.node_id.0, destination.node_id.0);
             let request = RouteRequest {
-                route_id: format!("diff_{}_{}", origin.node_id.0, destination.node_id.0),
-                origin: crate::LabeledPoint {
-                    id: format!("o{}", origin.node_id.0),
-                    lon: origin.lon,
-                    lat: origin.lat,
-                    z: None,
-                },
-                destination: crate::LabeledPoint {
-                    id: format!("d{}", destination.node_id.0),
-                    lon: destination.lon,
-                    lat: destination.lat,
-                    z: None,
-                },
-                snap: SnapOptions {
-                    max_distance_m: 500.0,
-                    z_window_m: None,
-                    attribute_filters: Default::default(),
-                    point_constraints: Default::default(),
-                },
-                connectivity: Default::default(),
-                fallback: Default::default(),
-                returns: ReturnConfig {
-                    geometry: ReturnGeometry::Full,
-                    ..ReturnConfig::default()
-                },
-                alternatives: Default::default(),
-                temporal: Default::default(),
+                returns: full_geometry(),
+                ..route_request(
+                    &format!("diff_{from}_{to}"),
+                    point(&format!("o{from}"), origin.lon, origin.lat),
+                    point(&format!("d{to}"), destination.lon, destination.lat),
+                )
             };
-            let exact = exact_engine.execute_route(&request);
-            let accelerated = accelerated_engine.execute_route(&request);
-            match (exact, accelerated) {
+            match (
+                exact_engine.execute_route(&request),
+                accelerated_engine.execute_route(&request),
+            ) {
                 (Ok(exact), Ok(accelerated)) => {
                     assert_eq!(
                         accelerated.summary.total_generalized_cost,
@@ -2114,42 +1144,17 @@ fn accelerated_engine_matches_exact_engine_under_pairwise_restrictions() {
 }
 
 #[test]
-fn respects_turn_restrictions() {
-    let topology = restricted_topology();
-    let metrics = restricted_metrics();
-    let request = RouteRequest {
-        route_id: "restricted".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "d".to_string(),
-            lon: 6.003,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
-
-    let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
-    assert_eq!(result.edge_path, vec![3, 2]);
-    assert_eq!(result.summary.total_distance_m, 300);
+fn respects_pairwise_and_multi_edge_turn_restrictions() {
+    for topology in [restricted_topology(), multi_edge_restricted_topology()] {
+        let result = execute_route(
+            &topology,
+            &restricted_metrics(),
+            &restricted_a_to_d("restricted"),
+        )
+        .expect("route succeeds");
+        assert_eq!(result.edge_path, vec![3, 2]);
+        assert_eq!(result.summary.total_distance_m, 300);
+    }
 }
 
 #[test]
@@ -2163,51 +1168,23 @@ fn builds_pairwise_turn_table_without_automaton_for_two_edge_restrictions() {
 }
 
 #[test]
-fn builds_routing_graph_from_persisted_edge_based_topology() {
-    let mut topology = restricted_topology();
-    topology.edge_based_topology = crate::build_edge_based_topology_fallback(&topology);
+fn multi_edge_restrictions_use_an_automaton_that_rejects_violating_paths() {
+    let graph = build_routing_graph(&multi_edge_restricted_topology(), &restricted_metrics())
+        .expect("graph builds");
 
-    let graph =
-        build_routing_graph(&topology, &restricted_metrics()).expect("graph builds from bundle");
-
-    assert!(!graph.has_restriction_sequences());
-    assert!(!graph.has_edge_transition(1, 2));
-    assert!(graph.has_edge_transition(0, 1));
+    assert!(graph.has_restriction_sequences());
+    assert!(!crate::path_respects_restriction_sequences(
+        &graph,
+        &[0, 1, 2]
+    ));
+    assert!(crate::path_respects_restriction_sequences(&graph, &[3, 2]));
 }
 
 #[test]
 fn applies_turn_penalties_when_selecting_routes() {
     let topology = turn_penalty_topology();
     let mut metrics = turn_penalty_metrics();
-    let request = RouteRequest {
-        route_id: "turn-penalty".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "d".to_string(),
-            lon: 6.002,
-            lat: 53.001,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
+    let request = penalty_route("turn-penalty");
 
     let without_penalty =
         execute_route(&topology, &metrics, &request).expect("route without turn penalty");
@@ -2227,35 +1204,7 @@ fn applies_turn_penalties_when_selecting_routes() {
 fn applies_traffic_signal_penalties() {
     let topology = traffic_signal_penalty_topology();
     let mut metrics = turn_penalty_metrics();
-    let request = RouteRequest {
-        route_id: "traffic-signal-penalty".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "d".to_string(),
-            lon: 6.002,
-            lat: 53.001,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
+    let request = penalty_route("traffic-signal-penalty");
 
     let without_penalty =
         execute_route(&topology, &metrics, &request).expect("route without signal penalty");
@@ -2274,35 +1223,7 @@ fn applies_traffic_signal_penalties() {
 fn applies_roundabout_entry_penalties() {
     let topology = roundabout_entry_penalty_topology();
     let mut metrics = roundabout_entry_penalty_metrics();
-    let request = RouteRequest {
-        route_id: "roundabout-entry-penalty".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "d".to_string(),
-            lon: 6.002,
-            lat: 53.001,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
+    let request = penalty_route("roundabout-entry-penalty");
 
     let without_penalty =
         execute_route(&topology, &metrics, &request).expect("route without roundabout penalty");
@@ -2318,91 +1239,20 @@ fn applies_roundabout_entry_penalties() {
 }
 
 #[test]
-fn uses_automaton_for_multi_edge_restriction_sequences() {
-    let graph = build_routing_graph(&multi_edge_restricted_topology(), &restricted_metrics())
-        .expect("graph builds");
-
-    assert!(graph.has_restriction_sequences());
-}
-
-#[test]
-fn respects_multi_edge_restriction_sequences() {
-    let topology = multi_edge_restricted_topology();
-    let metrics = restricted_metrics();
-    let request = RouteRequest {
-        route_id: "multi-edge-restricted".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "d".to_string(),
-            lon: 6.003,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
-
-    let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
-    assert_eq!(result.edge_path, vec![3, 2]);
-    assert_eq!(result.summary.total_distance_m, 300);
-}
-
-#[test]
 fn alternative_routes_fall_back_to_restricted_search_when_needed() {
-    let topology = multi_edge_restricted_topology();
-    let metrics = restricted_metrics();
-    let request = RouteRequest {
-        route_id: "multi-edge-restricted-alternative".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "d".to_string(),
-            lon: 6.003,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: AlternativeRouteOptions {
-            max_routes: 2,
-            max_cost_ratio: 2.0,
-            ..AlternativeRouteOptions::default()
-        },
-        temporal: Default::default(),
+    let mut request = restricted_a_to_d("multi-edge-restricted-alternative");
+    request.alternatives = AlternativeRouteOptions {
+        max_routes: 2,
+        max_cost_ratio: 2.0,
+        ..Default::default()
     };
 
-    let result = execute_route(&topology, &metrics, &request).expect("route succeeds");
+    let result = execute_route(
+        &multi_edge_restricted_topology(),
+        &restricted_metrics(),
+        &request,
+    )
+    .expect("route succeeds");
 
     assert_eq!(result.edge_path, vec![3, 2]);
     assert_eq!(result.alternatives.len(), 1);
@@ -2410,54 +1260,11 @@ fn alternative_routes_fall_back_to_restricted_search_when_needed() {
 }
 
 #[test]
-fn detects_when_a_path_violates_multi_edge_restriction_sequences() {
-    let graph = build_routing_graph(&multi_edge_restricted_topology(), &restricted_metrics())
-        .expect("graph builds");
-
-    assert!(!crate::path_respects_restriction_sequences(
-        &graph,
-        &[0, 1, 2]
-    ));
-    assert!(crate::path_respects_restriction_sequences(&graph, &[3, 2]));
-}
-
-#[test]
 fn can_ignore_multi_edge_restriction_sequences_via_engine_mode() {
-    let topology = multi_edge_restricted_topology();
     let mut metrics = restricted_metrics();
-    metrics.edge_metrics[3].travel_time_s = Some(25.0);
-    metrics.edge_metrics[3].generalized_cost = Some(25.0);
-    let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(metrics), None)
-        .expect("prepared engine builds");
-    let request = RouteRequest {
-        route_id: "multi-edge-override".to_string(),
-        origin: crate::LabeledPoint {
-            id: "a".to_string(),
-            lon: 6.0,
-            lat: 53.0,
-            z: None,
-        },
-        destination: crate::LabeledPoint {
-            id: "d".to_string(),
-            lon: 6.003,
-            lat: 53.0,
-            z: None,
-        },
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..ReturnConfig::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
+    set_edge_cost(&mut metrics, 3, Some(25.0));
+    let engine = exact_engine(multi_edge_restricted_topology(), metrics);
+    let request = restricted_a_to_d("multi-edge-override");
 
     let exact = engine
         .execute_route_with_mode(&request, EngineMode::Auto)
@@ -2557,57 +1364,27 @@ fn accelerated_many_to_many_matrix_matches_pairwise_routes() {
     reverse.edge_id = EdgeId(3);
     std::mem::swap(&mut reverse.from, &mut reverse.to);
     topology.push_edge(reverse);
-    let topology = with_edge_based_topology(topology);
-    let mut base_metrics = test_metrics();
-    base_metrics.edge_metrics.push(CompiledEdgeMetric {
-        edge_id: EdgeId(3),
-        travel_time_s: Some(20.0),
-        generalized_cost: Some(20.0),
-    });
-    let (bundle, accelerated_metrics) = build_test_cch(&topology, &base_metrics);
-    let engine = PreparedRoutingEngine::new(
-        Arc::new(topology),
-        Arc::new(accelerated_metrics),
-        Some(bundle),
-    )
-    .expect("accelerated engine builds");
+    let engine = cch_engine(
+        with_edge_based_topology(topology),
+        &metrics(&[10.0, 20.0, 100.0, 20.0]),
+    );
 
-    let point = |id: &str, lon: f64| crate::LabeledPoint {
-        id: id.to_string(),
-        lon,
-        lat: 53.0,
-        z: None,
-    };
     // Five distinct snapped destinations per origin push the batch strategy
     // onto the shared CCH search-space path; the pairwise CCH query answers
     // the same pairs one by one for comparison.
-    let origin_points = vec![point("a", 6.0), point("ab_mid", 6.0004)];
+    let origin_points = vec![point("a", 6.0, 53.0), point("ab_mid", 6.0004, 53.0)];
     let destination_points = vec![
-        point("b", 6.001),
-        point("c", 6.002),
-        point("bc_low", 6.0013),
-        point("bc_mid", 6.0015),
-        point("bc_high", 6.0017),
+        point("b", 6.001, 53.0),
+        point("c", 6.002, 53.0),
+        point("bc_low", 6.0013, 53.0),
+        point("bc_mid", 6.0015, 53.0),
+        point("bc_high", 6.0017, 53.0),
     ];
-    let point_set = |points: Vec<crate::LabeledPoint>| PointSetDocument {
-        points,
-        snap: SnapOptions {
-            max_distance_m: 500.0,
-            z_window_m: None,
-            attribute_filters: Default::default(),
-            point_constraints: Default::default(),
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig::default(),
-        alternatives: Default::default(),
-        temporal: Default::default(),
-    };
-    let origins = point_set(origin_points.clone());
-    let destinations = point_set(destination_points.clone());
-
     let matrix = engine
-        .execute_matrix(&origins, &destinations)
+        .execute_matrix(
+            &point_set(origin_points.clone()),
+            &point_set(destination_points.clone()),
+        )
         .expect("matrix succeeds");
     assert_eq!(
         matrix.cell_count,
@@ -2615,61 +1392,42 @@ fn accelerated_many_to_many_matrix_matches_pairwise_routes() {
     );
 
     for cell in &matrix.cells {
-        let origin = origin_points
-            .iter()
-            .find(|point| point.id == cell.origin_id)
-            .expect("cell origin known");
-        let destination = destination_points
-            .iter()
-            .find(|point| point.id == cell.destination_id)
-            .expect("cell destination known");
-        let request = RouteRequest {
-            route_id: format!("{}-{}", cell.origin_id, cell.destination_id),
-            origin: origin.clone(),
-            destination: destination.clone(),
-            snap: SnapOptions {
-                max_distance_m: 500.0,
-                z_window_m: None,
-                attribute_filters: Default::default(),
-                point_constraints: Default::default(),
-            },
-            connectivity: Default::default(),
-            fallback: Default::default(),
-            returns: ReturnConfig::default(),
-            alternatives: Default::default(),
-            temporal: Default::default(),
+        let find = |points: &[LabeledPoint], id: &str| {
+            points
+                .iter()
+                .find(|point| point.id == id)
+                .expect("cell endpoint known")
+                .clone()
         };
-        let pairwise = engine.execute_route(&request);
-        match (&cell.status, pairwise) {
+        let request = route_request(
+            &format!("{}-{}", cell.origin_id, cell.destination_id),
+            find(&origin_points, &cell.origin_id),
+            find(&destination_points, &cell.destination_id),
+        );
+        match (&cell.status, engine.execute_route(&request)) {
             (crate::BatchItemStatus::Succeeded, Ok(route)) => {
                 let matrix_cost = cell.total_generalized_cost.expect("matrix cost");
                 assert!(
                     (matrix_cost - route.summary.total_generalized_cost).abs() <= 1e-6,
-                    "cell {}->{} cost {} != pairwise {}",
-                    cell.origin_id,
-                    cell.destination_id,
-                    matrix_cost,
+                    "cell {} cost {matrix_cost} != pairwise {}",
+                    request.route_id,
                     route.summary.total_generalized_cost
                 );
                 let matrix_time = cell.total_travel_time_s.expect("matrix time");
                 assert!(
                     (matrix_time - route.summary.total_travel_time_s).abs() <= 1e-6,
-                    "cell {}->{} time {} != pairwise {}",
-                    cell.origin_id,
-                    cell.destination_id,
-                    matrix_time,
+                    "cell {} time {matrix_time} != pairwise {}",
+                    request.route_id,
                     route.summary.total_travel_time_s
                 );
             }
-            (crate::BatchItemStatus::Succeeded, Err(error)) => {
-                panic!(
-                    "matrix cell {}->{} succeeded but pairwise route failed: {error:#}",
-                    cell.origin_id, cell.destination_id
-                );
-            }
+            (crate::BatchItemStatus::Succeeded, Err(error)) => panic!(
+                "matrix cell {} succeeded but pairwise route failed: {error:#}",
+                request.route_id
+            ),
             (_, Ok(route)) => panic!(
-                "matrix cell {}->{} did not succeed but pairwise route did (cost {})",
-                cell.origin_id, cell.destination_id, route.summary.total_generalized_cost
+                "matrix cell {} did not succeed but pairwise route did (cost {})",
+                request.route_id, route.summary.total_generalized_cost
             ),
             (_, Err(_)) => {}
         }
@@ -2678,27 +1436,13 @@ fn accelerated_many_to_many_matrix_matches_pairwise_routes() {
 
 #[test]
 fn phast_expansion_matches_bounded_dijkstra_expansion() {
-    use crate::service_area::{
-        ServiceAreaMetricKind, build_service_area_expansion_with_settle_limit,
-    };
-
     let topology = test_topology();
-    let (bundle, accelerated_metrics) = build_test_cch(&topology, &test_metrics());
-    let metrics = std::sync::Arc::new(accelerated_metrics);
-    let routing_graph =
-        crate::build_routing_graph_from_shared(&topology, metrics.clone(), Some(bundle))
-            .expect("accelerated routing graph builds");
+    let (routing_graph, metrics) = cch_graph(&topology, &test_metrics());
     assert!(
         routing_graph.acceleration.is_some(),
         "fixture must produce an accelerated graph"
     );
-
-    let origin = crate::LabeledPoint {
-        id: "origin".to_string(),
-        lon: 6.0,
-        lat: 53.0,
-        z: None,
-    };
+    let origin = point("origin", 6.0, 53.0);
     let candidates =
         crate::snapping::snap_candidates(&topology, &routing_graph, &origin, 500.0, true)
             .expect("origin snaps");
@@ -2761,31 +1505,11 @@ fn phast_expansion_matches_bounded_dijkstra_expansion() {
 
 #[test]
 fn component_service_area_labels_bypass_scalar_phast() {
-    use crate::service_area::{
-        ServiceAreaMetricKind, build_service_area_expansion_with_settle_limit,
-    };
-
     let topology = test_topology();
     let mut base_metrics = test_metrics();
-    base_metrics.components = vec![CompiledCostComponent {
-        name: "exposure".to_string(),
-        weight: 0.0,
-        edge_values: vec![1.0, 2.0, 3.0],
-        scales_with_travel_time: false,
-        overlay_name: None,
-        invert_overlay: false,
-    }];
-    let (bundle, accelerated_metrics) = build_test_cch(&topology, &base_metrics);
-    let metrics = Arc::new(accelerated_metrics);
-    let routing_graph =
-        crate::build_routing_graph_from_shared(&topology, metrics.clone(), Some(bundle))
-            .expect("accelerated routing graph builds");
-    let origin = crate::LabeledPoint {
-        id: "origin".to_string(),
-        lon: 6.0,
-        lat: 53.0,
-        z: None,
-    };
+    base_metrics.components = vec![cost_component("exposure", &[1.0, 2.0, 3.0])];
+    let (routing_graph, metrics) = cch_graph(&topology, &base_metrics);
+    let origin = point("origin", 6.0, 53.0);
     let candidates =
         crate::snapping::snap_candidates(&topology, &routing_graph, &origin, 500.0, true)
             .expect("origin snaps");
@@ -2818,9 +1542,7 @@ fn fixed_point_near_tie_keeps_reconstruction_legal_and_error_bounded() {
     metrics.edge_metrics[0].generalized_cost = Some(10.0);
     metrics.edge_metrics[1].generalized_cost = Some(20.0001);
     metrics.edge_metrics[2].generalized_cost = Some(30.00005);
-    let (bundle, compiled) = build_test_cch(&topology, &metrics);
-    let graph = crate::build_routing_graph_from_shared(&topology, Arc::new(compiled), Some(bundle))
-        .expect("graph builds");
+    let (graph, _) = cch_graph(&topology, &metrics);
     let path = crate::accelerated_route_query(&topology, &graph, 0, 2)
         .expect("query succeeds")
         .expect("path exists");
@@ -2848,31 +1570,18 @@ fn finite_weight_overflow_disables_acceleration_without_losing_route() {
     let topology = test_topology();
     let mut metrics = test_metrics();
     metrics.edge_metrics[1].generalized_cost = Some(1e12);
-    let (bundle, compiled) = build_test_cch(&topology, &metrics);
-    let graph = crate::build_routing_graph_from_shared(&topology, Arc::new(compiled), Some(bundle))
-        .expect("overflow graph builds");
+    let (graph, _) = cch_graph(&topology, &metrics);
     assert!(graph.acceleration.is_none());
     assert_eq!(graph.edge_costs[1], 1e12);
 }
 
 #[test]
 fn phast_fractional_time_labels_obey_fixed_point_error_bound() {
-    use crate::service_area::{
-        ServiceAreaMetricKind, build_service_area_expansion_with_settle_limit,
-    };
     let topology = test_topology();
     let mut base_metrics = test_metrics();
     base_metrics.edge_metrics[1].travel_time_s = Some(20.0001);
-    let (bundle, compiled) = build_test_cch(&topology, &base_metrics);
-    let metrics = Arc::new(compiled);
-    let graph = crate::build_routing_graph_from_shared(&topology, metrics.clone(), Some(bundle))
-        .expect("graph builds");
-    let origin = crate::LabeledPoint {
-        id: "origin".into(),
-        lon: 6.0,
-        lat: 53.0,
-        z: None,
-    };
+    let (graph, metrics) = cch_graph(&topology, &base_metrics);
+    let origin = point("origin", 6.0, 53.0);
     let candidates = crate::snapping::snap_candidates(&topology, &graph, &origin, 1.0, true)
         .expect("origin snaps");
     // The budget lies between the rounded and original end time of edge 1.
@@ -2901,39 +1610,26 @@ fn phast_fractional_time_labels_obey_fixed_point_error_bound() {
 
 #[test]
 fn compiled_sub_metre_spur_does_not_add_a_free_backtrack() {
-    let mut topology = test_topology();
-    topology.nodes = [
-        (114.179, 22.28),
-        (114.18, 22.28),
-        (114.180003, 22.28),
-        (114.181, 22.28),
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(index, (lon, lat))| netweevil_core::TopologyNode {
-        node_id: netweevil_core::NodeId(index as u32),
-        lon,
-        lat,
-        z: 0.0,
-    })
-    .collect();
-    let template = topology.edge(0);
-    let edges = [(0, 1, 100), (1, 2, 0), (2, 1, 0), (1, 3, 100)]
-        .into_iter()
-        .enumerate()
-        .map(|(index, (from, to, length_m))| {
-            let mut edge = template.clone();
-            edge.edge_id = EdgeId(index as u32);
-            edge.from = netweevil_core::NodeId(from);
-            edge.to = netweevil_core::NodeId(to);
-            edge.length_m = length_m;
-            edge.access_mask = netweevil_core::AccessMask::new(netweevil_core::AccessMask::FOOT);
-            edge.road_class = netweevil_core::RoadClass::Path;
-            edge
-        })
-        .collect::<Vec<_>>();
-    topology.edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges);
-    let topology = with_edge_based_topology(topology);
+    let footpath = |id, from, to, length_m| DirectedEdge {
+        access_mask: AccessMask::new(AccessMask::FOOT),
+        road_class: RoadClass::Path,
+        ..edge(id, from, to, 10, length_m)
+    };
+    let topology = topology(
+        "test",
+        &[
+            (114.179, 22.28),
+            (114.18, 22.28),
+            (114.180003, 22.28),
+            (114.181, 22.28),
+        ],
+        &[
+            footpath(0, 0, 1, 100),
+            footpath(1, 1, 2, 0),
+            footpath(2, 2, 1, 0),
+            footpath(3, 1, 3, 100),
+        ],
+    );
     let profile = serde_yaml::from_str(
         "profile: {id: sub_metre, label: Sub-metre regression, mode: foot, defaults_pack: eu_foot_2026_01}",
     )
@@ -2946,9 +1642,7 @@ fn compiled_sub_metre_spur_does_not_add_a_free_backtrack() {
     .unwrap();
     assert!(metrics.edge_metrics[1].generalized_cost.unwrap() > 0.0);
     assert!(metrics.edge_metrics[2].generalized_cost.unwrap() > 0.0);
-    let (bundle, compiled) = build_test_cch(&topology, &metrics);
-    let graph = crate::build_routing_graph_from_shared(&topology, Arc::new(compiled), Some(bundle))
-        .unwrap();
+    let (graph, _) = cch_graph(&topology, &metrics);
     let path = crate::accelerated_route_query(&topology, &graph, 0, 3)
         .unwrap()
         .unwrap();
@@ -2958,20 +1652,15 @@ fn compiled_sub_metre_spur_does_not_add_a_free_backtrack() {
 #[test]
 fn fixed_point_shortcut_unpacks_lower_triangle_including_zero_costs() {
     let mut topology = test_topology();
-    topology.nodes.push(netweevil_core::TopologyNode {
-        node_id: netweevil_core::NodeId(3),
-        lon: 6.003,
-        lat: 53.0,
-        z: 0.0,
-    });
+    topology.nodes.push(node(3, 6.003, 53.0));
     for (edge, (from, to)) in topology
         .edge_layers
         .routing
         .iter_mut()
         .zip([(1, 2), (0, 1), (2, 3)])
     {
-        edge.from = netweevil_core::NodeId(from);
-        edge.to = netweevil_core::NodeId(to);
+        edge.from = NodeId(from);
+        edge.to = NodeId(to);
     }
     let topology = with_edge_based_topology(topology);
     for middle_cost in [20.0001, 0.0] {
@@ -3002,9 +1691,7 @@ fn fixed_point_shortcut_unpacks_lower_triangle_including_zero_costs() {
 #[test]
 fn cch_termination_accounts_for_negative_destination_phantom_cost() {
     let topology = test_topology();
-    let (bundle, compiled) = build_test_cch(&topology, &test_metrics());
-    let graph = crate::build_routing_graph_from_shared(&topology, Arc::new(compiled), Some(bundle))
-        .expect("graph builds");
+    let (graph, _) = cch_graph(&topology, &test_metrics());
     // The first meeting costs 18, but the upward route 0 -> 1 costs 30 - 15.
     // Stopping the forward queue at 18 discards the optimum.
     let origins = [(0, 10.0), (2, 18.0)];
@@ -3027,38 +1714,20 @@ fn cch_pruning_matches_complete_spaces_on_directed_graphs() {
         random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
         random >> 32
     };
+    let nodes = (0..8)
+        .map(|index| (6.0 + f64::from(index) * 0.001, 53.0))
+        .collect::<Vec<_>>();
     for _ in 0..12 {
-        let mut topology = test_topology();
-        topology.nodes = (0..8)
-            .map(|index| netweevil_core::TopologyNode {
-                node_id: netweevil_core::NodeId(index),
-                lon: 6.0 + f64::from(index) * 0.001,
-                lat: 53.0,
-                z: 0.0,
-            })
-            .collect();
         let mut edges = Vec::new();
-        let mut metrics = test_metrics();
-        metrics.edge_metrics.clear();
+        let mut costs = Vec::new();
         for edge_index in 0..24 {
-            let mut edge = topology.edge(0);
-            edge.edge_id = EdgeId(edge_index);
-            edge.from = netweevil_core::NodeId((next() % 8) as u32);
-            edge.to = netweevil_core::NodeId((edge.from.0 + 1 + (next() % 7) as u32) % 8);
-            edges.push(edge);
-            let cost = (next() % 30) as f64;
-            metrics.edge_metrics.push(CompiledEdgeMetric {
-                edge_id: EdgeId(edge_index),
-                travel_time_s: Some(cost),
-                generalized_cost: Some(cost),
-            });
+            let from = (next() % 8) as u32;
+            let to = (from + 1 + (next() % 7) as u32) % 8;
+            edges.push(edge(edge_index, from, to, 10, 100));
+            costs.push((next() % 30) as f64);
         }
-        topology.edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges);
-        topology = with_edge_based_topology(topology);
-        let (bundle, compiled) = build_test_cch(&topology, &metrics);
-        let graph =
-            crate::build_routing_graph_from_shared(&topology, Arc::new(compiled), Some(bundle))
-                .unwrap();
+        let topology = topology("test", &nodes, &edges);
+        let (graph, _) = cch_graph(&topology, &metrics(&costs));
         for _ in 0..100 {
             let origins = [
                 (next() as usize % 24, (next() % 30) as f64),
@@ -3098,46 +1767,33 @@ fn snap_cache_preserves_each_point_id_and_separates_radius_and_elevation_window(
     let topology = test_topology();
     let graph = build_routing_graph(&topology, &test_metrics()).unwrap();
     let mut cache = std::collections::HashMap::new();
-    let mut point = crate::LabeledPoint {
-        id: "first".into(),
-        lon: 6.0,
-        lat: 53.0,
+    let mut point = LabeledPoint {
         z: Some(5.0),
+        ..point("first", 6.0, 53.0)
     };
-    let wide = SnapOptions {
-        max_distance_m: 1.0,
+    let wide = crate::SnapOptions {
         z_window_m: Some(10.0),
-        ..Default::default()
+        ..snap_within(1.0)
     };
-    let narrow = SnapOptions {
-        max_distance_m: 10.0,
+    let narrow = crate::SnapOptions {
         z_window_m: Some(1.0),
-        ..Default::default()
+        ..snap_within(10.0)
     };
-    let first =
-        crate::snapping::cached_snap_candidates(&mut cache, &topology, &graph, &point, &wide, true)
-            .unwrap();
+    let mut snap = |point: &LabeledPoint, options| {
+        crate::snapping::cached_snap_candidates(&mut cache, &topology, &graph, point, options, true)
+    };
+    let first = snap(&point, &wide).unwrap();
     assert!(first.iter().all(|candidate| candidate.point_id == "first"));
     point.id = "second".into();
-    let second =
-        crate::snapping::cached_snap_candidates(&mut cache, &topology, &graph, &point, &wide, true)
-            .unwrap();
+    let second = snap(&point, &wide).unwrap();
     assert!(
         second
             .iter()
             .all(|candidate| candidate.point_id == "second")
     );
-    assert!(
-        crate::snapping::cached_snap_candidates(
-            &mut cache, &topology, &graph, &point, &narrow, true
-        )
-        .is_err()
-    );
+    assert!(snap(&point, &narrow).is_err());
     point.id = "third".into();
-    let error = crate::snapping::cached_snap_candidates(
-        &mut cache, &topology, &graph, &point, &narrow, true,
-    )
-    .unwrap_err();
+    let error = snap(&point, &narrow).unwrap_err();
     assert!(error.to_string().contains("third"));
     assert_eq!(error.diagnostics[0].point_ids, vec!["third"]);
 }
@@ -3151,14 +1807,14 @@ fn snaps_long_edge_midpoints_even_when_a_nearer_node_search_finds_other_edges() 
     topology.nodes[2].lat = 53.00005;
     topology = with_edge_based_topology(topology);
     let graph = build_routing_graph(&topology, &test_metrics()).unwrap();
-    let point = crate::LabeledPoint {
-        id: "middle".into(),
-        lon: 6.05,
-        lat: 53.0,
-        z: None,
-    };
-    let candidates =
-        crate::snapping::snap_candidates(&topology, &graph, &point, 10.0, true).unwrap();
+    let candidates = crate::snapping::snap_candidates(
+        &topology,
+        &graph,
+        &point("middle", 6.05, 53.0),
+        10.0,
+        true,
+    )
+    .unwrap();
     assert_eq!(candidates[0].snapped_edge_id, Some(0));
     assert!((candidates[0].snapped_edge_fraction.unwrap() - 0.5).abs() < 1e-10);
     assert!(candidates[0].snap_distance_m < 1e-8);
@@ -3167,26 +1823,19 @@ fn snaps_long_edge_midpoints_even_when_a_nearer_node_search_finds_other_edges() 
 #[test]
 fn edge_spatial_index_keeps_all_projectable_edges_and_prunes_distant_leaves() {
     let mut topology = test_topology();
-    topology.nodes.clear();
-    let template = test_topology().edge(0);
-    let mut edges = Vec::new();
-    for index in 0..512_u32 {
-        let lon = 4.0 + f64::from(index) * 0.01;
-        for offset in [0.0, 0.009] {
-            topology.nodes.push(netweevil_core::TopologyNode {
-                node_id: netweevil_core::NodeId(topology.nodes.len() as u32),
-                lon: lon + offset,
-                lat: 53.0,
-                z: 0.0,
-            });
-        }
-        let mut edge = template;
-        edge.edge_id = EdgeId(index);
-        edge.from = netweevil_core::NodeId(index * 2);
-        edge.to = netweevil_core::NodeId(index * 2 + 1);
-        edges.push(edge);
-    }
-    topology.edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges);
+    topology.nodes = (0..512_u32)
+        .flat_map(|index| {
+            let lon = 4.0 + f64::from(index) * 0.01;
+            [
+                node(index * 2, lon, 53.0),
+                node(index * 2 + 1, lon + 0.009, 53.0),
+            ]
+        })
+        .collect();
+    let edges = (0..512)
+        .map(|index| edge(index, index * 2, index * 2 + 1, 10, 100))
+        .collect::<Vec<_>>();
+    topology.edge_layers = TopologyEdgeLayers::from_directed_edges(&edges);
     let mut costs = vec![1.0; edges.len()];
     costs[100] = f64::INFINITY;
     let index = crate::edge_spatial_index::EdgeSpatialIndex::build(&topology, &costs);
@@ -3245,55 +1894,31 @@ fn restricted_frontier_resumes_without_losing_destination_offsets_or_turn_histor
 
 #[test]
 fn restricted_many_to_many_matrix_matches_independent_routes() {
-    let topology = multi_edge_restricted_topology();
-    let (bundle, metrics) = build_test_cch(&topology, &restricted_metrics());
-    let engine =
-        PreparedRoutingEngine::new(Arc::new(topology), Arc::new(metrics), Some(bundle)).unwrap();
-    let point = |lon: f64| crate::LabeledPoint {
-        id: lon.to_string(),
-        lon,
-        lat: 53.0,
-        z: None,
-    };
+    let engine = cch_engine(multi_edge_restricted_topology(), &restricted_metrics());
+    let lat53 = |lon: f64| point(&lon.to_string(), lon, 53.0);
     let point_set = |points| PointSetDocument {
-        points,
-        snap: SnapOptions {
-            max_distance_m: 10.0,
-            ..Default::default()
-        },
-        connectivity: Default::default(),
-        fallback: Default::default(),
-        returns: ReturnConfig {
-            geometry: ReturnGeometry::Full,
-            ..Default::default()
-        },
-        alternatives: Default::default(),
-        temporal: Default::default(),
+        snap: snap_within(10.0),
+        returns: full_geometry(),
+        ..point_set(points)
     };
-    let origins = point_set(vec![point(6.0), point(6.0005)]);
+    let origins = point_set(vec![lat53(6.0), lat53(6.0005)]);
     // Five distinct destinations activate shared CCH spaces even with turn
     // sequences. The cheapest unrestricted route violates [0, 1, 2].
     let destinations = point_set(vec![
-        point(6.0022),
-        point(6.0024),
-        point(6.0026),
-        point(6.0028),
-        point(6.003),
+        lat53(6.0022),
+        lat53(6.0024),
+        lat53(6.0026),
+        lat53(6.0028),
+        lat53(6.003),
     ]);
     let matrix = engine.execute_matrix(&origins, &destinations).unwrap();
     for (origin_index, origin) in origins.points.iter().enumerate() {
         for (destination_index, destination) in destinations.points.iter().enumerate() {
             let route = engine
                 .execute_route(&RouteRequest {
-                    route_id: "independent".into(),
-                    origin: origin.clone(),
-                    destination: destination.clone(),
                     snap: origins.snap.clone(),
-                    connectivity: Default::default(),
-                    fallback: Default::default(),
                     returns: origins.returns.clone(),
-                    alternatives: Default::default(),
-                    temporal: Default::default(),
+                    ..route_request("independent", origin.clone(), destination.clone())
                 })
                 .unwrap();
             let cell = &matrix.cells[origin_index * destinations.points.len() + destination_index];
@@ -3313,52 +1938,43 @@ fn restricted_many_to_many_matrix_matches_independent_routes() {
 #[test]
 fn coincident_opposite_snap_directions_choose_legal_lower_cost_despite_nanometre_noise() {
     let mut topology = test_topology();
-    topology.edge_layers.routing[2].from = netweevil_core::NodeId(2);
-    topology.edge_layers.routing[2].to = netweevil_core::NodeId(1);
+    topology.edge_layers.routing[2].from = NodeId(2);
+    topology.edge_layers.routing[2].to = NodeId(1);
     topology.edge_layers.routing[2].length_m = 200;
     let topology = with_edge_based_topology(topology);
     let mut metrics = test_metrics();
-    metrics.edge_metrics[2].travel_time_s = Some(20.0);
-    metrics.edge_metrics[2].generalized_cost = Some(20.0);
-    let (bundle, compiled) = build_test_cch(&topology, &metrics);
+    set_edge_cost(&mut metrics, 2, Some(20.0));
     for acceleration in [false, true] {
         let graph = if acceleration {
-            crate::build_routing_graph_from_shared(
-                &topology,
-                Arc::new(compiled.clone()),
-                Some(bundle.clone()),
-            )
-            .unwrap()
+            cch_graph(&topology, &metrics).0
         } else {
             build_routing_graph(&topology, &metrics).unwrap()
         };
-        let point = |id: &str, lon| crate::LabeledPoint {
-            id: id.into(),
-            lon,
-            lat: 53.0,
-            z: None,
-        };
-        let origins =
-            crate::snapping::snap_candidates(&topology, &graph, &point("origin", 6.0), 0.1, true)
-                .unwrap();
+        let origins = crate::snapping::snap_candidates(
+            &topology,
+            &graph,
+            &point("origin", 6.0, 53.0),
+            0.1,
+            true,
+        )
+        .unwrap();
         let destinations = crate::snapping::snap_candidates(
             &topology,
             &graph,
-            &point("target", 6.0015),
+            &point("target", 6.0015, 53.0),
             0.1,
             false,
         )
         .unwrap();
-        let mut reverse = destinations
-            .iter()
-            .find(|point| point.snapped_edge_id == Some(2))
-            .unwrap()
-            .clone();
-        let mut forward = destinations
-            .iter()
-            .find(|point| point.snapped_edge_id == Some(1))
-            .unwrap()
-            .clone();
+        let candidate_on = |edge| {
+            destinations
+                .iter()
+                .find(|point| point.snapped_edge_id == Some(edge))
+                .unwrap()
+                .clone()
+        };
+        let mut reverse = candidate_on(2);
+        let mut forward = candidate_on(1);
         reverse.snap_distance_m = 0.2;
         forward.snap_distance_m = 0.200000006;
         forward.snapped_lon += 6e-14;

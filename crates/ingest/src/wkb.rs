@@ -193,18 +193,11 @@ impl<'a> Cursor<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_util::gpkg_linestring_z;
 
     #[test]
     fn parses_geopackage_linestring_z() {
-        let mut blob = b"GP\0\x01".to_vec();
-        blob.extend_from_slice(&4326_i32.to_le_bytes());
-        blob.push(1);
-        blob.extend_from_slice(&1002_u32.to_le_bytes());
-        blob.extend_from_slice(&2_u32.to_le_bytes());
-        for value in [114.0_f64, 22.0, 5.0, 114.1, 22.1, 9.0] {
-            blob.extend_from_slice(&value.to_le_bytes());
-        }
-
+        let blob = gpkg_linestring_z(&[[114.0, 22.0, 5.0], [114.1, 22.1, 9.0]]);
         let geometry = parse_geopackage_lines(&blob).expect("geometry");
         assert_eq!(geometry.srs_id, 4326);
         assert_eq!(

@@ -1,0 +1,291 @@
+use super::{
+    read_acceleration_bundle, read_compiled_profile_bundle, read_edge_name_bundle,
+    read_topology_bundle, write_acceleration_bundle, write_compiled_profile_bundle,
+    write_edge_name_bundle, write_topology_bundle,
+};
+use netweevil_core::{
+    ACCELERATION_BUNDLE_SCHEMA_VERSION, AccessMask, CCH_ALGORITHM, CCH_WEIGHT_INFINITY,
+    CCH_WEIGHT_OVERFLOW, COMPILED_ACCELERATION_SCHEMA_VERSION,
+    COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId, CompiledAcceleration,
+    CompiledEdgeMetric, CompiledProfileBundle, CompiledTurnCostConfig, DatasetAccelerationBundle,
+    DirectedEdge, EdgeId, EdgeNameBundle, FeatureAttributeColumn, FeatureAttributeColumnData,
+    FeatureAttributeDefinition, FeatureAttributeTable, FeatureAttributeType, MinuteInterval,
+    NodeId, RoadClass, SmoothnessClass, SurfaceClass, TOPOLOGY_BUNDLE_SCHEMA_VERSION,
+    TemporalEffect, TemporalRule, TemporalRuleSet, TopologyBundle, TopologyEdgeLayers,
+    TopologyNode, TravelMode, TurnRestriction, TurnRestrictionKind,
+};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Temp file path that is removed on drop.
+struct TempFile(PathBuf);
+
+impl TempFile {
+    fn new(tag: &str) -> Self {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        Self(std::env::temp_dir().join(format!(
+            "netweevil-persist-{tag}-{}-{}.bin",
+            std::process::id(),
+            COUNTER.fetch_add(1, Ordering::Relaxed)
+        )))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+#[test]
+fn round_trips_topology_bundle_binary() {
+    let forward = DirectedEdge {
+        edge_id: EdgeId(0),
+        from: NodeId(0),
+        to: NodeId(1),
+        source_way_id: 200,
+        length_m: 123,
+        ascent_m: 5.5,
+        descent_m: 0.0,
+        feature_row: 0,
+        source_direction: 1,
+        temporal_rule_id: Some(0),
+        duration_s: None,
+        road_class: RoadClass::Path,
+        surface: SurfaceClass::Gravel,
+        smoothness: SmoothnessClass::Bad,
+        access_mask: AccessMask::new(AccessMask::FOOT),
+        is_toll: false,
+        max_speed_kph: None,
+        lanes: None,
+        name_index: Some(0),
+        geometry_offset: 0,
+        geometry_len: 0,
+        flags: 0,
+    };
+    let reverse = DirectedEdge {
+        edge_id: EdgeId(1),
+        from: NodeId(1),
+        to: NodeId(0),
+        source_way_id: 201,
+        length_m: 456,
+        ascent_m: 0.0,
+        descent_m: 5.5,
+        feature_row: 1,
+        source_direction: -1,
+        temporal_rule_id: None,
+        duration_s: Some(45.0),
+        road_class: RoadClass::Residential,
+        surface: SurfaceClass::Paved,
+        smoothness: SmoothnessClass::Good,
+        access_mask: AccessMask::new(AccessMask::CAR | AccessMask::FOOT),
+        is_toll: true,
+        name_index: None,
+        flags: 1,
+        ..forward
+    };
+    let column = |name: &str, semantic_role: &str, value_type, data| FeatureAttributeColumn {
+        definition: FeatureAttributeDefinition {
+            name: name.to_string(),
+            semantic_role: Some(semantic_role.to_string()),
+            value_type,
+            domain: Default::default(),
+        },
+        data,
+    };
+    let bundle = TopologyBundle {
+        schema_version: TOPOLOGY_BUNDLE_SCHEMA_VERSION,
+        source_path: "dataset.osm.pbf".to_string(),
+        source_sha256: "abc123".to_string(),
+        nodes: vec![
+            TopologyNode {
+                node_id: NodeId(0),
+                lon: 6.5,
+                lat: 53.2,
+                z: 12.5,
+            },
+            TopologyNode {
+                node_id: NodeId(1),
+                lon: 6.6,
+                lat: 53.3,
+                z: 18.0,
+            },
+        ],
+        edge_layers: TopologyEdgeLayers::from_directed_edges(&[forward, reverse]),
+        turn_restrictions: vec![TurnRestriction {
+            relation_id: 300,
+            kind: TurnRestrictionKind::NoTurn,
+            edge_path: vec![EdgeId(0)],
+            mode_mask: AccessMask::new(AccessMask::FOOT),
+        }],
+        names: vec!["path name".to_string()],
+        edge_based_topology: Default::default(),
+        spatial_index: None,
+        node_component_ids: vec![0, 0],
+        edge_component_ids: vec![0, 0],
+        feature_attributes: FeatureAttributeTable {
+            row_count: 2,
+            strings: vec!["outdoor".to_string(), "paid".to_string()],
+            columns: vec![
+                column(
+                    "feature_id",
+                    "feature_id",
+                    FeatureAttributeType::Integer,
+                    FeatureAttributeColumnData::Integer(vec![Some(200), Some(201)]),
+                ),
+                column(
+                    "Location",
+                    "indoor_location",
+                    FeatureAttributeType::String,
+                    FeatureAttributeColumnData::String(vec![Some(0), Some(1)]),
+                ),
+            ],
+        },
+        temporal_rule_sets: vec![TemporalRuleSet {
+            rules: vec![TemporalRule {
+                day_mask: netweevil_core::EVERY_DAY,
+                intervals: vec![MinuteInterval {
+                    start_minute: 9 * 60,
+                    end_minute: 18 * 60,
+                }],
+                effect: TemporalEffect::OpenOnly,
+            }],
+        }],
+    };
+
+    let file = TempFile::new("topology");
+    write_topology_bundle(file.path(), &bundle).expect("bundle should serialize");
+    let read = read_topology_bundle(file.path()).expect("bundle should deserialize");
+
+    assert_eq!(read.schema_version, bundle.schema_version);
+    assert_eq!(read.source_path, bundle.source_path);
+    assert_eq!(read.source_sha256, bundle.source_sha256);
+    assert_eq!(read.nodes.len(), 2);
+    assert_eq!(read.nodes[0].z, 12.5);
+    assert_eq!(read.edge_count(), 2);
+    let (forward, reverse) = (read.routing_edge(0), read.routing_edge(1));
+    assert_eq!(forward.ascent_m, 5.5);
+    assert_eq!(reverse.descent_m, 5.5);
+    assert_eq!(forward.feature_row, 0);
+    assert_eq!(forward.source_direction, 1);
+    assert_eq!(forward.temporal_rule_id, Some(0));
+    assert_eq!(read.edge_profile(0).duration_s, None);
+    assert_eq!(read.edge_profile(1).duration_s, Some(45.0));
+    assert!(read.edge_profile(1).is_toll);
+    assert!(
+        read.feature_attributes
+            .value_matches(1, "indoor_location", "paid")
+    );
+    assert_eq!(read.temporal_rule_sets.len(), 1);
+    assert_eq!(read.turn_restrictions.len(), 1);
+    assert_eq!(read.names, bundle.names);
+}
+
+#[test]
+fn round_trips_edge_name_bundle_binary() {
+    let bundle = EdgeNameBundle {
+        names: vec!["main street".to_string(), "harbor road".to_string()],
+    };
+    let file = TempFile::new("edge-names");
+    write_edge_name_bundle(file.path(), &bundle).expect("bundle should serialize");
+    let read = read_edge_name_bundle(file.path()).expect("edge-name bundle should deserialize");
+    assert_eq!(read.names, bundle.names);
+}
+
+#[test]
+fn round_trips_acceleration_bundle_binary() {
+    let bundle = DatasetAccelerationBundle {
+        schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
+        source_topology_bundle_id: CacheBundleId::new("topology-test"),
+        algorithm: CCH_ALGORITHM.to_string(),
+        stats: Default::default(),
+        edge_order: vec![0, 2, 1],
+        edge_rank: vec![0, 2, 1],
+        upward_first_out: vec![0, 1, 1, 1],
+        upward_head: vec![2],
+        downward_first_out: vec![0, 0, 1, 1],
+        downward_head: vec![0],
+    };
+    let file = TempFile::new("acceleration");
+    write_acceleration_bundle(file.path(), &bundle).expect("bundle should serialize");
+    let read =
+        read_acceleration_bundle(file.path()).expect("acceleration bundle should deserialize");
+
+    assert_eq!(read.schema_version, bundle.schema_version);
+    assert_eq!(read.algorithm, bundle.algorithm);
+    assert_eq!(read.stats, bundle.stats);
+    assert_eq!(read.edge_order, bundle.edge_order);
+    assert_eq!(read.edge_rank, bundle.edge_rank);
+    assert_eq!(read.upward_first_out, bundle.upward_first_out);
+    assert_eq!(read.upward_head, bundle.upward_head);
+    assert_eq!(read.downward_first_out, bundle.downward_first_out);
+    assert_eq!(read.downward_head, bundle.downward_head);
+}
+
+#[test]
+fn round_trips_compiled_profile_bundle_with_turn_costs() {
+    let mut bundle = CompiledProfileBundle {
+        schema_version: COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
+        profile_id: "test".to_string(),
+        profile_hash: "abc".to_string(),
+        mode: TravelMode::Car,
+        turn_costs: CompiledTurnCostConfig {
+            left_penalty_s: 7.0,
+            right_penalty_s: 3.0,
+            uturn_penalty_s: 20.0,
+            traffic_signal_penalty_s: 4.0,
+            roundabout_entry_penalty_s: 2.0,
+            cost_time_weight: 1.5,
+        },
+        components: Vec::new(),
+        temporal: Default::default(),
+        source_topology_bundle_id: CacheBundleId::new("topology-test"),
+        acceleration: None,
+        edge_metrics: vec![CompiledEdgeMetric {
+            edge_id: EdgeId(0),
+            travel_time_s: Some(12.0),
+            generalized_cost: Some(18.0),
+        }],
+    };
+    let file = TempFile::new("compiled-profile");
+
+    write_compiled_profile_bundle(file.path(), &bundle).expect("bundle should serialize");
+    let read = read_compiled_profile_bundle(file.path()).expect("bundle should deserialize");
+    assert_eq!(read.turn_costs.left_penalty_s, 7.0);
+    assert_eq!(read.turn_costs.cost_time_weight, 1.5);
+    assert_eq!(read.edge_metrics.len(), 1);
+
+    // Fixed-point weights, including both sentinels, survive unchanged in
+    // every per-metric weight set.
+    let weights = vec![0, 12345, CCH_WEIGHT_OVERFLOW, CCH_WEIGHT_INFINITY];
+    bundle.acceleration = Some(CompiledAcceleration {
+        schema_version: COMPILED_ACCELERATION_SCHEMA_VERSION,
+        source_acceleration_bundle_id: CacheBundleId::new("acceleration-test"),
+        algorithm: CCH_ALGORITHM.into(),
+        upward_weight: weights.clone(),
+        downward_weight: weights.clone(),
+        time_upward_weight: weights.clone(),
+        time_downward_weight: weights.clone(),
+        distance_upward_weight: weights.clone(),
+        distance_downward_weight: weights.clone(),
+    });
+    write_compiled_profile_bundle(file.path(), &bundle).expect("fixed-point bundle serializes");
+    let acceleration = read_compiled_profile_bundle(file.path())
+        .expect("fixed-point bundle reads")
+        .acceleration
+        .expect("acceleration retained");
+    for actual in [
+        &acceleration.upward_weight,
+        &acceleration.downward_weight,
+        &acceleration.time_upward_weight,
+        &acceleration.time_downward_weight,
+        &acceleration.distance_upward_weight,
+        &acceleration.distance_downward_weight,
+    ] {
+        assert_eq!(actual, &weights);
+    }
+}
