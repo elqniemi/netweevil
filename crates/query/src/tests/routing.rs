@@ -1133,17 +1133,15 @@ fn recosted_graphs_keep_destination_only_entry_costs_bit_identical() {
         .expect("same adjacency");
     let fresh = crate::build_routing_graph(&topology, &slower).expect("graph builds");
     let bits = |costs: &[f64]| costs.iter().map(|cost| cost.to_bits()).collect::<Vec<_>>();
-    assert_eq!(bits(&recosted.transition_costs), bits(&fresh.transition_costs));
+    assert_eq!(
+        bits(&recosted.transition_costs),
+        bits(&fresh.transition_costs)
+    );
     assert_eq!(
         bits(&recosted.reverse_transition_costs),
         bits(&fresh.reverse_transition_costs)
     );
-    assert!(
-        fresh
-            .transition_costs
-            .iter()
-            .any(|cost| *cost >= 600.0)
-    );
+    assert!(fresh.transition_costs.iter().any(|cost| *cost >= 600.0));
 
     // A different entry penalty changes the transitions: no reuse.
     let mut penalized = slower;
