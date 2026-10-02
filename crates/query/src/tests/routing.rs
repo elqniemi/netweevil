@@ -1189,7 +1189,7 @@ fn recosted_graphs_keep_destination_only_entry_costs_bit_identical() {
     }
 
     let recosted = graph
-        .with_metrics(&topology, &base, Arc::new(slower.clone()))
+        .with_metrics(&topology, &base, Arc::new(slower.clone()), None)
         .expect("same adjacency");
     let fresh = crate::build_routing_graph(&topology, &slower).expect("graph builds");
     let bits = |costs: &[f64]| costs.iter().map(|cost| cost.to_bits()).collect::<Vec<_>>();
@@ -1208,7 +1208,7 @@ fn recosted_graphs_keep_destination_only_entry_costs_bit_identical() {
     penalized.turn_costs.destination_only_penalty_s = 300.0;
     assert!(
         graph
-            .with_metrics(&topology, &base, Arc::new(penalized))
+            .with_metrics(&topology, &base, Arc::new(penalized), None)
             .is_none()
     );
 }
