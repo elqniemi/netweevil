@@ -1,19 +1,46 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use netweevil_core::{
-    ConnectedComponentKind, ConnectedComponentsMeta, DirectedEdge, EDGE_FLAG_ROUNDABOUT,
-    EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId, EdgeNameBundle, NodeId,
-    TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle, TopologyBundleMeta, TopologyNode,
+    AdminBoundarySource, ConnectedComponentKind, ConnectedComponentsMeta, DemImportSummary,
+    DirectedEdge, EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId,
+    EdgeNameBundle, NodeId, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle, TopologyBundleMeta,
+    TopologyElevation, TopologyNode,
 };
 use std::collections::BTreeMap;
 
 use rustc_hash::FxHashMap;
 
-use crate::import::{DatasetImportProgress, DatasetImportStage, PercentReporter, emit_progress};
+use crate::admin::{AdminIndex, read_boundaries_file};
+use crate::dem::{DemRaster, LonLatBounds};
+use crate::elevation::{DemSampling, SegmentElevation, assign_node_elevations, segment_elevation};
+use crate::import::{
+    DatasetImportProgress, DatasetImportStage, DemImportOptions, PercentReporter, emit_progress,
+};
 use crate::restrictions::build_turn_restrictions;
 use crate::scan::{PendingWay, ScanOutput, scan_osm};
+use crate::timezones::assign_timezones;
 use netweevil_core::SourceFormat;
+
+/// Optional inputs that enrich nodes and edges beyond the network source.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EnrichmentInputs {
+    /// Boundaries file (GeoJSON or OSM PBF) replacing the extract's admin
+    /// relations, with its SHA-256.
+    pub(crate) admin_boundaries: Option<(PathBuf, String)>,
+    /// DEM to sample, with its SHA-256.
+    pub(crate) dem: Option<(DemImportOptions, String)>,
+}
+
+/// Topology plus what the import needs to persist alongside it.
+pub(crate) struct BuiltTopology {
+    pub(crate) bundle: TopologyBundle,
+    pub(crate) names: EdgeNameBundle,
+    pub(crate) meta: TopologyBundleMeta,
+    /// The cropped DEM, for the runtime elevation raster.
+    pub(crate) dem: Option<DemRaster>,
+    pub(crate) warnings: Vec<String>,
+}
 
 pub(crate) fn build_topology_bundle(
     source_paths: &[PathBuf],
@@ -21,13 +48,19 @@ pub(crate) fn build_topology_bundle(
     source_sha256: &str,
     source_format: SourceFormat,
     mapping: Option<&crate::GeoPackageMapping>,
+    enrichment: &EnrichmentInputs,
     progress: &mut impl FnMut(DatasetImportProgress),
-) -> Result<(TopologyBundle, EdgeNameBundle, TopologyBundleMeta)> {
+) -> Result<BuiltTopology> {
     let source_path = source_paths
         .first()
         .ok_or_else(|| anyhow::anyhow!("dataset import requires at least one source"))?;
     let scan = match source_format {
-        SourceFormat::OsmPbf => scan_osm(source_path, source_size_bytes, progress)?,
+        SourceFormat::OsmPbf => scan_osm(
+            source_path,
+            source_size_bytes,
+            enrichment.admin_boundaries.is_none(),
+            progress,
+        )?,
         SourceFormat::OvertureParquet => {
             crate::overture::scan_overture(source_path, source_size_bytes, progress)?
         }
@@ -37,31 +70,174 @@ pub(crate) fn build_topology_bundle(
             progress,
         )?,
     };
-    let (mut bundle, names, meta) =
-        build_topology_from_scan(source_path, source_sha256, scan, progress)?;
+    let mut warnings = Vec::new();
+    let bounds = node_bounds(&scan);
+    let dem = match &enrichment.dem {
+        None => None,
+        Some(_) if source_format == SourceFormat::GeoPackage => bail!(
+            "DEM sampling applies to OSM and Overture sources; GeoPackage imports keep their surveyed heights"
+        ),
+        Some((options, _)) => {
+            emit_progress(
+                progress,
+                DatasetImportStage::SampleElevation,
+                Some(0.0),
+                format!("Reading DEM {}", options.path.display()),
+            );
+            let bounds =
+                bounds.ok_or_else(|| anyhow::anyhow!("the source has no nodes to sample"))?;
+            Some(DemRaster::read(
+                &options.path,
+                options.crs.as_deref(),
+                Some(bounds),
+            )?)
+        }
+    };
+    let (admin_source, boundaries, incomplete) = match &enrichment.admin_boundaries {
+        Some((path, sha256)) => {
+            let (boundaries, incomplete) = read_boundaries_file(path)?;
+            (
+                AdminBoundarySource::File {
+                    path: path.display().to_string(),
+                    sha256: sha256.clone(),
+                },
+                boundaries,
+                incomplete,
+            )
+        }
+        None => (
+            AdminBoundarySource::SourceExtract,
+            scan.admin_boundaries.clone(),
+            scan.incomplete_admin_relations.clone(),
+        ),
+    };
+    if let Some(first) = incomplete.first() {
+        warnings.push(format!(
+            "{} admin boundary relation(s) are incomplete in the boundaries source and were skipped (for example relation {first}); pass --admin-boundaries with complete boundaries",
+            incomplete.len(),
+        ));
+    }
+
+    let sampling = dem.as_ref().map(|dem| {
+        let reference_lat = bounds.map_or(0.0, |bounds| (bounds.min_lat + bounds.max_lat) / 2.0);
+        DemSampling::new(dem, reference_lat)
+    });
+    let (mut bundle, names, meta) = build_topology(
+        source_path,
+        source_sha256,
+        scan,
+        sampling.as_ref(),
+        progress,
+    )?;
+    if let (Some(sampling), Some((options, sha256))) = (&sampling, &enrichment.dem)
+        && let Some(summary) = bundle.elevation.dem.as_mut()
+    {
+        summary.source =
+            sampling
+                .dem
+                .source_info(&options.path, sha256, options.vertical_datum.clone());
+    }
+
+    emit_progress(
+        progress,
+        DatasetImportStage::AssignRegions,
+        None,
+        format!("Assigning timezones to {} nodes", bundle.nodes.len()),
+    );
+    let (timezones, node_timezone) = assign_timezones(&bundle.nodes);
+    bundle.regions.timezones = timezones;
+    bundle.regions.node_timezone = node_timezone;
+    let index = AdminIndex::new(boundaries);
+    if !index.is_empty() {
+        emit_progress(
+            progress,
+            DatasetImportStage::AssignRegions,
+            None,
+            format!(
+                "Assigning administrative areas to {} nodes",
+                bundle.nodes.len()
+            ),
+        );
+        let (areas, node_areas) = index.assign(&bundle.nodes);
+        bundle.regions.admin_source = Some(admin_source);
+        bundle.regions.admin_areas = areas;
+        bundle.regions.node_admin_area = node_areas;
+    } else if enrichment.admin_boundaries.is_some() {
+        warnings
+            .push("the boundaries file contains no usable admin_level 2 or 4 areas".to_string());
+    }
+
     bundle.source_path = source_paths
         .iter()
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>()
         .join(";");
-    Ok((bundle, names, meta))
+    Ok(BuiltTopology {
+        bundle,
+        names,
+        meta,
+        dem,
+        warnings,
+    })
 }
 
+fn node_bounds(scan: &ScanOutput) -> Option<LonLatBounds> {
+    let mut coords = scan.node_coords.values();
+    let &(lon, lat, _) = coords.next()?;
+    let mut bounds = LonLatBounds {
+        min_lon: lon,
+        min_lat: lat,
+        max_lon: lon,
+        max_lat: lat,
+    };
+    for &(lon, lat, _) in coords {
+        bounds.min_lon = bounds.min_lon.min(lon);
+        bounds.min_lat = bounds.min_lat.min(lat);
+        bounds.max_lon = bounds.max_lon.max(lon);
+        bounds.max_lat = bounds.max_lat.max(lat);
+    }
+    Some(bounds)
+}
+
+/// Builds a topology from a scan without DEM sampling.
 pub(crate) fn build_topology_from_scan(
     source_path: &Path,
     source_sha256: &str,
     scan: ScanOutput,
     progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<(TopologyBundle, EdgeNameBundle, TopologyBundleMeta)> {
+    build_topology(source_path, source_sha256, scan, None, progress)
+}
+
+/// Builds the topology; with `dem`, node heights come from the DEM and every
+/// edge carries a densified ascent/descent and its steepest grades.
+pub(crate) fn build_topology(
+    source_path: &Path,
+    source_sha256: &str,
+    scan: ScanOutput,
+    dem: Option<&DemSampling<'_>>,
+    progress: &mut impl FnMut(DatasetImportProgress),
+) -> Result<(TopologyBundle, EdgeNameBundle, TopologyBundleMeta)> {
     let ScanOutput {
         pending_ways,
         restriction_candidates,
-        node_coords,
+        mut node_coords,
         traffic_signal_nodes,
         counts,
         feature_attributes,
         temporal_rule_sets,
+        structure_ways,
+        ..
     } = scan;
+    let node_elevation_stats = dem.map(|sampling| {
+        emit_progress(
+            progress,
+            DatasetImportStage::SampleElevation,
+            None,
+            format!("Sampling DEM heights for {} nodes", node_coords.len()),
+        );
+        assign_node_elevations(sampling, &mut node_coords, &pending_ways, &structure_ways)
+    });
     let (nodes, node_lookup) = build_nodes(&node_coords);
     let name_lookup = build_name_lookup(&pending_ways);
 
@@ -79,6 +255,7 @@ pub(crate) fn build_topology_from_scan(
 
     let mut edges = Vec::new();
     let mut edge_highways = Vec::new();
+    let mut edge_grades = Vec::new();
     let mut skipped_way_count = 0_u64;
     let mut build_reporter = PercentReporter::starting_at_zero();
     for (way_index, way) in pending_ways.iter().enumerate() {
@@ -105,8 +282,23 @@ pub(crate) fn build_topology_from_scan(
 
             let length_m =
                 distance_3d_meters(from_lon, from_lat, from_z, to_lon, to_lat, to_z).round() as u32;
-            let (ascent_m, descent_m) = ascent_descent_meters(from_z, to_z);
-            segments.push((from_id, to_id, from, to, length_m, ascent_m, descent_m));
+            let profile = match dem {
+                Some(sampling) => segment_elevation(
+                    sampling,
+                    (from_lon, from_lat, from_z),
+                    (to_lon, to_lat, to_z),
+                    structure_ways.contains(&way.osm_way_id),
+                ),
+                None => {
+                    let (ascent_m, descent_m) = ascent_descent_meters(from_z, to_z);
+                    SegmentElevation {
+                        ascent_m,
+                        descent_m,
+                        ..SegmentElevation::default()
+                    }
+                }
+            };
+            segments.push((from_id, to_id, from, to, length_m, profile));
         }
 
         if segments.is_empty() {
@@ -116,10 +308,15 @@ pub(crate) fn build_topology_from_scan(
 
         let total_length_m = segments
             .iter()
-            .map(|(_, _, _, _, length_m, _, _)| *length_m as u64)
+            .map(|(_, _, _, _, length_m, _)| *length_m as u64)
             .sum();
         let segment_count = segments.len() as u32;
-        for (from_id, to_id, from_osm_id, to_osm_id, length_m, ascent_m, descent_m) in segments {
+        for (from_id, to_id, from_osm_id, to_osm_id, length_m, profile) in segments {
+            let SegmentElevation {
+                ascent_m,
+                descent_m,
+                ..
+            } = profile;
             let duration_s =
                 apportioned_duration_s(way.duration_s, length_m, total_length_m, segment_count);
             let mut forward_flags = 0_u32;
@@ -161,6 +358,7 @@ pub(crate) fn build_topology_from_scan(
                     flags: forward_flags | way.forward_extra_flags,
                 });
                 edge_highways.push(way.highway);
+                edge_grades.push(profile);
             }
 
             if way.reverse_access_mask.0 != 0 {
@@ -189,6 +387,7 @@ pub(crate) fn build_topology_from_scan(
                     flags: reverse_flags | way.reverse_extra_flags,
                 });
                 edge_highways.push(way.highway);
+                edge_grades.push(profile.reversed());
             }
         }
 
@@ -257,6 +456,27 @@ pub(crate) fn build_topology_from_scan(
         edge_component_ids: components.edge_component_ids.clone(),
         feature_attributes,
         temporal_rule_sets,
+        regions: Default::default(),
+        elevation: match (dem, node_elevation_stats) {
+            (Some(sampling), Some(stats)) => TopologyElevation {
+                dem: Some(DemImportSummary {
+                    source: sampling.dem.source_info(source_path, "", None),
+                    sample_spacing_m: sampling.spacing_m,
+                    sampled_node_count: stats.sampled,
+                    missing_node_count: stats.missing,
+                    structure_node_count: stats.structure,
+                }),
+                edge_max_uphill_permille: edge_grades
+                    .iter()
+                    .map(|grade| grade.max_uphill_permille)
+                    .collect(),
+                edge_max_downhill_permille: edge_grades
+                    .iter()
+                    .map(|grade| grade.max_downhill_permille)
+                    .collect(),
+            },
+            _ => TopologyElevation::default(),
+        },
     };
     let meta = TopologyBundleMeta {
         node_count: bundle.nodes.len() as u64,

@@ -21,6 +21,7 @@ fn builds_directional_three_dimensional_edge_quantities() {
         },
         feature_attributes: Default::default(),
         temporal_rule_sets: Vec::new(),
+        ..ScanOutput::default()
     };
     let (bundle, _, _) =
         build_topology_from_scan(Path::new("station.gpkg"), "abc", scan, &mut |_| {})

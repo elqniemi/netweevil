@@ -42,6 +42,7 @@ memmap2 = "0.9.8"
 mime_guess = "2.0.5"
 osmpbfreader = "0.17.0"
 parquet = { version = "56.2.0", default-features = false, features = ["arrow"] }
+proj4rs = { version = "0.2.0", default-features = false }
 rayon = "1.10.0"
 rustc-hash = "2.1.1"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -49,6 +50,7 @@ serde_json = "1.0.145"
 serde_yaml = "0.9.34"
 sha2 = "0.10.9"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
+tiff = { version = "0.11.3", default-features = false, features = ["deflate", "lzw"] }
 time = { version = "0.3.44", features = ["formatting", "parsing", "serde"] }
 tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
 toml = "0.8.23"
@@ -56,6 +58,7 @@ tower-http = { version = "0.6.6", features = ["cors", "trace", "fs"] }
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tzf-rs = { version = "2.1.2", default-features = false, features = ["bundled"] }
 ureq = { version = "3.4.0", default-features = false, features = ["json"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 zip = { version = "2.2.2", default-features = false, features = ["deflate"] }

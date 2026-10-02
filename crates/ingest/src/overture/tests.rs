@@ -90,6 +90,18 @@ fn attribute_schema() -> Schema {
             true,
         ),
         Field::new(
+            "road_flags",
+            list_of(vec![
+                Field::new(
+                    "values",
+                    DataType::List(Arc::new(Field::new("item", DataType::Utf8, true))),
+                    true,
+                ),
+                Field::new("between", between.clone(), true),
+            ]),
+            true,
+        ),
+        Field::new(
             "prohibited_transitions",
             list_of(vec![
                 Field::new(
@@ -288,8 +300,7 @@ fn imports_overture_fixture_end_to_end() {
         crate::DatasetImportOptions {
             name: "overture-test".to_string(),
             source: fixture.display().to_string(),
-            format: None,
-            mapping: None,
+            ..Default::default()
         },
         |_| {},
     )
@@ -312,6 +323,132 @@ fn imports_overture_fixture_end_to_end() {
         netweevil_core::TOPOLOGY_BUNDLE_SCHEMA_VERSION
     );
     assert_eq!(bundle.edge_profile(0).max_speed_kph, Some(60.0));
+    assert_eq!(bundle.regions.timezones, ["Europe/Amsterdam"]);
+    assert_eq!(bundle.regions.node_timezone, vec![0, 0]);
+    assert!(!bundle.regions.has_admin_areas());
+    assert!(manifest.elevation_bundle.is_none());
+}
+
+#[test]
+fn imports_with_a_dem_and_admin_boundaries() {
+    let dir = TempDir::new("overture-enriched");
+    let fixture = dir.join("segments.parquet");
+    let mut bridge = road("seg-b", &[("c2", 0.0), ("c3", 1.0)]);
+    bridge["road_flags"] = json!([{"values": ["is_bridge"]}]);
+    write_fixture(
+        &fixture,
+        &[
+            (
+                road("seg-a", &[("c1", 0.0), ("c2", 1.0)]),
+                vec![(6.560, 53.20), (6.562, 53.20)],
+            ),
+            (bridge, vec![(6.562, 53.20), (6.564, 53.20), (6.566, 53.20)]),
+            (
+                road("seg-c", &[("c3", 0.0), ("c4", 1.0)]),
+                vec![(6.566, 53.20), (6.568, 53.20)],
+            ),
+        ],
+    );
+    // 0.001 degree cells from 6.55 E; each holds its column index, except a
+    // 0 m river in column 14 under the middle of the bridge.
+    let dem = dir.join("dem.asc");
+    let mut grid =
+        "ncols 30\nnrows 20\nxllcorner 6.55\nyllcorner 53.19\ncellsize 0.001\n".to_string();
+    for _ in 0..20 {
+        for column in 0..30 {
+            grid.push_str(&format!(" {}", if column == 14 { 0 } else { column }));
+        }
+        grid.push('\n');
+    }
+    std::fs::write(&dem, grid).unwrap();
+    // A state west of 6.565 E without its country boundary, and a country east of it.
+    let boundaries = dir.join("boundaries.geojson");
+    std::fs::write(
+        &boundaries,
+        r#"{"type":"FeatureCollection","features":[
+          {"type":"Feature","properties":{"ISO3166-2":"NL-GR","name":"Groningen"},
+           "geometry":{"type":"Polygon","coordinates":[[[6.5,53.1],[6.565,53.1],[6.565,53.3],[6.5,53.3],[6.5,53.1]]]}},
+          {"type":"Feature","properties":{"admin_level":"2","ISO3166-1":"DE","name":"Deutschland"},
+           "geometry":{"type":"Polygon","coordinates":[[[6.565,53.1],[6.6,53.1],[6.6,53.3],[6.565,53.3],[6.565,53.1]]]}}
+        ]}"#,
+    )
+    .unwrap();
+
+    let paths =
+        netweevil_persist::WorkspacePaths::discover(dir.path()).expect("workspace discovers");
+    let options = |name: &str| crate::DatasetImportOptions {
+        name: name.to_string(),
+        source: fixture.display().to_string(),
+        ..Default::default()
+    };
+    let plain = crate::import_dataset(&paths, std::slice::from_ref(&fixture), options("t"), |_| {})
+        .expect("plain import");
+    let manifest = crate::import_dataset(
+        &paths,
+        std::slice::from_ref(&fixture),
+        crate::DatasetImportOptions {
+            admin_boundaries: Some(boundaries),
+            dem: Some(crate::DemImportOptions {
+                path: dem,
+                crs: None,
+                vertical_datum: Some("NAP".to_string()),
+            }),
+            ..options("t")
+        },
+        |_| {},
+    )
+    .expect("enriched import");
+    assert_ne!(
+        plain.topology_bundle.unwrap().bundle_id,
+        manifest.topology_bundle.as_ref().unwrap().bundle_id,
+        "enrichment inputs change the bundle id"
+    );
+
+    let bundle = netweevil_persist::read_topology_bundle(&manifest.topology_bundle.unwrap().path)
+        .expect("bundle reads back");
+    let node_at = |lon: f64| {
+        bundle
+            .nodes
+            .iter()
+            .position(|node| (node.lon - lon).abs() < 1e-9)
+            .unwrap()
+    };
+    let z = |lon: f64| bundle.nodes[node_at(lon)].z;
+    assert_eq!((z(6.562), z(6.566)), (11.5, 15.5));
+    // The bridge's middle vertex spans the river instead of dipping into it.
+    assert_eq!(z(6.564), 13.5);
+    let summary = bundle.elevation.dem.as_ref().expect("DEM summary");
+    assert_eq!(summary.structure_node_count, 1);
+    assert_eq!(summary.source.vertical_datum.as_deref(), Some("NAP"));
+    assert_eq!(
+        bundle.elevation.edge_max_uphill_permille.len(),
+        bundle.edge_count()
+    );
+    let uphill_edge = (0..bundle.edge_count())
+        .find(|&edge| {
+            let routing = bundle.routing_edge(edge);
+            routing.from.0 as usize == node_at(6.560) && routing.to.0 as usize == node_at(6.562)
+        })
+        .unwrap();
+    assert_eq!(bundle.routing_edge(uphill_edge).ascent_m, 2.0);
+    assert!(bundle.elevation.edge_max_grades(uphill_edge).unwrap().0 > 0.0);
+
+    let west = bundle.regions.node_admin_area(node_at(6.564)).unwrap();
+    assert_eq!(
+        (west.country_code.as_str(), west.state_code.as_deref()),
+        ("NL", Some("NL-GR"))
+    );
+    let east = bundle.regions.node_admin_area(node_at(6.566)).unwrap();
+    assert_eq!(east.country_name.as_deref(), Some("Deutschland"));
+    let crossing = (0..bundle.edge_count())
+        .filter(|&edge| bundle.edge_crosses_border(edge))
+        .count();
+    assert_eq!(crossing, 2, "both directions of the bridge's eastern half");
+
+    let raster = manifest.elevation_bundle.expect("elevation raster written");
+    let sampler = crate::ElevationSampler::open(std::path::Path::new(&raster.path)).unwrap();
+    let height = sampler.sample(6.5675, 53.2005).unwrap().unwrap();
+    assert!((height - 17.0).abs() < 1e-6, "{height}");
 }
 
 #[test]

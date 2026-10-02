@@ -25,8 +25,9 @@ use memmap2::Mmap;
 use netweevil_core::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId,
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
-    CompiledTemporalProfile, CompiledTurnCostConfig, DatasetAccelerationBundle, EdgeBasedTopology,
-    EdgeId, EdgePresentation, EdgeProfileAttributes, FeatureAttributeColumn,
+    CompiledTemporalProfile, CompiledTurnCostConfig, DatasetAccelerationBundle,
+    ELEVATION_RASTER_SCHEMA_VERSION, EdgeBasedTopology, EdgeId, EdgePresentation,
+    EdgeProfileAttributes, ElevationRasterHeader, FeatureAttributeColumn,
     FeatureAttributeColumnData, FeatureAttributeDefinition, FeatureAttributeTable, NodeId,
     NodeSpatialIndex, RoutingEdge, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle,
     TopologyEdgeLayers, TopologyNode, TravelMode,
@@ -241,29 +242,36 @@ struct SectionReader<'a> {
     sections: std::vec::IntoIter<Cow<'a, [u8]>>,
 }
 
+/// Splits a bundle into `(deflated, payload)` sections without inflating
+/// them.
+fn frame_sections<'a>(bytes: &'a [u8], path: &Path) -> Result<Vec<(bool, &'a [u8])>> {
+    if bytes.len() < MAGIC_LEN || &bytes[..MAGIC_LEN] != CURRENT_MAGIC {
+        return Err(unsupported_format_error(path));
+    }
+    let mut framed = Vec::new();
+    let mut offset = MAGIC_LEN;
+    while offset < bytes.len() {
+        let header_end = offset + 8;
+        if header_end > bytes.len() {
+            bail!("truncated bundle: missing section length");
+        }
+        let header = u64::from_le_bytes(bytes[offset..header_end].try_into().unwrap());
+        let end = usize::try_from(header & !DEFLATED)
+            .ok()
+            .and_then(|len| header_end.checked_add(len))
+            .filter(|end| *end <= bytes.len());
+        let Some(end) = end else {
+            bail!("truncated bundle: section extends past end of file");
+        };
+        framed.push((header & DEFLATED != 0, &bytes[header_end..end]));
+        offset = end;
+    }
+    Ok(framed)
+}
+
 impl<'a> SectionReader<'a> {
     fn new(bytes: &'a [u8], path: &Path) -> Result<Self> {
-        if bytes.len() < MAGIC_LEN || &bytes[..MAGIC_LEN] != CURRENT_MAGIC {
-            return Err(unsupported_format_error(path));
-        }
-        let mut framed = Vec::new();
-        let mut offset = MAGIC_LEN;
-        while offset < bytes.len() {
-            let header_end = offset + 8;
-            if header_end > bytes.len() {
-                bail!("truncated bundle: missing section length");
-            }
-            let header = u64::from_le_bytes(bytes[offset..header_end].try_into().unwrap());
-            let end = usize::try_from(header & !DEFLATED)
-                .ok()
-                .and_then(|len| header_end.checked_add(len))
-                .filter(|end| *end <= bytes.len());
-            let Some(end) = end else {
-                bail!("truncated bundle: section extends past end of file");
-            };
-            framed.push((header & DEFLATED != 0, &bytes[header_end..end]));
-            offset = end;
-        }
+        let framed = frame_sections(bytes, path)?;
         let sections = framed
             .into_par_iter()
             .map(|(deflated, payload)| {
@@ -680,6 +688,10 @@ struct TopologyHeader {
     names: Vec<String>,
     node_count: u64,
     edge_count: u64,
+    admin_source: Option<netweevil_core::AdminBoundarySource>,
+    admin_areas: Vec<netweevil_core::AdminArea>,
+    timezones: Vec<String>,
+    dem: Option<netweevil_core::DemImportSummary>,
 }
 
 /// Column kind of one feature-attribute column; the data follows in
@@ -873,6 +885,10 @@ fn encode_topology(writer: &mut SectionWriter, bundle: &TopologyBundle) -> Resul
         names: bundle.names.clone(),
         node_count: bundle.nodes.len() as u64,
         edge_count: edge_count as u64,
+        admin_source: bundle.regions.admin_source.clone(),
+        admin_areas: bundle.regions.admin_areas.clone(),
+        timezones: bundle.regions.timezones.clone(),
+        dem: bundle.elevation.dem.clone(),
     })?;
 
     // Nodes: ids are normally their index, coordinates OSM decimicro
@@ -965,7 +981,48 @@ fn encode_topology(writer: &mut SectionWriter, bundle: &TopologyBundle) -> Resul
         writer.write_u32s(&bundle.edge_component_ids)?;
     }
     write_feature_attributes(writer, &bundle.feature_attributes)?;
-    writer.write_bincode(&bundle.temporal_rule_sets)
+    writer.write_bincode(&bundle.temporal_rule_sets)?;
+
+    // Region and elevation columns are empty when the layer was not
+    // imported; nodes in one area or zone collapse to a constant.
+    let regions = &bundle.regions;
+    let elevation = &bundle.elevation;
+    for (name, len, expected) in [
+        (
+            "node admin areas",
+            regions.node_admin_area.len(),
+            bundle.nodes.len(),
+        ),
+        (
+            "node timezones",
+            regions.node_timezone.len(),
+            bundle.nodes.len(),
+        ),
+        (
+            "edge uphill grades",
+            elevation.edge_max_uphill_permille.len(),
+            edge_count,
+        ),
+        (
+            "edge downhill grades",
+            elevation.edge_max_downhill_permille.len(),
+            edge_count,
+        ),
+    ] {
+        if len != 0 {
+            ensure_len(name, len, expected)?;
+        }
+    }
+    writer.write_u32s(&regions.node_admin_area)?;
+    writer.write_u32s(&regions.node_timezone)?;
+    let widen = |values: &[u16]| {
+        values
+            .iter()
+            .map(|value| u32::from(*value))
+            .collect::<Vec<_>>()
+    };
+    writer.write_u32s(&widen(&elevation.edge_max_uphill_permille))?;
+    writer.write_u32s(&widen(&elevation.edge_max_downhill_permille))
 }
 
 pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<TopologyBundle> {
@@ -1134,16 +1191,43 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
             };
             let feature_attributes = read_feature_attributes(&mut reader)?;
             let temporal_rule_sets = reader.read_bincode()?;
+            let node_admin_area = reader.read_u32s()?;
+            let node_timezone = reader.read_u32s()?;
+            let narrow = |values: Vec<u32>| -> Result<Vec<u16>> {
+                values
+                    .into_iter()
+                    .map(|value| u16::try_from(value).context("edge grade out of range"))
+                    .collect()
+            };
+            let uphill = narrow(reader.read_u32s()?)?;
+            let downhill = narrow(reader.read_u32s()?)?;
+            for (name, len, expected) in [
+                ("node admin areas", node_admin_area.len(), node_count),
+                ("node timezones", node_timezone.len(), node_count),
+                ("edge uphill grades", uphill.len(), edge_count),
+                ("edge downhill grades", downhill.len(), edge_count),
+            ] {
+                if len != 0 {
+                    ensure_len(name, len, expected)?;
+                }
+            }
             Ok((
                 node_component_ids,
                 edge_component_ids,
                 feature_attributes,
                 temporal_rule_sets,
+                (node_admin_area, node_timezone, uphill, downhill),
             ))
         },
     );
     let edge_based_topology = edge_based_topology?;
-    let (node_component_ids, edge_component_ids, feature_attributes, temporal_rule_sets) = rest?;
+    let (
+        node_component_ids,
+        edge_component_ids,
+        feature_attributes,
+        temporal_rule_sets,
+        (node_admin_area, node_timezone, uphill, downhill),
+    ) = rest?;
 
     Ok(TopologyBundle {
         schema_version: header.schema_version,
@@ -1163,7 +1247,121 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
         edge_component_ids,
         feature_attributes,
         temporal_rule_sets,
+        regions: netweevil_core::TopologyRegions {
+            admin_source: header.admin_source,
+            admin_areas: header.admin_areas,
+            node_admin_area,
+            timezones: header.timezones,
+            node_timezone,
+        },
+        elevation: netweevil_core::TopologyElevation {
+            dem: header.dem,
+            edge_max_uphill_permille: uphill,
+            edge_max_downhill_permille: downhill,
+        },
     })
+}
+
+// --- Elevation raster bundle ----------------------------------------------
+//
+// A cropped DEM kept for runtime height queries. Tiles are independent
+// sections (whole decimetres, `NaN` nodata) so a reader inflates and decodes
+// only the tiles a query touches.
+
+pub(crate) fn write_elevation_raster_sectioned(
+    path: &Path,
+    header: &ElevationRasterHeader,
+    tiles: &[Vec<f64>],
+) -> Result<()> {
+    if tiles.len() != header.tile_count() {
+        bail!(
+            "elevation raster has {} tiles, expected {}",
+            tiles.len(),
+            header.tile_count()
+        );
+    }
+    let mut writer = SectionWriter::new();
+    writer.write_bincode(&"elevation")?;
+    writer.write_bincode(header)?;
+    for tile in tiles {
+        writer.write_f64s(tile)?;
+    }
+    writer.finish(path)
+}
+
+/// Lazily decoded elevation raster bundle backed by a memory map.
+pub struct ElevationRasterReader {
+    mmap: Mmap,
+    header: ElevationRasterHeader,
+    /// Byte range and deflate flag of each tile section within `mmap`.
+    tiles: Vec<(bool, std::ops::Range<usize>)>,
+}
+
+impl ElevationRasterReader {
+    pub fn open(path: &Path) -> Result<Self> {
+        let mmap = map_file(path)?;
+        let base = mmap.as_ptr() as usize;
+        let framed = frame_sections(&mmap, path)?;
+        let mut sections = framed.into_iter();
+        let mut next = |what: &str| {
+            sections
+                .next()
+                .with_context(|| format!("elevation raster is missing its {what}"))
+        };
+        let (deflated, tag) = next("tag")?;
+        if deflated || bincode::deserialize::<String>(tag).ok().as_deref() != Some("elevation") {
+            bail!("{} is not an elevation raster bundle", path.display());
+        }
+        let (deflated, header) = next("header")?;
+        if deflated {
+            bail!("elevation raster header must not be compressed");
+        }
+        let header: ElevationRasterHeader =
+            bincode::deserialize(header).context("parsing elevation raster header")?;
+        if header.schema_version != ELEVATION_RASTER_SCHEMA_VERSION {
+            return Err(unsupported_format_error(path));
+        }
+        let tiles = sections
+            .map(|(deflated, payload)| {
+                let start = payload.as_ptr() as usize - base;
+                (deflated, start..start + payload.len())
+            })
+            .collect::<Vec<_>>();
+        if tiles.len() != header.tile_count() {
+            bail!(
+                "elevation raster has {} tiles, expected {}",
+                tiles.len(),
+                header.tile_count()
+            );
+        }
+        Ok(Self {
+            mmap,
+            header,
+            tiles,
+        })
+    }
+
+    pub fn header(&self) -> &ElevationRasterHeader {
+        &self.header
+    }
+
+    /// Row-major heights of one tile (`NaN` for nodata); see
+    /// [`ElevationRasterHeader::tile_dimensions`].
+    pub fn tile(&self, tile_index: usize) -> Result<Vec<f32>> {
+        let (deflated, range) = self
+            .tiles
+            .get(tile_index)
+            .with_context(|| format!("elevation tile {tile_index} out of range"))?;
+        let payload = &self.mmap[range.clone()];
+        let values = if *deflated {
+            codec::decode_f64s(&inflate_chunked(payload)?)?
+        } else {
+            codec::decode_f64s(payload)?
+        };
+        let (columns, rows) = self.header.tile_dimensions(tile_index);
+        ensure_len("elevation tile", values.len(), columns * rows)?;
+        Ok(values.into_iter().map(|value| value as f32).collect())
+    }
 }
 
 #[cfg(test)]

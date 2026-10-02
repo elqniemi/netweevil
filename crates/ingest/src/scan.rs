@@ -13,6 +13,10 @@ use netweevil_core::{
 use osmpbfreader::{OsmObj, OsmPbfReader};
 use rustc_hash::{FxHashMap, FxHashSet};
 
+use crate::admin::{
+    AdminBoundary, AdminRelationCandidate, assemble_boundaries, boundary_node_ids,
+    load_boundary_ways, parse_admin_relation,
+};
 use crate::classify::{
     classify_directional_access, classify_smoothness, classify_speed_and_lanes, classify_surface,
     classify_toll, classify_way, is_traffic_signal_node, parse_duration_from_tags, tag,
@@ -61,6 +65,32 @@ pub(crate) struct ScanOutput {
     pub(crate) counts: ObjectCounts,
     pub(crate) feature_attributes: FeatureAttributeTable,
     pub(crate) temporal_rule_sets: Vec<TemporalRuleSet>,
+    /// Ways (by `osm_way_id`) on bridges or in tunnels, whose nodes do not
+    /// sit on the terrain.
+    pub(crate) structure_ways: FxHashSet<i64>,
+    /// Admin boundaries assembled from the source extract.
+    pub(crate) admin_boundaries: Vec<AdminBoundary>,
+    /// Admin relations in the extract that could not be assembled.
+    pub(crate) incomplete_admin_relations: Vec<i64>,
+}
+
+/// Whether OSM tags put a way on a bridge or in a tunnel. Building passages
+/// run at ground level.
+pub(crate) fn is_structure_way(tags: &osmpbfreader::Tags) -> bool {
+    let value = |key: &str| tags.get(key).map(|value| value.as_str());
+    value("bridge").is_some_and(|bridge| bridge != "no")
+        || value("tunnel").is_some_and(|tunnel| tunnel != "no" && tunnel != "building_passage")
+}
+
+/// First-pass result over an OSM PBF.
+pub(crate) struct RoutableScan {
+    pub(crate) ways: Vec<PendingWay>,
+    pub(crate) restriction_candidates: Vec<TurnRestrictionCandidate>,
+    pub(crate) needed_nodes: FxHashSet<i64>,
+    pub(crate) traffic_signal_nodes: FxHashSet<i64>,
+    pub(crate) counts: ObjectCounts,
+    pub(crate) structure_ways: FxHashSet<i64>,
+    pub(crate) admin_relations: Vec<AdminRelationCandidate>,
 }
 
 #[derive(Debug, Default)]
@@ -74,13 +104,7 @@ pub(crate) fn scan_routable_objects(
     source_path: &Path,
     source_size_bytes: u64,
     progress: &mut impl FnMut(DatasetImportProgress),
-) -> Result<(
-    Vec<PendingWay>,
-    Vec<TurnRestrictionCandidate>,
-    FxHashSet<i64>,
-    FxHashSet<i64>,
-    ObjectCounts,
-)> {
+) -> Result<RoutableScan> {
     let file = File::open(source_path)
         .with_context(|| format!("opening dataset source {}", source_path.display()))?;
     let bytes_read = Arc::new(AtomicU64::new(0));
@@ -90,6 +114,8 @@ pub(crate) fn scan_routable_objects(
     let mut restriction_candidates = Vec::new();
     let mut node_ids = FxHashSet::default();
     let mut traffic_signal_nodes = FxHashSet::default();
+    let mut structure_ways = FxHashSet::default();
+    let mut admin_relations = Vec::new();
     let mut counts = ObjectCounts::default();
     let mut reporter = PercentReporter::starting_at_zero();
 
@@ -115,6 +141,9 @@ pub(crate) fn scan_routable_objects(
                 };
                 if way.nodes.len() < 2 {
                     continue;
+                }
+                if is_structure_way(&way.tags) {
+                    structure_ways.insert(way.id.0);
                 }
                 let directional_access =
                     classify_directional_access(&way.tags, highway, road_class, access_mask);
@@ -155,6 +184,8 @@ pub(crate) fn scan_routable_objects(
                         node_ids.insert(via_node_id);
                     }
                     restriction_candidates.push(candidate);
+                } else if let Some(candidate) = parse_admin_relation(&relation) {
+                    admin_relations.push(candidate);
                 }
             }
         }
@@ -186,27 +217,33 @@ pub(crate) fn scan_routable_objects(
         ),
     );
 
-    Ok((
+    Ok(RoutableScan {
         ways,
         restriction_candidates,
-        node_ids,
+        needed_nodes: node_ids,
         traffic_signal_nodes,
         counts,
-    ))
+        structure_ways,
+        admin_relations,
+    })
 }
 
+/// Routing node coordinates (with zero elevation) and, separately, the
+/// coordinates of `boundary_nodes`.
 pub(crate) fn load_node_coords(
     source_path: &Path,
-    _source_size_bytes: u64,
     needed_nodes: &FxHashSet<i64>,
+    boundary_nodes: &FxHashSet<i64>,
     progress: &mut impl FnMut(DatasetImportProgress),
-) -> Result<FxHashMap<i64, (f64, f64, f64)>> {
+) -> Result<(FxHashMap<i64, (f64, f64, f64)>, FxHashMap<i64, (f64, f64)>)> {
     let file = File::open(source_path)
         .with_context(|| format!("opening dataset source {}", source_path.display()))?;
     let bytes_read = Arc::new(AtomicU64::new(0));
     let counting_file = CountingReader::new(file, Arc::clone(&bytes_read));
     let mut reader = OsmPbfReader::new(counting_file);
     let mut coords = FxHashMap::with_capacity_and_hasher(needed_nodes.len(), Default::default());
+    let mut boundary_coords =
+        FxHashMap::with_capacity_and_hasher(boundary_nodes.len(), Default::default());
     let mut reporter = PercentReporter::new();
 
     emit_progress(
@@ -221,11 +258,14 @@ pub(crate) fn load_node_coords(
             continue;
         };
         let node_id = node.id.0;
+        if boundary_nodes.contains(&node_id) {
+            boundary_coords.insert(node_id, (node.lon(), node.lat()));
+        }
         if needed_nodes.contains(&node_id) {
             coords.insert(node_id, (node.lon(), node.lat(), 0.0));
-            if coords.len() == needed_nodes.len() {
-                break;
-            }
+        }
+        if coords.len() == needed_nodes.len() && boundary_coords.len() == boundary_nodes.len() {
+            break;
         }
 
         reporter.emit_if_needed(
@@ -255,25 +295,44 @@ pub(crate) fn load_node_coords(
         ),
     );
 
-    Ok(coords)
+    Ok((coords, boundary_coords))
 }
 
-/// Runs both PBF passes and packages the result for the topology build.
+/// Runs the PBF passes and packages the result for the topology build. With
+/// `collect_admin`, admin relations found in the extract are assembled; the
+/// member ways cost one extra pass and their nodes load with the routing
+/// nodes.
 pub(crate) fn scan_osm(
     source_path: &Path,
     source_size_bytes: u64,
+    collect_admin: bool,
     progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<ScanOutput> {
-    let (pending_ways, restriction_candidates, needed_nodes, traffic_signal_nodes, counts) =
-        scan_routable_objects(source_path, source_size_bytes, progress)?;
-    let node_coords = load_node_coords(source_path, source_size_bytes, &needed_nodes, progress)?;
+    let scan = scan_routable_objects(source_path, source_size_bytes, progress)?;
+    let admin_relations = if collect_admin {
+        scan.admin_relations
+    } else {
+        Vec::new()
+    };
+    let admin_way_nodes = load_boundary_ways(source_path, &admin_relations)?;
+    let (node_coords, boundary_coords) = load_node_coords(
+        source_path,
+        &scan.needed_nodes,
+        &boundary_node_ids(&admin_way_nodes),
+        progress,
+    )?;
+    let (admin_boundaries, incomplete_admin_relations) =
+        assemble_boundaries(&admin_relations, &admin_way_nodes, &boundary_coords);
     Ok(ScanOutput {
-        pending_ways,
-        restriction_candidates,
+        pending_ways: scan.ways,
+        restriction_candidates: scan.restriction_candidates,
         node_coords,
-        traffic_signal_nodes,
-        counts,
+        traffic_signal_nodes: scan.traffic_signal_nodes,
+        counts: scan.counts,
         feature_attributes: Default::default(),
         temporal_rule_sets: Vec::new(),
+        structure_ways: scan.structure_ways,
+        admin_boundaries,
+        incomplete_admin_relations,
     })
 }

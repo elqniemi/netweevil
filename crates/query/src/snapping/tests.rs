@@ -16,6 +16,8 @@ fn finite_global_snap_radius_is_bounded_by_the_node_grid() {
         edge_layers: Default::default(),
         feature_attributes: Default::default(),
         temporal_rule_sets: vec![],
+        regions: Default::default(),
+        elevation: Default::default(),
         turn_restrictions: vec![],
         names: vec![],
         edge_based_topology: Default::default(),

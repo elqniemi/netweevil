@@ -56,6 +56,8 @@ fn topology() -> TopologyBundle {
         edge_component_ids: vec![0, 0],
         feature_attributes: FeatureAttributeTable::default(),
         temporal_rule_sets: Vec::new(),
+        regions: Default::default(),
+        elevation: Default::default(),
     };
     bundle.edge_based_topology = EdgeBasedTopology::build(2, 2, |index| {
         let edge = bundle.edge_layers.routing[index];
@@ -146,4 +148,67 @@ fn rejects_an_unrecognized_magic_or_schema() {
         error.to_string().contains("re-import the dataset"),
         "{error}"
     );
+}
+
+#[test]
+fn elevation_raster_tiles_load_individually() {
+    use netweevil_core::{DemFormat, DemSourceInfo, RasterCrs, RasterGrid};
+    let grid = RasterGrid {
+        columns: 5,
+        rows: 3,
+        min_x: 0.0,
+        max_y: 30.0,
+        cell_width: 10.0,
+        cell_height: 10.0,
+    };
+    let header = ElevationRasterHeader {
+        schema_version: ELEVATION_RASTER_SCHEMA_VERSION,
+        source: DemSourceInfo {
+            path: "dem.asc".to_string(),
+            sha256: "abc".to_string(),
+            format: DemFormat::AsciiGrid,
+            crs: RasterCrs::Geographic,
+            vertical_datum: None,
+            grid,
+        },
+        grid,
+        tile_size: 2,
+    };
+    assert_eq!((header.tile_columns(), header.tile_rows()), (3, 2));
+    assert_eq!(header.tile_dimensions(2), (1, 2));
+    assert_eq!(header.tile_dimensions(5), (1, 1));
+    assert_eq!(header.cell_tile(4, 2), (5, 0));
+    assert_eq!(header.cell_tile(3, 1), (1, 3));
+    // Cell (column, row) holds `row * 10 + column + 0.5`, except one nodata cell.
+    let tiles = (0..header.tile_count())
+        .map(|tile| {
+            let (columns, rows) = header.tile_dimensions(tile);
+            let (first_column, first_row) = ((tile % 3) * 2, (tile / 3) * 2);
+            (0..rows)
+                .flat_map(|row| {
+                    (0..columns).map(move |column| {
+                        let (column, row) = (first_column + column, first_row + row);
+                        if (column, row) == (1, 1) {
+                            f64::NAN
+                        } else {
+                            (row * 10 + column) as f64 + 0.5
+                        }
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let dir = std::env::temp_dir().join(format!("netweevil-elevation-{}", std::process::id()));
+    let path = dir.join("raster.bin");
+    write_elevation_raster_sectioned(&path, &header, &tiles).unwrap();
+    let reader = ElevationRasterReader::open(&path).unwrap();
+    assert_eq!(reader.header(), &header);
+    let (tile, offset) = header.cell_tile(3, 1);
+    assert_eq!(reader.tile(tile).unwrap()[offset], 13.5);
+    let (tile, offset) = header.cell_tile(1, 1);
+    assert!(reader.tile(tile).unwrap()[offset].is_nan());
+    assert_eq!(reader.tile(5).unwrap(), vec![24.5]);
+    assert!(reader.tile(6).is_err());
+    assert!(write_elevation_raster_sectioned(&path, &header, &tiles[1..]).is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
 }

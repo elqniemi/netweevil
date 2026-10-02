@@ -14,7 +14,7 @@ use axum::body::Body;
 use axum::extract::{Path as AxumPath, Query, State};
 use futures_util::StreamExt;
 use netweevil_core::SourceFormat;
-use netweevil_ingest::{DatasetImportOptions, import_dataset};
+use netweevil_ingest::{DatasetImportOptions, DemImportOptions, import_dataset};
 use netweevil_manifest::now_rfc3339;
 use netweevil_persist::{
     WorkspaceConfig, WorkspaceLocation, WorkspacePaths, list_json_files,
@@ -486,6 +486,22 @@ pub(crate) struct DatasetImportRequest {
     pub(crate) format: Option<SourceFormat>,
     #[serde(default)]
     pub(crate) mapping: Option<String>,
+    /// Upload name or path of a GeoJSON/OSM PBF boundaries file.
+    #[serde(default)]
+    pub(crate) admin_boundaries: Option<String>,
+    /// DEM to sample for node heights and edge grades.
+    #[serde(default)]
+    pub(crate) dem: Option<DemImportRequest>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct DemImportRequest {
+    /// Upload name or path of an ESRI ASCII grid or GeoTIFF.
+    pub(crate) source: String,
+    #[serde(default)]
+    pub(crate) crs: Option<String>,
+    #[serde(default)]
+    pub(crate) vertical_datum: Option<String>,
 }
 
 pub(crate) async fn import_dataset_handler(
@@ -524,6 +540,24 @@ pub(crate) async fn import_dataset_handler(
         .map(|mapping| resolve_source(&paths, mapping))
         .transpose()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let admin_boundaries = payload
+        .admin_boundaries
+        .as_deref()
+        .map(|source| resolve_source(&paths, source))
+        .transpose()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let dem = payload
+        .dem
+        .as_ref()
+        .map(|dem| {
+            resolve_source(&paths, &dem.source).map(|path| DemImportOptions {
+                path,
+                crs: dem.crs.clone(),
+                vertical_datum: dem.vertical_datum.clone(),
+            })
+        })
+        .transpose()
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let name = payload.name.clone();
     let label = format!("Import dataset '{name}'");
     let source_label = sources
@@ -544,6 +578,8 @@ pub(crate) async fn import_dataset_handler(
                     source: source_label,
                     format: payload.format,
                     mapping,
+                    admin_boundaries,
+                    dem,
                 },
                 |event| job.progress(event.stage.label(), &event.message, event.stage_percent),
             )?;

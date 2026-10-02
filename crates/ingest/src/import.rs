@@ -11,14 +11,14 @@ use netweevil_core::{BuildStage, CacheBundleId, DatasetId, SourceFormat};
 use netweevil_manifest::{BundleRef, DatasetManifest, now_rfc3339};
 use netweevil_persist::{
     WorkspacePaths, write_acceleration_bundle, write_dataset_manifest, write_edge_name_bundle,
-    write_topology_bundle,
+    write_elevation_raster, write_topology_bundle,
 };
 use sha2::{Digest, Sha256};
 
 use crate::acceleration::build_dataset_acceleration_bundle_with_progress;
-use crate::topology::build_topology_bundle;
+use crate::topology::{EnrichmentInputs, build_topology_bundle};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DatasetImportOptions {
     pub name: String,
     pub source: String,
@@ -26,7 +26,28 @@ pub struct DatasetImportOptions {
     pub format: Option<SourceFormat>,
     /// Required for GeoPackage sources; ignored by other readers.
     pub mapping: Option<PathBuf>,
+    /// Admin boundaries (GeoJSON or OSM PBF) used instead of the
+    /// `boundary=administrative` relations in an OSM extract, for extracts
+    /// that cut country or state boundaries.
+    pub admin_boundaries: Option<PathBuf>,
+    /// DEM sampled for node heights and edge grades (OSM and Overture).
+    pub dem: Option<DemImportOptions>,
 }
+
+/// A DEM to sample during import.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DemImportOptions {
+    /// ESRI ASCII grid (`.asc`) or GeoTIFF.
+    pub path: PathBuf,
+    /// Raster CRS as `EPSG:<code>` or a `+proj=` definition; GeoTIFFs
+    /// normally carry their own.
+    pub crs: Option<String>,
+    /// Vertical datum label recorded with the heights (`HKPD`, `EGM2008`).
+    pub vertical_datum: Option<String>,
+}
+
+/// Tile edge length, in cells, of the stored elevation raster.
+const ELEVATION_TILE_SIZE: u32 = 256;
 
 /// Infers the source format from the path: a directory or a
 /// `.parquet`/`.geoparquet` file is Overture GeoParquet, `.gpkg` is an OGC
@@ -52,7 +73,9 @@ pub enum DatasetImportStage {
     HashSource,
     ScanRoutableObjects,
     LoadNodeCoords,
+    SampleElevation,
     BuildTopology,
+    AssignRegions,
     BuildAcceleration,
     WriteTopologyBundle,
     WriteManifest,
@@ -65,7 +88,9 @@ impl DatasetImportStage {
             Self::HashSource => "Hash Source",
             Self::ScanRoutableObjects => "Scan Routable Objects",
             Self::LoadNodeCoords => "Load Node Coords",
+            Self::SampleElevation => "Sample Elevation",
             Self::BuildTopology => "Build Topology",
+            Self::AssignRegions => "Assign Regions",
             Self::BuildAcceleration => "Build Acceleration",
             Self::WriteTopologyBundle => "Write Topology Bundle",
             Self::WriteManifest => "Write Dataset Manifest",
@@ -126,29 +151,54 @@ where
         format!("Hashing {} source(s)", source_paths.len()),
     );
     let (sha256, size) = sha256_sources(source_paths, &mut progress)?;
+    let mut enrichment = EnrichmentInputs::default();
+    if let Some(path) = &options.admin_boundaries {
+        let (digest, _) = sha256_source(path, &mut progress)?;
+        enrichment.admin_boundaries = Some((path.clone(), digest));
+    }
+    if let Some(dem) = &options.dem {
+        let (digest, _) = sha256_source(&dem.path, &mut progress)?;
+        enrichment.dem = Some((dem.clone(), digest));
+    }
+    // Bundle ids change with every enrichment input, so cached compiled
+    // profiles never outlive the boundaries or DEM they were built on.
+    let bundle_key = enrichment_key(&sha256, &enrichment);
     let dataset_id = DatasetId::new(options.name);
-    let bundle_id = CacheBundleId::new(format!("topology-{}-{}", dataset_id.0, &sha256[..12]));
+    let bundle_id = CacheBundleId::new(format!("topology-{}-{}", dataset_id.0, &bundle_key[..12]));
     let bundle_path = paths
         .topology_bundles_dir
         .join(format!("{}.bin", bundle_id.0));
     let edge_name_bundle_id =
-        CacheBundleId::new(format!("edge-names-{}-{}", dataset_id.0, &sha256[..12]));
+        CacheBundleId::new(format!("edge-names-{}-{}", dataset_id.0, &bundle_key[..12]));
     let edge_name_bundle_path = paths
         .edge_name_bundles_dir
         .join(format!("{}.bin", edge_name_bundle_id.0));
-    let acceleration_bundle_id =
-        CacheBundleId::new(format!("acceleration-{}-{}", dataset_id.0, &sha256[..12]));
+    let acceleration_bundle_id = CacheBundleId::new(format!(
+        "acceleration-{}-{}",
+        dataset_id.0,
+        &bundle_key[..12]
+    ));
     let acceleration_bundle_path = paths
         .acceleration_bundles_dir
         .join(format!("{}.bin", acceleration_bundle_id.0));
-    let (bundle, edge_name_bundle, topology_meta) = build_topology_bundle(
+    let built = build_topology_bundle(
         source_paths,
         size,
         &sha256,
         source_format,
         mapping.as_ref(),
+        &enrichment,
         &mut progress,
     )?;
+    for warning in &built.warnings {
+        emit_progress(
+            &mut progress,
+            DatasetImportStage::AssignRegions,
+            None,
+            format!("Warning: {warning}"),
+        );
+    }
+    let (bundle, edge_name_bundle, topology_meta) = (built.bundle, built.names, built.meta);
     let acceleration_bundle =
         build_dataset_acceleration_bundle_with_progress(&bundle, bundle_id.clone(), &mut progress);
     emit_progress(
@@ -178,6 +228,28 @@ where
         ),
     );
     write_acceleration_bundle(&acceleration_bundle_path, &acceleration_bundle)?;
+    let elevation_bundle = match (built.dem, bundle.elevation.dem.as_ref()) {
+        (Some(dem), Some(summary)) => {
+            let bundle_id =
+                CacheBundleId::new(format!("elevation-{}-{}", dataset_id.0, &bundle_key[..12]));
+            let path = paths
+                .elevation_bundles_dir
+                .join(format!("{}.bin", bundle_id.0));
+            emit_progress(
+                &mut progress,
+                DatasetImportStage::WriteTopologyBundle,
+                None,
+                format!("Writing elevation raster {}", path.display()),
+            );
+            let (header, tiles) = dem.to_tiles(summary.source.clone(), ELEVATION_TILE_SIZE);
+            write_elevation_raster(&path, &header, &tiles)?;
+            Some(BundleRef {
+                bundle_id,
+                path: path.display().to_string(),
+            })
+        }
+        _ => None,
+    };
 
     let manifest = DatasetManifest {
         dataset_id,
@@ -204,6 +276,7 @@ where
             bundle_id: acceleration_bundle_id,
             path: acceleration_bundle_path.display().to_string(),
         }),
+        elevation_bundle,
         topology_meta: Some(topology_meta),
         acceleration_stats: Some(acceleration_bundle.stats.clone()),
     };
@@ -235,6 +308,27 @@ where
         ),
     );
     Ok(manifest)
+}
+
+/// Source hash, extended with the enrichment inputs when there are any.
+fn enrichment_key(source_sha256: &str, enrichment: &EnrichmentInputs) -> String {
+    if enrichment.admin_boundaries.is_none() && enrichment.dem.is_none() {
+        return source_sha256.to_string();
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(source_sha256.as_bytes());
+    if let Some((_, digest)) = &enrichment.admin_boundaries {
+        hasher.update(b"\0admin\0");
+        hasher.update(digest.as_bytes());
+    }
+    if let Some((dem, digest)) = &enrichment.dem {
+        hasher.update(b"\0dem\0");
+        hasher.update(digest.as_bytes());
+        hasher.update(dem.crs.as_deref().unwrap_or_default().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(dem.vertical_datum.as_deref().unwrap_or_default().as_bytes());
+    }
+    hex::encode(hasher.finalize())
 }
 
 fn sha256_sources<F>(source_paths: &[PathBuf], progress: &mut F) -> Result<(String, u64)>

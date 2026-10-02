@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use memmap2::Mmap;
 use netweevil_core::{
-    CompiledProfileBundle, DatasetAccelerationBundle, EdgeNameBundle, TopologyBundle,
+    CompiledProfileBundle, DatasetAccelerationBundle, EdgeNameBundle, ElevationRasterHeader,
+    TopologyBundle,
 };
 use netweevil_manifest::{CompiledProfileManifest, DatasetManifest, RunManifest};
 use serde::de::DeserializeOwned;
@@ -30,6 +31,8 @@ pub struct WorkspacePaths {
     pub edge_name_bundles_dir: PathBuf,
     pub acceleration_bundles_dir: PathBuf,
     pub metric_bundles_dir: PathBuf,
+    /// Cropped, tiled DEM rasters kept for runtime height queries.
+    pub elevation_bundles_dir: PathBuf,
     pub transit_bundles_dir: PathBuf,
     pub datasets_dir: PathBuf,
     pub transit_feeds_dir: PathBuf,
@@ -57,6 +60,7 @@ impl WorkspacePaths {
             edge_name_bundles_dir: state_dir.join("bundles").join("names"),
             acceleration_bundles_dir: state_dir.join("bundles").join("acceleration"),
             metric_bundles_dir: state_dir.join("bundles").join("metrics"),
+            elevation_bundles_dir: state_dir.join("bundles").join("elevation"),
             transit_bundles_dir: state_dir.join("bundles").join("transit"),
             datasets_dir: state_dir.join("datasets"),
             transit_feeds_dir: state_dir.join("transit_feeds"),
@@ -81,6 +85,7 @@ impl WorkspacePaths {
             &self.edge_name_bundles_dir,
             &self.acceleration_bundles_dir,
             &self.metric_bundles_dir,
+            &self.elevation_bundles_dir,
             &self.transit_bundles_dir,
             &self.datasets_dir,
             &self.transit_feeds_dir,
@@ -230,6 +235,18 @@ pub fn read_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
 pub fn write_topology_bundle(path: impl AsRef<Path>, bundle: &TopologyBundle) -> Result<()> {
     sectioned::write_topology_sectioned(path.as_ref(), bundle)
 }
+
+/// Writes a tiled elevation raster; `tiles` are row-major heights in
+/// metres (`NaN` for nodata), already rounded to whole decimetres.
+pub fn write_elevation_raster(
+    path: impl AsRef<Path>,
+    header: &ElevationRasterHeader,
+    tiles: &[Vec<f64>],
+) -> Result<()> {
+    sectioned::write_elevation_raster_sectioned(path.as_ref(), header, tiles)
+}
+
+pub use sectioned::ElevationRasterReader;
 
 pub fn write_edge_name_bundle(path: impl AsRef<Path>, bundle: &EdgeNameBundle) -> Result<()> {
     write_binary(path, bundle)
@@ -458,6 +475,7 @@ pub fn prune_bundle_cache(paths: &WorkspacePaths, dry_run: bool) -> Result<Cache
             &dataset.topology_bundle,
             &dataset.edge_name_bundle,
             &dataset.acceleration_bundle,
+            &dataset.elevation_bundle,
         ]
         .into_iter()
         .flatten()
@@ -471,6 +489,7 @@ pub fn prune_bundle_cache(paths: &WorkspacePaths, dry_run: bool) -> Result<Cache
         &paths.edge_name_bundles_dir,
         &paths.acceleration_bundles_dir,
         &paths.metric_bundles_dir,
+        &paths.elevation_bundles_dir,
     ] {
         for entry in
             fs::read_dir(dir).with_context(|| format!("reading directory {}", dir.display()))?

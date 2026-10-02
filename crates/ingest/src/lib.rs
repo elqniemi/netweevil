@@ -2,10 +2,15 @@
 //! transportation GeoParquet, builds the routable topology (edge-based
 //! graph, turn restrictions, connected components, road classification),
 //! and preprocesses the CCH acceleration bundle used by the query engine.
+//! Imports also assign each node its IANA timezone and, optionally, its
+//! administrative area and DEM height.
 
 mod acceleration;
+mod admin;
 mod audit;
 mod classify;
+pub mod dem;
+mod elevation;
 mod geopackage;
 mod import;
 mod mapping;
@@ -13,6 +18,7 @@ mod opening_hours;
 mod overture;
 mod restrictions;
 mod scan;
+mod timezones;
 mod topology;
 mod wkb;
 
@@ -20,9 +26,10 @@ pub use audit::{
     AttributeDrift, AttributeSchemaDrift, DatasetAuditReport, EdgeAttributeLinkDrift,
     GeometryDrift, GeometrySegment, audit_geopackage_dataset,
 };
+pub use dem::ElevationSampler;
 pub use import::{
-    DatasetImportOptions, DatasetImportProgress, DatasetImportStage, detect_source_format,
-    import_dataset,
+    DatasetImportOptions, DatasetImportProgress, DatasetImportStage, DemImportOptions,
+    detect_source_format, import_dataset,
 };
 pub use mapping::{
     CoordinateMapping, CoordinateQuantization, DirectionValue, FieldMapping,

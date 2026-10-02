@@ -75,6 +75,8 @@ fn fixture() -> Arc<ServiceRuntime> {
         edge_component_ids: vec![0; 3],
         feature_attributes: Default::default(),
         temporal_rule_sets: vec![],
+        regions: Default::default(),
+        elevation: Default::default(),
     };
     let document = netweevil_profile::load_profile(concat!(
         env!("CARGO_MANIFEST_DIR"),

@@ -57,5 +57,7 @@ pub(crate) fn topology(edges: &[DirectedEdge]) -> TopologyBundle {
         edge_component_ids: vec![0; edges.len()],
         feature_attributes: Default::default(),
         temporal_rule_sets: Vec::new(),
+        regions: Default::default(),
+        elevation: Default::default(),
     }
 }
