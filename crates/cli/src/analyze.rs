@@ -1775,7 +1775,7 @@ fn emit_structured_failure_diagnostics(error: &anyhow::Error) {
     }
 }
 
-fn load_route_execution_inputs(
+pub(crate) fn load_route_execution_inputs(
     paths: &WorkspacePaths,
     dataset_id: &str,
     profile: &ProfileDocument,

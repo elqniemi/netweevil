@@ -12,6 +12,7 @@ mod experiment;
 mod profile;
 mod report;
 mod simulate;
+mod traffic;
 mod transit;
 
 use std::env;
@@ -28,13 +29,16 @@ use crate::analyze::{
     analyze_service_area_sequence, analyze_transit_batch, analyze_transit_route,
 };
 use crate::api::{ApiCommand, BootstrapArgs, api_serve, bootstrap};
-use crate::bench::{BenchCommand, bench_compare, bench_corpus, bench_http, bench_run};
+use crate::bench::{
+    BenchCommand, bench_compare, bench_corpus, bench_http, bench_run, bench_traffic,
+};
 use crate::cache::{CacheCommand, cache_list, cache_prune};
 use crate::dataset::{DatasetCommand, dataset_audit, dataset_import, dataset_list};
 use crate::experiment::{ExperimentCommand, experiment_run};
 use crate::profile::{ProfileCommand, profile_compile, profile_validate};
 use crate::report::{ReportCommand, report_render};
 use crate::simulate::{SimulateCommand, simulate_run, simulate_validate};
+use crate::traffic::{TrafficCommand, traffic_command};
 use crate::transit::{
     TransitBindingsCommand, TransitCommand, TransitTransfersCommand, transit_apply_bindings,
     transit_build_transfers, transit_import, transit_list,
@@ -67,6 +71,7 @@ fn main() -> Result<()> {
             },
             TransitCommand::List => transit_list(&paths),
         },
+        Command::Traffic { command } => traffic_command(&paths, command),
         Command::Profile { command: profile } => match profile {
             ProfileCommand::Validate { profile } => profile_validate(&profile),
             ProfileCommand::Compile { dataset, profile } => {
@@ -109,6 +114,7 @@ fn main() -> Result<()> {
             BenchCommand::Run(args) => bench_run(&paths, args),
             BenchCommand::Http(args) => bench_http(args),
             BenchCommand::Compare(args) => bench_compare(args),
+            BenchCommand::Traffic(args) => bench_traffic(&paths, args),
         },
         Command::Api { command: api } => match api {
             ApiCommand::Serve(args) => api_serve(paths, args),
@@ -137,6 +143,11 @@ enum Command {
     Transit {
         #[command(subcommand)]
         command: TransitCommand,
+    },
+    /// Historical speed profiles and traffic-aware routes.
+    Traffic {
+        #[command(subcommand)]
+        command: TrafficCommand,
     },
     Profile {
         #[command(subcommand)]
