@@ -171,6 +171,24 @@ pub struct ServiceAreaResult {
     pub warnings: Vec<String>,
 }
 
+/// One road segment near a located point: the projection shared by its
+/// directed edges and each direction's position along its own edge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NearestSegment {
+    pub distance_m: f64,
+    pub lon: f64,
+    pub lat: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub z: Option<f64>,
+    pub edges: Vec<NearestDirectedEdge>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct NearestDirectedEdge {
+    pub edge_index: u32,
+    pub fraction: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SnappedPoint {
     pub point_id: String,

@@ -195,6 +195,23 @@ impl PreparedRoutingEngine {
         )
     }
 
+    /// The `count` nearest routable road segments to `point`; see
+    /// [`nearest_segments`].
+    pub fn nearest_segments(
+        &self,
+        point: &LabeledPoint,
+        options: &SnapOptions,
+        count: usize,
+    ) -> Result<Vec<NearestSegment>> {
+        nearest_segments(
+            self.topology.as_ref(),
+            &self.default_routing_graph,
+            point,
+            options,
+            count,
+        )
+    }
+
     /// Execute a route between pre-snapped candidate sets produced by
     /// [`Self::snap_route_candidates`]. Requests with failure modes or exact
     /// temporal/component labels fall back to the full snap-and-route path so

@@ -380,6 +380,93 @@ fn collect_snap_candidates(
     Ok(candidates)
 }
 
+/// The `count` nearest road segments to `point` within
+/// `options.max_distance_m`, nearest first. Both directions of a two-way
+/// segment form one result. Attribute filters, the Z window and point
+/// bearing/approach constraints apply as in snapping; endpoints are kept, so
+/// a point at a junction lists every incident segment at distance zero.
+pub(crate) fn nearest_segments(
+    topology: &TopologyBundle,
+    routing_graph: &RoutingGraph,
+    point: &LabeledPoint,
+    options: &SnapOptions,
+    count: usize,
+) -> Result<Vec<NearestSegment>> {
+    if !point.lon.is_finite()
+        || !(-180.0..=180.0).contains(&point.lon)
+        || !point.lat.is_finite()
+        || !(-90.0..=90.0).contains(&point.lat)
+    {
+        bail!("locate point longitude and latitude must be finite and within geographic bounds");
+    }
+    if options.max_distance_m < 0.0 || !options.max_distance_m.is_finite() {
+        bail!("snap max_distance_m must be a finite non-negative value");
+    }
+    let constraint = options.point_constraints.get(&point.id);
+    if let Some(constraint) = constraint {
+        validate_point_constraint(constraint)?;
+    }
+    // Every segment within the radius is found, so once `count` qualify the
+    // nearest `count` equal those of a full-radius scan.
+    let mut radius_m = options.max_distance_m.min(INITIAL_SNAP_RADIUS_M);
+    loop {
+        let mut segments = Vec::<NearestSegment>::new();
+        for edge_index in routing_graph
+            .edge_spatial_index
+            .candidates(point.lon, point.lat, radius_m)
+        {
+            let edge = topology.routing_edge(edge_index as usize);
+            let from = &topology.nodes[edge.from.0 as usize];
+            let to = &topology.nodes[edge.to.0 as usize];
+            let projection = project_point_onto_segment(point.lon, point.lat, from, to);
+            let z = if projection.fraction == 0.0 {
+                from.elevation_m()
+            } else if projection.fraction == 1.0 {
+                to.elevation_m()
+            } else {
+                (from.z.is_finite() && to.z.is_finite()).then_some(projection.z)
+            };
+            if projection.distance_m > radius_m
+                || !edge_matches_filters(topology, edge_index as usize, &options.attribute_filters)
+                || !elevation_is_eligible(point, z, options.z_window_m)
+                || constraint.is_some_and(|constraint| {
+                    !edge_matches_point_constraint(point, from, to, constraint)
+                })
+            {
+                continue;
+            }
+            let directed = NearestDirectedEdge {
+                edge_index,
+                fraction: projection.fraction,
+            };
+            match segments.iter_mut().find(|segment| {
+                let other = topology.routing_edge(segment.edges[0].edge_index as usize);
+                // Edges are straight, so reversed endpoints share geometry.
+                other.from == edge.to && other.to == edge.from
+            }) {
+                Some(segment) => segment.edges.push(directed),
+                None => segments.push(NearestSegment {
+                    distance_m: projection.distance_m,
+                    lon: projection.lon,
+                    lat: projection.lat,
+                    z,
+                    edges: vec![directed],
+                }),
+            }
+        }
+        if segments.len() >= count || radius_m >= options.max_distance_m {
+            segments.sort_by(|left, right| {
+                left.distance_m
+                    .total_cmp(&right.distance_m)
+                    .then_with(|| left.edges[0].edge_index.cmp(&right.edges[0].edge_index))
+            });
+            segments.truncate(count);
+            return Ok(segments);
+        }
+        radius_m = options.max_distance_m.min(radius_m * SNAP_RADIUS_GROWTH);
+    }
+}
+
 fn validate_point_constraint(constraint: &PointSnapConstraint) -> Result<()> {
     if let Some(bearing) = constraint.bearing {
         if !bearing.degrees.is_finite() || !(0.0..=360.0).contains(&bearing.degrees) {
