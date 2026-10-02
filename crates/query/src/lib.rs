@@ -15,6 +15,7 @@ mod diagnostics;
 mod documents;
 mod edge_spatial_index;
 mod engine;
+mod expansion;
 mod geometry;
 mod isochrone_polygon;
 mod navigation;
@@ -42,6 +43,7 @@ pub use betweenness::{
 pub use diagnostics::*;
 pub use documents::*;
 pub use engine::*;
+pub use expansion::*;
 pub(crate) use geometry::*;
 pub use navigation::*;
 pub(crate) use pareto::*;

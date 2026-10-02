@@ -1638,7 +1638,7 @@ pub(crate) fn service_area_edge_cost(
     }
 }
 
-fn service_area_turn_cost(
+pub(crate) fn service_area_turn_cost(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     previous_edge_index: usize,

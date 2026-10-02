@@ -212,6 +212,17 @@ impl PreparedRoutingEngine {
         )
     }
 
+    /// Settled edges of the exact search behind a route or service area,
+    /// in settle order; see [`ExpansionRequest`].
+    pub fn execute_expansion(&self, request: &ExpansionRequest) -> Result<ExpansionResult> {
+        crate::expansion::execute_expansion_with_graph(
+            self.topology.as_ref(),
+            self.metrics.as_ref(),
+            &self.default_routing_graph,
+            request,
+        )
+    }
+
     /// Execute a route between pre-snapped candidate sets produced by
     /// [`Self::snap_route_candidates`]. Requests with failure modes or exact
     /// temporal/component labels fall back to the full snap-and-route path so
