@@ -259,8 +259,8 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
     assert_eq!(read.turn_costs.cost_time_weight, 1.5);
     assert_eq!(read.edge_metrics.len(), 1);
 
-    // Fixed-point weights, including both sentinels, survive unchanged in
-    // every per-metric weight set.
+    // Fixed-point weights, including both sentinels, are dropped from every
+    // per-metric weight set while the acceleration header is kept.
     let weights = vec![0, 12345, CCH_WEIGHT_OVERFLOW, CCH_WEIGHT_INFINITY];
     bundle.acceleration = Some(CompiledAcceleration {
         schema_version: COMPILED_ACCELERATION_SCHEMA_VERSION,
