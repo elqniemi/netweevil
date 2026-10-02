@@ -74,9 +74,41 @@ pub(crate) fn request_time_seconds(bundle: &TransitBundle, raw: &str) -> Result<
             ),
         }
     };
-    u32::try_from(unix_s - bundle.time_origin_unix_s).with_context(|| {
-        format!("transit datetime '{raw}' precedes the timetable origin or exceeds its supported time range")
-    })
+    let window_end = service_window_end_unix_s(bundle)?;
+    if unix_s < bundle.time_origin_unix_s || unix_s >= window_end {
+        let first = bundle.service_dates.first().map_or("?", String::as_str);
+        let last = bundle.service_dates.last().map_or("?", String::as_str);
+        bail!(
+            "transit datetime '{raw}' is outside the service window of feed '{}' ({first} to {last}, {}); \
+             pick a time in that window or re-import the feed with --service-start/--service-days",
+            bundle.feed_id,
+            bundle.agency_timezone,
+        );
+    }
+    u32::try_from(unix_s - bundle.time_origin_unix_s)
+        .with_context(|| format!("transit datetime '{raw}' exceeds the supported time range"))
+}
+
+/// Local midnight two days after the last imported service date: GTFS times
+/// past 24:00 keep overnight trips of the last service day reachable.
+fn service_window_end_unix_s(bundle: &TransitBundle) -> Result<i64> {
+    let last = bundle
+        .service_dates
+        .last()
+        .context("transit service window is empty")?;
+    let window_end = NaiveDate::parse_from_str(last, "%Y-%m-%d")
+        .with_context(|| format!("invalid service date '{last}'"))?
+        .checked_add_days(chrono::Days::new(2))
+        .context("service date out of range")?;
+    let timezone: Tz = bundle
+        .agency_timezone
+        .parse()
+        .context("invalid agency_timezone")?;
+    timezone
+        .from_local_datetime(&window_end.and_hms_opt(0, 0, 0).expect("valid midnight"))
+        .earliest()
+        .map(|midnight| midnight.timestamp())
+        .context("service window end has no local midnight")
 }
 
 fn parse_naive_datetime(raw: &str) -> Result<NaiveDateTime> {
