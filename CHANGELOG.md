@@ -10,6 +10,9 @@
   request whose cheapest penalized route breaks them. The cheapest
   orientation and route within the limits is returned, and the request fails
   only when none exists. Alternatives over a limit are dropped.
+- Profiles: `preferences.max_grade` excludes edges whose steepest DEM grade
+  in the travel direction is above a limit, either one rise/run value or
+  separate `uphill`/`downhill` limits.
 - `returns.admin_areas` and `returns.elevation` also annotate waypoint legs
   (`/v1/waypoints`) and alternative routes, each from its own path.
 - Directions: two same-side turns joined by a short connector (a cycle path

@@ -287,6 +287,75 @@ fn border_crossings_add_time_and_penalty_or_are_avoided() {
     );
 }
 
+/// Three bicycle edges whose steepest (uphill, downhill) grades are
+/// 3 %/0, 9 %/0 and 0/12 %, as a DEM import stores them.
+fn graded_topology() -> TopologyBundle {
+    let mut topology = topology(&[
+        edge(0, RoadClass::Residential, AccessMask::BICYCLE),
+        edge(1, RoadClass::Residential, AccessMask::BICYCLE),
+        edge(2, RoadClass::Residential, AccessMask::BICYCLE),
+    ]);
+    topology.elevation.edge_max_uphill_permille = vec![30, 90, 0];
+    topology.elevation.edge_max_downhill_permille = vec![0, 0, 120];
+    topology
+}
+
+/// Edges `max_grade` leaves routable on [`graded_topology`].
+fn routable_under(max_grade: &str, topology: &TopologyBundle) -> Vec<bool> {
+    let profile = profile(
+        "bicycle",
+        &format!("preferences: {{max_grade: {max_grade}}}"),
+    );
+    compile(&profile, topology)
+        .edge_metrics
+        .iter()
+        .map(|metric| metric.generalized_cost.is_some())
+        .collect()
+}
+
+#[test]
+fn max_grade_excludes_edges_steeper_than_the_limit() {
+    let graded = graded_topology();
+    // One number limits both directions; a grade equal to it is allowed.
+    assert_eq!(routable_under("0.08", &graded), [true, false, false]);
+    assert_eq!(routable_under("0.09", &graded), [true, true, false]);
+    // Separate limits leave the other direction open.
+    assert_eq!(
+        routable_under("{uphill: 0.08}", &graded),
+        [true, false, true]
+    );
+    assert_eq!(
+        routable_under("{downhill: 0.1}", &graded),
+        [true, true, false]
+    );
+    // Without a DEM there are no grades and nothing is excluded.
+    let flat = topology(&[edge(0, RoadClass::Residential, AccessMask::BICYCLE)]);
+    assert_eq!(routable_under("0.01", &flat), [true]);
+}
+
+#[test]
+fn max_grade_rejects_negative_limits_and_unknown_keys() {
+    let negative = profile("bicycle", "preferences: {max_grade: -0.1}");
+    let error = negative.validate().expect_err("negative limit is rejected");
+    assert!(error.to_string().contains("max_grade"), "{error}");
+    let typo = serde_yaml::from_str::<ProfileDocument>(
+        "profile: {id: test, label: test, mode: bicycle, defaults_pack: test}\n\
+         preferences: {max_grade: {up: 0.1}}",
+    );
+    assert!(typo.is_err());
+
+    let example = crate::load_profile(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/profiles/bicycle_max_grade_osm.yml"
+    ))
+    .expect("example parses");
+    example.validate().expect("example is valid");
+    assert_eq!(
+        example.preferences.max_grade.map(crate::MaxGrade::limits),
+        Some((Some(0.08), Some(0.12)))
+    );
+}
+
 #[test]
 fn excludes_matching_edges_from_compiled_metrics() {
     let profile = profile("foot", "exclude_rules:\n  - match: {highway: primary}");

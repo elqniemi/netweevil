@@ -22,8 +22,9 @@ pub use load::load_profile;
 pub use progress::{ProfileCompileProgress, ProfileCompileStage};
 pub use schema::{
     BreakdownMetric, CostComponentConfig, CostConfig, DirectionConfig, ExcludeRule, FacilityConfig,
-    FacilityCost, FactorRule, FerryConfig, Objective, PostedLimitPolicy, PreferencesConfig,
-    ProfileDocument, ProfileHeader, ReturnConfig, ReturnGeometry, SlopeModelConfig, SlopePoint,
-    SpeedRule, SpeedsConfig, TagMatch, TemporalProfileConfig, TurnConfig,
+    FacilityCost, FactorRule, FerryConfig, MaxGrade, Objective, PostedLimitPolicy,
+    PreferencesConfig, ProfileDocument, ProfileHeader, ReturnConfig, ReturnGeometry,
+    SlopeModelConfig, SlopePoint, SpeedRule, SpeedsConfig, TagMatch, TemporalProfileConfig,
+    TurnConfig,
 };
 pub use turns::destination_only_entry_cost;

@@ -124,6 +124,14 @@ impl ProfileDocument {
                 bail!("preferences.{name} must be finite and non-negative");
             }
         }
+        if let Some(max_grade) = self.preferences.max_grade {
+            let (uphill, downhill) = max_grade.limits();
+            for (name, limit) in [("uphill", uphill), ("downhill", downhill)] {
+                if limit.is_some_and(|limit| !limit.is_finite() || limit < 0.0) {
+                    bail!("preferences.max_grade {name} limit must be finite and non-negative");
+                }
+            }
+        }
         if let Some(vehicle) = &self.vehicle {
             vehicle.validate().map_err(anyhow::Error::msg)?;
         }
@@ -624,6 +632,46 @@ pub struct PreferencesConfig {
     /// control stop).
     #[serde(default)]
     pub border_crossing_time_s: f64,
+    /// Exclude edges whose steepest grade in the travel direction is above
+    /// a limit. Uses the per-edge grades sampled from a DEM at import;
+    /// datasets without a DEM exclude nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_grade: Option<MaxGrade>,
+}
+
+/// Steepest allowed grade as rise/run (`0.08` is 8 %): one number for both
+/// directions, or separate `uphill` and `downhill` limits, either optional.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum MaxGrade {
+    Both(f64),
+    Directional {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uphill: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        downhill: Option<f64>,
+    },
+}
+
+impl MaxGrade {
+    /// `(uphill, downhill)` limits; `None` leaves that direction open.
+    pub fn limits(self) -> (Option<f64>, Option<f64>) {
+        match self {
+            Self::Both(grade) => (Some(grade), Some(grade)),
+            Self::Directional { uphill, downhill } => (uphill, downhill),
+        }
+    }
+
+    /// Whether an edge whose steepest uphill and downhill grades are these
+    /// stored permille values is too steep. Limits are compared at the
+    /// same whole-permille resolution.
+    pub fn excludes_permille(self, uphill: u16, downhill: u16) -> bool {
+        let above = |permille: u16, limit: Option<f64>| {
+            limit.is_some_and(|limit| f64::from(permille) > (limit * 1000.0).round())
+        };
+        let (max_uphill, max_downhill) = self.limits();
+        above(uphill, max_uphill) || above(downhill, max_downhill)
+    }
 }
 
 fn default_pref() -> f64 {
@@ -647,6 +695,7 @@ impl Default for PreferencesConfig {
             avoid_border_crossings: false,
             border_crossing_penalty_s: 0.0,
             border_crossing_time_s: 0.0,
+            max_grade: None,
         }
     }
 }
