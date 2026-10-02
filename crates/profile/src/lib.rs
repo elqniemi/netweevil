@@ -14,7 +14,8 @@ mod test_support;
 mod turns;
 
 pub use compile::{
-    ServiceAreaMetric, compile_profile_bundle, compile_profile_bundle_with_acceleration,
+    CostBaseArcs, ServiceAreaMetric, compile_profile_bundle,
+    compile_profile_bundle_with_acceleration,
     compile_profile_bundle_with_acceleration_with_progress, compile_profile_metrics_with_progress,
     customize_acceleration, customize_service_area_metric, is_statically_usable,
 };

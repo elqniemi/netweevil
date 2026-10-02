@@ -66,6 +66,11 @@ impl<K: PartialEq> DerivedEngineCache<K> {
 /// large share of the preparation time on restriction-rich networks).
 pub(crate) type AvoidEngineKey = (Vec<(u32, u64)>, bool);
 
+/// Avoid sets of at most one edge in this many re-customize the base
+/// engine's hierarchy; larger ones touch enough of it that a full
+/// customization (parallel) is faster.
+const RECUSTOMIZE_SHARE: usize = 200;
+
 impl PreparedRoutingEngine {
     /// The edges `avoid` excludes or penalizes, or `None` when the set does
     /// not change the problem (empty, matching no routable edge, or already
@@ -129,12 +134,55 @@ impl PreparedRoutingEngine {
         );
         self.avoid_engines.get_or_build(key, || {
             let started = std::time::Instant::now();
-            let mut engine = PreparedRoutingEngine::build(
-                self.topology.clone(),
-                Arc::new(resolved.apply(self.metrics.as_ref())),
-                self.dataset_acceleration(),
-                with_ignore_mode_graph,
-            )?;
+            let metrics = Arc::new(resolved.apply(self.metrics.as_ref()));
+            // Avoiding only raises or removes the costs of the avoided edges, so
+            // a small avoid set re-customizes this engine's hierarchy instead of
+            // customizing it from scratch.
+            let mut ranked = (resolved.edges.len()
+                <= self.topology.edge_count() / RECUSTOMIZE_SHARE)
+                .then(|| {
+                    let changed = resolved
+                        .edges
+                        .iter()
+                        .map(|&(edge, _)| edge)
+                        .collect::<Vec<_>>();
+                    recustomize_changed_edges(
+                        self.topology.as_ref(),
+                        metrics.as_ref(),
+                        &self.default_routing_graph,
+                        &changed,
+                    )
+                })
+                .flatten();
+            // Closing edges only removes adjacency, so a re-customized engine
+            // filters this engine's graph instead of building one.
+            let filtered = ranked.is_some().then(|| {
+                self.default_routing_graph.with_closed_edges(
+                    self.topology.as_ref(),
+                    self.metrics.as_ref(),
+                    &metrics,
+                    &mut ranked,
+                )
+            });
+            let mut engine = match filtered.flatten() {
+                Some(graph) => {
+                    validate_execution_inputs(self.topology.as_ref(), metrics.as_ref())?;
+                    PreparedRoutingEngine::assemble(
+                        self.topology.clone(),
+                        metrics,
+                        graph?,
+                        true,
+                        with_ignore_mode_graph,
+                    )
+                }
+                None => PreparedRoutingEngine::build(
+                    self.topology.clone(),
+                    metrics,
+                    self.dataset_acceleration(),
+                    with_ignore_mode_graph,
+                    ranked.map(CchWeights::Ranked),
+                )?,
+            };
             engine.avoid_applied = true;
             tracing::debug!(
                 edges = resolved.edges.len(),

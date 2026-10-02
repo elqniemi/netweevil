@@ -467,7 +467,7 @@ fn arrive_by_breaks_equal_latest_departures_by_generalized_cost() {
     metrics.edge_metrics[1].generalized_cost = Some(200.0);
     metrics.edge_metrics[2].travel_time_s = None;
     metrics.edge_metrics[2].generalized_cost = None;
-    metrics.edge_metrics.push(edge_metric(3, 20.0));
+    metrics.edge_metrics.push(edge_metric(20.0));
 
     let route = crate::execute_route(
         &topology,
@@ -494,7 +494,7 @@ fn temporal_scenario_can_enable_a_materialized_direction_hidden_from_static_rout
     });
     topology.edge_based_topology = crate::build_edge_based_topology_fallback(&topology);
     let mut metrics = test_metrics(false);
-    metrics.edge_metrics.push(edge_metric(3, 10.0));
+    metrics.edge_metrics.push(edge_metric(10.0));
     let mut request = depart_at("2026-07-10T12:00:00+08:00");
     request.origin = point("upper", 6.001);
     request.destination = point("lower", 6.0);
@@ -543,7 +543,7 @@ fn temporal_overlay_updates_component_vector_and_scalar_cost() {
     metrics.edge_metrics[0].generalized_cost = Some(30.0);
     metrics.components = vec![CompiledCostComponent {
         weight: 2.0,
-        edge_values: vec![10.0, 20.0, 100.0],
+        edge_values: vec![10.0, 20.0, 100.0].into(),
         invert_overlay: true,
         ..component("sun_time", true, Some("shade_fraction"))
     }];
@@ -625,7 +625,7 @@ fn component(
     CompiledCostComponent {
         name: name.to_string(),
         weight: 1.0,
-        edge_values: vec![200.0, 0.0, 0.0],
+        edge_values: vec![200.0, 0.0, 0.0].into(),
         scales_with_travel_time,
         overlay_name: overlay_name.map(str::to_string),
         invert_overlay: false,
@@ -673,9 +673,8 @@ fn arrive_by(arrive_by: &str, lookback_s: f64) -> crate::RouteRequest {
     request
 }
 
-fn edge_metric(edge_id: u32, seconds: f64) -> CompiledEdgeMetric {
+fn edge_metric(seconds: f64) -> CompiledEdgeMetric {
     CompiledEdgeMetric {
-        edge_id: EdgeId(edge_id),
         travel_time_s: Some(seconds),
         generalized_cost: Some(seconds),
     }
@@ -697,11 +696,7 @@ fn test_metrics(allow_wait: bool) -> CompiledProfileBundle {
         },
         source_topology_bundle_id: CacheBundleId::new("topology-test"),
         acceleration: None,
-        edge_metrics: vec![
-            edge_metric(0, 10.0),
-            edge_metric(1, 20.0),
-            edge_metric(2, 100.0),
-        ],
+        edge_metrics: vec![edge_metric(10.0), edge_metric(20.0), edge_metric(100.0)],
         vehicle: Default::default(),
     }
 }

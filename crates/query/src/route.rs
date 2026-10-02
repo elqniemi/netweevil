@@ -282,7 +282,7 @@ pub(crate) fn cached_failure_mode_bundle(
     {
         routing_graph.acceleration = build_acceleration_graph(
             degraded_metrics.clone(),
-            failure_weights,
+            failure_weights.map(CchWeights::Slots),
             Some(base_acceleration.source.clone()),
             degraded_topology.edge_count(),
         )?
@@ -362,7 +362,6 @@ fn build_failure_mode_bundle(
                 flags: 0,
             });
             degraded_metrics.edge_metrics.push(CompiledEdgeMetric {
-                edge_id: metric.edge_id,
                 travel_time_s: metric.travel_time_s,
                 generalized_cost: metric.generalized_cost,
             });

@@ -738,7 +738,7 @@ pub(crate) fn seeded_bidirectional_dijkstra_on_edge_transitions(
                 for transition_index in routing_graph.reverse_transition_range(edge_index) {
                     let previous_edge =
                         routing_graph.reverse_transition_edges[transition_index] as usize;
-                    let next_cost = cost + routing_graph.reverse_transition_costs[transition_index];
+                    let next_cost = cost + routing_graph.reverse_transition_cost(transition_index);
                     if !scratch.update_backward(previous_edge, next_cost, edge_index as u32) {
                         continue;
                     }

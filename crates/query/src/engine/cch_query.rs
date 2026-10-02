@@ -103,14 +103,17 @@ pub(crate) struct RankedCch {
 }
 
 impl RankedCch {
-    /// Ranked rows of `source` carrying the slot-ordered arc weights.
+    /// Ranked rows of `source` carrying the slot-ordered arc weights. Every
+    /// metric customized on the same live `source` shares one topology.
     pub(crate) fn build(
-        source: &DatasetAccelerationBundle,
+        source: &Arc<DatasetAccelerationBundle>,
         upward_weight: &[u32],
         downward_weight: &[u32],
     ) -> Self {
+        static TOPOLOGIES: DerivedCache<DatasetAccelerationBundle, RankedTopology> =
+            DerivedCache::new();
         Self::with_topology(
-            Arc::new(RankedTopology::build(source)),
+            TOPOLOGIES.get_or_build(source, || RankedTopology::build(source)),
             source,
             upward_weight,
             downward_weight,
@@ -203,6 +206,35 @@ impl RankedCch {
         )
     }
 
+    /// Position in the ranked upward weights of the upward arc in bundle
+    /// slot `slot` of `tail`'s row.
+    pub(crate) fn upward_position(
+        &self,
+        source: &DatasetAccelerationBundle,
+        tail: usize,
+        slot: usize,
+    ) -> usize {
+        let offset = slot - source.upward_first_out[tail] as usize;
+        self.upward_range(source.edge_rank[tail] as usize).start + offset
+    }
+
+    /// Position in the ranked downward weights of the downward arc
+    /// `tail -> head`, if the hierarchy has it.
+    pub(crate) fn downward_position(
+        &self,
+        source: &DatasetAccelerationBundle,
+        tail: usize,
+        head: usize,
+    ) -> Option<usize> {
+        let range = self.downward_range(source.edge_rank[head] as usize);
+        self.topology.downward_tail[range.clone()]
+            .binary_search_by(|&tail_rank| {
+                (source.edge_order[tail_rank as usize] as usize).cmp(&tail)
+            })
+            .ok()
+            .map(|offset| range.start + offset)
+    }
+
     /// Weight of the upward arc in bundle slot `slot` of `tail`'s row.
     pub(crate) fn upward_weight(
         &self,
@@ -210,8 +242,7 @@ impl RankedCch {
         tail: usize,
         slot: usize,
     ) -> u32 {
-        let offset = slot - source.upward_first_out[tail] as usize;
-        self.upward_weight[self.upward_range(source.edge_rank[tail] as usize).start + offset]
+        self.upward_weight[self.upward_position(source, tail, slot)]
     }
 
     /// Weight of the downward arc `tail -> head`, if the hierarchy has it.
@@ -221,13 +252,24 @@ impl RankedCch {
         tail: usize,
         head: usize,
     ) -> Option<u32> {
-        let range = self.downward_range(source.edge_rank[head] as usize);
-        self.topology.downward_tail[range.clone()]
-            .binary_search_by(|&tail_rank| {
-                (source.edge_order[tail_rank as usize] as usize).cmp(&tail)
-            })
-            .ok()
-            .map(|offset| self.downward_weight[range.start + offset])
+        self.downward_position(source, tail, head)
+            .map(|position| self.downward_weight[position])
+    }
+
+    /// The ranked `(upward, downward)` weight arrays.
+    pub(crate) fn ranked_weights(&self) -> (&[u32], &[u32]) {
+        (&self.upward_weight, &self.downward_weight)
+    }
+
+    /// This hierarchy with other weights in ranked order.
+    pub(crate) fn with_ranked_weights(&self, upward: Vec<u32>, downward: Vec<u32>) -> Self {
+        debug_assert_eq!(upward.len(), self.upward_weight.len());
+        debug_assert_eq!(downward.len(), self.downward_weight.len());
+        Self {
+            topology: self.topology.clone(),
+            upward_weight: upward,
+            downward_weight: downward,
+        }
     }
 
     /// Whether `other` shares this hierarchy's ranked topology.

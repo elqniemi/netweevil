@@ -29,7 +29,6 @@ fn engine(
     metrics.edge_metrics = edges
         .iter()
         .map(|edge| CompiledEdgeMetric {
-            edge_id: edge.edge_id,
             travel_time_s: Some(f64::from(edge.length_m) / 10.0),
             generalized_cost: Some(f64::from(edge.length_m)),
         })

@@ -127,7 +127,9 @@ pub(crate) fn exclude_vehicle_edges(metrics: &mut CompiledProfileBundle, edges: 
             .iter_mut()
             .zip(&mut metrics.components)
         {
-            values.push(std::mem::take(&mut component.edge_values[edge as usize]));
+            values.push(std::mem::take(
+                &mut std::sync::Arc::make_mut(&mut component.edge_values)[edge as usize],
+            ));
         }
     }
     metrics.vehicle = exclusions;
@@ -148,7 +150,7 @@ pub(crate) fn restore_vehicle_exclusions(metrics: &mut CompiledProfileBundle) {
             .iter_mut()
             .zip(&exclusions.component_values)
         {
-            component.edge_values[edge as usize] = values[position];
+            std::sync::Arc::make_mut(&mut component.edge_values)[edge as usize] = values[position];
         }
     }
     metrics.vehicle.vehicle = exclusions.vehicle;

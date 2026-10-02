@@ -29,7 +29,9 @@ pub(crate) struct RoutingGraph {
     pub(crate) transition_costs: Arc<[f64]>,
     reverse_transition_first_out: Arc<[u32]>,
     pub(crate) reverse_transition_edges: Arc<[u32]>,
-    pub(crate) reverse_transition_costs: Arc<[f64]>,
+    /// Forward transition of each reverse transition, so reverse searches
+    /// read the forward costs instead of a permuted copy.
+    reverse_transition_forward: Arc<[u32]>,
     pub(crate) acceleration: Option<Arc<AccelerationGraph>>,
     /// True when the attached acceleration weights were customized with the
     /// request's failure-mode penalties baked in (degraded graphs only);
@@ -207,6 +209,12 @@ impl RoutingGraph {
     pub(crate) fn transition_range(&self, edge_index: usize) -> std::ops::Range<usize> {
         self.transition_first_out[edge_index] as usize
             ..self.transition_first_out[edge_index + 1] as usize
+    }
+
+    /// Cost of the reverse transition at `reverse_index`: the cost of its
+    /// forward transition.
+    pub(crate) fn reverse_transition_cost(&self, reverse_index: usize) -> f64 {
+        self.transition_costs[self.reverse_transition_forward[reverse_index] as usize]
     }
 
     pub(crate) fn reverse_transition_range(&self, edge_index: usize) -> std::ops::Range<usize> {
@@ -521,7 +529,7 @@ pub(crate) fn build_routing_graph_with_options_from_shared(
 pub(crate) fn build_routing_graph_with_weights(
     topology: &TopologyBundle,
     metrics: Arc<CompiledProfileBundle>,
-    weights: Option<CchArcWeights>,
+    weights: Option<CchWeights>,
     acceleration: Option<Arc<DatasetAccelerationBundle>>,
     options: RoutingGraphBuildOptions,
 ) -> Result<RoutingGraph> {
@@ -723,7 +731,7 @@ pub(crate) fn build_routing_graph_with_weights(
         reverse_transition_first_out[edge_index + 1] += reverse_transition_first_out[edge_index];
     }
     let mut reverse_transition_edges = vec![0_u32; transition_count];
-    let mut reverse_transition_costs = vec![0.0_f64; transition_count];
+    let mut reverse_transition_forward = vec![0_u32; transition_count];
     let mut reverse_write_positions = reverse_transition_first_out[..edge_count].to_vec();
     for edge_index in 0..edge_count {
         for transition_index in
@@ -733,7 +741,7 @@ pub(crate) fn build_routing_graph_with_weights(
             let write_index = &mut reverse_write_positions[next_edge];
             let slot = *write_index as usize;
             reverse_transition_edges[slot] = edge_index as u32;
-            reverse_transition_costs[slot] = transition_costs[transition_index];
+            reverse_transition_forward[slot] = transition_index as u32;
             *write_index += 1;
         }
     }
@@ -743,21 +751,25 @@ pub(crate) fn build_routing_graph_with_weights(
         .map(|sequence| sequence.iter().rev().copied().collect::<Vec<_>>())
         .collect::<Vec<_>>();
 
-    let edge_spatial_index =
-        crate::edge_spatial_index::EdgeSpatialIndex::build(topology, &edge_costs);
+    // Profiles that agree on the traversable edges share these arrays and
+    // the spatial index with each other (see `shared_structure`).
+    let edge_order = U32_ARRAYS.intern(edge_order);
+    let edge_spatial_index = shared_spatial_index(topology, &edge_order, &edge_costs, || {
+        crate::edge_spatial_index::EdgeSpatialIndex::build(topology, &edge_costs)
+    });
     Ok(RoutingGraph {
-        edge_spatial_index: Arc::new(edge_spatial_index),
-        first_out: first_out.into(),
-        edge_order: edge_order.into(),
-        incoming_first_out: incoming_first_out.into(),
-        incoming_edge_order: incoming_edge_order.into(),
-        edge_costs: edge_costs.into(),
-        transition_first_out: transition_first_out.into(),
-        transition_edges: transition_edges.into(),
-        transition_costs: transition_costs.into(),
-        reverse_transition_first_out: reverse_transition_first_out.into(),
-        reverse_transition_edges: reverse_transition_edges.into(),
-        reverse_transition_costs: reverse_transition_costs.into(),
+        edge_spatial_index,
+        first_out: U32_ARRAYS.intern(first_out),
+        edge_order,
+        incoming_first_out: U32_ARRAYS.intern(incoming_first_out),
+        incoming_edge_order: U32_ARRAYS.intern(incoming_edge_order),
+        edge_costs: F64_ARRAYS.intern(edge_costs),
+        transition_first_out: U32_ARRAYS.intern(transition_first_out),
+        transition_edges: U32_ARRAYS.intern(transition_edges),
+        transition_costs: F64_ARRAYS.intern(transition_costs),
+        reverse_transition_first_out: U32_ARRAYS.intern(reverse_transition_first_out),
+        reverse_transition_edges: U32_ARRAYS.intern(reverse_transition_edges),
+        reverse_transition_forward: U32_ARRAYS.intern(reverse_transition_forward),
         // Temporal-inclusive graphs intentionally run exact searches: their
         // scenario-only directions are absent from the static CCH weights.
         // Do not invoke the acceleration loader here, because a missing
@@ -801,7 +813,7 @@ impl RoutingGraph {
             transition_costs: self.transition_costs.clone(),
             reverse_transition_first_out: self.reverse_transition_first_out.clone(),
             reverse_transition_edges: self.reverse_transition_edges.clone(),
-            reverse_transition_costs: self.reverse_transition_costs.clone(),
+            reverse_transition_forward: self.reverse_transition_forward.clone(),
             acceleration: self.acceleration.clone(),
             acceleration_includes_failure_penalties: self.acceleration_includes_failure_penalties,
             automaton: Arc::new(RestrictionAutomaton::build(&[])),
@@ -828,23 +840,10 @@ impl RoutingGraph {
         metrics: Arc<CompiledProfileBundle>,
         weights: Option<&CchArcWeights>,
     ) -> Option<Self> {
-        let turns = |metrics: &CompiledProfileBundle| {
-            let turns = metrics.turn_costs;
-            [
-                turns.left_penalty_s,
-                turns.right_penalty_s,
-                turns.uturn_penalty_s,
-                turns.traffic_signal_penalty_s,
-                turns.roundabout_entry_penalty_s,
-                turns.cost_time_weight,
-                turns.destination_only_penalty_s,
-            ]
-            .map(f64::to_bits)
-        };
         if self.includes_temporal_materialized_directions
             || self.acceleration_includes_failure_penalties
             || metrics.mode != base_metrics.mode
-            || turns(&metrics) != turns(base_metrics)
+            || !same_turn_costs(&metrics, base_metrics)
             || metrics.edge_metrics.len() != self.edge_costs.len()
         {
             return None;
@@ -883,17 +882,6 @@ impl RoutingGraph {
                         + transition_access_cost(topology, base_metrics, edge_index, next_edge));
             }
         }
-        let mut reverse_transition_costs = vec![0.0_f64; transition_costs.len()];
-        let mut reverse_write_positions =
-            self.reverse_transition_first_out[..edge_costs.len()].to_vec();
-        for edge_index in 0..edge_costs.len() {
-            for transition_index in self.transition_range(edge_index) {
-                let next_edge = self.transition_edges[transition_index] as usize;
-                let slot = &mut reverse_write_positions[next_edge];
-                reverse_transition_costs[*slot as usize] = transition_costs[transition_index];
-                *slot += 1;
-            }
-        }
         let acceleration = match &self.acceleration {
             Some(base) => Some(Arc::new(base.with_metrics(metrics, weights)?)),
             None => None,
@@ -910,7 +898,7 @@ impl RoutingGraph {
             transition_costs: transition_costs.into(),
             reverse_transition_first_out: self.reverse_transition_first_out.clone(),
             reverse_transition_edges: self.reverse_transition_edges.clone(),
-            reverse_transition_costs: reverse_transition_costs.into(),
+            reverse_transition_forward: self.reverse_transition_forward.clone(),
             acceleration,
             acceleration_includes_failure_penalties: false,
             automaton: self.automaton.clone(),
@@ -922,6 +910,184 @@ impl RoutingGraph {
             // which `with_metrics` requires to be unchanged.
             turn_seconds: self.turn_seconds.clone(),
         })
+    }
+}
+
+/// Whether two profiles charge bit-identical turn costs.
+fn same_turn_costs(left: &CompiledProfileBundle, right: &CompiledProfileBundle) -> bool {
+    let bits = |metrics: &CompiledProfileBundle| {
+        let turns = metrics.turn_costs;
+        [
+            turns.left_penalty_s,
+            turns.right_penalty_s,
+            turns.uturn_penalty_s,
+            turns.traffic_signal_penalty_s,
+            turns.roundabout_entry_penalty_s,
+            turns.cost_time_weight,
+            turns.destination_only_penalty_s,
+        ]
+        .map(f64::to_bits)
+    };
+    bits(left) == bits(right)
+}
+
+impl RoutingGraph {
+    /// This graph for `metrics`, which may raise edge costs and close edges
+    /// but routes on no edge this graph cannot (avoid sets). The adjacency is
+    /// this graph's with closed edges filtered out, in the order a fresh
+    /// build lists them, and transition costs use the builder's arithmetic,
+    /// so the graph equals a fresh build. `ranked` carries the hierarchy
+    /// customized for `metrics` and is taken only when the graph is built.
+    /// `None` when `metrics` opens an edge or changes the mode or turn costs,
+    /// or when this graph has no turn table or is not a plain static graph.
+    pub(crate) fn with_closed_edges(
+        &self,
+        topology: &TopologyBundle,
+        base_metrics: &CompiledProfileBundle,
+        metrics: &Arc<CompiledProfileBundle>,
+        ranked: &mut Option<RankedCch>,
+    ) -> Option<Result<Self>> {
+        let Some(Some(turn_seconds)) = self.turn_seconds.get() else {
+            return None;
+        };
+        if self.includes_temporal_materialized_directions
+            || self.acceleration_includes_failure_penalties
+            || !self.virtual_reverse_of.is_empty()
+            || metrics.mode != base_metrics.mode
+            || !same_turn_costs(metrics, base_metrics)
+            || metrics.edge_metrics.len() != self.edge_costs.len()
+            || ranked.is_none() != self.acceleration.is_none()
+        {
+            return None;
+        }
+        let mode_bit = metrics.mode.access_bit();
+        let edge_count = self.edge_costs.len();
+        let mut edge_costs = vec![f64::INFINITY; edge_count];
+        for (edge_index, metric) in metrics.edge_metrics.iter().enumerate() {
+            let traversable =
+                netweevil_profile::is_statically_usable(topology, edge_index, mode_bit)
+                    && metric.travel_time_s.is_some();
+            if let Some(cost) = metric.generalized_cost.filter(|_| traversable) {
+                if !self.edge_costs[edge_index].is_finite() {
+                    return None;
+                }
+                edge_costs[edge_index] = cost;
+            }
+        }
+        let open = |edge: u32| edge_costs[edge as usize].is_finite();
+
+        let node_count = self.first_out.len() - 1;
+        let filter_csr = |first_out: &[u32], items: &[u32]| {
+            let mut new_first_out = Vec::with_capacity(first_out.len());
+            let mut new_items = Vec::with_capacity(items.len());
+            new_first_out.push(0);
+            for node in 0..node_count {
+                new_items.extend(
+                    items[first_out[node] as usize..first_out[node + 1] as usize]
+                        .iter()
+                        .copied()
+                        .filter(|&edge| open(edge)),
+                );
+                new_first_out.push(new_items.len() as u32);
+            }
+            (new_first_out, new_items)
+        };
+        let (first_out, edge_order) = filter_csr(&self.first_out, &self.edge_order);
+        let (incoming_first_out, incoming_edge_order) =
+            filter_csr(&self.incoming_first_out, &self.incoming_edge_order);
+
+        // Forward transitions of open edges into open edges, in this graph's
+        // order, with costs by the builder's arithmetic.
+        let weight = metrics.turn_costs.cost_time_weight;
+        let mut transition_first_out = Vec::with_capacity(edge_count + 1);
+        let mut transition_edges = Vec::with_capacity(self.transition_edges.len());
+        let mut transition_costs = Vec::with_capacity(self.transition_edges.len());
+        let mut classes = Vec::with_capacity(self.transition_edges.len());
+        let mut kept = vec![u32::MAX; self.transition_edges.len()];
+        transition_first_out.push(0);
+        for edge_index in 0..edge_count {
+            if open(edge_index as u32) {
+                for transition_index in self.transition_range(edge_index) {
+                    let next_edge = self.transition_edges[transition_index];
+                    if !open(next_edge) {
+                        continue;
+                    }
+                    kept[transition_index] = transition_edges.len() as u32;
+                    transition_edges.push(next_edge);
+                    transition_costs.push(
+                        edge_costs[next_edge as usize]
+                            + (turn_seconds.get(transition_index) * weight
+                                + transition_access_cost(
+                                    topology,
+                                    base_metrics,
+                                    edge_index,
+                                    next_edge as usize,
+                                )),
+                    );
+                    classes.push(turn_seconds.classes[transition_index]);
+                }
+            }
+            transition_first_out.push(transition_edges.len() as u32);
+        }
+        let mut reverse_transition_first_out = Vec::with_capacity(edge_count + 1);
+        let mut reverse_transition_edges = Vec::with_capacity(transition_edges.len());
+        let mut reverse_transition_forward = Vec::with_capacity(transition_edges.len());
+        reverse_transition_first_out.push(0);
+        for edge_index in 0..edge_count {
+            for reverse_index in self.reverse_transition_range(edge_index) {
+                let forward = kept[self.reverse_transition_forward[reverse_index] as usize];
+                if forward != u32::MAX {
+                    reverse_transition_edges.push(self.reverse_transition_edges[reverse_index]);
+                    reverse_transition_forward.push(forward);
+                }
+            }
+            reverse_transition_first_out.push(reverse_transition_edges.len() as u32);
+        }
+
+        let edge_order = U32_ARRAYS.intern(edge_order);
+        let edge_spatial_index = shared_spatial_index(topology, &edge_order, &edge_costs, || {
+            crate::edge_spatial_index::EdgeSpatialIndex::build(topology, &edge_costs)
+        });
+        let acceleration = match (ranked.take(), self.acceleration.as_ref()) {
+            (Some(ranked), Some(base)) => match build_acceleration_graph(
+                metrics.clone(),
+                Some(CchWeights::Ranked(ranked)),
+                Some(base.source.clone()),
+                edge_count,
+            ) {
+                Ok(acceleration) => acceleration.map(Arc::new),
+                Err(error) => return Some(Err(error)),
+            },
+            _ => None,
+        };
+        let turn_table = TransitionTurnSeconds {
+            values: turn_seconds.values.clone(),
+            classes,
+        };
+        Some(Ok(Self {
+            edge_spatial_index,
+            first_out: U32_ARRAYS.intern(first_out),
+            edge_order,
+            incoming_first_out: U32_ARRAYS.intern(incoming_first_out),
+            incoming_edge_order: U32_ARRAYS.intern(incoming_edge_order),
+            edge_costs: F64_ARRAYS.intern(edge_costs),
+            transition_first_out: U32_ARRAYS.intern(transition_first_out),
+            transition_edges: U32_ARRAYS.intern(transition_edges),
+            transition_costs: F64_ARRAYS.intern(transition_costs),
+            reverse_transition_first_out: U32_ARRAYS.intern(reverse_transition_first_out),
+            reverse_transition_edges: U32_ARRAYS.intern(reverse_transition_edges),
+            reverse_transition_forward: U32_ARRAYS.intern(reverse_transition_forward),
+            acceleration,
+            acceleration_includes_failure_penalties: false,
+            automaton: self.automaton.clone(),
+            reverse_automaton: self.reverse_automaton.clone(),
+            virtual_reverse_of: Arc::default(),
+            includes_temporal_materialized_directions: false,
+            // Only time-dependent graphs carry conditional turns, and those
+            // are never filtered here.
+            conditional_turns: Arc::default(),
+            turn_seconds: Arc::new(std::sync::OnceLock::from(Some(turn_table))),
+        }))
     }
 }
 
@@ -974,6 +1140,24 @@ impl AccelerationGraph {
 /// hierarchy, as customization emits them.
 pub(crate) type CchArcWeights = (Vec<u32>, Vec<u32>);
 
+/// Generalized-cost weights for a new acceleration graph.
+pub(crate) enum CchWeights {
+    /// Slot-ordered weights from customization.
+    Slots(CchArcWeights),
+    /// A ranked hierarchy already carrying the weights (re-customized from
+    /// another graph over the same dataset hierarchy).
+    Ranked(RankedCch),
+}
+
+impl CchWeights {
+    pub(crate) fn as_slots(&self) -> Option<&CchArcWeights> {
+        match self {
+            Self::Slots(weights) => Some(weights),
+            Self::Ranked(_) => None,
+        }
+    }
+}
+
 /// Compiled profile bundles persist per-edge metrics only. When `metrics`
 /// carries an acceleration header for `dataset_acceleration` but no arc
 /// weights yet, customize the generalized-cost weights now and return them
@@ -986,7 +1170,7 @@ pub(crate) fn customize_loaded_metrics(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
     dataset_acceleration: Option<&DatasetAccelerationBundle>,
-) -> Option<CchArcWeights> {
+) -> Option<CchWeights> {
     let (Some(source), Some(compiled)) = (dataset_acceleration, metrics.acceleration.as_ref())
     else {
         return None;
@@ -1008,7 +1192,10 @@ pub(crate) fn customize_loaded_metrics(
         source,
         compiled.source_acceleration_bundle_id.clone(),
     );
-    Some((weights.upward_weight, weights.downward_weight))
+    Some(CchWeights::Slots((
+        weights.upward_weight,
+        weights.downward_weight,
+    )))
 }
 
 /// The ranked hierarchy of `metrics` over `dataset_acceleration`. The cost
@@ -1016,7 +1203,7 @@ pub(crate) fn customize_loaded_metrics(
 /// bundle's acceleration otherwise.
 pub(crate) fn build_acceleration_graph(
     metrics: Arc<CompiledProfileBundle>,
-    weights: Option<CchArcWeights>,
+    weights: Option<CchWeights>,
     dataset_acceleration: Option<Arc<DatasetAccelerationBundle>>,
     edge_count: usize,
 ) -> Result<Option<AccelerationGraph>> {
@@ -1032,7 +1219,8 @@ pub(crate) fn build_acceleration_graph(
         return Ok(None);
     };
     let (upward_weight, downward_weight) = match &weights {
-        Some((upward, downward)) => (upward.as_slice(), downward.as_slice()),
+        Some(CchWeights::Slots((upward, downward))) => (upward.as_slice(), downward.as_slice()),
+        Some(CchWeights::Ranked(ranked)) => ranked.ranked_weights(),
         None => (
             acceleration.upward_weight.as_slice(),
             acceleration.downward_weight.as_slice(),
@@ -1118,8 +1306,10 @@ pub(crate) fn build_acceleration_graph(
         }
     }
 
-    let ranked = RankedCch::build(&topology_source, upward_weight, downward_weight);
-    drop(weights);
+    let ranked = match weights {
+        Some(CchWeights::Ranked(ranked)) => ranked,
+        _ => RankedCch::build(&topology_source, upward_weight, downward_weight),
+    };
     Ok(Some(AccelerationGraph {
         source: topology_source,
         metrics,

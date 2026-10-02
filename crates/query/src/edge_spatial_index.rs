@@ -1,5 +1,7 @@
 //! A prepared edge index for snapping, including the interiors of long edges.
 
+use std::sync::Arc;
+
 use netweevil_core::{TopologyBundle, geo::EARTH_RADIUS_M};
 
 const LEAF_SIZE: usize = 16;
@@ -15,14 +17,84 @@ struct Node {
     count: u32,
 }
 
+/// The routable edges of one graph over a bounding-box tree. Graphs whose
+/// routable edges are a subset of another graph's share that graph's tree
+/// and keep a membership mask of their own. Queries return every edge of
+/// the matched leaves (a superset of the edges within reach) and callers
+/// test each edge exactly, so a larger tree with a mask answers like a tree
+/// of the subset.
 #[derive(Default)]
 pub(crate) struct EdgeSpatialIndex {
+    tree: Arc<EdgeTree>,
+    /// Routable edges as a bitset; `None` when every indexed edge is.
+    routable: Option<Arc<[u64]>>,
+}
+
+#[derive(Default)]
+struct EdgeTree {
     nodes: Vec<Node>,
     edge_ids: Vec<u32>,
 }
 
+/// Bitset of the edges with a finite cost.
+pub(crate) fn routable_edge_set(edge_costs: &[f64]) -> Vec<u64> {
+    let mut words = vec![0_u64; edge_costs.len().div_ceil(64)];
+    for (edge, cost) in edge_costs.iter().enumerate() {
+        if cost.is_finite() {
+            words[edge / 64] |= 1 << (edge % 64);
+        }
+    }
+    words
+}
+
 impl EdgeSpatialIndex {
     pub(crate) fn build(topology: &TopologyBundle, edge_costs: &[f64]) -> Self {
+        Self {
+            tree: Arc::new(EdgeTree::build(topology, edge_costs)),
+            routable: None,
+        }
+    }
+
+    /// This index's tree restricted to the edges of `routable`, which must
+    /// be a subset of the indexed edges.
+    pub(crate) fn restricted_to(&self, routable: Arc<[u64]>) -> Self {
+        Self {
+            tree: self.tree.clone(),
+            routable: Some(routable),
+        }
+    }
+
+    fn is_routable(&self, edge: u32) -> bool {
+        self.routable.as_ref().is_none_or(|words| {
+            words
+                .get(edge as usize / 64)
+                .is_some_and(|word| word & (1 << (edge % 64)) != 0)
+        })
+    }
+
+    pub(crate) fn candidates(&self, lon: f64, lat: f64, radius_m: f64) -> Vec<u32> {
+        let mut edges = self.tree.candidates(lon, lat, radius_m);
+        if self.routable.is_some() {
+            edges.retain(|&edge| self.is_routable(edge));
+        }
+        edges
+    }
+
+    /// Indexed edges whose endpoint bounding box intersects
+    /// `[west, south, east, north]`, in ascending edge order. Edges are
+    /// straight between their nodes, so this is exact up to the segment
+    /// crossing only a corner of the box.
+    pub(crate) fn edges_in_bbox(&self, topology: &TopologyBundle, bbox: [f64; 4]) -> Vec<u32> {
+        let mut edges = self.tree.edges_in_bbox(topology, bbox);
+        if self.routable.is_some() {
+            edges.retain(|&edge| self.is_routable(edge));
+        }
+        edges
+    }
+}
+
+impl EdgeTree {
+    fn build(topology: &TopologyBundle, edge_costs: &[f64]) -> Self {
         let edge_ids = edge_costs
             .iter()
             .enumerate()
@@ -116,7 +188,7 @@ impl EdgeSpatialIndex {
         self.build_node(topology, first_child + 1, midpoint, end);
     }
 
-    pub(crate) fn candidates(&self, lon: f64, lat: f64, radius_m: f64) -> Vec<u32> {
+    fn candidates(&self, lon: f64, lat: f64, radius_m: f64) -> Vec<u32> {
         let mut edges = Vec::new();
         if self.nodes.is_empty() {
             return edges;
@@ -148,11 +220,7 @@ impl EdgeSpatialIndex {
         edges
     }
 
-    /// Indexed edges whose endpoint bounding box intersects
-    /// `[west, south, east, north]`, in ascending edge order. Edges are
-    /// straight between their nodes, so this is exact up to the segment
-    /// crossing only a corner of the box.
-    pub(crate) fn edges_in_bbox(&self, topology: &TopologyBundle, bbox: [f64; 4]) -> Vec<u32> {
+    fn edges_in_bbox(&self, topology: &TopologyBundle, bbox: [f64; 4]) -> Vec<u32> {
         let [west, south, east, north] = bbox;
         let intersects = |bounds: [f64; 4]| {
             bounds[0] <= east && bounds[2] >= west && bounds[1] <= north && bounds[3] >= south

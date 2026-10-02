@@ -393,6 +393,80 @@ fn round_trips_source_snapshot_and_rejects_inconsistent_columns() {
     assert!(write_source_snapshot_bundle(file.path(), &snapshot).is_err());
 }
 
+/// Equal component columns read from different bundles (or twice from one)
+/// share one allocation; columns that differ in any bit do not.
+#[test]
+fn compiled_profile_reads_share_equal_component_columns() {
+    let component = |name: &str, values: Vec<f32>| netweevil_core::CompiledCostComponent {
+        name: name.to_string(),
+        weight: 1.0,
+        edge_values: values.into(),
+        scales_with_travel_time: false,
+        overlay_name: None,
+        invert_overlay: false,
+    };
+    let bundle = |components: Vec<netweevil_core::CompiledCostComponent>| CompiledProfileBundle {
+        vehicle: netweevil_core::CompiledVehicleExclusions {
+            component_values: vec![Vec::new(); components.len()],
+            ..Default::default()
+        },
+        schema_version: COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
+        profile_id: "columns".to_string(),
+        profile_hash: "abc".to_string(),
+        mode: TravelMode::Foot,
+        turn_costs: CompiledTurnCostConfig::default(),
+        components,
+        temporal: CompiledTemporalProfile::default(),
+        source_topology_bundle_id: CacheBundleId::new("topology-test"),
+        acceleration: None,
+        edge_metrics: vec![
+            CompiledEdgeMetric {
+                travel_time_s: Some(1.0),
+                generalized_cost: Some(1.0),
+            };
+            3
+        ],
+    };
+    let first = TempFile::new("columns-first");
+    let second = TempFile::new("columns-second");
+    write_compiled_profile_bundle(
+        first.path(),
+        &bundle(vec![
+            component("sun", vec![0.5, 1.25, 7.0]),
+            component("cover", vec![0.5, 1.25, 7.0]),
+        ]),
+    )
+    .expect("first bundle writes");
+    write_compiled_profile_bundle(
+        second.path(),
+        &bundle(vec![
+            component("sun", vec![0.5, 1.25, 7.0]),
+            component("signed", vec![-0.0, 1.25, 7.0]),
+            component("zero", vec![0.0, 1.25, 7.0]),
+        ]),
+    )
+    .expect("second bundle writes");
+
+    let first = read_compiled_profile_bundle(first.path()).expect("first bundle reads");
+    let second = read_compiled_profile_bundle(second.path()).expect("second bundle reads");
+    let column =
+        |bundle: &CompiledProfileBundle, index: usize| bundle.components[index].edge_values.clone();
+    assert!(std::sync::Arc::ptr_eq(
+        &column(&first, 0),
+        &column(&first, 1)
+    ));
+    assert!(std::sync::Arc::ptr_eq(
+        &column(&first, 0),
+        &column(&second, 0)
+    ));
+    assert!(!std::sync::Arc::ptr_eq(
+        &column(&second, 1),
+        &column(&second, 2)
+    ));
+    assert_eq!(column(&second, 1)[0].to_bits(), (-0.0_f32).to_bits());
+    assert_eq!(&*column(&second, 0), &[0.5, 1.25, 7.0]);
+}
+
 #[test]
 fn round_trips_compiled_profile_bundle_with_turn_costs() {
     let mut bundle = CompiledProfileBundle {
@@ -428,12 +502,10 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
         acceleration: None,
         edge_metrics: vec![
             CompiledEdgeMetric {
-                edge_id: EdgeId(0),
                 travel_time_s: Some(12.0),
                 generalized_cost: Some(18.0),
             },
             CompiledEdgeMetric {
-                edge_id: EdgeId(1),
                 travel_time_s: None,
                 generalized_cost: None,
             },

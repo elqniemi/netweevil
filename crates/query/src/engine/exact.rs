@@ -748,7 +748,7 @@ fn seeded_bidirectional_dijkstra_with_banned_edges(
                     if banned_edges.contains(&previous_edge) {
                         continue;
                     }
-                    let next_cost = cost + routing_graph.reverse_transition_costs[transition_index];
+                    let next_cost = cost + routing_graph.reverse_transition_cost(transition_index);
                     if next_cost >= best_cost
                         || !scratch.update_backward(previous_edge, next_cost, edge_index as u32)
                     {

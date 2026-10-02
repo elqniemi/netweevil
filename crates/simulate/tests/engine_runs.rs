@@ -124,7 +124,6 @@ fn grid_engine_for(
         .map(|index| {
             let length = bundle.routing_edge(index).length_m as f64;
             CompiledEdgeMetric {
-                edge_id: EdgeId(index as u32),
                 travel_time_s: Some(length / speed_mps),
                 generalized_cost: Some(length / speed_mps),
             }

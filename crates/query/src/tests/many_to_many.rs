@@ -111,7 +111,6 @@ fn restricted_astar_matches_restricted_dijkstra_on_random_graphs() {
             edges.push(edge);
             let cost = (next() % 30) as f64;
             metrics.edge_metrics.push(CompiledEdgeMetric {
-                edge_id: EdgeId(edge_index),
                 travel_time_s: Some(cost),
                 generalized_cost: Some(cost),
             });

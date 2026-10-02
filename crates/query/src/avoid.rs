@@ -326,7 +326,12 @@ pub(crate) fn resolve_avoid(
 
 /// Distance from a point to an edge segment in the snapper's local metric
 /// (equirectangular around the edge's start node).
-fn point_segment_distance_m(lon: f64, lat: f64, from: &TopologyNode, to: &TopologyNode) -> f64 {
+pub(crate) fn point_segment_distance_m(
+    lon: f64,
+    lat: f64,
+    from: &TopologyNode,
+    to: &TopologyNode,
+) -> f64 {
     let px = projected_delta_x(from.lon, from.lat, lon);
     let py = projected_delta_y(from.lat, lat);
     let sx = projected_delta_x(from.lon, from.lat, to.lon);
