@@ -174,7 +174,7 @@ function WhereStep({ info }: { info: WorkspaceInfo | null }) {
       <h2>Where your data lives</h2>
       <p>
         NetWeevil keeps everything it creates in one folder, <code>.netweevil/</code>, inside the workspace the API was started in. Your source files
-        (OSM extracts, GTFS zips) are never modified: uploads are copied into the folder, and files you point to by path are read in place.
+        (OSM extracts, GTFS zips) are never modified: uploads are copied into the folder, and the CLI reads files you point it to in place.
       </p>
       {info && (
         <>
@@ -220,7 +220,7 @@ function WhereStep({ info }: { info: WorkspaceInfo | null }) {
   );
 }
 
-// --- Shared: source chooser (upload or path) ---
+// --- Shared: source chooser (new or previous upload) ---
 
 function SourceChooser({ info, accept, kinds, value, onChange }: { info: WorkspaceInfo | null; accept: string; kinds: UploadInfo["kind"][]; value: string; onChange: (v: string) => void }) {
   const queryClient = useQueryClient();
@@ -253,11 +253,6 @@ function SourceChooser({ info, accept, kinds, value, onChange }: { info: Workspa
         )}
         <small className="muted">Copied into `.netweevil/uploads/`. Large extracts take a while; the page stays usable.</small>
       </label>
-      <label className="field">
-        <span>Or a path on the machine running the API</span>
-        <input type="text" value={value} onChange={(e) => onChange(e.target.value)} placeholder="/data/extract.osm.pbf or datasets/city.osm.pbf" />
-        <small className="muted">Read in place, not copied. Relative paths resolve from the workspace folder.</small>
-      </label>
       {uploads.length > 0 && (
         <label className="field">
           <span>Or a previous upload</span>
@@ -271,6 +266,10 @@ function SourceChooser({ info, accept, kinds, value, onChange }: { info: Workspa
           </select>
         </label>
       )}
+      <small className="muted">
+        The API only imports files in <code>.netweevil/uploads/</code>: upload them here or copy them into that folder. To import a large extract in
+        place without copying, use the CLI (<code>netweevil dataset import</code> or <code>netweevil transit import</code>).
+      </small>
       {error && <div className="error-text">{error}</div>}
     </div>
   );

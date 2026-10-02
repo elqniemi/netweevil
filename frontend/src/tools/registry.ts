@@ -151,10 +151,36 @@ const returnFields: Field[] = [
 const temporalFields: Field[] = [
   { key: "departure_time", label: "Departure time", type: "datetime", group: "Time", placeholder: "2026-05-12T08:30:00+02:00" },
   { key: "arrive_by", label: "Arrive by", type: "datetime", group: "Time", placeholder: "2026-05-12T09:00:00+02:00" },
-  { key: "scenario", label: "Scenario file (server path)", type: "text", group: "Time", placeholder: "examples/scenarios/generic_asset_failure.yml" },
-  { key: "holiday_calendar", label: "Holiday calendar (server path)", type: "text", group: "Time", placeholder: "examples/temporal/example_holidays.yml" },
-  { key: "overlay", label: "Overlays (comma-separated server paths)", type: "text", group: "Time", placeholder: "examples/temporal/shade_fraction.csv" },
+  {
+    key: "scenario",
+    label: "Scenario overlay (JSON)",
+    type: "json",
+    group: "Time",
+    placeholder: '{"id": "closure", "features": [{"source_feature_id": 900002, "force_closed": true}]}',
+    hint: "Per-feature overrides: force_closed, force_open, speed_factor, replace_rules, rules.",
+  },
+  { key: "holidays", label: "Holidays (comma-separated dates)", type: "list", group: "Time", placeholder: "2026-01-01, 2026-12-25" },
+  {
+    key: "overlays",
+    label: "Overlays (JSON)",
+    type: "json",
+    group: "Time",
+    placeholder: '[{"id": "shade", "rows": [{"feature_id": 900001, "t_start": "2026-07-10T09:30:00+08:00", "t_end": "2026-07-10T10:00:00+08:00", "shade_fraction": 0.75}]}]',
+    hint: "List of overlay documents; each row is feature_id, t_start, t_end (RFC 3339) plus named numeric values. Later overlays take precedence.",
+  },
   { key: "max_labels_per_state", label: "Max labels per state", type: "number", min: 1, step: 1, group: "Time", placeholder: "default" },
+];
+
+const avoidFields: Field[] = [
+  {
+    key: "avoid",
+    label: "Avoid (JSON)",
+    type: "json",
+    group: "Avoid",
+    placeholder:
+      '{"points": [{"lon": 6.56, "lat": 53.21, "radius_m": 25, "penalty_factor": 3.0}], "polygons": [{"rings": [[[6.55, 53.2], [6.57, 53.2], [6.57, 53.22], [6.55, 53.2]]]}], "source_feature_ids": [123456]}',
+    hint: "points (radius_m defaults to 10), polygons (GeoJSON rings, outer first) and source_feature_ids. Omit penalty_factor to exclude matching edges entirely; a number in [1, 1000] multiplies their cost.",
+  },
 ];
 
 const alternativeFields: Field[] = [
@@ -265,15 +291,21 @@ function temporal(form: Record<string, unknown>) {
   const arr = str(form, "arrive_by");
   if (dep) out.departure_time = dep;
   if (arr) out.arrive_by = arr;
-  const scenario = str(form, "scenario");
+  const scenario = parseJson(form, "scenario");
   if (scenario) out.scenario = scenario;
-  const holidays = str(form, "holiday_calendar");
-  if (holidays) out.holiday_calendar = holidays;
-  const overlays = list(form, "overlay");
-  if (overlays.length) out.overlay = overlays;
+  const holidays = list(form, "holidays");
+  if (holidays.length) out.holidays = holidays;
+  const overlays = parseJson(form, "overlays");
+  if (overlays) out.overlays = Array.isArray(overlays) ? overlays : [overlays];
   const labels = num(form, "max_labels_per_state");
   if (labels !== undefined) out.max_labels_per_state = labels;
   return out;
+}
+
+/** Request-level avoid areas (`{avoid: ...}` or nothing), flattened next to the temporal fields. */
+function avoid(form: Record<string, unknown>) {
+  const value = parseJson(form, "avoid");
+  return value ? { avoid: value } : {};
 }
 
 function alternatives(form: Record<string, unknown>) {
@@ -311,7 +343,7 @@ function routeId(ctx: BuildContext, key: string, fallback: string, index: number
   return ctx.routes.length > 1 ? `${base}_${index + 1}` : base;
 }
 
-function pointSet(ctx: BuildContext, slot: string, opts: { geometry?: boolean } = {}) {
+function pointSet(ctx: BuildContext, slot: string, opts: { geometry?: boolean; avoid?: boolean } = {}) {
   const form = ctx.form;
   return {
     points: ctx.points(slot).map(labeled),
@@ -320,6 +352,7 @@ function pointSet(ctx: BuildContext, slot: string, opts: { geometry?: boolean } 
     fallback: fallback(form),
     returns: { geometry: opts.geometry === false ? "none" : (str(form, "geometry") ?? "none") },
     ...temporal(form),
+    ...(opts.avoid ? avoid(form) : {}),
   };
 }
 
@@ -333,6 +366,7 @@ const routeFields: Field[] = [
   ...returnFields,
   ...alternativeFields,
   ...temporalFields,
+  ...avoidFields,
   {
     key: "component_constraints",
     label: "Component constraints (JSON)",
@@ -362,6 +396,7 @@ function buildRoute(ctx: BuildContext, route: RouteInput, index: number, directi
     connectivity: connectivity(form),
     fallback: fallback(form),
     returns: returns(form),
+    ...avoid(form),
   };
   if (!directions) {
     const alt = alternatives(form);
@@ -413,7 +448,7 @@ const directionsTool: ToolDef = {
   live: true,
   tableKey: "maneuvers",
   slots: [],
-  fields: [{ key: "route_id", label: "Route id", type: "text", default: "console_directions" }, ...snapFields, ...connectivityFields, ...fallbackFields],
+  fields: [{ key: "route_id", label: "Route id", type: "text", default: "console_directions" }, ...snapFields, ...connectivityFields, ...fallbackFields, ...avoidFields],
   buildEach: (ctx, route, index) => buildRoute(ctx, route, index, true),
   ready: needRoute,
 };
@@ -473,6 +508,7 @@ const waypointsTool: ToolDef = {
     ...snapFields,
     ...returnFields,
     ...temporalFields.slice(0, 1),
+    ...avoidFields,
   ],
   buildEach: (ctx, route, index) => {
     const pts = [route.origin!, ...route.vias, route.destination!];
@@ -488,6 +524,7 @@ const waypointsTool: ToolDef = {
       optimize_order: bool(ctx.form, "optimize_order"),
       returns: returns(ctx.form),
       ...temporal(ctx.form),
+      ...avoid(ctx.form),
     };
     return envelope(ctx, request, false);
   },
@@ -525,6 +562,7 @@ const odTool: ToolDef = {
     },
     ...alternativeFields,
     ...temporalFields,
+    ...avoidFields,
   ],
   build: (ctx) => {
     const pairs = ctx.routes.map(({ route, index }) => ({ pair_id: `pair_${index + 1}`, origin: labeled(route.origin!), destination: labeled(route.destination!) }));
@@ -535,6 +573,7 @@ const odTool: ToolDef = {
       fallback: fallback(ctx.form),
       returns: { geometry: str(ctx.form, "geometry") ?? "full" },
       ...temporal(ctx.form),
+      ...avoid(ctx.form),
     };
     const alt = alternatives(ctx.form);
     if (alt) request.alternatives = alt;
@@ -576,10 +615,11 @@ const matrixTool: ToolDef = {
       ],
     },
     ...temporalFields,
+    ...avoidFields,
   ],
   build: (ctx) =>
     envelope(ctx, {
-      origins: pointSet(ctx, "origins"),
+      origins: pointSet(ctx, "origins", { avoid: true }),
       destinations: pointSet(ctx, "destinations"),
     }),
   ready: (ctx) => needPoints(ctx, "origins", 1, "origin") ?? needPoints(ctx, "destinations", 1, "destination"),
@@ -608,10 +648,11 @@ const accessibilityTool: ToolDef = {
     ...snapFields,
     ...connectivityFields,
     ...temporalFields,
+    ...avoidFields,
   ],
   build: (ctx) =>
     envelope(ctx, {
-      origins: pointSet(ctx, "origins", { geometry: false }),
+      origins: pointSet(ctx, "origins", { geometry: false, avoid: true }),
       categories: [
         {
           category_id: str(ctx.form, "category_id") ?? "destinations",
@@ -718,6 +759,7 @@ function serviceAreaRequest(ctx: BuildContext) {
     polygon,
     returns,
     ...temporal(form),
+    ...avoid(form),
   };
 }
 
@@ -734,7 +776,7 @@ const serviceAreaTool: ToolDef = {
   usesProfile: true,
   input: "slots",
   slots: [{ id: "origins", label: "Origins" }],
-  fields: [...serviceAreaFields, ...temporalFields],
+  fields: [...serviceAreaFields, ...temporalFields, ...avoidFields],
   build: (ctx) => envelope(ctx, serviceAreaRequest(ctx), false),
   ready: (ctx) => needPoints(ctx, "origins", 1, "origin"),
 };
@@ -760,6 +802,7 @@ const serviceAreaSequenceTool: ToolDef = {
     { key: "departure_times", label: "Explicit departure times (comma-separated, overrides range)", type: "text", placeholder: "" },
     ...serviceAreaFields,
     ...temporalFields.slice(2),
+    ...avoidFields,
   ],
   build: (ctx) => {
     const request = serviceAreaRequest(ctx);
@@ -801,6 +844,7 @@ const betweennessTool: ToolDef = {
     { key: "include_zero", label: "Include zero-score edges", type: "checkbox", default: false },
     ...snapFields,
     ...temporalFields,
+    ...avoidFields,
   ],
   build: (ctx) => {
     const weighted = (p: InputPoint) => ({ ...labeled(p), weight: p.weight ?? 1 });
@@ -814,6 +858,7 @@ const betweennessTool: ToolDef = {
         max_od_pairs: num(ctx.form, "max_od_pairs") ?? 10000,
         include_zero: bool(ctx.form, "include_zero"),
         ...temporal(ctx.form),
+        ...avoid(ctx.form),
       },
       false,
     );
@@ -829,7 +874,7 @@ const scenarioBatchTool: ToolDef = {
   layers: ["line", "polygon", "point"],
   tableKey: "routes",
   method: "POST",
-  description: "Baseline versus scenario cases (overlay file, top-k closures, attribute group) for routes and service areas in one call. Leave cases blank for a baseline-only run; edit the JSON to add OD, matrix or betweenness analyses.",
+  description: "Baseline versus scenario cases (inline overlay, top-k closures, attribute group) for routes and service areas in one call. Leave cases blank for a baseline-only run; edit the JSON to add OD, matrix or betweenness analyses.",
   supportsGeojson: true,
   usesProfile: true,
   input: "routes",
@@ -837,8 +882,20 @@ const scenarioBatchTool: ToolDef = {
   fields: [
     { key: "batch_id", label: "Batch id", type: "text", default: "console_batch" },
     { key: "departure_time", label: "Departure time", type: "datetime", default: "2026-05-12T08:30:00+02:00" },
-    { key: "scenario_overlay", label: "Scenario overlay (server path, blank = baseline only)", type: "text", placeholder: "examples/scenarios/generic_asset_failure.yml" },
-    { key: "ranking", label: "Top-k ranking file (server path)", type: "text", group: "Top-k closures", placeholder: ".netweevil/runs/betweenness_ranking.json" },
+    {
+      key: "scenario_overlay",
+      label: "Scenario overlay (JSON, blank = baseline only)",
+      type: "json",
+      placeholder: '{"id": "closure", "features": [{"source_feature_id": 900002, "force_closed": true}]}',
+    },
+    {
+      key: "ranking",
+      label: "Feature ranking (JSON)",
+      type: "json",
+      group: "Top-k closures",
+      placeholder: '[{"source_feature_id": 900002, "score": 9.0}, {"source_feature_id": 900001, "score": 4.5}]',
+      hint: "The highest-scoring features are closed; scores of repeated features are summed.",
+    },
     { key: "top_k", label: "Closures to apply", type: "number", default: 3, min: 1, step: 1, group: "Top-k closures" },
     { key: "group_attribute", label: "Attribute", type: "text", group: "Attribute group closure", placeholder: "bridge" },
     { key: "group_value", label: "Value", type: "text", group: "Attribute group closure", placeholder: "yes" },
@@ -848,9 +905,9 @@ const scenarioBatchTool: ToolDef = {
   build: (ctx) => {
     const form = ctx.form;
     const scenarios: Record<string, unknown>[] = [];
-    const overlay = str(form, "scenario_overlay");
+    const overlay = parseJson(form, "scenario_overlay");
     if (overlay) scenarios.push({ id: "overlay_case", overlay });
-    const ranking = str(form, "ranking");
+    const ranking = parseJson(form, "ranking");
     const topK = num(form, "top_k") ?? 3;
     if (ranking) scenarios.push({ id: `top_${topK}_closures`, top_k: { ranking, count: topK } });
     const attribute = str(form, "group_attribute");
