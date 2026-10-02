@@ -29,6 +29,7 @@ mod service_area_sequence;
 mod snapping;
 mod temporal;
 mod trace_matching;
+mod trip;
 mod waypoints;
 
 pub use accessibility::*;
@@ -59,6 +60,11 @@ pub use temporal::{
     load_temporal_overlay, parse_datetime,
 };
 pub use trace_matching::*;
+pub use trip::solver as trip_solver;
+pub use trip::{
+    MAX_TRIP_STOPS, TripMode, TripOptimization, TripOptimizerOptions, TripRequest, TripResult,
+    TripStop, TripTimeWindow, TripVisit,
+};
 pub use waypoints::*;
 
 #[cfg(test)]
