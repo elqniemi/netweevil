@@ -635,13 +635,13 @@ fn default_destination_only_penalty_s() -> f64 {
 }
 
 impl Default for PreferencesConfig {
-    /// Used when a profile omits `preferences` entirely; the zero
-    /// preferences match the previously derived default.
+    /// Used when a profile omits `preferences` entirely: the same neutral
+    /// values as an empty `preferences:` block.
     fn default() -> Self {
         Self {
-            use_highways: 0.0,
-            use_tolls: 0.0,
-            use_tracks: 0.0,
+            use_highways: default_pref(),
+            use_tolls: default_pref(),
+            use_tracks: default_pref(),
             service_penalty_s: 0.0,
             destination_only_penalty_s: default_destination_only_penalty_s(),
             avoid_border_crossings: false,

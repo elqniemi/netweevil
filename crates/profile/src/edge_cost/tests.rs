@@ -66,3 +66,17 @@ fn posted_limits_never_apply_to_foot_profiles() {
     // Foot speed comes from the road-class default, not the limit.
     assert!(speed_kph(&profile, &primary_edge(Some(100.0))) < 100.0);
 }
+
+#[test]
+fn omitted_preferences_are_neutral() {
+    let omitted: crate::schema::PreferencesConfig = Default::default();
+    let empty: crate::schema::PreferencesConfig = serde_yaml::from_str("{}").unwrap();
+    for (value, neutral) in [
+        (omitted.use_highways, empty.use_highways),
+        (omitted.use_tolls, empty.use_tolls),
+        (omitted.use_tracks, empty.use_tracks),
+    ] {
+        assert_eq!(value, neutral);
+        assert_eq!(super::preference_multiplier(value), 1.0);
+    }
+}
