@@ -896,8 +896,12 @@ pub(crate) fn analyze_route_path(
         }
 
         if let Some(previous_edge_index) = previous_edge_index {
-            let turn_penalty_s =
-                turn_penalty_seconds(topology, metrics, previous_edge_index, edge_index);
+            let turn_penalty_s = routing_graph.turn_seconds_between(
+                topology,
+                metrics,
+                previous_edge_index,
+                edge_index,
+            );
             network_travel_time_s += turn_penalty_s;
             network_generalized_cost += turn_penalty_s * metrics.turn_costs.cost_time_weight;
             if let Some(sequence_len) = routing_graph

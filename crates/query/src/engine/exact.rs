@@ -300,8 +300,14 @@ pub(crate) fn route_between_candidates(
                 path
             };
             if let Some(path) = path {
-                let path =
-                    finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
+                let path = finalize_route_path(
+                    topology,
+                    metrics,
+                    routing_graph,
+                    path.edge_indexes,
+                    origin,
+                    destination,
+                );
                 if has_failure_modes(fallback) {
                     return Ok((origin.clone(), destination.clone(), path, hop_info));
                 }
@@ -402,8 +408,14 @@ pub(crate) fn route_between_candidates_with_banned_edges(
             else {
                 continue;
             };
-            let path =
-                finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
+            let path = finalize_route_path(
+                topology,
+                metrics,
+                routing_graph,
+                path.edge_indexes,
+                origin,
+                destination,
+            );
             let replace = best.as_ref().is_none_or(|(_, _, best_path, _)| {
                 path.total_generalized_cost < best_path.total_generalized_cost
             });

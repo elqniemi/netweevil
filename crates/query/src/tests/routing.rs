@@ -1329,6 +1329,40 @@ fn applies_roundabout_entry_penalties() {
 }
 
 #[test]
+fn transition_turn_table_matches_turn_geometry() {
+    let topology = traffic_signal_penalty_topology();
+    let mut metrics = turn_penalty_metrics();
+    metrics.turn_costs.left_penalty_s = 10.0;
+    metrics.turn_costs.right_penalty_s = 5.0;
+    metrics.turn_costs.uturn_penalty_s = 30.0;
+    metrics.turn_costs.traffic_signal_penalty_s = 7.0;
+    metrics.turn_costs.roundabout_entry_penalty_s = 3.0;
+    let graph = build_routing_graph(&topology, &metrics).expect("routing graph");
+    let edge_count = topology.edge_count();
+    let pairs = (0..edge_count)
+        .flat_map(|from| (0..edge_count).map(move |to| (from, to)))
+        .collect::<Vec<_>>();
+    let geometry = pairs
+        .iter()
+        .map(|&(from, to)| crate::turn_penalty_seconds(&topology, &metrics, from, to).to_bits())
+        .collect::<Vec<_>>();
+    let lookup = |graph: &RoutingGraph| {
+        pairs
+            .iter()
+            .map(|&(from, to)| {
+                graph
+                    .turn_seconds_between(&topology, &metrics, from, to)
+                    .to_bits()
+            })
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(lookup(&graph), geometry);
+    assert!(graph.transition_turn_seconds(&topology, &metrics).is_some());
+    assert_eq!(lookup(&graph), geometry);
+}
+
+#[test]
 fn alternative_routes_fall_back_to_restricted_search_when_needed() {
     let mut request = restricted_a_to_d("multi-edge-restricted-alternative");
     request.alternatives = AlternativeRouteOptions {

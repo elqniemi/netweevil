@@ -53,41 +53,79 @@ impl TransitionTurnSeconds {
     }
 }
 
+impl TransitionTurnSeconds {
+    fn build(
+        graph: &RoutingGraph,
+        topology: &TopologyBundle,
+        metrics: &CompiledProfileBundle,
+    ) -> Option<Self> {
+        use rayon::prelude::*;
+        let seconds = (0..graph.edge_costs.len())
+            .into_par_iter()
+            .flat_map_iter(|edge_index| {
+                graph
+                    .transition_range(edge_index)
+                    .map(move |transition_index| {
+                        let next_edge = graph.transition_edges[transition_index] as usize;
+                        turn_penalty_seconds(topology, metrics, edge_index, next_edge)
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut values = Vec::<f64>::new();
+        let mut classes = Vec::with_capacity(seconds.len());
+        for seconds in seconds {
+            let class = match values
+                .iter()
+                .position(|known| known.to_bits() == seconds.to_bits())
+            {
+                Some(class) => class,
+                None => {
+                    values.push(seconds);
+                    values.len() - 1
+                }
+            };
+            classes.push(u8::try_from(class).ok()?);
+        }
+        Some(Self { values, classes })
+    }
+}
+
 impl RoutingGraph {
-    /// Exact `turn_penalty_seconds` for every forward transition. `None`
-    /// when more than 256 distinct values occur; callers then compute turns
-    /// directly. `topology` and `metrics` must be the ones the graph was
-    /// built from.
+    /// Exact `turn_penalty_seconds` for every forward transition, built on
+    /// first use. `None` when more than 256 distinct values occur; callers
+    /// then compute turns directly. `topology` and `metrics` must be the
+    /// ones the graph was built from.
     pub(crate) fn transition_turn_seconds(
         &self,
         topology: &TopologyBundle,
         metrics: &CompiledProfileBundle,
     ) -> Option<&TransitionTurnSeconds> {
         self.turn_seconds
-            .get_or_init(|| {
-                let mut values = Vec::<f64>::new();
-                let mut classes = vec![0_u8; self.transition_edges.len()];
-                for edge_index in 0..self.edge_costs.len() {
-                    for transition_index in self.transition_range(edge_index) {
-                        let next_edge = self.transition_edges[transition_index] as usize;
-                        let seconds =
-                            turn_penalty_seconds(topology, metrics, edge_index, next_edge);
-                        let class = match values
-                            .iter()
-                            .position(|known| known.to_bits() == seconds.to_bits())
-                        {
-                            Some(class) => class,
-                            None => {
-                                values.push(seconds);
-                                values.len() - 1
-                            }
-                        };
-                        classes[transition_index] = u8::try_from(class).ok()?;
-                    }
-                }
-                Some(TransitionTurnSeconds { values, classes })
-            })
+            .get_or_init(|| TransitionTurnSeconds::build(self, topology, metrics))
             .as_ref()
+    }
+
+    /// `turn_penalty_seconds(previous_edge, next_edge)`, read from the
+    /// transition table when it has already been built and the transition
+    /// belongs to this graph; computed from the turn geometry otherwise.
+    /// The table holds the same values, so both paths agree bit for bit.
+    /// `topology` and `metrics` must be the ones the graph was built from.
+    pub(crate) fn turn_seconds_between(
+        &self,
+        topology: &TopologyBundle,
+        metrics: &CompiledProfileBundle,
+        previous_edge: usize,
+        next_edge: usize,
+    ) -> f64 {
+        if let Some(Some(table)) = self.turn_seconds.get()
+            && previous_edge < self.edge_costs.len()
+            && let Some(transition_index) = self
+                .transition_range(previous_edge)
+                .find(|&index| self.transition_edges[index] as usize == next_edge)
+        {
+            return table.get(transition_index);
+        }
+        turn_penalty_seconds(topology, metrics, previous_edge, next_edge)
     }
 
     pub(crate) fn outgoing_edges(&self, node_index: usize) -> &[u32] {

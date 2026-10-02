@@ -58,6 +58,9 @@ impl PreparedRoutingEngine {
         if let Some(acceleration) = default_routing_graph.acceleration.as_ref() {
             acceleration.ranked.get(acceleration);
         }
+        // Route finalization and analysis read turn penalties from this
+        // table once it exists; build it before the first request.
+        default_routing_graph.transition_turn_seconds(topology.as_ref(), metrics.as_ref());
         let mut ignore_multi_edge_restrictions_graph =
             if default_routing_graph.has_restriction_sequences() {
                 Some(build_routing_graph_with_options_from_shared(
@@ -515,6 +518,7 @@ fn effective_engine_description(routing_graph: &RoutingGraph) -> EffectiveEngine
 pub(crate) fn finalize_route_path(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
     edge_indexes: Vec<usize>,
     origin: &SnappedPoint,
     destination: &SnappedPoint,
@@ -532,9 +536,12 @@ pub(crate) fn finalize_route_path(
         );
         total_generalized_cost += metric.generalized_cost.unwrap_or_default() * factor;
         if let Some(previous_edge_index) = previous_edge_index {
-            total_generalized_cost +=
-                turn_penalty_seconds(topology, metrics, previous_edge_index, edge_index)
-                    * metrics.turn_costs.cost_time_weight;
+            total_generalized_cost += routing_graph.turn_seconds_between(
+                topology,
+                metrics,
+                previous_edge_index,
+                edge_index,
+            ) * metrics.turn_costs.cost_time_weight;
         }
         previous_edge_index = Some(edge_index);
     }

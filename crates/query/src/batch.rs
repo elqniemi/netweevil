@@ -1114,7 +1114,14 @@ pub(crate) fn batch_route_result_for_path(
     hop_info: HopSelectionInfo,
     path: RoutePath,
 ) -> Result<RouteResult> {
-    let path = finalize_route_path(topology, metrics, path.edge_indexes, origin, destination);
+    let path = finalize_route_path(
+        topology,
+        metrics,
+        routing_graph,
+        path.edge_indexes,
+        origin,
+        destination,
+    );
     let analysis = analyze_route_path(
         topology,
         metrics,
