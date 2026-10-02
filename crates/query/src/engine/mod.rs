@@ -81,13 +81,31 @@ impl PreparedRoutingEngine {
             customize_loaded_metrics(topology.as_ref(), metrics.as_ref(), acceleration.as_deref())
         });
         let customized_at_load = weights.is_some();
-        let mut default_routing_graph = build_routing_graph_with_weights(
+        let default_routing_graph = build_routing_graph_with_weights(
             topology.as_ref(),
             metrics.clone(),
             weights,
             acceleration.clone(),
             RoutingGraphBuildOptions::default(),
         )?;
+        Ok(Self::assemble(
+            topology,
+            metrics,
+            default_routing_graph,
+            customized_at_load,
+            with_ignore_mode_graph,
+        ))
+    }
+
+    /// An engine around a built default graph. `customized_at_load` defers
+    /// the service-area weight sets to first use.
+    fn assemble(
+        topology: Arc<TopologyBundle>,
+        metrics: Arc<CompiledProfileBundle>,
+        mut default_routing_graph: RoutingGraph,
+        customized_at_load: bool,
+        with_ignore_mode_graph: bool,
+    ) -> Self {
         if customized_at_load
             && let Some(acceleration) = default_routing_graph
                 .acceleration
@@ -102,7 +120,7 @@ impl PreparedRoutingEngine {
         let ignore_multi_edge_restrictions_graph = (with_ignore_mode_graph
             && default_routing_graph.has_restriction_sequences())
         .then(|| default_routing_graph.without_restriction_sequences());
-        Ok(Self {
+        Self {
             topology,
             metrics,
             default_routing_graph,
@@ -110,7 +128,7 @@ impl PreparedRoutingEngine {
             avoid_engines: AvoidEngineCache::default(),
             avoid_applied: false,
             avoid_index: std::sync::OnceLock::new(),
-        })
+        }
     }
 
     /// An engine over the same topology and dataset hierarchy with replaced

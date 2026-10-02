@@ -771,23 +771,10 @@ impl RoutingGraph {
         metrics: Arc<CompiledProfileBundle>,
         weights: Option<&CchArcWeights>,
     ) -> Option<Self> {
-        let turns = |metrics: &CompiledProfileBundle| {
-            let turns = metrics.turn_costs;
-            [
-                turns.left_penalty_s,
-                turns.right_penalty_s,
-                turns.uturn_penalty_s,
-                turns.traffic_signal_penalty_s,
-                turns.roundabout_entry_penalty_s,
-                turns.cost_time_weight,
-                turns.destination_only_penalty_s,
-            ]
-            .map(f64::to_bits)
-        };
         if self.includes_temporal_materialized_directions
             || self.acceleration_includes_failure_penalties
             || metrics.mode != base_metrics.mode
-            || turns(&metrics) != turns(base_metrics)
+            || !same_turn_costs(&metrics, base_metrics)
             || metrics.edge_metrics.len() != self.edge_costs.len()
         {
             return None;
@@ -853,6 +840,181 @@ impl RoutingGraph {
             // which `with_metrics` requires to be unchanged.
             turn_seconds: self.turn_seconds.clone(),
         })
+    }
+}
+
+/// Whether two profiles charge bit-identical turn costs.
+fn same_turn_costs(left: &CompiledProfileBundle, right: &CompiledProfileBundle) -> bool {
+    let bits = |metrics: &CompiledProfileBundle| {
+        let turns = metrics.turn_costs;
+        [
+            turns.left_penalty_s,
+            turns.right_penalty_s,
+            turns.uturn_penalty_s,
+            turns.traffic_signal_penalty_s,
+            turns.roundabout_entry_penalty_s,
+            turns.cost_time_weight,
+            turns.destination_only_penalty_s,
+        ]
+        .map(f64::to_bits)
+    };
+    bits(left) == bits(right)
+}
+
+impl RoutingGraph {
+    /// This graph for `metrics`, which may raise edge costs and close edges
+    /// but routes on no edge this graph cannot (avoid sets). The adjacency is
+    /// this graph's with closed edges filtered out, in the order a fresh
+    /// build lists them, and transition costs use the builder's arithmetic,
+    /// so the graph equals a fresh build. `ranked` carries the hierarchy
+    /// customized for `metrics` and is taken only when the graph is built.
+    /// `None` when `metrics` opens an edge or changes the mode or turn costs,
+    /// or when this graph has no turn table or is not a plain static graph.
+    pub(crate) fn with_closed_edges(
+        &self,
+        topology: &TopologyBundle,
+        base_metrics: &CompiledProfileBundle,
+        metrics: &Arc<CompiledProfileBundle>,
+        ranked: &mut Option<RankedCch>,
+    ) -> Option<Result<Self>> {
+        let Some(Some(turn_seconds)) = self.turn_seconds.get() else {
+            return None;
+        };
+        if self.includes_temporal_materialized_directions
+            || self.acceleration_includes_failure_penalties
+            || !self.virtual_reverse_of.is_empty()
+            || metrics.mode != base_metrics.mode
+            || !same_turn_costs(metrics, base_metrics)
+            || metrics.edge_metrics.len() != self.edge_costs.len()
+            || ranked.is_none() != self.acceleration.is_none()
+        {
+            return None;
+        }
+        let mode_bit = metrics.mode.access_bit();
+        let edge_count = self.edge_costs.len();
+        let mut edge_costs = vec![f64::INFINITY; edge_count];
+        for (edge_index, metric) in metrics.edge_metrics.iter().enumerate() {
+            let traversable =
+                netweevil_profile::is_statically_usable(topology, edge_index, mode_bit)
+                    && metric.travel_time_s.is_some();
+            if let Some(cost) = metric.generalized_cost.filter(|_| traversable) {
+                if !self.edge_costs[edge_index].is_finite() {
+                    return None;
+                }
+                edge_costs[edge_index] = cost;
+            }
+        }
+        let open = |edge: u32| edge_costs[edge as usize].is_finite();
+
+        let node_count = self.first_out.len() - 1;
+        let filter_csr = |first_out: &[u32], items: &[u32]| {
+            let mut new_first_out = Vec::with_capacity(first_out.len());
+            let mut new_items = Vec::with_capacity(items.len());
+            new_first_out.push(0);
+            for node in 0..node_count {
+                new_items.extend(
+                    items[first_out[node] as usize..first_out[node + 1] as usize]
+                        .iter()
+                        .copied()
+                        .filter(|&edge| open(edge)),
+                );
+                new_first_out.push(new_items.len() as u32);
+            }
+            (new_first_out, new_items)
+        };
+        let (first_out, edge_order) = filter_csr(&self.first_out, &self.edge_order);
+        let (incoming_first_out, incoming_edge_order) =
+            filter_csr(&self.incoming_first_out, &self.incoming_edge_order);
+
+        // Forward transitions of open edges into open edges, in this graph's
+        // order, with costs by the builder's arithmetic.
+        let weight = metrics.turn_costs.cost_time_weight;
+        let mut transition_first_out = Vec::with_capacity(edge_count + 1);
+        let mut transition_edges = Vec::with_capacity(self.transition_edges.len());
+        let mut transition_costs = Vec::with_capacity(self.transition_edges.len());
+        let mut classes = Vec::with_capacity(self.transition_edges.len());
+        let mut kept = vec![u32::MAX; self.transition_edges.len()];
+        transition_first_out.push(0);
+        for edge_index in 0..edge_count {
+            if open(edge_index as u32) {
+                for transition_index in self.transition_range(edge_index) {
+                    let next_edge = self.transition_edges[transition_index];
+                    if !open(next_edge) {
+                        continue;
+                    }
+                    kept[transition_index] = transition_edges.len() as u32;
+                    transition_edges.push(next_edge);
+                    transition_costs.push(
+                        edge_costs[next_edge as usize]
+                            + (turn_seconds.get(transition_index) * weight
+                                + transition_access_cost(
+                                    topology,
+                                    base_metrics,
+                                    edge_index,
+                                    next_edge as usize,
+                                )),
+                    );
+                    classes.push(turn_seconds.classes[transition_index]);
+                }
+            }
+            transition_first_out.push(transition_edges.len() as u32);
+        }
+        let mut reverse_transition_first_out = Vec::with_capacity(edge_count + 1);
+        let mut reverse_transition_edges = Vec::with_capacity(transition_edges.len());
+        let mut reverse_transition_forward = Vec::with_capacity(transition_edges.len());
+        reverse_transition_first_out.push(0);
+        for edge_index in 0..edge_count {
+            for reverse_index in self.reverse_transition_range(edge_index) {
+                let forward = kept[self.reverse_transition_forward[reverse_index] as usize];
+                if forward != u32::MAX {
+                    reverse_transition_edges.push(self.reverse_transition_edges[reverse_index]);
+                    reverse_transition_forward.push(forward);
+                }
+            }
+            reverse_transition_first_out.push(reverse_transition_edges.len() as u32);
+        }
+
+        let edge_order = U32_ARRAYS.intern(edge_order);
+        let edge_spatial_index = shared_spatial_index(topology, &edge_order, &edge_costs, || {
+            crate::edge_spatial_index::EdgeSpatialIndex::build(topology, &edge_costs)
+        });
+        let acceleration = match (ranked.take(), self.acceleration.as_ref()) {
+            (Some(ranked), Some(base)) => match build_acceleration_graph(
+                metrics.clone(),
+                Some(CchWeights::Ranked(ranked)),
+                Some(base.source.clone()),
+                edge_count,
+            ) {
+                Ok(acceleration) => acceleration.map(Arc::new),
+                Err(error) => return Some(Err(error)),
+            },
+            _ => None,
+        };
+        let turn_table = TransitionTurnSeconds {
+            values: turn_seconds.values.clone(),
+            classes,
+        };
+        Some(Ok(Self {
+            edge_spatial_index,
+            first_out: U32_ARRAYS.intern(first_out),
+            edge_order,
+            incoming_first_out: U32_ARRAYS.intern(incoming_first_out),
+            incoming_edge_order: U32_ARRAYS.intern(incoming_edge_order),
+            edge_costs: F64_ARRAYS.intern(edge_costs),
+            transition_first_out: U32_ARRAYS.intern(transition_first_out),
+            transition_edges: U32_ARRAYS.intern(transition_edges),
+            transition_costs: F64_ARRAYS.intern(transition_costs),
+            reverse_transition_first_out: U32_ARRAYS.intern(reverse_transition_first_out),
+            reverse_transition_edges: U32_ARRAYS.intern(reverse_transition_edges),
+            reverse_transition_forward: U32_ARRAYS.intern(reverse_transition_forward),
+            acceleration,
+            acceleration_includes_failure_penalties: false,
+            automaton: self.automaton.clone(),
+            reverse_automaton: self.reverse_automaton.clone(),
+            virtual_reverse_of: Arc::default(),
+            includes_temporal_materialized_directions: false,
+            turn_seconds: Arc::new(std::sync::OnceLock::from(Some(turn_table))),
+        }))
     }
 }
 

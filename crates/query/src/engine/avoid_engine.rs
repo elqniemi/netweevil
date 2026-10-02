@@ -130,7 +130,7 @@ impl PreparedRoutingEngine {
         // Avoiding only raises or removes the costs of the avoided edges, so
         // a small avoid set re-customizes this engine's hierarchy instead of
         // customizing it from scratch.
-        let customized = (resolved.edges.len() <= self.topology.edge_count() / RECUSTOMIZE_SHARE)
+        let mut ranked = (resolved.edges.len() <= self.topology.edge_count() / RECUSTOMIZE_SHARE)
             .then(|| {
                 let changed = resolved
                     .edges
@@ -144,15 +144,36 @@ impl PreparedRoutingEngine {
                     &changed,
                 )
             })
-            .flatten()
-            .map(CchWeights::Ranked);
-        let mut engine = PreparedRoutingEngine::build(
-            self.topology.clone(),
-            metrics,
-            self.dataset_acceleration(),
-            with_ignore_mode_graph,
-            customized,
-        )?;
+            .flatten();
+        // Closing edges only removes adjacency, so a re-customized engine
+        // filters this engine's graph instead of building one.
+        let filtered = ranked.is_some().then(|| {
+            self.default_routing_graph.with_closed_edges(
+                self.topology.as_ref(),
+                self.metrics.as_ref(),
+                &metrics,
+                &mut ranked,
+            )
+        });
+        let mut engine = match filtered.flatten() {
+            Some(graph) => {
+                validate_execution_inputs(self.topology.as_ref(), metrics.as_ref())?;
+                PreparedRoutingEngine::assemble(
+                    self.topology.clone(),
+                    metrics,
+                    graph?,
+                    true,
+                    with_ignore_mode_graph,
+                )
+            }
+            None => PreparedRoutingEngine::build(
+                self.topology.clone(),
+                metrics,
+                self.dataset_acceleration(),
+                with_ignore_mode_graph,
+                ranked.map(CchWeights::Ranked),
+            )?,
+        };
         engine.avoid_applied = true;
         tracing::debug!(
             edges = resolved.edges.len(),
