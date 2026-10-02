@@ -477,7 +477,10 @@ impl MiniStation {
         let mut request = route_request(origin, destination);
         request.temporal = netweevil_query::TemporalRequestOptions {
             departure_time: Some(departure_time.to_string()),
-            scenario: Some(self.dir.join("scenario.yml")),
+            scenario: Some(
+                netweevil_query::load_scenario_overlay(self.dir.join("scenario.yml"))
+                    .expect("scenario loads"),
+            ),
             ..Default::default()
         };
         netweevil_query::execute_route(&self.topology, metrics, &request)
