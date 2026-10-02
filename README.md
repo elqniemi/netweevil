@@ -349,7 +349,7 @@ Top-level commands:
 - `dataset import|audit|list`
 - `transit import|bindings apply|transfers build|list`
 - `profile validate|compile`
-- `analyze route|route-batch|od|matrix|accessibility|service-area|service-area-sequence|betweenness|scenario-batch|transit-route|transit-batch`
+- `analyze route|route-batch|od|matrix|accessibility|service-area|service-area-sequence|betweenness|scenario-batch|transit-route|transit-batch|trip`
 - `experiment run`
 - `simulate validate|run`
 - `report render`
@@ -607,6 +607,7 @@ Execution endpoints:
 - `POST /v1/directions`
 - `POST /v1/match`
 - `POST /v1/waypoints`
+- `POST /v1/trip`: optimized stop order (roundtrip, fixed start/end, open) with service times and time windows
 - `POST /v1/locate`
 - `POST /v1/od`
 - `POST /v1/matrix`
@@ -791,6 +792,17 @@ the routes is visible:
 
 ```bash
 netweevil bench compare --baseline /tmp/http-c16.json --candidate /tmp/osrm-c16.json
+```
+
+`bench trip` measures trip optimization on real stop matrices. For each size
+the first N mutually routable corpus origins form a roundtrip; it reports the
+matrix time, the default solve, and the gap to Held–Karp (small sizes), the
+best of several longer seeded runs, and the assignment lower bound:
+
+```bash
+netweevil bench trip --dataset groningen \
+  --profile examples/profiles/car_research_v1.yml \
+  --corpus /tmp/groningen-2000.csv --sizes 10,50,200,1000 --json /tmp/trip.json
 ```
 
 JSON reports carry a SHA-256 fingerprint of the selected corpus coordinates,
