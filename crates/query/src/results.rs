@@ -390,6 +390,12 @@ pub struct RouteAlternative {
     pub diagnostics: Vec<AnalysisDiagnostic>,
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Areas, border crossings and timezones (`returns.admin_areas`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regions: Option<RouteRegions>,
+    /// Elevation profile (`returns.elevation`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elevation: Option<RouteElevationProfile>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

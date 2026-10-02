@@ -547,6 +547,7 @@ fn render_leg(
                 .extend(path.iter().map(|&edge| topology.routing_edge(edge).to.0));
         }
     }
+    annotate_route(topology, &request.returns, &mut route);
     if let Some(breakdowns) = route.breakdowns.as_mut() {
         *breakdowns = RouteBreakdowns::default();
         for (position, &edge_index) in path.iter().enumerate() {

@@ -10,6 +10,8 @@
   request whose cheapest penalized route breaks them. The cheapest
   orientation and route within the limits is returned, and the request fails
   only when none exists. Alternatives over a limit are dropped.
+- `returns.admin_areas` and `returns.elevation` also annotate waypoint legs
+  (`/v1/waypoints`) and alternative routes, each from its own path.
 - Directions: two same-side turns joined by a short connector (a cycle path
   hairpin) are one sharp turn, not a U-turn. Walking and cycling jogs that
   barely change the heading get no step.

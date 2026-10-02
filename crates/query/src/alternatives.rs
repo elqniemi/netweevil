@@ -295,6 +295,8 @@ fn materialize_route_alternative(
         violations: analysis.violations,
         diagnostics,
         warnings,
+        regions: None,
+        elevation: None,
     })
 }
 

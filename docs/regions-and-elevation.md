@@ -49,7 +49,7 @@ Admin areas are used in four places:
     - match: {country: NL, highway: trunk}    # e.g. no bicycles on Dutch trunk roads
   ```
 - **Border crossings.** `preferences.avoid_border_crossings: true` excludes crossing edges. `border_crossing_penalty_s` adds generalized cost per crossing, and `border_crossing_time_s` adds travel time, for example for a border check. These are edge metrics, so CCH routes stay exact. Requests set them through `profile_overrides`, for example `{"preferences": {"avoid_border_crossings": true}}`.
-- **Responses.** `returns.admin_areas: true` adds `regions` to a route: country/state spans along the route with their driving side and distances, the border-crossing count, and the timezones entered.
+- **Responses.** `returns.admin_areas: true` adds `regions` to a route: country/state spans along the route with their driving side and distances, the border-crossing count, and the timezones entered. Each waypoint leg and each alternative route gets its own `regions`.
 
 ## Elevation
 
@@ -65,7 +65,7 @@ Bridges and tunnels (OSM `bridge=*` or `tunnel=*` other than `building_passage`,
 
 The existing `slope_model` (Tobler or piecewise) uses the stored ascent and descent, so bicycle and walking profiles on OSM data respond to terrain. Example: [`examples/profiles/pedestrian_hilly_osm.yml`](../examples/profiles/pedestrian_hilly_osm.yml).
 
-`returns.elevation: true` adds `elevation` to a route:
+`returns.elevation: true` adds `elevation` to a route, to each waypoint leg and to each alternative:
 
 - `points`: `[distance_m, height]` per vertex, with `null` heights where unknown;
 - `ascent_m` and `descent_m` from the densified edges;
