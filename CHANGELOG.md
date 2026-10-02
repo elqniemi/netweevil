@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- `netweevil dataset update` applies OSM change files (`.osc`, `.osc.gz`) or
+  a newer extract to an imported OSM dataset without nested-dissection
+  ordering: the topology equals a full import of the changed extract and the
+  CCH is contracted with the previous elimination order. Updates report fill
+  growth against the last full ordering and reorder from scratch past
+  `--max-fill-growth` or with `--reorder always`. OSM PBF imports keep a
+  source snapshot under `.netweevil/bundles/source` for this and read the
+  extract in one pass; datasets imported earlier need a re-import to update.
+  The API applies updates with `POST /v1/workspace/datasets/{id}/update`
+  and reloads changed datasets with `POST /v1/workspace/reload`, swapping
+  the runtime once the new build is loaded. Cached compiled profiles are
+  only reused for the topology they were compiled against, and bundle and
+  manifest files are replaced atomically.
 - `netweevil bootstrap` and argument-less `api serve` start in setup mode and
   serve the web console, which is embedded in the executable when
   `frontend/dist` exists at build time. `bootstrap` opens the browser
