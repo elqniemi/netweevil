@@ -330,6 +330,7 @@ All CLI and API state is under `.netweevil/` in the current workspace:
 - `.netweevil/bundles/source`: retained OSM source objects that `dataset update` applies change files to (OSM PBF imports only)
 - `.netweevil/bundles/metrics`: compiled profile metric bundles (per-edge metrics only; CCH weights are customized when an engine loads the profile)
 - `.netweevil/bundles/transit`: transit bundles
+- `.netweevil/traffic` and `.netweevil/bundles/traffic`: imported historical traffic speed manifests and bundles
 - `.netweevil/runs`: route, OD, matrix, service-area, experiment, and simulation outputs
 - `.netweevil/reports`: rendered reports
 
@@ -970,6 +971,29 @@ osmium tags-filter \
 ```
 
 Do not pass `-R` or `--omit-referenced`; netweevil needs referenced topology objects.
+
+## Traffic Speeds
+
+Historical time-of-week speeds and live updates give timed requests credible
+ETAs for car, HGV and transit-vehicle profiles:
+
+```bash
+netweevil traffic import examples/traffic/groningen_synthetic.yml --dataset groningen
+netweevil api serve --dataset groningen \
+  --default-profile examples/profiles/car_north_nl_2026_05.yml \
+  --traffic groningen_synthetic
+```
+
+Route, OD, matrix and service-area requests with a `departure_time` run on a
+CCH customized for the departure's 15-minute (configurable) bucket plus the
+live updates valid then; route arrival times are integrated along the path
+with the speed in force at every instant. `traffic: time_dependent` selects
+exact time-dependent routing instead, `traffic: off` ignores traffic. Push
+closures and speeds with `POST /v1/traffic/live` (published after a
+background re-customization; readers never wait) and inspect the state with
+`GET /v1/traffic`. Responses report the bucket, live version and cache use
+under `service.traffic`. See [Historical and live traffic](docs/traffic.md)
+for the formats, semantics and Groningen measurements.
 
 ## Updating OSM Datasets
 
