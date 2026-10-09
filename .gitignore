@@ -78,6 +78,7 @@ index.html
 !examples/hong-kong/**/*.geojson
 !examples/hong-kong/**/*.jsonl
 !examples/hong-kong/**/*.ndjson
+!examples/api/groningen_province_admin_bounds.geojson
 
 # Generated API examples and benchmark outputs are reproducible local artifacts.
 examples/api/*_result*.json

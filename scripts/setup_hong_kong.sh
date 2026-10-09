@@ -124,7 +124,9 @@ if ((!SERVE_ONLY && !PROFILES_ONLY && !TERRAIN_ONLY)); then
     python3 scripts/download_hong_kong_sources.py --output-dir "$STATE/raw" --only roads
     ROAD_SOURCE="$STATE/raw/hong-kong-latest.osm.pbf"
   fi
-  "$BIN" dataset import "$ROAD_SOURCE" --name hk_roads
+  road_dem=()
+  if [[ -f "$terrain_input" ]]; then road_dem=(--dem "$terrain_input" --dem-crs EPSG:2326); fi
+  "$BIN" dataset import "$ROAD_SOURCE" --name hk_roads ${road_dem[@]+"${road_dem[@]}"}
   "$BIN" transit import "$STATE/transit/hong_kong_multimodal.gtfs.zip" --name hong_kong_multimodal \
     --service-start "$SERVICE_START" --service-days "$SERVICE_DAYS" --stop-bindings "$STATE/transit/stop_bindings.json"
 fi
