@@ -1,0 +1,97 @@
+# Default walking profile created by the NetWeevil setup flow.
+# Also used as the transfer/access profile for transit routing.
+# Edit freely: the file is yours. Change `profile.id` to keep several variants.
+profile:
+  id: pedestrian_default
+  label: "Pedestrian (default)"
+  mode: foot
+  defaults_pack: eu_foot_2026_01
+  extends: foot_default
+
+cost:
+  objective: generalized
+  distance_weight: 0.015
+  time_weight: 1.0
+
+speed_rules:
+  - match:
+      highway: footway
+    speed_kph: 5.0
+  - match:
+      highway: path
+    speed_kph: 5.0
+  - match:
+      highway: pedestrian
+    speed_kph: 5.0
+  - match:
+      highway: steps
+    speed_kph: 2.5
+  - match:
+      highway: residential
+    speed_kph: 5.0
+  - match:
+      highway: living_street
+    speed_kph: 5.0
+  - match:
+      highway: service
+    speed_kph: 4.5
+  - match:
+      highway: tertiary
+    speed_kph: 4.8
+  - match:
+      highway: secondary
+    speed_kph: 4.8
+  - match:
+      highway: primary
+    speed_kph: 4.6
+  - match:
+      highway: track
+    speed_kph: 4.6
+
+exclude_rules:
+  - match:
+      highway: motorway
+  - match:
+      highway: trunk
+
+factors:
+  - match:
+      surface: gravel
+    speed_factor: 0.9
+  - match:
+      surface: cobblestone
+    speed_factor: 0.85
+  - match:
+      surface: sand
+    speed_factor: 0.6
+  - match:
+      smoothness: bad
+    speed_factor: 0.85
+
+direction:
+  ignore_plain_oneway_for_foot: true
+
+ferry:
+  allow: true
+  use_ferry: 0.25
+  boarding_cost_s: 120
+  infer_duration_when_missing: true
+  default_speed_kph: 8
+
+preferences:
+  use_highways: 0.01
+  use_tolls: 0.0
+  use_tracks: 0.45
+  service_penalty_s: 8
+
+returns:
+  geometry: full
+  segment_rows: true
+  road_type_breakdown:
+    - time_s
+    - distance_m
+  surface_breakdown:
+    - time_s
+    - distance_m
+  penalty_breakdown: true
+  explain_cost_derivation: true

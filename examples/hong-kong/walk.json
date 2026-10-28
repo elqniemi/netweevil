@@ -1,0 +1,22 @@
+{
+  "profile_id": "pedestrian_fastest_multilayer",
+  "request": {
+    "route_id": "central_to_admiralty_3d",
+    "origin": {
+      "id": "CEN Exit J3",
+      "lon": 114.16077236000001,
+      "lat": 22.281293400000038,
+      "z": 0.0580000000045402
+    },
+    "destination": {
+      "id": "ADM Exit B",
+      "lon": 114.16437372000007,
+      "lat": 22.27938818000007,
+      "z": -2.139999999999418
+    },
+    "returns": {
+      "geometry": "full",
+      "segment_rows": true
+    }
+  }
+}

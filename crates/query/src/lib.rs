@@ -1,0 +1,88 @@
+//! The NetWeevil routing engine: exact point-to-point routes, alternatives,
+//! OD batches, travel-time matrices, service areas (isochrones), and
+//! accessibility over an edge-based graph with turn costs and restrictions.
+//!
+//! Customizable contraction hierarchies minimize the compiled fixed-point
+//! metric; route summaries use original floating-point edge costs. Temporal
+//! and constrained requests use exact label searches. `PreparedRoutingEngine`
+//! is the shared, thread-safe entry point used by the CLI, API, and simulation.
+
+mod accessibility;
+mod alternatives;
+mod annotations;
+mod avoid;
+mod batch;
+mod betweenness;
+mod diagnostics;
+mod documents;
+mod edge_spatial_index;
+mod engine;
+mod expansion;
+mod geometry;
+mod isochrone_polygon;
+mod local_time;
+mod navigation;
+mod pareto;
+mod provenance;
+mod requests;
+mod results;
+mod route;
+mod scenario_batch;
+mod service_area;
+mod service_area_sequence;
+mod snapping;
+mod temporal;
+mod trace_matching;
+mod traffic;
+mod trip;
+mod vehicle;
+mod waypoints;
+
+pub use accessibility::*;
+pub(crate) use alternatives::*;
+pub use annotations::{RouteAdminSpan, RouteElevationProfile, RouteRegions};
+pub(crate) use annotations::{annotate_route, wants_annotations};
+pub use avoid::{AvoidOptions, AvoidPoint, AvoidPolygon};
+pub(crate) use avoid::{ResolvedAvoid, ensure_no_avoid, resolve_avoid};
+pub use batch::*;
+pub(crate) use betweenness::execute_betweenness_with_graph;
+pub use betweenness::{
+    BetweennessEdgeScore, BetweennessPairResult, BetweennessRequest, BetweennessResult,
+    WeightedPoint,
+};
+pub use diagnostics::*;
+pub use documents::*;
+pub use engine::*;
+pub use expansion::*;
+pub(crate) use geometry::*;
+pub use local_time::{NetworkTimezones, in_zone, parse_local_datetime};
+pub use navigation::*;
+pub(crate) use pareto::*;
+pub(crate) use provenance::*;
+pub use requests::*;
+pub use results::*;
+pub use route::*;
+pub use scenario_batch::*;
+pub use service_area::*;
+pub use service_area_sequence::*;
+pub(crate) use snapping::*;
+pub use temporal::{
+    HolidayCalendarDocument, ScenarioFeatureOverride, ScenarioOverlay, TemporalContext,
+    TemporalOverlayDocument, TemporalOverlayRow, TemporalOverlaySeries, everyday_mask,
+    load_holiday_calendar, load_scenario_overlay, load_temporal_overlay, parse_datetime,
+};
+pub use trace_matching::*;
+pub use traffic::{
+    HistoricalTraffic, LiveSwapReport, LiveTrafficDirection, LiveTrafficEntry, LiveTrafficSnapshot,
+    LiveTrafficUpdate, TrafficBucketInfo, TrafficProfileStatus, TrafficRouter, TrafficSelection,
+    TrafficService, TrafficSpeedPolicy, TrafficStatus,
+};
+pub use trip::solver as trip_solver;
+pub use trip::{
+    MAX_TRIP_STOPS, TripMode, TripOptimization, TripOptimizerOptions, TripRequest, TripResult,
+    TripStop, TripTimeWindow, TripVisit,
+};
+pub use waypoints::*;
+
+#[cfg(test)]
+mod tests;

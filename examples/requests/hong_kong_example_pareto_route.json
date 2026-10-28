@@ -1,0 +1,35 @@
+{
+  "route_id": "hk_example_shelter_pareto",
+  "origin": {
+    "id": "illustrative_origin",
+    "lon": 114.1548,
+    "lat": 22.2818,
+    "z": 8.0
+  },
+  "destination": {
+    "id": "illustrative_destination",
+    "lon": 114.1517,
+    "lat": 22.2839,
+    "z": 34.0
+  },
+  "snap": {
+    "max_distance_m": 250.0,
+    "z_window_m": 4.0
+  },
+  "constraints": [
+    {
+      "component": "uncovered_time",
+      "max_value": 300.0
+    }
+  ],
+  "pareto": {
+    "component": "uncovered_time",
+    "max_routes": 8,
+    "max_labels_per_state": 96
+  },
+  "returns": {
+    "geometry": "full",
+    "segment_rows": true,
+    "explain_cost_derivation": true
+  }
+}

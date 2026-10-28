@@ -1,0 +1,728 @@
+use std::collections::BTreeMap;
+
+use anyhow::{Result, bail};
+use netweevil_core::{TravelMode, VehicleParams};
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileDocument {
+    pub profile: ProfileHeader,
+    #[serde(default)]
+    pub cost: CostConfig,
+    #[serde(default)]
+    pub speeds: SpeedsConfig,
+    #[serde(default)]
+    pub speed_rules: Vec<SpeedRule>,
+    #[serde(default)]
+    pub exclude_rules: Vec<ExcludeRule>,
+    #[serde(default)]
+    pub factors: Vec<FactorRule>,
+    /// Optional walking-speed adjustment derived from the directed edge
+    /// gradient. When omitted, the profile's ordinary speed rules are used
+    /// unchanged.
+    #[serde(default)]
+    pub slope_model: Option<SlopeModelConfig>,
+    /// Class-specific traversal models for stairs, lifts, escalators and
+    /// other pedestrian facilities.
+    #[serde(default)]
+    pub facilities: FacilityConfig,
+    /// Named quantities accumulated alongside the scalar routing objective.
+    /// The expression language is deliberately small and edge-local; see
+    /// [`CostComponentConfig::expression`].
+    #[serde(default)]
+    pub components: BTreeMap<String, CostComponentConfig>,
+    /// Waiting policy used by exact time-dependent searches.
+    #[serde(default)]
+    pub temporal: TemporalProfileConfig,
+    #[serde(default)]
+    pub direction: DirectionConfig,
+    #[serde(default)]
+    pub turns: TurnConfig,
+    #[serde(default)]
+    pub ferry: FerryConfig,
+    #[serde(default)]
+    pub preferences: PreferencesConfig,
+    /// Physical vehicle parameters. Edges whose height, weight, hazmat or
+    /// similar restrictions the vehicle violates are excluded at compile
+    /// time; requests may override individual fields.
+    #[serde(default)]
+    pub vehicle: Option<VehicleParams>,
+    #[serde(default)]
+    pub returns: ReturnConfig,
+}
+
+impl ProfileDocument {
+    pub fn validate(&self) -> Result<()> {
+        if self.profile.id.trim().is_empty() {
+            bail!("profile.id must not be empty");
+        }
+        if self.profile.defaults_pack.trim().is_empty() {
+            bail!("profile.defaults_pack must not be empty");
+        }
+        if self.cost.distance_weight < 0.0 || self.cost.time_weight < 0.0 {
+            bail!("cost weights must be non-negative");
+        }
+        for (index, rule) in self.speed_rules.iter().enumerate() {
+            if rule.r#match.tags.is_empty() {
+                bail!("speed_rules[{index}] must contain at least one match tag");
+            }
+            if rule.speed_kph <= 0.0 {
+                bail!("speed_rules[{index}] speed_kph must be > 0");
+            }
+        }
+        for (index, rule) in self.exclude_rules.iter().enumerate() {
+            if rule.r#match.tags.is_empty() {
+                bail!("exclude_rules[{index}] must contain at least one match tag");
+            }
+        }
+        for (index, factor) in self.factors.iter().enumerate() {
+            if factor.r#match.tags.is_empty() {
+                bail!("factors[{index}] must contain at least one match tag");
+            }
+            if factor.speed_factor <= 0.0 {
+                bail!("factors[{index}] speed_factor must be > 0");
+            }
+        }
+        if let Some(slope_model) = &self.slope_model {
+            slope_model.validate()?;
+        }
+        self.facilities.validate()?;
+        for (name, component) in &self.components {
+            if name.trim().is_empty() {
+                bail!("component names must not be empty");
+            }
+            if component.expression.trim().is_empty() {
+                bail!("component '{name}' must contain a non-empty expression");
+            }
+            if !component.weight.is_finite() || component.weight < 0.0 {
+                bail!("component '{name}' weight must be finite and non-negative");
+            }
+        }
+        if !self.temporal.max_wait_s.is_finite() || self.temporal.max_wait_s < 0.0 {
+            bail!("temporal.max_wait_s must be finite and non-negative");
+        }
+        let destination_only_penalty_s = self.preferences.destination_only_penalty_s;
+        if !destination_only_penalty_s.is_finite() || destination_only_penalty_s < 0.0 {
+            bail!("preferences.destination_only_penalty_s must be finite and non-negative");
+        }
+        for (name, value) in [
+            (
+                "border_crossing_penalty_s",
+                self.preferences.border_crossing_penalty_s,
+            ),
+            (
+                "border_crossing_time_s",
+                self.preferences.border_crossing_time_s,
+            ),
+        ] {
+            if !value.is_finite() || value < 0.0 {
+                bail!("preferences.{name} must be finite and non-negative");
+            }
+        }
+        if let Some(max_grade) = self.preferences.max_grade {
+            let (uphill, downhill) = max_grade.limits();
+            for (name, limit) in [("uphill", uphill), ("downhill", downhill)] {
+                if limit.is_some_and(|limit| !limit.is_finite() || limit < 0.0) {
+                    bail!("preferences.max_grade {name} limit must be finite and non-negative");
+                }
+            }
+        }
+        if let Some(vehicle) = &self.vehicle {
+            vehicle.validate().map_err(anyhow::Error::msg)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProfileHeader {
+    pub id: String,
+    pub label: String,
+    pub mode: TravelMode,
+    pub defaults_pack: String,
+    #[serde(default)]
+    pub extends: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CostConfig {
+    #[serde(default)]
+    pub objective: Objective,
+    #[serde(default)]
+    pub distance_weight: f64,
+    #[serde(default = "default_time_weight")]
+    pub time_weight: f64,
+}
+
+impl Default for CostConfig {
+    fn default() -> Self {
+        Self {
+            objective: Objective::Fastest,
+            distance_weight: 0.0,
+            time_weight: 1.0,
+        }
+    }
+}
+
+fn default_time_weight() -> f64 {
+    1.0
+}
+
+#[derive(Debug, Clone, PartialEq, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Objective {
+    #[default]
+    Fastest,
+    Shortest,
+    Generalized,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct SpeedsConfig {
+    /// How posted speed limits from the source data (OSM `maxspeed`,
+    /// Overture `speed_limits`) combine with class/profile speeds for
+    /// motorized modes.
+    #[serde(default)]
+    pub posted_limits: PostedLimitPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PostedLimitPolicy {
+    /// The posted limit replaces the class/profile speed wherever the
+    /// source data carries one; profile speeds fill the gaps.
+    Prefer,
+    /// The posted limit caps the class/profile speed (default): travel is
+    /// never assumed faster than the legal limit, but profile speeds that
+    /// are already lower win.
+    #[default]
+    Cap,
+    /// Posted limits are ignored; only class/profile speeds apply.
+    Ignore,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TagMatch {
+    #[serde(flatten)]
+    pub tags: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SpeedRule {
+    #[serde(rename = "match")]
+    pub r#match: TagMatch,
+    pub speed_kph: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExcludeRule {
+    #[serde(rename = "match")]
+    pub r#match: TagMatch,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FactorRule {
+    #[serde(rename = "match")]
+    pub r#match: TagMatch,
+    pub speed_factor: f64,
+}
+
+/// Directed-gradient walking model. Gradients are represented as rise/run
+/// (for example `0.10` means a ten-percent uphill grade).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SlopeModelConfig {
+    /// Tobler's hiking function, normalized so a flat edge keeps the speed
+    /// selected by the ordinary profile rules. The normalization preserves
+    /// custom pedestrian base speeds while retaining Tobler's asymmetric
+    /// uphill/downhill response.
+    Tobler {
+        #[serde(default = "default_tobler_exponent")]
+        exponent: f64,
+        #[serde(default = "default_tobler_optimal_gradient")]
+        optimal_gradient: f64,
+        #[serde(default = "default_min_slope_speed_factor")]
+        min_speed_factor: f64,
+        #[serde(default = "default_max_slope_speed_factor")]
+        max_speed_factor: f64,
+    },
+    /// Linear interpolation between gradient/speed-factor control points.
+    /// Values outside the supplied range use the nearest endpoint.
+    Piecewise { points: Vec<SlopePoint> },
+}
+
+impl SlopeModelConfig {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Tobler {
+                exponent,
+                optimal_gradient,
+                min_speed_factor,
+                max_speed_factor,
+            } => {
+                if !exponent.is_finite() || *exponent <= 0.0 {
+                    bail!("slope_model.exponent must be finite and > 0");
+                }
+                if !optimal_gradient.is_finite() {
+                    bail!("slope_model.optimal_gradient must be finite");
+                }
+                if !min_speed_factor.is_finite()
+                    || !max_speed_factor.is_finite()
+                    || *min_speed_factor <= 0.0
+                    || *max_speed_factor < *min_speed_factor
+                {
+                    bail!("slope_model speed-factor bounds must be finite, positive, and ordered");
+                }
+            }
+            Self::Piecewise { points } => {
+                if points.is_empty() {
+                    bail!("piecewise slope_model must contain at least one point");
+                }
+                let mut previous = f64::NEG_INFINITY;
+                for (index, point) in points.iter().enumerate() {
+                    if !point.gradient.is_finite()
+                        || !point.speed_factor.is_finite()
+                        || point.speed_factor <= 0.0
+                    {
+                        bail!(
+                            "slope_model.points[{index}] must contain a finite gradient and a positive finite speed_factor"
+                        );
+                    }
+                    if point.gradient <= previous {
+                        bail!("piecewise slope_model gradients must be strictly increasing");
+                    }
+                    previous = point.gradient;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+fn default_tobler_exponent() -> f64 {
+    3.5
+}
+
+fn default_tobler_optimal_gradient() -> f64 {
+    0.05
+}
+
+fn default_min_slope_speed_factor() -> f64 {
+    0.1
+}
+
+fn default_max_slope_speed_factor() -> f64 {
+    2.0
+}
+
+#[derive(Debug, Clone, PartialEq, Copy, Serialize, Deserialize)]
+pub struct SlopePoint {
+    pub gradient: f64,
+    pub speed_factor: f64,
+}
+
+/// Facility classes are matched against any semantic or retained dataset
+/// attribute. A class not present in this map falls back to normal edge
+/// traversal.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FacilityConfig {
+    #[serde(default = "default_facility_attribute")]
+    pub attribute: String,
+    #[serde(default)]
+    pub classes: BTreeMap<String, FacilityCost>,
+}
+
+impl Default for FacilityConfig {
+    fn default() -> Self {
+        Self {
+            attribute: default_facility_attribute(),
+            classes: BTreeMap::new(),
+        }
+    }
+}
+
+impl FacilityConfig {
+    fn validate(&self) -> Result<()> {
+        if !self.classes.is_empty() && self.attribute.trim().is_empty() {
+            bail!("facilities.attribute must not be empty when classes are configured");
+        }
+        for (class, cost) in &self.classes {
+            if class.trim().is_empty() {
+                bail!("facility class names must not be empty");
+            }
+            cost.validate(class)?;
+        }
+        Ok(())
+    }
+}
+
+fn default_facility_attribute() -> String {
+    "feature_type".to_string()
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FacilityCost {
+    Stairs {
+        #[serde(default = "default_stair_vertical_speed")]
+        vertical_speed_mps: f64,
+        #[serde(default)]
+        boarding_penalty_s: f64,
+        #[serde(default)]
+        burden_per_vertical_m: f64,
+        #[serde(default = "default_stair_burden_component")]
+        burden_component: String,
+    },
+    Escalator {
+        #[serde(default = "default_escalator_speed")]
+        conveyor_speed_mps: f64,
+        #[serde(default)]
+        walking_speed_mps: f64,
+        #[serde(default)]
+        boarding_penalty_s: f64,
+    },
+    Lift {
+        #[serde(default)]
+        wait_s: f64,
+        #[serde(default = "default_lift_vertical_speed")]
+        vertical_speed_mps: f64,
+        #[serde(default = "default_lift_wait_component")]
+        wait_component: String,
+    },
+    Travelator {
+        #[serde(default = "default_travelator_speed")]
+        conveyor_speed_mps: f64,
+        #[serde(default)]
+        walking_speed_mps: f64,
+        #[serde(default)]
+        boarding_penalty_s: f64,
+    },
+    Ramp {
+        #[serde(default = "default_ramp_speed_factor")]
+        speed_factor: f64,
+        #[serde(default)]
+        boarding_penalty_s: f64,
+    },
+}
+
+impl FacilityCost {
+    fn validate(&self, class: &str) -> Result<()> {
+        let positive = |name: &str, value: f64| -> Result<()> {
+            if !value.is_finite() || value <= 0.0 {
+                bail!("facility class '{class}' {name} must be finite and > 0");
+            }
+            Ok(())
+        };
+        let non_negative = |name: &str, value: f64| -> Result<()> {
+            if !value.is_finite() || value < 0.0 {
+                bail!("facility class '{class}' {name} must be finite and non-negative");
+            }
+            Ok(())
+        };
+        match self {
+            Self::Stairs {
+                vertical_speed_mps,
+                boarding_penalty_s,
+                burden_per_vertical_m,
+                burden_component,
+            } => {
+                positive("vertical_speed_mps", *vertical_speed_mps)?;
+                non_negative("boarding_penalty_s", *boarding_penalty_s)?;
+                non_negative("burden_per_vertical_m", *burden_per_vertical_m)?;
+                if *burden_per_vertical_m > 0.0 && burden_component.trim().is_empty() {
+                    bail!("facility class '{class}' burden_component must not be empty");
+                }
+            }
+            Self::Escalator {
+                conveyor_speed_mps,
+                walking_speed_mps,
+                boarding_penalty_s,
+            }
+            | Self::Travelator {
+                conveyor_speed_mps,
+                walking_speed_mps,
+                boarding_penalty_s,
+            } => {
+                positive("conveyor_speed_mps", *conveyor_speed_mps)?;
+                non_negative("walking_speed_mps", *walking_speed_mps)?;
+                non_negative("boarding_penalty_s", *boarding_penalty_s)?;
+            }
+            Self::Lift {
+                wait_s,
+                vertical_speed_mps,
+                wait_component,
+            } => {
+                non_negative("wait_s", *wait_s)?;
+                positive("vertical_speed_mps", *vertical_speed_mps)?;
+                if wait_component.trim().is_empty() {
+                    bail!("facility class '{class}' wait_component must not be empty");
+                }
+            }
+            Self::Ramp {
+                speed_factor,
+                boarding_penalty_s,
+            } => {
+                positive("speed_factor", *speed_factor)?;
+                non_negative("boarding_penalty_s", *boarding_penalty_s)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+fn default_stair_vertical_speed() -> f64 {
+    0.35
+}
+
+fn default_stair_burden_component() -> String {
+    "stair_burden".to_string()
+}
+
+fn default_escalator_speed() -> f64 {
+    0.5
+}
+
+fn default_lift_vertical_speed() -> f64 {
+    1.5
+}
+
+fn default_lift_wait_component() -> String {
+    "lift_wait".to_string()
+}
+
+fn default_travelator_speed() -> f64 {
+    0.75
+}
+
+fn default_ramp_speed_factor() -> f64 {
+    0.8
+}
+
+/// Named component definition. Supported expressions are a base quantity
+/// (`travel_time`, `distance`, `ascent`, or `descent`) optionally multiplied
+/// by an attribute predicate (`covered == false`) and/or an overlay term
+/// (`overlay:shade_fraction` or `1 - overlay:shade_fraction`). Parentheses
+/// and either `*` or the multiplication sign are accepted.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CostComponentConfig {
+    pub expression: String,
+    #[serde(default)]
+    pub weight: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Copy, Serialize, Deserialize)]
+pub struct TemporalProfileConfig {
+    #[serde(default)]
+    pub allow_wait: bool,
+    #[serde(default = "default_max_wait_s")]
+    pub max_wait_s: f64,
+}
+
+impl Default for TemporalProfileConfig {
+    fn default() -> Self {
+        Self {
+            allow_wait: false,
+            max_wait_s: default_max_wait_s(),
+        }
+    }
+}
+
+fn default_max_wait_s() -> f64 {
+    3_600.0
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DirectionConfig {
+    #[serde(default)]
+    pub ignore_plain_oneway_for_foot: bool,
+    #[serde(default)]
+    pub allow_bicycle_contraflow_on_roads: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct TurnConfig {
+    #[serde(default)]
+    pub left_penalty_s: f64,
+    #[serde(default)]
+    pub right_penalty_s: f64,
+    #[serde(default)]
+    pub uturn_penalty_s: f64,
+    #[serde(default)]
+    pub traffic_signal_penalty_s: f64,
+    #[serde(default)]
+    pub roundabout_entry_penalty_s: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FerryConfig {
+    #[serde(default = "default_true")]
+    pub allow: bool,
+    #[serde(default = "default_use_ferry")]
+    pub use_ferry: f64,
+    #[serde(default)]
+    pub boarding_cost_s: f64,
+    #[serde(default)]
+    pub infer_duration_when_missing: bool,
+    #[serde(default = "default_ferry_speed")]
+    pub default_speed_kph: f64,
+}
+
+impl Default for FerryConfig {
+    fn default() -> Self {
+        Self {
+            allow: true,
+            use_ferry: 0.5,
+            boarding_cost_s: 0.0,
+            infer_duration_when_missing: true,
+            default_speed_kph: 20.0,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_use_ferry() -> f64 {
+    0.5
+}
+
+fn default_ferry_speed() -> f64 {
+    20.0
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PreferencesConfig {
+    #[serde(default = "default_pref")]
+    pub use_highways: f64,
+    #[serde(default = "default_pref")]
+    pub use_tolls: f64,
+    #[serde(default = "default_pref")]
+    pub use_tracks: f64,
+    #[serde(default)]
+    pub service_penalty_s: f64,
+    /// Generalized-cost seconds charged when a route enters an edge whose
+    /// access is destination-only for the profile's mode (`destination`,
+    /// `delivery`, `customers`) from one that is not. Routes that start or
+    /// end inside such an area pay it at most once per entry, so through
+    /// traffic avoids it while local access stays possible.
+    #[serde(default = "default_destination_only_penalty_s")]
+    pub destination_only_penalty_s: f64,
+    /// Exclude edges between two different countries. Needs a dataset
+    /// imported with admin boundaries; elsewhere no edge crosses a border.
+    #[serde(default)]
+    pub avoid_border_crossings: bool,
+    /// Generalized cost added to each edge that crosses a country border.
+    #[serde(default)]
+    pub border_crossing_penalty_s: f64,
+    /// Travel time added to each border crossing (for example a border
+    /// control stop).
+    #[serde(default)]
+    pub border_crossing_time_s: f64,
+    /// Exclude edges whose steepest grade in the travel direction is above
+    /// a limit. Uses the per-edge grades sampled from a DEM at import;
+    /// datasets without a DEM exclude nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_grade: Option<MaxGrade>,
+}
+
+/// Steepest allowed grade as rise/run (`0.08` is 8 %): one number for both
+/// directions, or separate `uphill` and `downhill` limits, either optional.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum MaxGrade {
+    Both(f64),
+    Directional {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uphill: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        downhill: Option<f64>,
+    },
+}
+
+impl MaxGrade {
+    /// `(uphill, downhill)` limits; `None` leaves that direction open.
+    pub fn limits(self) -> (Option<f64>, Option<f64>) {
+        match self {
+            Self::Both(grade) => (Some(grade), Some(grade)),
+            Self::Directional { uphill, downhill } => (uphill, downhill),
+        }
+    }
+
+    /// Whether an edge whose steepest uphill and downhill grades are these
+    /// stored permille values is too steep. Limits are compared at the
+    /// same whole-permille resolution.
+    pub fn excludes_permille(self, uphill: u16, downhill: u16) -> bool {
+        let above = |permille: u16, limit: Option<f64>| {
+            limit.is_some_and(|limit| f64::from(permille) > (limit * 1000.0).round())
+        };
+        let (max_uphill, max_downhill) = self.limits();
+        above(uphill, max_uphill) || above(downhill, max_downhill)
+    }
+}
+
+fn default_pref() -> f64 {
+    0.5
+}
+
+fn default_destination_only_penalty_s() -> f64 {
+    600.0
+}
+
+impl Default for PreferencesConfig {
+    /// Used when a profile omits `preferences` entirely: the same neutral
+    /// values as an empty `preferences:` block.
+    fn default() -> Self {
+        Self {
+            use_highways: default_pref(),
+            use_tolls: default_pref(),
+            use_tracks: default_pref(),
+            service_penalty_s: 0.0,
+            destination_only_penalty_s: default_destination_only_penalty_s(),
+            avoid_border_crossings: false,
+            border_crossing_penalty_s: 0.0,
+            border_crossing_time_s: 0.0,
+            max_grade: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ReturnConfig {
+    #[serde(default)]
+    pub geometry: ReturnGeometry,
+    #[serde(default)]
+    pub segment_rows: bool,
+    #[serde(default)]
+    pub road_type_breakdown: Vec<BreakdownMetric>,
+    #[serde(default)]
+    pub surface_breakdown: Vec<BreakdownMetric>,
+    #[serde(default)]
+    pub penalty_breakdown: bool,
+    #[serde(default)]
+    pub explain_cost_derivation: bool,
+    /// Report the countries/states, border crossings and timezones along a
+    /// route.
+    #[serde(default)]
+    pub admin_areas: bool,
+    /// Report the route's elevation profile, ascent/descent and steepest
+    /// grades.
+    #[serde(default)]
+    pub elevation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Copy, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReturnGeometry {
+    #[default]
+    None,
+    Full,
+    Segments,
+}
+
+#[derive(Debug, Clone, PartialEq, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BreakdownMetric {
+    TimeS,
+    DistanceM,
+}

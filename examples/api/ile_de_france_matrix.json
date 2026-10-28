@@ -1,0 +1,44 @@
+{
+  "request": {
+    "origins": {
+      "points": [
+        {
+          "id": "la_defense",
+          "lon": 2.2369,
+          "lat": 48.8919
+        },
+        {
+          "id": "nation",
+          "lon": 2.3950,
+          "lat": 48.8483
+        }
+      ],
+      "snap": {
+        "max_distance_m": 500.0
+      },
+      "returns": {
+        "geometry": "full"
+      }
+    },
+    "destinations": {
+      "points": [
+        {
+          "id": "chatelet",
+          "lon": 2.3470,
+          "lat": 48.8580
+        },
+        {
+          "id": "orly_airport_area",
+          "lon": 2.3790,
+          "lat": 48.7283
+        }
+      ],
+      "snap": {
+        "max_distance_m": 500.0
+      },
+      "returns": {
+        "geometry": "full"
+      }
+    }
+  }
+}

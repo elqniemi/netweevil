@@ -1,0 +1,6 @@
+# Python packages for the documentation site. Build it with:
+#   pip install -r docs/requirements.txt && mkdocs build --strict
+mkdocs==1.6.1
+mkdocs-material==9.8.0
+mkdocs-swagger-ui-tag==0.8.1
+pymdown-extensions==12.3

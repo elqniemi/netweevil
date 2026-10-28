@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "feed_id": "hk_example_mtr",
+  "bindings": [
+    {
+      "stop_id": "ILLUSTRATIVE-PLATFORM-A",
+      "node": {
+        "node_id": 18432
+      }
+    },
+    {
+      "stop_id": "ILLUSTRATIVE-PLATFORM-B",
+      "edge": {
+        "edge_id": 9012,
+        "fraction": 0.35
+      }
+    },
+    {
+      "stop_id": "ILLUSTRATIVE-PLATFORM-C",
+      "coordinate": {
+        "lon": 114.1577,
+        "lat": 22.2820,
+        "z": -8.2,
+        "z_window_m": 1.5,
+        "attribute_filter": {
+          "indoor_location": "platform"
+        }
+      }
+    }
+  ]
+}

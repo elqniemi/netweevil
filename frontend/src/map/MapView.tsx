@@ -1,0 +1,930 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import maplibregl, { type Map as MapLibreMap, type MapMouseEvent } from "maplibre-gl";
+import "maplibre-gl/dist/maplibre-gl.css";
+import { basemapStyle } from "./basemaps";
+import {
+  addPoint,
+  appendEditorStop,
+  getPoints,
+  getState,
+  moveEditorStop,
+  moveRouteEnd,
+  nextEditorStopId,
+  nextPointId,
+  placeRoutePoint,
+  removeEditorStop,
+  removePoint,
+  removeVia,
+  setActiveRoute,
+  setEditor,
+  setRouteEnd,
+  setState,
+  updatePoint,
+  updateVia,
+  useStore,
+  type EditorState,
+  type RouteEnd,
+  type RouteInput,
+  type ToolId,
+} from "../state/store";
+import { TOOL_BY_ID } from "../tools/registry";
+import { EMPTY_COLLECTION, PALETTE, SLOT_COLORS, featureBounds, routeColor, type Feature, type FeatureCollection } from "../geo/features";
+import type { FeedStop, ServiceInfo, TerrainSourcesResponse } from "../api/types";
+import { apiRequest } from "../api/client";
+import { lineColor } from "../ui/editorShared";
+import type { createThreeDOverlay } from "./ThreeDOverlay";
+import type { StationGeometryResponse } from "../geo/stationGeometry";
+import { StationGeometryCache } from "../geo/stationGeometryCache";
+import { applyTerrain, selectedTerrain, terrainTileError, TERRAIN_SOURCE } from "./terrain";
+import { applyNetworkTiles, networkTileUrl } from "./networkTiles";
+import { stopLetter } from "../tools/clock";
+
+const RESULT_SOURCE = "results";
+const INPUT_SOURCE = "inputs";
+const SIM_AGENTS_SOURCE = "sim-agents";
+const SIM_EDGES_SOURCE = "sim-edges";
+const EDITOR_SOURCE = "editor";
+const PROFILE_HOVER_SOURCE = "profile-hover";
+const EDITOR_LAYERS = ["editor-base-stop", "editor-stop"];
+
+/** Map features of the GTFS editor: base feed stops, scenario stops and lines. */
+function editorFeatures(editor: EditorState, active: boolean): FeatureCollection {
+  const features: Feature[] = [];
+  if (!active || !editor.scenario) return { type: "FeatureCollection", features };
+  const scenario = editor.scenario;
+  const usedByActive = new Set<string>(editor.activeLine !== null ? (scenario.lines[editor.activeLine]?.stops.map((s) => s.stop_id) ?? []) : []);
+  const scenarioIds = new Set(scenario.stops.map((s) => s.stop_id));
+  const lookup = new Map<string, { lon: number; lat: number; name: string }>();
+  for (const s of editor.baseStops) lookup.set(s.stop_id, s);
+  for (const s of scenario.stops) lookup.set(s.stop_id, s);
+  let id = 0;
+  for (const s of editor.baseStops) {
+    if (scenarioIds.has(s.stop_id)) continue;
+    features.push({ type: "Feature", id: id++, geometry: { type: "Point", coordinates: [s.lon, s.lat] }, properties: { kind: "base_stop", stop_id: s.stop_id, name: s.name, used: usedByActive.has(s.stop_id) ? 1 : 0, selected: editor.selectedStop === s.stop_id ? 1 : 0 } });
+  }
+  scenario.lines.forEach((line, index) => {
+    const coords = line.stops.map((s) => lookup.get(s.stop_id)).filter((p): p is { lon: number; lat: number; name: string } => !!p).map((p) => [p.lon, p.lat]);
+    if (coords.length >= 2) {
+      features.push({ type: "Feature", id: id++, geometry: { type: "LineString", coordinates: coords }, properties: { kind: "line", index, color: lineColor(line, index), active: index === editor.activeLine ? 1 : 0, name: line.short_name || line.line_id } });
+    }
+  });
+  for (const s of scenario.stops) {
+    features.push({ type: "Feature", id: id++, geometry: { type: "Point", coordinates: [s.lon, s.lat] }, properties: { kind: "scn_stop", stop_id: s.stop_id, name: s.name, used: usedByActive.has(s.stop_id) ? 1 : 0, selected: editor.selectedStop === s.stop_id ? 1 : 0 } });
+  }
+  // Sequence labels along the active line.
+  if (editor.activeLine !== null && scenario.lines[editor.activeLine]) {
+    scenario.lines[editor.activeLine].stops.forEach((s, position) => {
+      const p = lookup.get(s.stop_id);
+      if (p) features.push({ type: "Feature", id: id++, geometry: { type: "Point", coordinates: [p.lon, p.lat] }, properties: { kind: "seq", label: String(position + 1), stop_id: s.stop_id } });
+    });
+  }
+  return { type: "FeatureCollection", features };
+}
+
+interface Props {
+  service: ServiceInfo | null;
+}
+
+/** What an input marker on the map refers to, carried in feature properties. */
+interface MarkerRef {
+  kind: "slot" | "route";
+  slot?: string;
+  index: number;
+  route?: number;
+  end?: RouteEnd | "via";
+}
+
+function markerRef(props: Record<string, unknown> | null | undefined): MarkerRef | null {
+  if (!props || (props.kind !== "slot" && props.kind !== "route")) return null;
+  return {
+    kind: props.kind as MarkerRef["kind"],
+    slot: typeof props.slot === "string" ? props.slot : undefined,
+    index: Number(props.index ?? 0),
+    route: typeof props.route === "number" ? props.route : undefined,
+    end: typeof props.end === "string" ? (props.end as MarkerRef["end"]) : undefined,
+  };
+}
+
+/** Builds the input-point feature collection: routes for route tools, slots otherwise. */
+function inputFeatures(tool: ToolId, routes: RouteInput[]): FeatureCollection {
+  const def = TOOL_BY_ID[tool];
+  const features: Feature[] = [];
+  let id = 0;
+  if (def.input === "routes") {
+    const multi = routes.length > 1;
+    routes.forEach((route, r) => {
+      const color = multi ? routeColor(r) : PALETTE.crimson;
+      const suffix = multi ? String(r + 1) : "";
+      if (def.usesVias) {
+        route.vias.forEach((via, v) => {
+          features.push({
+            type: "Feature",
+            id: id++,
+            geometry: { type: "Point", coordinates: [via.lon, via.lat] },
+            properties: { kind: "route", route: r, end: "via", index: v, label: String(v + 1), color, small: 1 },
+          });
+        });
+      }
+      if (route.origin) {
+        features.push({
+          type: "Feature",
+          id: id++,
+          geometry: { type: "Point", coordinates: [route.origin.lon, route.origin.lat] },
+          properties: { kind: "route", route: r, end: "origin", index: 0, label: `A${suffix}`, color, small: 0 },
+        });
+      }
+      if (route.destination) {
+        features.push({
+          type: "Feature",
+          id: id++,
+          geometry: { type: "Point", coordinates: [route.destination.lon, route.destination.lat] },
+          properties: { kind: "route", route: r, end: "destination", index: 0, label: `B${suffix}`, color: multi ? color : PALETTE.blue, small: 0 },
+        });
+      }
+    });
+  }
+  for (const slot of def.slots) {
+    const points = getPoints(slot.id);
+    points.forEach((p, index) => {
+      const color = SLOT_COLORS[slot.id] ?? "#7B3FB8";
+      const label = slot.max === 1 ? slot.label[0] : slot.timed ? stopLetter(index) : String(index + 1);
+      features.push({
+        type: "Feature",
+        id: id++,
+        geometry: { type: "Point", coordinates: [p.lon, p.lat] },
+        properties: { kind: "slot", slot: slot.id, index, label, color, small: 0 },
+      });
+    });
+    if (slot.id === "zone" && points.length >= 3) {
+      const ring = points.map((p) => [p.lon, p.lat]);
+      ring.push(ring[0]);
+      features.push({ type: "Feature", id: id++, geometry: { type: "Polygon", coordinates: [ring] }, properties: { slot: slot.id, zone: true, color: "#0E8A6A" } });
+    }
+  }
+  return { type: "FeatureCollection", features };
+}
+
+/** Opacity multiplier that dims every run except the selected one. */
+function selectionExpression(selected: number | null): maplibregl.ExpressionSpecification | number {
+  if (selected === null) return 1;
+  return ["case", ["any", ["==", ["get", "_run"], selected], ["==", ["get", "_reference"], true]], 1, 0.18];
+}
+
+function addLayers(map: MapLibreMap) {
+  if (map.getSource(RESULT_SOURCE)) return;
+  for (const id of [RESULT_SOURCE, INPUT_SOURCE, SIM_EDGES_SOURCE, SIM_AGENTS_SOURCE, EDITOR_SOURCE, PROFILE_HOVER_SOURCE]) {
+    map.addSource(id, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+  }
+
+  map.addLayer({
+    id: "results-fill",
+    type: "fill",
+    source: RESULT_SOURCE,
+    filter: ["any", ["==", ["geometry-type"], "Polygon"], ["==", ["geometry-type"], "MultiPolygon"]],
+    paint: { "fill-color": ["get", "_color"], "fill-opacity": ["get", "_fill"] },
+  });
+  map.addLayer({
+    id: "results-fill-outline",
+    type: "line",
+    source: RESULT_SOURCE,
+    filter: ["any", ["==", ["geometry-type"], "Polygon"], ["==", ["geometry-type"], "MultiPolygon"]],
+    paint: { "line-color": ["get", "_color"], "line-width": ["get", "_width"], "line-opacity": 0.9 },
+  });
+  map.addLayer({
+    id: "results-line-casing",
+    type: "line",
+    source: RESULT_SOURCE,
+    filter: ["all", ["any", ["==", ["geometry-type"], "LineString"], ["==", ["geometry-type"], "MultiLineString"]], ["==", ["get", "_dash"], 0]],
+    layout: { "line-cap": "round", "line-join": "round", "line-sort-key": ["get", "_sort"] },
+    paint: { "line-color": "#ffffff", "line-width": ["+", ["get", "_width"], 2.5], "line-opacity": 0.85 },
+  });
+  map.addLayer({
+    id: "results-line",
+    type: "line",
+    source: RESULT_SOURCE,
+    filter: ["all", ["any", ["==", ["geometry-type"], "LineString"], ["==", ["geometry-type"], "MultiLineString"]], ["==", ["get", "_dash"], 0]],
+    layout: { "line-cap": "round", "line-join": "round", "line-sort-key": ["get", "_sort"] },
+    paint: { "line-color": ["get", "_color"], "line-width": ["get", "_width"], "line-opacity": ["get", "_opacity"], "line-offset": ["coalesce", ["get", "_offset"], 0] },
+  });
+  map.addLayer({
+    id: "results-line-dashed",
+    type: "line",
+    source: RESULT_SOURCE,
+    filter: ["all", ["any", ["==", ["geometry-type"], "LineString"], ["==", ["geometry-type"], "MultiLineString"]], ["==", ["get", "_dash"], 1]],
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": ["get", "_color"], "line-width": ["get", "_width"], "line-opacity": ["get", "_opacity"], "line-dasharray": [1.5, 2] },
+  });
+  map.addLayer({
+    id: "results-point",
+    type: "circle",
+    source: RESULT_SOURCE,
+    filter: ["all", ["==", ["geometry-type"], "Point"], ["!=", ["get", "_kind"], "trip_stops"]],
+    paint: {
+      "circle-radius": ["get", "_radius"],
+      "circle-color": ["get", "_color"],
+      "circle-opacity": ["get", "_opacity"],
+      "circle-stroke-color": "#ffffff",
+      "circle-stroke-width": 1.5,
+    },
+  });
+
+  // Height labels next to probed points.
+  map.addLayer({
+    id: "results-label",
+    type: "symbol",
+    source: RESULT_SOURCE,
+    filter: ["all", ["==", ["geometry-type"], "Point"], ["==", ["get", "_kind"], "heights"]],
+    layout: { "text-field": ["get", "_label"], "text-size": 11, "text-font": ["Noto Sans Bold"], "text-anchor": "left", "text-offset": [0.8, 0], "text-allow-overlap": false },
+    paint: { "text-color": PALETTE.ink, "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
+  });
+  // Trip visit order: a numbered badge at the upper right of each stop marker.
+  map.addLayer({
+    id: "results-badge",
+    type: "circle",
+    source: RESULT_SOURCE,
+    filter: ["==", ["get", "_kind"], "trip_stops"],
+    paint: { "circle-radius": 9, "circle-color": ["get", "_color"], "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.5, "circle-translate": [13, -13] },
+  });
+  map.addLayer({
+    id: "results-badge-label",
+    type: "symbol",
+    source: RESULT_SOURCE,
+    filter: ["==", ["get", "_kind"], "trip_stops"],
+    layout: { "text-field": ["get", "_label"], "text-size": 10, "text-font": ["Noto Sans Bold"], "text-allow-overlap": true, "text-ignore-placement": true },
+    paint: { "text-color": "#ffffff", "text-translate": [13, -13] },
+  });
+  map.addLayer({
+    id: "profile-hover",
+    type: "circle",
+    source: PROFILE_HOVER_SOURCE,
+    paint: { "circle-radius": 6, "circle-color": PALETTE.ink, "circle-stroke-color": "#ffffff", "circle-stroke-width": 2 },
+  });
+
+  map.addLayer({
+    id: "sim-edges",
+    type: "line",
+    source: SIM_EDGES_SOURCE,
+    layout: { "line-cap": "round" },
+    paint: { "line-color": ["get", "_color"], "line-width": ["get", "_width"], "line-opacity": 0.85 },
+  });
+  map.addLayer({
+    id: "sim-agents",
+    type: "circle",
+    source: SIM_AGENTS_SOURCE,
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 8, 1.5, 12, 3, 16, 6],
+      "circle-color": ["get", "_color"],
+      "circle-opacity": 0.9,
+    },
+  });
+
+  // GTFS editor: base stops (grey), lines, scenario stops (accent) and sequence labels.
+  map.addLayer({
+    id: "editor-line-casing",
+    type: "line",
+    source: EDITOR_SOURCE,
+    filter: ["==", ["get", "kind"], "line"],
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": "#ffffff", "line-width": ["case", ["==", ["get", "active"], 1], 8, 5], "line-opacity": 0.9 },
+  });
+  map.addLayer({
+    id: "editor-line",
+    type: "line",
+    source: EDITOR_SOURCE,
+    filter: ["==", ["get", "kind"], "line"],
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": ["get", "color"], "line-width": ["case", ["==", ["get", "active"], 1], 5, 3], "line-opacity": ["case", ["==", ["get", "active"], 1], 1, 0.7] },
+  });
+  map.addLayer({
+    id: "editor-base-stop",
+    type: "circle",
+    source: EDITOR_SOURCE,
+    filter: ["==", ["get", "kind"], "base_stop"],
+    paint: {
+      "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, ["case", ["==", ["get", "used"], 1], 6, 2], 14, ["case", ["==", ["get", "used"], 1], 6, 4.5]],
+      "circle-color": ["case", ["==", ["get", "used"], 1], "#0e7c86", "#ffffff"],
+      "circle-stroke-color": ["case", ["==", ["get", "selected"], 1], "#16232e", "#6b7a87"],
+      "circle-stroke-width": ["case", ["==", ["get", "selected"], 1], 2.5, 1.2],
+      "circle-opacity": 0.95,
+    },
+  });
+  map.addLayer({
+    id: "editor-stop",
+    type: "circle",
+    source: EDITOR_SOURCE,
+    filter: ["==", ["get", "kind"], "scn_stop"],
+    paint: {
+      "circle-radius": 7,
+      "circle-color": ["case", ["==", ["get", "used"], 1], "#0e7c86", "#7B3FB8"],
+      "circle-stroke-color": ["case", ["==", ["get", "selected"], 1], "#16232e", "#ffffff"],
+      "circle-stroke-width": ["case", ["==", ["get", "selected"], 1], 3, 2],
+    },
+  });
+  map.addLayer({
+    id: "editor-seq",
+    type: "symbol",
+    source: EDITOR_SOURCE,
+    filter: ["==", ["get", "kind"], "seq"],
+    layout: { "text-field": ["get", "label"], "text-size": 10, "text-font": ["Noto Sans Bold"], "text-offset": [0, -1.4], "text-allow-overlap": true },
+    paint: { "text-color": "#16232e", "text-halo-color": "#ffffff", "text-halo-width": 1.5 },
+  });
+  map.addLayer({
+    id: "editor-stop-label",
+    type: "symbol",
+    source: EDITOR_SOURCE,
+    filter: ["any", ["==", ["get", "kind"], "scn_stop"], ["all", ["==", ["get", "kind"], "base_stop"], ["==", ["get", "used"], 1]]],
+    minzoom: 12,
+    layout: { "text-field": ["get", "name"], "text-size": 10.5, "text-font": ["Noto Sans Regular"], "text-offset": [0, 1.1], "text-anchor": "top", "text-optional": true },
+    paint: { "text-color": "#16232e", "text-halo-color": "#ffffff", "text-halo-width": 1.2 },
+  });
+
+  map.addLayer({
+    id: "inputs-zone",
+    type: "fill",
+    source: INPUT_SOURCE,
+    filter: ["==", ["geometry-type"], "Polygon"],
+    paint: { "fill-color": ["get", "color"], "fill-opacity": 0.12 },
+  });
+  map.addLayer({
+    id: "inputs-guide",
+    type: "line",
+    source: INPUT_SOURCE,
+    filter: ["any", ["==", ["geometry-type"], "LineString"], ["==", ["geometry-type"], "Polygon"]],
+    paint: { "line-color": ["get", "color"], "line-width": 1.5, "line-dasharray": [2, 2], "line-opacity": 0.8 },
+  });
+  map.addLayer({
+    id: "inputs-halo",
+    type: "circle",
+    source: INPUT_SOURCE,
+    filter: ["==", ["geometry-type"], "Point"],
+    paint: { "circle-radius": ["case", ["==", ["get", "small"], 1], 8, 11], "circle-color": "#ffffff", "circle-opacity": 0.95 },
+  });
+  map.addLayer({
+    id: "inputs-point",
+    type: "circle",
+    source: INPUT_SOURCE,
+    filter: ["==", ["geometry-type"], "Point"],
+    paint: { "circle-radius": ["case", ["==", ["get", "small"], 1], 6, 9], "circle-color": ["get", "color"] },
+  });
+  map.addLayer({
+    id: "inputs-label",
+    type: "symbol",
+    source: INPUT_SOURCE,
+    filter: ["==", ["geometry-type"], "Point"],
+    layout: {
+      "text-field": ["get", "label"],
+      "text-size": ["case", ["==", ["get", "small"], 1], 9, 10],
+      "text-font": ["Noto Sans Bold"],
+      "text-allow-overlap": true,
+      "text-ignore-placement": true,
+    },
+    paint: { "text-color": "#ffffff" },
+  });
+}
+
+function setSource(map: MapLibreMap, id: string, data: FeatureCollection) {
+  const source = map.getSource(id) as maplibregl.GeoJSONSource | undefined;
+  if (source) source.setData(data as unknown as Parameters<maplibregl.GeoJSONSource["setData"]>[0]);
+}
+
+function applySelection(map: MapLibreMap, selected: number | null) {
+  const factor = selectionExpression(selected);
+  const mul = (base: maplibregl.ExpressionSpecification): maplibregl.ExpressionSpecification | number =>
+    typeof factor === "number" ? base : ["*", base, factor];
+  if (map.getLayer("results-line")) map.setPaintProperty("results-line", "line-opacity", mul(["get", "_opacity"]));
+  if (map.getLayer("results-line-dashed")) map.setPaintProperty("results-line-dashed", "line-opacity", mul(["get", "_opacity"]));
+  if (map.getLayer("results-line-casing")) map.setPaintProperty("results-line-casing", "line-opacity", typeof factor === "number" ? 0.85 : ["*", 0.85, factor]);
+  if (map.getLayer("results-point")) map.setPaintProperty("results-point", "circle-opacity", mul(["get", "_opacity"]));
+  if (map.getLayer("results-fill")) map.setPaintProperty("results-fill", "fill-opacity", mul(["get", "_fill"]));
+}
+
+function applyMarkerScale(map: MapLibreMap, scale: number) {
+  if (!map.getLayer("inputs-point")) return;
+  map.setPaintProperty("inputs-halo", "circle-radius", ["*", ["case", ["==", ["get", "small"], 1], 8, 11], scale]);
+  map.setPaintProperty("inputs-point", "circle-radius", ["*", ["case", ["==", ["get", "small"], 1], 6, 9], scale]);
+  map.setLayoutProperty("inputs-label", "text-size", ["*", ["case", ["==", ["get", "small"], 1], 9, 10], Math.max(0.6, scale)]);
+}
+
+function currentBbox(map: MapLibreMap): [number, number, number, number] {
+  const b = map.getBounds();
+  return [b.getWest(), b.getSouth(), b.getEast(), b.getNorth()];
+}
+
+/** Whether a map click would place a point (crosshair cursor). */
+function placing(): boolean {
+  const s = getState();
+  const def = TOOL_BY_ID[s.tool];
+  if (def.input === "editor") return s.editor.mode === "add" && s.editor.activeLine !== null && !!s.editor.scenario;
+  if (def.input === "viewport") return false;
+  if (def.input === "routes") {
+    const route = s.routes[Math.min(s.activeRoute, s.routes.length - 1)];
+    return !route.origin || !route.destination || !!def.usesVias;
+  }
+  return def.slots.length > 0;
+}
+
+export function MapView({ service }: Props) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<MapLibreMap | null>(null);
+  const styleReady = useRef(false);
+  const basemap = useStore((s) => s.basemap);
+  const tool = useStore((s) => s.tool);
+  const points = useStore((s) => s.points);
+  const routes = useStore((s) => s.routes);
+  const activeRoute = useStore((s) => s.activeRoute);
+  const result = useStore((s) => s.result);
+  const references = useStore((s) => s.referenceLayers);
+  const referenceFitRequest = useStore((s) => s.referenceFitRequest);
+  const stationGeometry = useStore((s) => s.stationGeometry);
+  const selectedRun = useStore((s) => s.selectedRun);
+  const fitRequest = useStore((s) => s.fitRequest);
+  const flyRequest = useStore((s) => s.flyRequest);
+  const markerScale = useStore((s) => s.mapStyle.markerScale);
+  const mapStyle = useStore((s) => s.mapStyle);
+  const terrainSources = useStore((s) => s.terrainSources);
+  const terrainRefreshRequest = useStore((s) => s.terrainRefreshRequest);
+  const displayedFeatures = useMemo(() => combinedFeatures(), [result, references, stationGeometry, mapStyle.view3d, mapStyle.stationPlatforms]);
+  const overlayRef = useRef<ReturnType<typeof createThreeDOverlay> | null>(null);
+  const [threeDError, setThreeDError] = useState<string | null>(null);
+  const agentFeatures = useStore((s) => s.simulation.agentFeatures);
+  const edgeFeatures = useStore((s) => s.simulation.edgeFeatures);
+  const showEdges = useStore((s) => s.simulation.showEdges);
+  const editor = useStore((s) => s.editor);
+  const fittedRef = useRef(false);
+
+  // Create the map once.
+  useEffect(() => {
+    if (!containerRef.current || mapRef.current) return;
+    const map = new maplibregl.Map({
+      container: containerRef.current,
+      style: basemapStyle(getState().basemap),
+      center: [6.57, 53.22],
+      zoom: 11,
+      attributionControl: { compact: true },
+      // Smooth playback and drag handling matter more than tile fidelity here.
+      fadeDuration: 0,
+    });
+    map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
+    map.addControl(new maplibregl.ScaleControl({ maxWidth: 120 }), "bottom-left");
+    mapRef.current = map;
+    if (import.meta.env.DEV) (window as unknown as { __netweevilMap: MapLibreMap }).__netweevilMap = map;
+
+    const syncViewport = () => setState({ viewport: { bbox: currentBbox(map), zoom: map.getZoom() } });
+    map.on("moveend", syncViewport);
+
+    map.on("style.load", () => {
+      addLayers(map);
+      styleReady.current = true;
+      setSource(map, INPUT_SOURCE, inputFeatures(getState().tool, getState().routes));
+      setSource(map, RESULT_SOURCE, combinedFeatures());
+      setSource(map, SIM_AGENTS_SOURCE, getState().simulation.agentFeatures ?? EMPTY_COLLECTION);
+      setSource(map, SIM_EDGES_SOURCE, getState().simulation.edgeFeatures ?? EMPTY_COLLECTION);
+      setSource(map, EDITOR_SOURCE, editorFeatures(getState().editor, getState().tool === "transit_editor"));
+      applySelection(map, getState().selectedRun);
+      setSource(map, PROFILE_HOVER_SOURCE, profileHoverFeatures(getState().profileHover));
+      applyMarkerScale(map, getState().mapStyle.markerScale);
+      apply3dPresentation(map, !!overlayRef.current && getState().mapStyle.view3d);
+      setState({ terrainError: null });
+      applyTerrainPresentation(map);
+      applyNetworkTilePresentation(map);
+      overlayRef.current?.update(combinedFeatures(), getState().mapStyle, getState().selectedRun);
+      syncViewport();
+    });
+    map.on("error", (event) => {
+      if ((event as unknown as { sourceId?: string }).sourceId !== TERRAIN_SOURCE) return;
+      const message = terrainTileError(event.error);
+      if (getState().terrainError !== message) setState({ terrainError: message });
+    });
+
+    // --- Click to add points, drag to move them (routes re-run live while dragging). ---
+    let dragging: MarkerRef | null = null;
+    let draggingStop: string | null = null;
+    const canvas = map.getCanvas();
+    const setCursor = (cursor: string) => (canvas.style.cursor = cursor);
+
+    // --- GTFS editor: drag scenario stops, click to add, right-click to remove. ---
+    map.on("mousedown", "editor-stop", (e) => {
+      const stopId = e.features?.[0]?.properties?.stop_id;
+      if (typeof stopId !== "string") return;
+      e.preventDefault();
+      draggingStop = stopId;
+      setCursor("grabbing");
+      map.dragPan.disable();
+    });
+    map.on("mousemove", (e: MapMouseEvent) => {
+      if (draggingStop) moveEditorStop(draggingStop, e.lngLat.lng, e.lngLat.lat);
+    });
+    const endStopDrag = () => {
+      if (!draggingStop) return;
+      draggingStop = null;
+      setCursor(placing() ? "crosshair" : "");
+      map.dragPan.enable();
+    };
+    map.on("mouseup", endStopDrag);
+    map.on("mouseout", endStopDrag);
+    map.on("contextmenu", (e) => {
+      if (getState().tool !== "transit_editor") return;
+      const hits = map.queryRenderedFeatures(e.point, { layers: EDITOR_LAYERS.filter((id) => map.getLayer(id)) });
+      const stopId = hits[0]?.properties?.stop_id;
+      if (typeof stopId !== "string") return;
+      e.preventDefault();
+      removeEditorStop(stopId);
+    });
+    map.on("mouseenter", "editor-stop", () => setCursor("grab"));
+    map.on("mouseleave", "editor-stop", () => setCursor(placing() ? "crosshair" : ""));
+    map.on("mouseenter", "editor-base-stop", () => setCursor("pointer"));
+    map.on("mouseleave", "editor-base-stop", () => setCursor(placing() ? "crosshair" : ""));
+
+    map.on("mousedown", "inputs-point", (e) => {
+      const ref = markerRef(e.features?.[0]?.properties as Record<string, unknown> | undefined);
+      if (!ref) return;
+      e.preventDefault();
+      dragging = ref;
+      if (ref.kind === "route" && ref.route !== undefined && ref.end !== "via") setActiveRoute(ref.route, ref.end);
+      setCursor("grabbing");
+      map.dragPan.disable();
+    });
+    map.on("mousemove", (e: MapMouseEvent) => {
+      if (!dragging) return;
+      const { lng, lat } = e.lngLat;
+      if (dragging.kind === "slot" && dragging.slot) updatePoint(dragging.slot, dragging.index, { lon: lng, lat });
+      else if (dragging.kind === "route" && dragging.route !== undefined) {
+        if (dragging.end === "via") updateVia(dragging.route, dragging.index, { lon: lng, lat });
+        else if (dragging.end) moveRouteEnd(dragging.route, dragging.end, lng, lat);
+      }
+    });
+    const endDrag = () => {
+      if (!dragging) return;
+      dragging = null;
+      setCursor(placing() ? "crosshair" : "");
+      map.dragPan.enable();
+    };
+    map.on("mouseup", endDrag);
+    map.on("mouseout", endDrag);
+
+    map.on("contextmenu", "inputs-point", (e) => {
+      const ref = markerRef(e.features?.[0]?.properties as Record<string, unknown> | undefined);
+      if (!ref) return;
+      e.preventDefault();
+      if (ref.kind === "slot" && ref.slot) removePoint(ref.slot, ref.index);
+      else if (ref.kind === "route" && ref.route !== undefined) {
+        if (ref.end === "via") removeVia(ref.route, ref.index);
+        else if (ref.end) {
+          setRouteEnd(ref.route, ref.end, null);
+          setActiveRoute(ref.route, ref.end);
+        }
+      }
+    });
+
+    map.on("click", (e) => {
+      if (dragging || draggingStop) return;
+      const state0 = getState();
+      if (state0.tool === "transit_editor") {
+        const editor = state0.editor;
+        if (!editor.scenario) return;
+        const hits = map.queryRenderedFeatures(e.point, { layers: EDITOR_LAYERS.filter((id) => map.getLayer(id)) });
+        const stopId = hits[0]?.properties?.stop_id;
+        const canAdd = editor.mode === "add" && editor.activeLine !== null;
+        if (typeof stopId === "string") {
+          setEditor({ selectedStop: stopId });
+          if (canAdd) appendEditorStop(stopId);
+          return;
+        }
+        if (!canAdd) return;
+        const id = nextEditorStopId();
+        const line = editor.scenario.lines[editor.activeLine!];
+        const name = `${line?.short_name || line?.line_id || "Stop"} ${line ? line.stops.length + 1 : editor.scenario.stops.length + 1}`;
+        appendEditorStop(id, { name, lon: e.lngLat.lng, lat: e.lngLat.lat });
+        setEditor({ selectedStop: id });
+        return;
+      }
+      const hits = map.queryRenderedFeatures(e.point, { layers: ["inputs-point"] });
+      if (hits.length) {
+        const ref = markerRef(hits[0].properties as Record<string, unknown>);
+        if (ref?.kind === "route" && ref.route !== undefined && ref.end !== "via") setActiveRoute(ref.route, ref.end);
+        return;
+      }
+      const state = getState();
+      const def = TOOL_BY_ID[state.tool];
+      if (def.input === "routes") {
+        placeRoutePoint(e.lngLat.lng, e.lngLat.lat, !!def.usesVias);
+        setCursor(placing() ? "crosshair" : "");
+        return;
+      }
+      if (!def.slots.length) return;
+      const activeSlot = state.activeSlot[state.tool] ?? def.slots[0].id;
+      const slot = def.slots.find((s) => s.id === activeSlot) ?? def.slots[0];
+      const point = { id: nextPointId(slot.id), lon: e.lngLat.lng, lat: e.lngLat.lat };
+      addPoint(slot.id, point, slot.max);
+      // Auto-advance for single-point slots.
+      if (slot.max === 1) {
+        const next = def.slots.find((s) => s.id !== slot.id && s.max === 1 && getPoints(s.id).length === 0);
+        if (next) setState((prev) => ({ activeSlot: { ...prev.activeSlot, [state.tool]: next.id } }));
+      }
+    });
+
+    map.on("mouseenter", "inputs-point", () => setCursor("grab"));
+    map.on("mouseleave", "inputs-point", () => setCursor(placing() ? "crosshair" : ""));
+
+    // --- Hover info for results. ---
+    const hoverLayers = ["results-badge", "results-point", "results-line", "results-line-dashed", "results-fill", "sim-agents", "sim-edges"];
+    map.on("mousemove", (e) => {
+      if (dragging || !styleReady.current) return;
+      if (getState().mapStyle.view3d && overlayRef.current) return;
+      const layers = hoverLayers.filter((id) => map.getLayer(id));
+      const hits = map.queryRenderedFeatures(e.point, { layers });
+      if (!hits.length) {
+        if (getState().hoverInfo) setState({ hoverInfo: null });
+        return;
+      }
+      const props = (hits[0].properties ?? {}) as Record<string, unknown>;
+      setState({ hoverInfo: { x: e.point.x, y: e.point.y, props } });
+    });
+
+    return () => {
+      if (overlayRef.current) map.removeControl(overlayRef.current.control);
+      overlayRef.current = null;
+      map.remove();
+      mapRef.current = null;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Basemap switches replace the style; layers are re-added on style.load.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    styleReady.current = false;
+    map.setStyle(basemapStyle(basemap));
+  }, [basemap]);
+
+  // Restore the visible saved inputs on startup. The viewport itself is not
+  // persisted; skipping this fit would leave saved Hong Kong routes in the
+  // constructor's Groningen view. Later input edits and pans keep their view.
+  useEffect(() => {
+    const map = mapRef.current;
+    const bounds = service?.dataset.topology_bounds;
+    if (!map || fittedRef.current) return;
+    const state = getState();
+    const savedBounds = featureBounds(inputFeatures(state.tool, state.routes));
+    const initialBounds = savedBounds ?? (bounds ? [bounds.min_lon, bounds.min_lat, bounds.max_lon, bounds.max_lat] as [number, number, number, number] : null);
+    if (!initialBounds) return;
+    fittedRef.current = true;
+    map.fitBounds(initialBounds, { padding: 40, duration: 0, ...(savedBounds ? { maxZoom: 16 } : {}) });
+  }, [service]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady.current) return;
+    setSource(map, INPUT_SOURCE, inputFeatures(tool, routes));
+    map.getCanvas().style.cursor = placing() ? "crosshair" : "";
+  }, [tool, points, routes, activeRoute]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady.current) return;
+    setSource(map, RESULT_SOURCE, displayedFeatures);
+  }, [displayedFeatures]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady.current) return;
+    setSource(map, EDITOR_SOURCE, editorFeatures(editor, tool === "transit_editor"));
+    map.getCanvas().style.cursor = placing() ? "crosshair" : "";
+  }, [editor, tool]);
+
+  // Base feed stops for the view while editing an overlay scenario.
+  const baseFeedId = tool === "transit_editor" ? (editor.scenario?.base_feed_id ?? null) : null;
+  const viewport = useStore((s) => s.viewport.bbox);
+  const apiBase = useStore((s) => s.apiBase);
+  const profileId = useStore((s) => s.profileId);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (map && styleReady.current) applyNetworkTilePresentation(map);
+  }, [apiBase, profileId, mapStyle.networkTiles]);
+  const terrainCatalogScope = useRef<string | null>(null);
+  const terrainScope = JSON.stringify([apiBase, service?.workspace_root ?? null]);
+  useEffect(() => {
+    const changed = terrainCatalogScope.current !== terrainScope;
+    terrainCatalogScope.current = terrainScope;
+    const controller = new AbortController();
+    setState(state => ({ terrainSources: changed ? [] : state.terrainSources, terrainStatus: "Loading terrain sources…", ...(changed ? { terrainError: null } : {}) }));
+    void apiRequest<TerrainSourcesResponse>(apiBase, "/v1/terrain-sources", { tool: "terrain", signal: controller.signal })
+      .then(({ data }) => {
+        if (controller.signal.aborted) return;
+        const diagnostics = data.diagnostics?.join(" ");
+        setState({ terrainSources: data.sources, terrainStatus: diagnostics || (data.sources.length ? null : "No local DEM is available. Prepare terrain for this API workspace, then refresh sources.") });
+      }).catch(error => {
+        if (!controller.signal.aborted) setState({ terrainStatus: `Terrain sources could not load: ${error instanceof Error ? error.message : String(error)}` });
+      });
+    return () => controller.abort();
+  }, [apiBase, terrainScope, terrainRefreshRequest]);
+
+  const terrainSelection = selectedTerrain(terrainSources, mapStyle.terrainSourceId);
+  const terrainIdentity = JSON.stringify([apiBase, terrainSelection?.id, terrainSelection?.version]);
+  useEffect(() => { setState({ terrainError: null }); }, [terrainIdentity, mapStyle.terrainEnabled, mapStyle.view3d]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (map && styleReady.current) applyTerrainPresentation(map);
+  }, [apiBase, terrainSources, mapStyle.terrainEnabled, mapStyle.terrainSourceId, mapStyle.view3d, mapStyle.verticalExaggeration]);
+
+  const selectedFeedId = useStore((s) => s.feedId);
+  const stationFeedId = selectedFeedId ?? service?.loaded_transit_feeds[0]?.feed_id;
+  const stationCache = useRef(new StationGeometryCache());
+  const stationScope = service && stationFeedId ? JSON.stringify([apiBase, service.workspace_root, service.dataset.dataset_id, service.dataset.imported_at, service.dataset.updated_at, stationFeedId]) : null;
+  useEffect(() => {
+    const active = mapStyle.view3d && mapStyle.stationPlatforms && stationFeedId && viewport && stationScope;
+    const cache = stationCache.current;
+    // Below-ground or raised geometry can project into the screen even when
+    // its ground coordinates lie outside map.getBounds(). Small feeds fit in
+    // one request, then the GPU handles all camera movement without culling.
+    if (active && cache.coversFeed(stationScope)) return;
+    const { ticket, display } = cache.begin(active ? stationScope : null);
+    setState(display);
+    if (!active) {
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      const [w, s, e, n] = viewport;
+      const padX = Math.max(0.01, (e - w) * 0.5), padY = Math.max(0.01, (n - s) * 0.5);
+      const padded = [Math.max(-180, w - padX), Math.max(-90, s - padY), Math.min(180, e + padX), Math.min(90, n + padY)];
+      const fetchGeometry = (bbox: number[]) => apiRequest<StationGeometryResponse>(apiBase, `/v1/transit-feeds/${encodeURIComponent(stationFeedId)}/station-geometry`, {
+        tool: "station_geometry", body: { bbox, limit: 5000 }, signal: controller.signal,
+      });
+      void (async () => {
+        let wholeFeed = !cache.needsViewport(stationScope);
+        let { data } = await fetchGeometry(wholeFeed ? [-180, -90, 180, 90] : padded);
+        if (controller.signal.aborted) return;
+        if (wholeFeed && data.metadata.truncated) {
+          cache.markTruncated(ticket);
+          wholeFeed = false;
+          ({ data } = await fetchGeometry(padded));
+        }
+        if (controller.signal.aborted) return;
+        const display = cache.complete(ticket, data, wholeFeed);
+        if (display) setState(display);
+      })().catch((error) => {
+        if (controller.signal.aborted) return;
+        const display = cache.fail(ticket, error);
+        if (display) setState(display);
+      });
+    }, 180);
+    return () => { clearTimeout(timer); controller.abort(); cache.cancel(ticket); };
+  }, [apiBase, stationFeedId, stationScope, viewport, mapStyle.view3d, mapStyle.stationPlatforms]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !baseFeedId || !viewport) {
+      if (!baseFeedId && getState().editor.baseStops.length) setEditor({ baseStops: [] });
+      return;
+    }
+    if (map.getZoom() < 9.5) {
+      if (getState().editor.baseStops.length) setEditor({ baseStops: [] });
+      return;
+    }
+    const controller = new AbortController();
+    const [w, s, e, n] = viewport;
+    const padX = (e - w) * 0.2;
+    const padY = (n - s) * 0.2;
+    const bbox = [w - padX, s - padY, e + padX, n + padY].map((v) => v.toFixed(5)).join(",");
+    const timer = window.setTimeout(() => {
+      void apiRequest<{ stops: FeedStop[] }>(apiBase, `/v1/transit-feeds/${encodeURIComponent(baseFeedId)}/stops?bbox=${bbox}&limit=6000`, { tool: "transit_editor", signal: controller.signal })
+        .then((response) => setEditor({ baseStops: response.data.stops }))
+        .catch(() => undefined);
+    }, 150);
+    return () => {
+      clearTimeout(timer);
+      controller.abort();
+    };
+  }, [baseFeedId, viewport, apiBase]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady.current) return;
+    applySelection(map, selectedRun);
+  }, [selectedRun]);
+
+  const profileHover = useStore((s) => s.profileHover);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady.current) return;
+    setSource(map, PROFILE_HOVER_SOURCE, profileHoverFeatures(profileHover));
+  }, [profileHover]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady.current) return;
+    setSource(map, SIM_AGENTS_SOURCE, agentFeatures ?? EMPTY_COLLECTION);
+  }, [agentFeatures]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady.current) return;
+    setSource(map, SIM_EDGES_SOURCE, showEdges ? (edgeFeatures ?? EMPTY_COLLECTION) : EMPTY_COLLECTION);
+  }, [edgeFeatures, showEdges]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || fitRequest === 0) return;
+    const state = getState();
+    const run = state.fitRun;
+    const collection = run !== null && state.result?.runs[run] ? state.result.runs[run].features : (state.result?.features ?? state.simulation.edgeFeatures);
+    if (!collection) return;
+    const bounds = featureBounds(collection);
+    if (!bounds) return;
+    map.fitBounds(bounds, { padding: { top: 60, bottom: 120, left: 60, right: 60 }, duration: 500, maxZoom: 16 });
+  }, [fitRequest]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady.current) return;
+    applyMarkerScale(map, markerScale);
+  }, [markerScale]);
+
+  // Load the GPU renderer only when 3D is first requested. Style changes and
+  // route selection reuse the same canvas, including across basemap switches.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    let cancelled = false;
+    const sync = async () => {
+      if (mapStyle.view3d && !overlayRef.current) {
+        try {
+          const { createThreeDOverlay } = await import("./ThreeDOverlay");
+          if (cancelled || mapRef.current !== map) return;
+          const overlay = createThreeDOverlay((hoverInfo) => setState({ hoverInfo }));
+          map.addControl(overlay.control);
+          overlayRef.current = overlay;
+          setThreeDError(null);
+        } catch (error) {
+          if (!cancelled) setThreeDError(error instanceof Error ? error.message : String(error));
+          return;
+        }
+      }
+      if (cancelled) return;
+      overlayRef.current?.update(displayedFeatures, mapStyle, selectedRun);
+      if (styleReady.current) apply3dPresentation(map, mapStyle.view3d && !!overlayRef.current);
+    };
+    void sync();
+    return () => { cancelled = true; };
+  }, [mapStyle, displayedFeatures, selectedRun]);
+
+  useEffect(() => {
+    if (!referenceFitRequest || !mapRef.current) return;
+    const bounds = featureBounds({ type: "FeatureCollection", features: references.flatMap((layer) => layer.features.features) });
+    if (bounds) mapRef.current.fitBounds(bounds, { padding: 60, maxZoom: 18 });
+  }, [referenceFitRequest, references]);
+
+  useEffect(() => {
+    mapRef.current?.easeTo({ pitch: mapStyle.view3d ? mapStyle.pitch : 0, duration: 400 });
+  }, [mapStyle.view3d, mapStyle.pitch]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !flyRequest) return;
+    map.flyTo({ center: [flyRequest.lon, flyRequest.lat], zoom: Math.max(map.getZoom(), flyRequest.zoom), duration: 700 });
+  }, [flyRequest]);
+
+  return <><div ref={containerRef} className="map" />{threeDError && mapStyle.view3d && <div className="map-3d-error" role="alert">3D could not start. The flat map is still available. {threeDError}</div>}</>;
+}
+
+function profileHoverFeatures(position: [number, number] | null): FeatureCollection {
+  if (!position) return EMPTY_COLLECTION;
+  return { type: "FeatureCollection", features: [{ type: "Feature", geometry: { type: "Point", coordinates: position }, properties: {} }] };
+}
+
+function apply3dPresentation(map: MapLibreMap, active: boolean) {
+  for (const id of ["results-line", "results-line-casing", "results-line-dashed", "results-point", "results-fill", "results-fill-outline", "results-label", "results-badge", "results-badge-label"]) {
+    const visibility = active ? "none" : "visible";
+    if (map.getLayer(id) && map.getLayoutProperty(id, "visibility") !== visibility) map.setLayoutProperty(id, "visibility", visibility);
+  }
+  const style = getState().mapStyle;
+  // The separate overlay keeps below-datum geometry visible. Fade the base
+  // canvas for x-ray inspection without changing any source elevations.
+  const opacity = String(active && style.xray ? style.basemapOpacity : 1);
+  if (map.getCanvas().style.opacity !== opacity) map.getCanvas().style.opacity = opacity;
+}
+
+function applyNetworkTilePresentation(map: MapLibreMap) {
+  const state = getState();
+  applyNetworkTiles(map, state.mapStyle.networkTiles ? networkTileUrl(state.apiBase, state.profileId) : null, "results-fill");
+}
+
+function applyTerrainPresentation(map: MapLibreMap) {
+  const state = getState();
+  try {
+    applyTerrain(map, { view3d: state.mapStyle.view3d, enabled: state.mapStyle.terrainEnabled,
+      exaggeration: state.mapStyle.verticalExaggeration, source: selectedTerrain(state.terrainSources, state.mapStyle.terrainSourceId), apiBase: state.apiBase });
+  } catch (error) {
+    setState({ terrainError: `Terrain could not start: ${error instanceof Error ? error.message : String(error)}` });
+  }
+}
+
+function combinedFeatures(): FeatureCollection {
+  const state = getState();
+  const station = state.mapStyle.view3d && state.mapStyle.stationPlatforms ? state.stationGeometry?.features ?? [] : [];
+  if (!state.referenceLayers.length && !station.length) return state.result?.features ?? EMPTY_COLLECTION;
+  return { type: "FeatureCollection", features: [...(state.result?.features.features ?? []), ...state.referenceLayers.flatMap((layer) => layer.features.features), ...station] };
+}

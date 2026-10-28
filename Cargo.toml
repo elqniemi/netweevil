@@ -1,0 +1,69 @@
+[workspace]
+members = [
+    "crates/api",
+    "crates/cli",
+    "crates/core",
+    "crates/ingest",
+    "crates/persist",
+    "crates/profile",
+    "crates/query",
+    "crates/report",
+    "crates/simulate",
+    "crates/transit",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.4.0-alpha"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.96.1"
+repository = "https://github.com/elqniemi/netweevil"
+homepage = "https://github.com/elqniemi/netweevil"
+keywords = ["routing", "openstreetmap", "gis", "gtfs", "isochrone"]
+categories = ["science::geo", "algorithms"]
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+axum = "0.8.6"
+bincode = "1.3.3"
+bytemuck = { version = "1.21.0", features = ["extern_crate_alloc"] }
+clap = { version = "4.5.50", features = ["derive"] }
+csv = "1.3.1"
+flate2 = "1.1.9"
+chrono = { version = "0.4.44", default-features = false, features = ["std"] }
+chrono-tz = "0.10.4"
+arrow-array = "56.2.0"
+arrow-json = "56.2.0"
+arrow-schema = "56.2.0"
+hex = "0.4.3"
+memmap2 = "0.9.8"
+mime_guess = "2.0.5"
+mvt = "0.15.0"
+osmpbfreader = "0.17.0"
+quick-xml = "0.42.0"
+parquet = { version = "56.2.0", default-features = false, features = ["arrow"] }
+proj4rs = { version = "0.2.0", default-features = false }
+rayon = "1.10.0"
+rustc-hash = "2.1.1"
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+serde_json = { version = "1.0.145", features = ["float_roundtrip"] }
+serde_yaml = "0.9.34"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+tiff = { version = "0.11.3", default-features = false, features = ["deflate", "lzw"] }
+time = { version = "0.3.44", features = ["formatting", "parsing", "serde"] }
+tokio = { version = "1.48.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+toml = "0.8.23"
+tower-http = { version = "0.6.6", features = ["cors", "trace", "fs"] }
+futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+tzf-rs = { version = "2.1.2", default-features = false, features = ["bundled"] }
+ureq = { version = "3.4.0", default-features = false, features = ["json"] }
+uuid = { version = "1.18.1", features = ["serde", "v4"] }
+zip = { version = "2.2.2", default-features = false, features = ["deflate"] }
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+type_complexity = "allow"
+large_enum_variant = "allow"

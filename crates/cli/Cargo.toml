@@ -1,0 +1,39 @@
+[package]
+name = "netweevil-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "NetWeevil command-line interface for OSM routing research and analysis runs"
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "netweevil"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+csv.workspace = true
+netweevil-api = { path = "../api" }
+netweevil-core = { path = "../core" }
+netweevil-ingest = { path = "../ingest" }
+netweevil-persist = { path = "../persist" }
+netweevil-profile = { path = "../profile" }
+netweevil-query = { path = "../query" }
+netweevil-report = { path = "../report" }
+netweevil-simulate = { path = "../simulate" }
+netweevil-transit = { path = "../transit" }
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tokio.workspace = true
+tracing-subscriber.workspace = true
+ureq.workspace = true
+
+[lints]
+workspace = true

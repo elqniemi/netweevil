@@ -1,0 +1,45 @@
+{
+  "feed_id": "hong_kong_multimodal",
+  "pedestrian_profile_id": "pedestrian_fastest_multilayer",
+  "request": {
+    "route_id": "hk_verified_tram",
+    "origin": {
+      "id": "td:99304",
+      "lon": 114.18415,
+      "lat": 22.26982
+    },
+    "destination": {
+      "id": "td:99138",
+      "lon": 114.15494,
+      "lat": 22.28524
+    },
+    "time": {
+      "datetime": "2026-09-10T09:00:00+08:00",
+      "search_window_s": 7200
+    },
+    "modes": {
+      "transit": [
+        "tram"
+      ],
+      "access": [
+        "walk"
+      ],
+      "egress": [
+        "walk"
+      ],
+      "street_access": "network",
+      "transfer_profile_id": "pedestrian_fastest_multilayer",
+      "max_access_distance_m": 150,
+      "max_egress_distance_m": 150,
+      "max_transfer_distance_m": 500,
+      "max_transfers": 0,
+      "max_endpoint_snap_distance_m": 50
+    },
+    "returns": {
+      "include_geometry": true,
+      "walking_geometry": "network",
+      "include_stops": true,
+      "include_stop_segments": true
+    }
+  }
+}

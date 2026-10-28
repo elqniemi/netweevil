@@ -1,0 +1,148 @@
+# Rust build artifacts
+/target/
+**/target/
+**/*.rlib
+**/*.rmeta
+
+# Workspace runtime/cache data (local run state, manifests, bundles, reports)
+/.netweevil/
+
+# Personal material that is not published: analyses, decks, showcase movie
+# builds and old release archives. See private/README.md.
+/private/
+/projects-analyses/
+
+# Local dataset/extracts
+/datasets/*
+!/datasets/.gitkeep
+!/datasets/README.md
+*.osm
+*.osm.bz2
+*.osm.pbf
+*.osm.gz
+*.osm.zip
+*.osm.xml
+*.gtfs.zip
+
+# Local DEM/raster sources and derived arrays. Terrain PNG tiles and manifests
+# belong under .netweevil/terrain/, already excluded above.
+*.asc
+*.dem
+*.dtm
+*.tif
+*.tiff
+*.vrt
+*.npy
+*.npz
+Whole_HK_DTM_5m.zip
+*.gpkg-wal
+*.gpkg-shm
+*.gpkg-journal
+
+# Generated analysis outputs and report artifacts
+*.geojson
+*.gpkg
+*.geoparquet
+*.parquet
+*.jsonl
+*.ndjson
+run-manifest.json
+index.html
+!/frontend/index.html
+
+# Generated documentation and presentation artifacts
+/README.pdf
+/qgis_plugin/README.pdf
+/scripts/build_readme_pdfs.sh
+/scripts/build_pitch_deck.py
+# Decks and their build assets live outside version control.
+/pitch_assets/
+/*.pptx
+
+# Private planning/status documents
+/PROGRESS.md
+/IMPLEMENT_*.md
+
+# Keep hand-authored fixtures and documented examples available to users.
+!examples/requests/**/*.json
+!examples/requests/**/*.geojson
+!examples/requests/**/*.jsonl
+!examples/requests/**/*.ndjson
+!examples/profiles/**/*.json
+!examples/profiles/**/*.geojson
+!examples/profiles/**/*.jsonl
+!examples/profiles/**/*.ndjson
+!examples/experiments/**/*.json
+!examples/experiments/**/*.geojson
+!examples/experiments/**/*.jsonl
+!examples/experiments/**/*.ndjson
+
+!examples/hong-kong/**/*.geojson
+!examples/hong-kong/**/*.jsonl
+!examples/hong-kong/**/*.ndjson
+!examples/api/groningen_province_admin_bounds.geojson
+
+# Generated API examples and benchmark outputs are reproducible local artifacts.
+examples/api/*_result*.json
+examples/api/*_results*.json
+examples/api/*_output*.json
+examples/api/*.jsonl
+
+# QGIS plugin + Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.venv/
+.venv_maps/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# IDE, editor, and OS artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Build tooling and test artifacts
+build/
+dist/
+/frontend/node_modules/
+.pnpm-store/
+*.tsbuildinfo
+coverage/
+*.profraw
+*.profdata
+*.gcda
+*.gcno
+*.o
+*.obj
+*.dll
+*.so
+*.dylib
+*.exe
+*.out
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*.part
+*.cache
+
+# Local environment settings and secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Claude Code session artifacts
+.claude/
+
+# Generated documentation site (mkdocs build)
+/site/

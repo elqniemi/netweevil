@@ -1,0 +1,31 @@
+{
+  "route_id": "route_demo_001",
+  "origin": {
+    "id": "origin_a",
+    "lon": 6.5665,
+    "lat": 53.2194
+  },
+  "destination": {
+    "id": "destination_b",
+    "lon": 6.5716,
+    "lat": 53.2148
+  },
+  "snap": {
+    "max_distance_m": 500.0
+  },
+  "returns": {
+    "geometry": "full",
+    "segment_rows": true,
+    "road_type_breakdown": [
+      "time_s",
+      "distance_m"
+    ],
+    "surface_breakdown": [
+      "time_s",
+      "distance_m"
+    ],
+    "penalty_breakdown": true,
+    "explain_cost_derivation": true
+  }
+}
+

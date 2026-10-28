@@ -1,0 +1,18 @@
+{
+  "profile_id": "truck_hgv_v1",
+  "request": {
+    "route_id": "groningen_van_on_truck_profile",
+    "origin": {"id": "origin", "lon": 6.626958, "lat": 53.380511},
+    "destination": {"id": "destination", "lon": 6.591494, "lat": 53.335076},
+    "snap": {"max_distance_m": 500.0},
+    "returns": {"geometry": "full"},
+    "vehicle": {
+      "height_m": 2.0,
+      "width_m": 2.0,
+      "length_m": 6.0,
+      "weight_t": 3.5,
+      "axle_load_t": 2.0,
+      "trailers": 0
+    }
+  }
+}

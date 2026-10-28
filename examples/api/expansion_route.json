@@ -1,0 +1,9 @@
+{
+  "profile_id": "car_research_v1",
+  "request": {
+    "action": "route",
+    "origin": {"id": "origin", "lon": 6.5665, "lat": 53.2194},
+    "destination": {"id": "destination", "lon": 6.6, "lat": 53.24},
+    "max_edges": 100000
+  }
+}

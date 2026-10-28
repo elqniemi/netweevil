@@ -1,0 +1,32 @@
+{
+  "analysis_id": "groningen_car_transit_service_area",
+  "origins": [
+    {
+      "id": "park_and_ride_hoogkerk",
+      "lon": 6.5008,
+      "lat": 53.2032
+    }
+  ],
+  "time": {
+    "datetime": "2026-05-11T08:30:00+02:00",
+    "arrive_by": false,
+    "search_window_s": 3600
+  },
+  "modes": {
+    "access": ["car"],
+    "egress": ["car"],
+    "transit": ["bus", "tram", "rail"],
+    "car_access_speed_kph": 25.0,
+    "max_car_access_distance_m": 15000.0,
+    "max_transfer_distance_m": 500.0,
+    "board_slack_s": 30,
+    "transfer_slack_s": 120,
+    "max_transfers": 3
+  },
+  "max_travel_time_s": 3600,
+  "returns": {
+    "include_stops": true,
+    "include_stop_segments": true,
+    "include_geometry": true
+  }
+}

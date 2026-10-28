@@ -1,0 +1,17 @@
+{
+  "points": [
+    {
+      "id": "destination_b",
+      "lon": 6.5716,
+      "lat": 53.2148
+    },
+    {
+      "id": "destination_d",
+      "lon": 6.5698,
+      "lat": 53.2137
+    }
+  ],
+  "snap": {
+    "max_distance_m": 500.0
+  }
+}

@@ -1,0 +1,26 @@
+[package]
+name = "netweevil-report"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "NetWeevil run manifests, report rendering, and local result exports"
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+netweevil-core = { path = "../core" }
+netweevil-persist = { path = "../persist" }
+netweevil-profile = { path = "../profile" }
+netweevil-query = { path = "../query" }
+parquet.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

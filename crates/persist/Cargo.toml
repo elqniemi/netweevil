@@ -1,0 +1,28 @@
+[package]
+name = "netweevil-persist"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "NetWeevil .netweevil/ state layout, manifests, and binary bundle IO"
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bincode.workspace = true
+bytemuck.workspace = true
+flate2.workspace = true
+memmap2.workspace = true
+netweevil-core = { path = "../core" }
+netweevil-profile = { path = "../profile" }
+netweevil-query = { path = "../query" }
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

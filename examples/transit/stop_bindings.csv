@@ -1,0 +1,4 @@
+stop_id,kind,node_id,edge_id,fraction,lon,lat,z,z_window_m,attribute_filter
+DEMO-NODE,node,18432,,,,,,,
+DEMO-EDGE,edge,,9012,0.35,,,,,
+DEMO-COORDINATE,coordinate,,,,114.1577,22.2820,-8.2,1.5,"{""indoor_location"":""platform""}"

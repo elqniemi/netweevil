@@ -1,0 +1,6 @@
+{
+  "updates": [
+    {"feature_id": 4463602, "direction": "forward", "speed_kph": 25, "ttl_s": 1800},
+    {"feature_id": 6348846, "closed": true, "ttl_s": 3600}
+  ]
+}

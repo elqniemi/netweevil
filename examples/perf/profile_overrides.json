@@ -1,0 +1,9 @@
+{
+  "preferences": {
+    "use_highways": 0.2,
+    "use_tolls": 0.0
+  },
+  "turns": {
+    "left_penalty_s": 12.0
+  }
+}

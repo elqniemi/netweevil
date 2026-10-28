@@ -1,0 +1,107 @@
+# German guidance phrases in the infinitive style of navigation devices.
+# `units_in` holds the dative forms used after "in" ("in 500 Metern").
+# See en.yaml for the format.
+locale: de
+name: Deutsch
+aliases: [de-DE, de-AT, de-CH]
+plural: one_exactly
+ordinal: other_only
+decimal_separator: ","
+list_separator: ", "
+sentence: "{text}."
+
+units:
+  meters: {one: "{n} Meter", other: "{n} Meter"}
+  kilometers: {one: "{n} Kilometer", other: "{n} Kilometer"}
+  feet: {one: "{n} Fuß", other: "{n} Fuß"}
+  miles: {one: "{n} Meile", other: "{n} Meilen"}
+
+units_in:
+  meters: {one: "{n} Meter", other: "{n} Metern"}
+  kilometers: {one: "{n} Kilometer", other: "{n} Kilometern"}
+  feet: {one: "{n} Fuß", other: "{n} Fuß"}
+  miles: {one: "{n} Meile", other: "{n} Meilen"}
+
+ordinals: {other: "{n}."}
+
+directions:
+  slight_left: leicht links
+  left: links
+  sharp_left: scharf links
+  slight_right: leicht rechts
+  right: rechts
+  sharp_right: scharf rechts
+
+sides:
+  left: links
+  right: rechts
+
+cardinals:
+  north: Richtung Norden
+  northeast: Richtung Nordosten
+  east: Richtung Osten
+  southeast: Richtung Südosten
+  south: Richtung Süden
+  southwest: Richtung Südwesten
+  west: Richtung Westen
+  northwest: Richtung Nordwesten
+
+phrases:
+  depart: "{cardinal} starten"
+  depart_street: "{cardinal} auf {street} starten"
+  continue: "geradeaus weiter"
+  continue_street: "weiter auf {street}"
+  turn: "{direction} abbiegen"
+  turn_street: "{direction} abbiegen auf {street}"
+  turn_toward: "{direction} abbiegen Richtung {toward}"
+  uturn: "wenden"
+  uturn_street: "wenden auf {street}"
+  ramp: "die Auffahrt {side} nehmen"
+  ramp_toward: "die Auffahrt {side} Richtung {toward} nehmen"
+  ramp_straight: "geradeaus auf die Auffahrt"
+  ramp_straight_toward: "geradeaus auf die Auffahrt Richtung {toward}"
+  exit: "die Ausfahrt {side} nehmen"
+  exit_toward: "die Ausfahrt {side} Richtung {toward} nehmen"
+  exit_number: "Ausfahrt {exit} {side} nehmen"
+  exit_number_toward: "Ausfahrt {exit} {side} Richtung {toward} nehmen"
+  keep: "an der Gabelung {side} halten"
+  keep_street: "{side} halten auf {street}"
+  keep_toward: "{side} halten Richtung {toward}"
+  keep_straight: "an der Gabelung geradeaus weiter"
+  keep_straight_street: "geradeaus weiter auf {street}"
+  keep_straight_toward: "geradeaus weiter Richtung {toward}"
+  merge: "einfädeln"
+  merge_street: "auf {street} einfädeln"
+  roundabout_enter: "in den Kreisverkehr einfahren"
+  roundabout_enter_exit: "im Kreisverkehr die {ordinal} Ausfahrt nehmen"
+  roundabout_enter_exit_street: "im Kreisverkehr die {ordinal} Ausfahrt nehmen auf {street}"
+  roundabout_exit: "den Kreisverkehr verlassen"
+  roundabout_exit_street: "den Kreisverkehr verlassen auf {street}"
+  ferry_enter: "die Fähre nehmen"
+  ferry_enter_street: "die Fähre {street} nehmen"
+  ferry_exit: "die Fähre verlassen"
+  stairs: "die Treppe nehmen"
+  stairs_up: "die Treppe hinaufgehen"
+  stairs_down: "die Treppe hinuntergehen"
+  escalator: "die Rolltreppe nehmen"
+  escalator_up: "die Rolltreppe nach oben nehmen"
+  escalator_down: "die Rolltreppe nach unten nehmen"
+  elevator: "den Aufzug nehmen"
+  elevator_up: "den Aufzug nach oben nehmen"
+  elevator_down: "den Aufzug nach unten nehmen"
+  travelator: "das Laufband nehmen"
+  arrive: "Sie haben Ihr Ziel erreicht"
+  arrive_side: "Ihr Ziel befindet sich {side}"
+  arrive_pre_alert: "in {distance} erreichen Sie Ihr Ziel"
+  verbal_pre_alert: "in {distance} {instruction}"
+  verbal_then: "{instruction}, dann {next}"
+  verbal_post_transition: "der Straße {distance} folgen"
+  transit_wait: "an {stop} warten"
+  transit_wait_line: "an {stop} auf {line} warten"
+  transit_board: "an {stop} in {line} einsteigen"
+  transit_board_toward: "an {stop} in {line} Richtung {headsign} einsteigen"
+  transit_ride: "mit {line} von {from} nach {to} fahren"
+  transit_alight: "an {stop} aussteigen"
+  street_leg_walk: "von {from} nach {to} gehen"
+  street_leg_bicycle: "mit dem Fahrrad von {from} nach {to} fahren"
+  street_leg_car: "mit dem Auto von {from} nach {to} fahren"

@@ -1,0 +1,106 @@
+profile:
+  id: pedestrian_multilayer
+  label: "Slope- and facility-aware multilayer pedestrian"
+  mode: foot
+  defaults_pack: eu_foot_2026_01
+
+cost:
+  objective: generalized
+  time_weight: 1.0
+  distance_weight: 0.0
+
+speed_rules:
+  - match:
+      highway: footway
+    speed_kph: 4.8
+  - match:
+      highway: path
+    speed_kph: 4.6
+  - match:
+      highway: pedestrian
+    speed_kph: 4.8
+  - match:
+      highway: steps
+    speed_kph: 3.0
+
+exclude_rules:
+  - match:
+      enabled: "false"
+
+slope_model:
+  kind: tobler
+  exponent: 3.5
+  optimal_gradient: 0.05
+  min_speed_factor: 0.10
+  max_speed_factor: 2.0
+
+facilities:
+  attribute: feature_type
+  classes:
+    stairs:
+      kind: stairs
+      vertical_speed_mps: 0.30
+      boarding_penalty_s: 1.5
+      burden_per_vertical_m: 1.0
+      burden_component: stair_burden
+    escalator:
+      kind: escalator
+      conveyor_speed_mps: 0.50
+      walking_speed_mps: 0.35
+      boarding_penalty_s: 3.0
+    lift:
+      kind: lift
+      wait_s: 25.0
+      vertical_speed_mps: 1.5
+      wait_component: lift_wait
+    stairlift:
+      kind: lift
+      wait_s: 35.0
+      vertical_speed_mps: 0.15
+      wait_component: lift_wait
+    travelator:
+      kind: travelator
+      conveyor_speed_mps: 0.75
+      walking_speed_mps: 0.50
+      boarding_penalty_s: 1.0
+    ramp:
+      kind: ramp
+      speed_factor: 0.85
+      boarding_penalty_s: 0.0
+
+components:
+  uncovered_time:
+    expression: "travel_time * (covered == false)"
+    weight: 0.25
+  sun_time:
+    expression: "travel_time * (covered == false) * (1 - overlay:shade_fraction)"
+    weight: 0.50
+  coverage_unknown_time:
+    expression: "travel_time * (covered == unknown)"
+    weight: 0.0
+  ascent_m:
+    expression: ascent
+    weight: 3.0
+  stair_burden:
+    expression: zero
+    weight: 2.0
+  lift_wait:
+    expression: zero
+    weight: 0.0
+
+temporal:
+  allow_wait: true
+  max_wait_s: 900
+
+direction:
+  ignore_plain_oneway_for_foot: true
+
+ferry:
+  allow: false
+
+returns:
+  geometry: full
+  segment_rows: true
+  road_type_breakdown: [time_s, distance_m]
+  penalty_breakdown: true
+  explain_cost_derivation: true

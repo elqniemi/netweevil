@@ -1,0 +1,7 @@
+# Lint rules for `npx @redocly/cli lint docs/api/openapi.yaml`.
+extends:
+  - recommended
+rules:
+  # Probes and listings such as /healthz and GET /v1/workspace/jobs have no
+  # client error to describe.
+  operation-4xx-response: off

@@ -1,0 +1,51 @@
+name: Bug report
+description: Something produced a wrong result, crashed, or failed unexpectedly
+labels: [bug]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - CLI (netweevil)
+        - HTTP API
+        - Routing / query engine
+        - Dataset import / ingest
+        - Profiles
+        - Transit (GTFS)
+        - Simulation
+        - QGIS plugin
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: >-
+        The commands or request payloads that trigger the problem. For
+        routing bugs, include the dataset (a public extract name and date is
+        fine), the profile, and the request. Minimal reproductions get fixed
+        fastest.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Rust version (`rustc --version`), NetWeevil commit, and for plugin bugs the QGIS version.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / output
+      render: text

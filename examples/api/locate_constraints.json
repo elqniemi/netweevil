@@ -1,0 +1,17 @@
+{
+  "profile_id": "car_north_nl_2026_05",
+  "request": {
+    "points": [{"id": "pickup", "lon": 6.5665, "lat": 53.2194}],
+    "direction": "origin",
+    "snap": {
+      "max_distance_m": 100,
+      "point_constraints": {
+        "pickup": {
+          "bearing": {"degrees": 90, "tolerance_degrees": 30},
+          "approach": "curb",
+          "driving_side": "right"
+        }
+      }
+    }
+  }
+}

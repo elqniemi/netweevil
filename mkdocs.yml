@@ -1,0 +1,126 @@
+site_name: NetWeevil
+site_description: Local network analysis for OSM routing research, GTFS transit, traffic simulation and QGIS workflows.
+site_url: https://elqniemi.github.io/netweevil/
+repo_url: https://github.com/elqniemi/netweevil
+repo_name: elqniemi/netweevil
+edit_uri: edit/main/docs/
+copyright: NetWeevil is available under the MIT or the Apache-2.0 license.
+
+theme:
+  name: material
+  logo: assets/brand/logo.svg
+  favicon: assets/brand/logo.svg
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Use the dark theme
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Use the light theme
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.tabs.link
+    - content.action.edit
+    - toc.follow
+
+plugins:
+  - search
+  - swagger-ui-tag
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - def_list
+  - footnotes
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+exclude_docs: |
+  /api/redocly.yaml
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Quickstart: getting-started/quickstart.md
+      - Docker: getting-started/docker.md
+  - Concepts:
+      - Architecture: concepts/architecture.md
+      - State directory: concepts/state-layout.md
+      - Profiles: concepts/profiles.md
+      - Routing engine: concepts/routing-engine.md
+  - Guides:
+      - Street routing:
+          - Routing: guides/routing.md
+          - Batch analysis: guides/batch-analysis.md
+          - Service areas: guides/service-areas.md
+          - Request profiles: guides/request-profiles.md
+          - Snap constraints: guides/snap-constraints.md
+          - Trace matching: guides/trace-matching.md
+          - Trip optimization: guides/trip-optimization.md
+      - Transit and time:
+          - Transit: guides/transit.md
+          - Multilayer and temporal routing: guides/multilayer-temporal-routing.md
+          - Traffic: guides/traffic.md
+          - Simulation: guides/simulation.md
+      - Data:
+          - Regions and elevation: guides/regions-and-elevation.md
+          - Terrain: guides/terrain.md
+          - Datasets: guides/datasets.md
+      - Research:
+          - Benchmarking: guides/benchmarking.md
+          - Reports and experiments: guides/reports-and-experiments.md
+          - Hong Kong tutorial: guides/hong-kong-tutorial.md
+  - Tools:
+      - Web console: tools/web-console.md
+      - QGIS plugin: tools/qgis-plugin.md
+  - Reference:
+      - CLI reference: cli/reference.md
+      - HTTP API: api/index.md
+      - API reference: api/reference.md
+  - Project:
+      - Contributing: project/contributing.md
+      - Roadmap: project/roadmap.md
+      - Changelog: project/changelog.md

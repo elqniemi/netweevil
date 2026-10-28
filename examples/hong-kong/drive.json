@@ -1,0 +1,19 @@
+{
+  "profile_id": "car_research_v3",
+  "request": {
+    "route_id": "central_to_wan_chai_roads",
+    "origin": {
+      "id": "Central waterfront",
+      "lon": 114.1594,
+      "lat": 22.2846
+    },
+    "destination": {
+      "id": "Wan Chai",
+      "lon": 114.1733,
+      "lat": 22.2793
+    },
+    "returns": {
+      "geometry": "full"
+    }
+  }
+}

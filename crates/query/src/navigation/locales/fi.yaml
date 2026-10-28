@@ -1,0 +1,108 @@
+# Finnish guidance phrases. Street names are never inflected: they follow
+# a case-marked noun ("tielle {street}"). `units` holds the forms used after
+# "jatka" (partitive after numbers other than one); `units_in` the genitive
+# used before "päästä". See en.yaml for the format.
+locale: fi
+name: Suomi
+aliases: [fi-FI]
+plural: one_exactly
+ordinal: other_only
+decimal_separator: ","
+list_separator: ", "
+sentence: "{text}."
+
+units:
+  meters: {one: "{n} metri", other: "{n} metriä"}
+  kilometers: {one: "{n} kilometri", other: "{n} kilometriä"}
+  feet: {one: "{n} jalka", other: "{n} jalkaa"}
+  miles: {one: "{n} maili", other: "{n} mailia"}
+
+units_in:
+  meters: {one: "{n} metrin", other: "{n} metrin"}
+  kilometers: {one: "{n} kilometrin", other: "{n} kilometrin"}
+  feet: {one: "{n} jalan", other: "{n} jalan"}
+  miles: {one: "{n} mailin", other: "{n} mailin"}
+
+ordinals: {other: "{n}."}
+
+directions:
+  slight_left: loivasti vasemmalle
+  left: vasemmalle
+  sharp_left: jyrkästi vasemmalle
+  slight_right: loivasti oikealle
+  right: oikealle
+  sharp_right: jyrkästi oikealle
+
+sides:
+  left: vasemmalla
+  right: oikealla
+
+cardinals:
+  north: pohjoiseen
+  northeast: koilliseen
+  east: itään
+  southeast: kaakkoon
+  south: etelään
+  southwest: lounaaseen
+  west: länteen
+  northwest: luoteeseen
+
+phrases:
+  depart: "lähde {cardinal}"
+  depart_street: "lähde {cardinal} tietä {street}"
+  continue: "jatka suoraan"
+  continue_street: "jatka tielle {street}"
+  turn: "käänny {direction}"
+  turn_street: "käänny {direction} tielle {street}"
+  turn_toward: "käänny {direction} suuntaan {toward}"
+  uturn: "tee U-käännös"
+  uturn_street: "tee U-käännös tielle {street}"
+  ramp: "ota {side} oleva ramppi"
+  ramp_toward: "ota {side} oleva ramppi suuntaan {toward}"
+  ramp_straight: "aja suoraan rampille"
+  ramp_straight_toward: "aja suoraan rampille suuntaan {toward}"
+  exit: "ota {side} oleva liittymä"
+  exit_toward: "ota {side} oleva liittymä suuntaan {toward}"
+  exit_number: "ota liittymä {exit} {side}"
+  exit_number_toward: "ota liittymä {exit} {side} suuntaan {toward}"
+  keep: "pysy {side} haarautumassa"
+  keep_street: "pysy {side} ja jatka tielle {street}"
+  keep_toward: "pysy {side} suuntaan {toward}"
+  keep_straight: "jatka suoraan haarautumassa"
+  keep_straight_street: "jatka suoraan tielle {street}"
+  keep_straight_toward: "jatka suoraan suuntaan {toward}"
+  merge: "liity liikennevirtaan"
+  merge_street: "liity tielle {street}"
+  roundabout_enter: "aja liikenneympyrään"
+  roundabout_enter_exit: "aja liikenneympyrään ja poistu {ordinal} liittymästä"
+  roundabout_enter_exit_street: "aja liikenneympyrään ja poistu {ordinal} liittymästä tielle {street}"
+  roundabout_exit: "poistu liikenneympyrästä"
+  roundabout_exit_street: "poistu liikenneympyrästä tielle {street}"
+  ferry_enter: "nouse lautalle"
+  ferry_enter_street: "nouse lautalle {street}"
+  ferry_exit: "poistu lautalta"
+  stairs: "kulje portaita"
+  stairs_up: "nouse portaita ylös"
+  stairs_down: "laskeudu portaita alas"
+  escalator: "käytä liukuportaita"
+  escalator_up: "nouse liukuportailla ylös"
+  escalator_down: "laskeudu liukuportailla alas"
+  elevator: "käytä hissiä"
+  elevator_up: "nouse hissillä ylös"
+  elevator_down: "laskeudu hissillä alas"
+  travelator: "käytä liukukäytävää"
+  arrive: "olet perillä"
+  arrive_side: "määränpää on {side}"
+  arrive_pre_alert: "{distance} päästä olet perillä"
+  verbal_pre_alert: "{distance} päästä {instruction}"
+  verbal_then: "{instruction}, sitten {next}"
+  verbal_post_transition: "jatka {distance}"
+  transit_wait: "odota pysäkillä {stop}"
+  transit_wait_line: "odota linjaa {line} pysäkillä {stop}"
+  transit_board: "nouse linjan {line} kyytiin pysäkillä {stop}"
+  transit_board_toward: "nouse linjan {line} kyytiin pysäkillä {stop}, suunta {headsign}"
+  transit_ride: "matkusta linjalla {line}: {from} – {to}"
+  transit_alight: "jää pois pysäkillä {stop}"
+  street_leg_walk: "kävele: {from} – {to}"
+  street_leg_bicycle: "pyöräile: {from} – {to}"
+  street_leg_car: "aja: {from} – {to}"

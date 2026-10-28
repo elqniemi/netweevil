@@ -1,0 +1,219 @@
+# Hong Kong analysis configuration for preprocessed copies of the CSDI
+# 3D_Pedestrian_Network.gpkg and 3D_Indoor_Network.gpkg sources.
+#
+# IMPORTANT: the published files use EPSG:2326+5738 and cannot be imported
+# directly. First create WGS84 longitude/latitude + HKPD-Z GeoPackages while
+# preserving these basenames, layer names, column names, coded domains, and
+# source vertices. Point the import command at those prepared copies.
+version: 1
+
+coordinates:
+  geographic_wgs84: true
+  z_metres: true
+
+retain: all
+
+quantization:
+  xy_degrees: 1.0e-9
+  z_m: 0.01
+
+# Central-Mid-Levels escalator/travelator features audited against the source
+# snapshot used in July 2026. Both directions are materialized so runtime
+# scenarios can reproduce the operating direction. Re-audit this list after a
+# source refresh; IDs, schedules, or digitization directions may change. The
+# selected source rows are preserved in
+# ../scenarios/hong_kong_central_mid_levels_source_features.csv.
+materialize_both_directions_for:
+  - 250009329
+  - 250009423
+  - 250009531
+  - 250009566
+  - 250009706
+  - 250009795
+  - 250009860
+  - 250010006
+  - 250011096
+  - 250011163
+  - 250011303
+  - 250011479
+  - 250011674
+  - 250011990
+  - 250012071
+  - 250012510
+  - 250021142
+  - 290066748
+  - 290066759
+  - 290066760
+  - 290066761
+  - 290066762
+  - 290066763
+  - 290066764
+  - 290066765
+  - 290066766
+  - 290066767
+  - 290066768
+  - 290066769
+  - 290066770
+  - 290066771
+  - 290066772
+  - 290066773
+
+layers:
+  - source: 3D_Pedestrian_Network.gpkg
+    table: pedestrian_route
+    geometry_column: Shape
+    defaults:
+      highway: footway
+      access: [foot]
+      direction: both
+    fields:
+      PedestrianRouteID: feature_id
+      Direction:
+        role: direction
+        decode:
+          "-1": reverse
+          "0": both
+          "1": forward
+      # Canonicalize both ordinary and M_ domain variants for profile
+      # matching while retaining the original numeric source value.
+      FeatureType:
+        role: feature_type
+        decode: &hk_feature_type_decode
+          "1": footway
+          "2": footbridge
+          "4": subway
+          "5": service_lane
+          "6": traffic_island
+          "7": runin
+          "8": escalator
+          "9": travelator
+          "10": lift
+          "11": ramp
+          "12": stairs
+          "13": stairlift
+          "14": other
+          "15": footway
+          "16": escalator
+          "17": travelator
+          "18": lift
+          "19": ramp
+          "20": stairs
+          "21": stairlift
+          "22": other
+          "23": generalized_walkway_inside_park
+          "24": footpath
+          "25": village
+          "26": track
+          "30": crossing_signalized
+          "31": crossing_zebra
+          "32": crossing_cautionary
+          "33": crossing_others
+      WeatherProof:
+        role: covered
+        decode:
+          "1": "true"
+          "2": "false"
+          "3": unknown
+      Location:
+        role: indoor_location
+        decode:
+          "1": outdoor
+          "2": indoor
+          # Value 3 occurs in the indoor file even though its coded domain is
+          # absent from the outdoor file.
+          "3": paid_area
+      WheelchairBarrier:
+        role: wheelchair_barrier
+        decode:
+          "1": "true"
+          "2": "false"
+      WheelchairAccess:
+        role: wheelchair_access
+        decode:
+          "1": "true"
+          "2": "false"
+      Enabled:
+        role: enabled
+        decode:
+          "1": "true"
+          "2": "false"
+      access_time_details: access_schedule
+      access_time_type: access_schedule_polarity
+      AliasNameEN: name_en
+      AliasNameTC: name_tc
+      StreetNameEN: street_name_en
+      StreetNameTC: street_name_tc
+      Gradient: source_gradient
+      FloorID: floor_id
+      BuildingID_1: building_id_1
+      BuildingID_2: building_id_2
+      SiteID: site_id
+      TerminalID: terminal_id
+      ST_CODE: street_code
+
+  - source: 3D_Indoor_Network.gpkg
+    table: indoor_pedestrian_route
+    geometry_column: Shape
+    defaults:
+      highway: footway
+      access: [foot]
+      direction: both
+    fields:
+      PedestrianRouteID: feature_id
+      Direction:
+        role: direction
+        decode:
+          "-1": reverse
+          "0": both
+          "1": forward
+      FeatureType:
+        role: feature_type
+        decode: *hk_feature_type_decode
+      WeatherProof:
+        role: covered
+        decode:
+          "1": "true"
+          "2": "false"
+          "3": unknown
+      Location:
+        role: indoor_location
+        decode:
+          "1": outdoor
+          "2": indoor
+          "3": paid_area
+      WheelchairBarrier:
+        role: wheelchair_barrier
+        decode:
+          "1": "true"
+          "2": "false"
+      WheelchairAccess:
+        role: wheelchair_access
+        decode:
+          "1": "true"
+          "2": "false"
+      Enabled:
+        role: enabled
+        decode:
+          "1": "true"
+          "2": "false"
+      access_time_details: access_schedule
+      access_time_type: access_schedule_polarity
+      AliasNameEN: name_en
+      AliasNameTC: name_tc
+      StreetNameEN: street_name_en
+      StreetNameTC: street_name_tc
+      Gradient: source_gradient
+      FloorID: floor_id
+      BuildingID_1: building_id_1
+      BuildingID_2: building_id_2
+      SiteID: site_id
+      TerminalID: terminal_id
+      ST_CODE: street_code
+      MTRVenueID: mtr_venue_id
+      MTRStationCode: mtr_station_code
+      MTRStationID: mtr_station_id
+      MTRLineCodes: mtr_line_codes
+      MTRPlatformLevel: mtr_platform_level
+      MTRPlatformLineCodes: mtr_platform_line_codes
+      MTRPlatformSourceIDs: mtr_platform_source_ids
+      MTRPlatformStopIDs: mtr_platform_stop_ids

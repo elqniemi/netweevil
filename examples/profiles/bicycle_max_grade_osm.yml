@@ -1,0 +1,31 @@
+# Cycling on an OSM network imported with --dem: edges climbing more than
+# 8 % or descending more than 12 % (steepest DEM grade along the edge, in
+# the travel direction) are excluded. Without a DEM nothing is excluded.
+profile:
+  id: bicycle_max_grade_osm
+  label: "Bicycle profile avoiding steep climbs"
+  mode: bicycle
+  defaults_pack: eu_bicycle_2026_01
+  extends: bicycle_default
+
+cost:
+  objective: fastest
+
+speed_rules:
+  - match: {highway: cycleway}
+    speed_kph: 18.0
+  - match: {highway: residential}
+    speed_kph: 17.0
+  - match: {highway: tertiary}
+    speed_kph: 17.0
+
+exclude_rules:
+  - match: {highway: motorway}
+  - match: {highway: trunk}
+
+preferences:
+  max_grade: {uphill: 0.08, downhill: 0.12}
+
+returns:
+  geometry: full
+  elevation: true

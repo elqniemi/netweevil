@@ -1,0 +1,93 @@
+# Default bus profile created by the NetWeevil setup flow.
+# Edit freely: the file is yours. Change `profile.id` to keep several variants.
+profile:
+  id: bus_default
+  label: "Bus (default)"
+  mode: bus
+  defaults_pack: eu_bus_2026_01
+
+cost:
+  objective: fastest
+  distance_weight: 0.0
+  time_weight: 1.0
+
+speeds:
+  posted_limits: cap
+
+# Bus-only roads (`highway=busway`, and bus/psv access on other roads)
+# come from the dataset's access tags. The busway rule precedes the
+# service rule, the class busways belong to.
+speed_rules:
+  - match:
+      highway: busway
+    speed_kph: 50
+  - match:
+      road_class: motorway
+    speed_kph: 90
+  - match:
+      road_class: trunk
+    speed_kph: 75
+  - match:
+      road_class: primary
+    speed_kph: 55
+  - match:
+      road_class: secondary
+    speed_kph: 50
+  - match:
+      road_class: tertiary
+    speed_kph: 45
+  - match:
+      road_class: residential
+    speed_kph: 25
+  - match:
+      road_class: service
+    speed_kph: 15
+
+exclude_rules:
+  - match:
+      road_class: track
+
+factors:
+  - match:
+      surface: cobblestone
+    speed_factor: 0.75
+  - match:
+      smoothness: bad
+    speed_factor: 0.7
+
+turns:
+  left_penalty_s: 8
+  right_penalty_s: 3
+  uturn_penalty_s: 120
+  traffic_signal_penalty_s: 8
+  roundabout_entry_penalty_s: 4
+
+ferry:
+  allow: true
+  use_ferry: 0.35
+  boarding_cost_s: 600
+  infer_duration_when_missing: true
+  default_speed_kph: 20
+
+preferences:
+  use_highways: 0.8
+  use_tolls: 0.5
+  use_tracks: 0.0
+  service_penalty_s: 45
+  destination_only_penalty_s: 900
+
+# A 12 m single-deck city bus. Use height_m: 4.3 for a double-decker.
+vehicle:
+  height_m: 3.2
+  width_m: 2.55
+  length_m: 12.0
+  weight_t: 19.0
+  axle_load_t: 11.5
+
+returns:
+  geometry: full
+  segment_rows: true
+  road_type_breakdown:
+    - time_s
+    - distance_m
+  penalty_breakdown: true

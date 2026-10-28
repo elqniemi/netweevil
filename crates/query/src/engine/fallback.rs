@@ -1,0 +1,690 @@
+use netweevil_core::{
+    CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, add_cch_weights, encode_cch_weight,
+};
+use rustc_hash::FxHashMap;
+
+use anyhow::{Context, Result};
+use netweevil_core::{CompiledProfileBundle, TopologyBundle};
+
+use crate::*;
+
+#[derive(Default)]
+pub(crate) struct RestrictedSearchScratch {
+    dist: FxHashMap<SearchStateKey, f64>,
+    previous: FxHashMap<SearchStateKey, Option<SearchStateKey>>,
+    settled_edges: FxHashMap<usize, SearchStateKey>,
+    heap: StateHeap,
+}
+
+impl RestrictedSearchScratch {
+    pub(crate) fn prepare(
+        &mut self,
+        metrics: &CompiledProfileBundle,
+        routing_graph: &RoutingGraph,
+        origin_seeds: &[(usize, f64)],
+        fallback: &FallbackPolicy,
+    ) {
+        self.dist.clear();
+        self.previous.clear();
+        self.settled_edges.clear();
+        self.heap.clear();
+        for &(edge_index, cost) in origin_seeds {
+            let (_, edge_penalty_cost) =
+                edge_failure_mode_penalty(metrics, routing_graph, fallback, edge_index);
+            let cost = cost + edge_penalty_cost;
+            let automaton_state = routing_graph.automaton.transition(0, edge_index);
+            let key = SearchStateKey {
+                edge_index,
+                automaton_state,
+            };
+            if !cost.is_finite() || self.dist.get(&key).is_some_and(|&known| known <= cost) {
+                continue;
+            }
+            self.dist.insert(key, cost);
+            self.previous.insert(key, None);
+            self.heap.push(edge_index, automaton_state, cost);
+        }
+    }
+
+    /// Continue one origin's Dijkstra frontier for another destination. Settled
+    /// states and their predecessors remain valid across destination queries.
+    pub(crate) fn route_to(
+        &mut self,
+        topology: &TopologyBundle,
+        metrics: &CompiledProfileBundle,
+        routing_graph: &RoutingGraph,
+        destination_seeds: &[(usize, f64)],
+        initial_upper_bound: Option<RoutePath>,
+        fallback: &FallbackPolicy,
+    ) -> Result<Option<RoutePath>> {
+        let mut best_path = initial_upper_bound;
+        let mut best_cost = best_path
+            .as_ref()
+            .map(|path| path.total_generalized_cost)
+            .unwrap_or(f64::INFINITY);
+        let mut best_state = None;
+        // Destination seeds are the few directed edges at one snapped point.
+        let mut destination_adjustments = Vec::<(usize, f64)>::new();
+        for &(edge, adjustment) in destination_seeds {
+            match destination_adjustments
+                .iter_mut()
+                .find(|(known_edge, _)| *known_edge == edge)
+            {
+                Some((_, known)) => *known = known.min(adjustment),
+                None => destination_adjustments.push((edge, adjustment)),
+            }
+        }
+        let adjustment_for = |edge_index: usize| {
+            destination_adjustments
+                .iter()
+                .find(|(edge, _)| *edge == edge_index)
+                .map(|&(_, adjustment)| adjustment)
+        };
+        let minimum_adjustment = destination_adjustments
+            .iter()
+            .map(|&(_, adjustment)| adjustment)
+            .fold(0.0, f64::min);
+        for &(edge, adjustment) in &destination_adjustments {
+            if let Some(&key) = self.settled_edges.get(&edge) {
+                let cost = self.dist[&key] + adjustment;
+                if cost < best_cost {
+                    best_cost = cost;
+                    best_state = Some(key);
+                }
+            }
+        }
+        // Preserve the unexpanded frontier for later destinations. Destination
+        // offsets may be negative, so queue cost alone cannot bound a route.
+        while self.heap.peek_cost() + minimum_adjustment < best_cost {
+            let (edge_index, automaton_state, cost) = self.heap.pop().unwrap();
+            let key = SearchStateKey {
+                edge_index,
+                automaton_state,
+            };
+            if cost > self.dist[&key] {
+                continue;
+            }
+            self.settled_edges.entry(edge_index).or_insert(key);
+            if let Some(adjustment) = adjustment_for(edge_index) {
+                let candidate_cost = cost + adjustment;
+                if candidate_cost < best_cost {
+                    best_cost = candidate_cost;
+                    best_state = Some(key);
+                }
+            }
+            for transition_index in routing_graph.transition_range(edge_index) {
+                let next_edge = routing_graph.transition_edges[transition_index] as usize;
+                let Some((_, penalty_cost)) = transition_failure_mode_penalty(
+                    topology,
+                    metrics,
+                    routing_graph,
+                    automaton_state,
+                    edge_index,
+                    next_edge,
+                    fallback,
+                ) else {
+                    continue;
+                };
+                let next_cost =
+                    cost + routing_graph.transition_costs[transition_index] + penalty_cost;
+                let next_automaton_state = routing_graph
+                    .automaton
+                    .transition(automaton_state, next_edge);
+                let next_key = SearchStateKey {
+                    edge_index: next_edge,
+                    automaton_state: next_automaton_state,
+                };
+                if next_cost + f64::EPSILON < *self.dist.get(&next_key).unwrap_or(&f64::INFINITY) {
+                    self.dist.insert(next_key, next_cost);
+                    self.previous.insert(next_key, Some(key));
+                    self.heap.push(next_edge, next_automaton_state, next_cost);
+                }
+            }
+        }
+        if let Some(mut cursor) = best_state {
+            let mut edge_indexes = Vec::new();
+            loop {
+                edge_indexes.push(cursor.edge_index);
+                let previous = self
+                    .previous
+                    .get(&cursor)
+                    .context("failed to reconstruct restricted route path")?;
+                let Some(previous) = previous else {
+                    break;
+                };
+                cursor = *previous;
+            }
+            edge_indexes.reverse();
+            best_path = Some(RoutePath {
+                edge_indexes,
+                total_generalized_cost: best_cost,
+            });
+        }
+        Ok(best_path)
+    }
+}
+
+pub(crate) fn edge_failure_mode_penalty(
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    fallback: &FallbackPolicy,
+    edge_index: usize,
+) -> (f64, f64) {
+    if routing_graph
+        .virtual_reverse_of
+        .get(edge_index)
+        .and_then(|value| *value)
+        .is_some()
+    {
+        let penalty_s = fallback
+            .penalties
+            .reverse_oneway_penalty_s
+            .unwrap_or_default();
+        return (penalty_s, penalty_s * metrics.turn_costs.cost_time_weight);
+    }
+    (0.0, 0.0)
+}
+
+pub(crate) fn transition_failure_mode_penalty(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    automaton_state: usize,
+    previous_edge_index: usize,
+    next_edge_index: usize,
+    fallback: &FallbackPolicy,
+) -> Option<(f64, f64)> {
+    let mut penalty_s = 0.0;
+    if let Some(sequence_len) = routing_graph
+        .automaton
+        .prohibited_sequence_len(automaton_state, next_edge_index)
+    {
+        if fallback.ignore_turn_restrictions {
+            penalty_s += fallback
+                .penalties
+                .ignored_turn_restriction_penalty_s
+                .unwrap_or_default();
+        } else if sequence_len == 2
+            && classify_turn(topology, previous_edge_index, next_edge_index) == TurnDirection::Uturn
+            && fallback.allow_uturn_where_normally_forbidden
+        {
+            penalty_s += fallback
+                .penalties
+                .forbidden_uturn_penalty_s
+                .or(fallback.penalties.illegal_turn_penalty_s)
+                .unwrap_or_default();
+        } else if sequence_len == 2 && fallback.allow_illegal_turn {
+            penalty_s += fallback
+                .penalties
+                .illegal_turn_penalty_s
+                .unwrap_or_default();
+        } else {
+            return None;
+        }
+    }
+    let (_, edge_penalty_cost) =
+        edge_failure_mode_penalty(metrics, routing_graph, fallback, next_edge_index);
+    Some((
+        penalty_s,
+        penalty_s * metrics.turn_costs.cost_time_weight + edge_penalty_cost,
+    ))
+}
+
+/// Sum of the illegal-movement penalty costs a failure-mode search paid
+/// along `edge_indexes`: the reverse-oneway penalty of every virtual edge and
+/// the turn penalty of every relaxed restriction, replaying the automaton.
+pub(crate) fn path_failure_mode_penalty_cost(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    fallback: &FallbackPolicy,
+    edge_indexes: &[usize],
+) -> f64 {
+    let Some((&first, rest)) = edge_indexes.split_first() else {
+        return 0.0;
+    };
+    let mut total = edge_failure_mode_penalty(metrics, routing_graph, fallback, first).1;
+    let mut automaton_state = routing_graph.automaton.transition(0, first);
+    let mut previous = first;
+    for &edge_index in rest {
+        total += transition_failure_mode_penalty(
+            topology,
+            metrics,
+            routing_graph,
+            automaton_state,
+            previous,
+            edge_index,
+            fallback,
+        )
+        .map_or(f64::INFINITY, |(_, cost)| cost);
+        automaton_state = routing_graph
+            .automaton
+            .transition(automaton_state, edge_index);
+        previous = edge_index;
+    }
+    total
+}
+
+/// Whether `fallback` caps the illegal movements a degraded route may use.
+pub(crate) fn has_failure_mode_limits(fallback: &FallbackPolicy) -> bool {
+    has_failure_modes(fallback)
+        && (fallback.max_illegal_distance_m.is_some() || fallback.max_illegal_turns.is_some())
+}
+
+/// One partial route of [`limited_failure_mode_route`].
+struct LimitedLabel {
+    edge_index: usize,
+    automaton_state: usize,
+    cost: f64,
+    /// Reverse-oneway metres travelled so far.
+    illegal_distance_m: f64,
+    /// Relaxed turn restrictions so far.
+    illegal_turns: u32,
+    previous: Option<usize>,
+}
+
+impl LimitedLabel {
+    /// No worse in both illegal-movement counts; with labels settled in
+    /// cost order this makes `self` dominate `other`.
+    fn covers(&self, other: &LimitedLabel) -> bool {
+        self.illegal_distance_m <= other.illegal_distance_m + 1e-9
+            && self.illegal_turns <= other.illegal_turns
+    }
+}
+
+/// Cheapest failure-mode route from `origin` to `destination` whose
+/// reverse-oneway distance and relaxed turn restrictions stay within
+/// `fallback.max_illegal_distance_m` and `fallback.max_illegal_turns`,
+/// counted the way the route analysis counts them.
+///
+/// The penalized search minimizes cost alone, so its route may break a
+/// limit while a costlier one does not. This label-setting search keeps,
+/// for each edge and restriction state, every label that no cheaper label
+/// matches in both illegal distance and illegal turns. Labels leave the
+/// queue in cost order, so the first route within the limits that cannot
+/// be undercut is optimal. It runs only after the penalized route broke a
+/// limit.
+pub(crate) fn limited_failure_mode_route(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    fallback: &FallbackPolicy,
+    origin: &SnappedPoint,
+    destination: &SnappedPoint,
+    initial_upper_bound: Option<RoutePath>,
+) -> Result<Option<RoutePath>> {
+    let max_distance_m = fallback.max_illegal_distance_m.unwrap_or(f64::INFINITY) + f64::EPSILON;
+    let max_turns = fallback.max_illegal_turns.unwrap_or(u32::MAX);
+    let illegal_length_m = |edge_index: usize| {
+        let reversed = routing_graph
+            .virtual_reverse_of
+            .get(edge_index)
+            .is_some_and(Option::is_some);
+        if reversed {
+            f64::from(topology.routing_edge(edge_index).length_m)
+        } else {
+            0.0
+        }
+    };
+    // Destination edges: the cost adjustment and the reverse-oneway metres
+    // beyond the snapped position, which the route does not travel.
+    let mut destinations = Vec::<(usize, f64, f64)>::new();
+    for (edge_index, adjustment) in destination_edge_seeds(routing_graph, destination) {
+        let untravelled = match (
+            destination.snapped_edge_id,
+            destination.snapped_edge_fraction,
+        ) {
+            (Some(edge), Some(fraction)) if edge as usize == edge_index => {
+                illegal_length_m(edge_index) * (1.0 - fraction)
+            }
+            _ => 0.0,
+        };
+        match destinations
+            .iter_mut()
+            .find(|(edge, _, _)| *edge == edge_index)
+        {
+            Some((_, known, _)) => *known = known.min(adjustment),
+            None => destinations.push((edge_index, adjustment, untravelled)),
+        }
+    }
+    let destination_of = |edge_index: usize| {
+        destinations
+            .iter()
+            .find(|(edge, _, _)| *edge == edge_index)
+            .map(|&(_, adjustment, untravelled)| (adjustment, untravelled))
+    };
+    let minimum_adjustment = destinations
+        .iter()
+        .map(|&(_, adjustment, _)| adjustment)
+        .fold(0.0, f64::min);
+
+    let mut labels = Vec::<LimitedLabel>::new();
+    let mut settled = FxHashMap::<SearchStateKey, Vec<usize>>::default();
+    let mut heap = StateHeap::default();
+    let mut best_cost = initial_upper_bound
+        .as_ref()
+        .map_or(f64::INFINITY, |path| path.total_generalized_cost);
+    let mut best_label = None;
+    let dominated = |settled: &FxHashMap<SearchStateKey, Vec<usize>>,
+                     labels: &[LimitedLabel],
+                     label: &LimitedLabel| {
+        let key = SearchStateKey {
+            edge_index: label.edge_index,
+            automaton_state: label.automaton_state,
+        };
+        settled
+            .get(&key)
+            .is_some_and(|known| known.iter().any(|&index| labels[index].covers(label)))
+    };
+    // A label over the distance limit may still end within it on its
+    // destination edge; it is kept for that check but not expanded.
+    let push = |labels: &mut Vec<LimitedLabel>, heap: &mut StateHeap, label: LimitedLabel| {
+        let over = label.illegal_distance_m > max_distance_m || label.illegal_turns > max_turns;
+        if !label.cost.is_finite() || (over && destination_of(label.edge_index).is_none()) {
+            return;
+        }
+        heap.push(label.edge_index, labels.len(), label.cost);
+        labels.push(label);
+    };
+
+    for (edge_index, cost) in origin_edge_seeds(routing_graph, origin) {
+        let travelled = match (origin.snapped_edge_id, origin.snapped_edge_fraction) {
+            (Some(edge), Some(fraction)) if edge as usize == edge_index => 1.0 - fraction,
+            _ => 1.0,
+        };
+        let (_, penalty_cost) =
+            edge_failure_mode_penalty(metrics, routing_graph, fallback, edge_index);
+        push(
+            &mut labels,
+            &mut heap,
+            LimitedLabel {
+                edge_index,
+                automaton_state: routing_graph.automaton.transition(0, edge_index),
+                cost: cost + penalty_cost,
+                illegal_distance_m: illegal_length_m(edge_index) * travelled,
+                illegal_turns: 0,
+                previous: None,
+            },
+        );
+    }
+
+    while heap.peek_cost() + minimum_adjustment < best_cost {
+        let (_, index, _) = heap.pop().unwrap();
+        if dominated(&settled, &labels, &labels[index]) {
+            continue;
+        }
+        let label = &labels[index];
+        let key = SearchStateKey {
+            edge_index: label.edge_index,
+            automaton_state: label.automaton_state,
+        };
+        settled.entry(key).or_default().push(index);
+        if let Some((adjustment, untravelled)) = destination_of(label.edge_index)
+            && label.illegal_distance_m - untravelled <= max_distance_m
+            && label.illegal_turns <= max_turns
+            && label.cost + adjustment < best_cost
+        {
+            best_cost = label.cost + adjustment;
+            best_label = Some(index);
+        }
+        if label.illegal_distance_m > max_distance_m || label.illegal_turns > max_turns {
+            continue;
+        }
+        let (edge_index, automaton_state) = (label.edge_index, label.automaton_state);
+        let (cost, illegal_distance_m, illegal_turns) =
+            (label.cost, label.illegal_distance_m, label.illegal_turns);
+        for transition_index in routing_graph.transition_range(edge_index) {
+            let next_edge = routing_graph.transition_edges[transition_index] as usize;
+            let Some((_, penalty_cost)) = transition_failure_mode_penalty(
+                topology,
+                metrics,
+                routing_graph,
+                automaton_state,
+                edge_index,
+                next_edge,
+                fallback,
+            ) else {
+                continue;
+            };
+            let relaxed = routing_graph
+                .automaton
+                .prohibited_sequence_len(automaton_state, next_edge)
+                .is_some();
+            let next = LimitedLabel {
+                edge_index: next_edge,
+                automaton_state: routing_graph
+                    .automaton
+                    .transition(automaton_state, next_edge),
+                cost: cost + routing_graph.transition_costs[transition_index] + penalty_cost,
+                illegal_distance_m: illegal_distance_m + illegal_length_m(next_edge),
+                illegal_turns: illegal_turns + u32::from(relaxed),
+                previous: Some(index),
+            };
+            if next.cost < best_cost && !dominated(&settled, &labels, &next) {
+                push(&mut labels, &mut heap, next);
+            }
+        }
+    }
+
+    let Some(mut cursor) = best_label else {
+        return Ok(initial_upper_bound);
+    };
+    let mut edge_indexes = vec![labels[cursor].edge_index];
+    while let Some(previous) = labels[cursor].previous {
+        edge_indexes.push(labels[previous].edge_index);
+        cursor = previous;
+    }
+    edge_indexes.reverse();
+    Ok(Some(RoutePath {
+        edge_indexes,
+        total_generalized_cost: best_cost,
+    }))
+}
+
+/// Customizes CCH weights for a degraded (failure-mode) graph so requests
+/// with failure modes route accelerated instead of via graph-wide Dijkstra.
+///
+/// Only sound when every restriction is pairwise: the failure penalties are
+/// then a function of (previous edge, next edge) alone and are included
+/// before quantizing base weights. Multi-edge restriction sequences return
+/// `None` (their penalties are state-dependent) and keep the Dijkstra path.
+/// Reverse-oneway variants change the edge set and never reach here.
+pub(crate) fn customize_failure_mode_acceleration(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    degraded_graph: &RoutingGraph,
+    base_acceleration: &AccelerationGraph,
+    fallback: &FallbackPolicy,
+) -> Option<netweevil_core::CompiledAcceleration> {
+    let mode_bit = metrics.mode.access_bit();
+    if topology.turn_restrictions.iter().any(|restriction| {
+        restriction.mode_mask.contains(mode_bit)
+            && restriction.applies_statically()
+            && restriction.edge_path.len() > 2
+    }) {
+        return None;
+    }
+    let source = base_acceleration.source.as_ref();
+    let edge_count = degraded_graph.edge_costs.len();
+    if source.upward_first_out.len() != edge_count + 1
+        || source.downward_first_out.len() != edge_count + 1
+    {
+        return None;
+    }
+    let base_compiled = base_acceleration.metrics.acceleration.as_ref()?;
+
+    let upward_len = source.upward_head.len();
+    let downward_len = source.downward_head.len();
+    let mut upward_weight = vec![CCH_WEIGHT_INFINITY; upward_len];
+    let mut downward_weight = vec![CCH_WEIGHT_INFINITY; downward_len];
+
+    // Phase 1: degraded transition costs plus the pairwise failure
+    // penalties, exactly as the Dijkstra search would pay them.
+    for edge_index in 0..edge_count {
+        let automaton_state = degraded_graph.automaton.transition(0, edge_index);
+        for transition_index in degraded_graph.transition_range(edge_index) {
+            let next_edge = degraded_graph.transition_edges[transition_index] as usize;
+            if next_edge == edge_index {
+                continue;
+            }
+            let Some((_, penalty_cost)) = transition_failure_mode_penalty(
+                topology,
+                metrics,
+                degraded_graph,
+                automaton_state,
+                edge_index,
+                next_edge,
+                fallback,
+            ) else {
+                continue;
+            };
+            let weight = degraded_graph.transition_costs[transition_index] + penalty_cost;
+            if !weight.is_finite() {
+                continue;
+            }
+            if source.edge_rank[edge_index] < source.edge_rank[next_edge] {
+                if let Some(slot) = base_acceleration.upward_arc_slot(edge_index, next_edge as u32)
+                {
+                    upward_weight[slot] = upward_weight[slot].min(encode_cch_weight(weight));
+                }
+            } else if let Some(slot) =
+                base_acceleration.downward_arc_slot(edge_index, next_edge as u32)
+            {
+                downward_weight[slot] = downward_weight[slot].min(encode_cch_weight(weight));
+            }
+        }
+    }
+
+    // Phase 2: triangle relaxation in elimination order, reusing the base
+    // graph's ranked downward rows over the identical arc topology.
+    relax_lower_triangles(base_acceleration, &mut upward_weight, &mut downward_weight);
+
+    if upward_weight.contains(&CCH_WEIGHT_OVERFLOW)
+        || downward_weight.contains(&CCH_WEIGHT_OVERFLOW)
+    {
+        return None;
+    }
+    Some(netweevil_core::CompiledAcceleration {
+        schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
+        source_acceleration_bundle_id: base_compiled.source_acceleration_bundle_id.clone(),
+        algorithm: source.algorithm.clone(),
+        upward_weight,
+        downward_weight,
+        time_upward_weight: Vec::new(),
+        time_downward_weight: Vec::new(),
+        distance_upward_weight: Vec::new(),
+        distance_downward_weight: Vec::new(),
+    })
+}
+
+/// CCH basic customization over the hierarchy's arc topology: processes
+/// middle states in elimination order and relaxes every lower triangle
+/// `w(x -> y) = min(w(x -> y), w(x -> v) + w(v -> y))`. Child weights are
+/// final before their triangles are visited.
+pub(crate) fn relax_lower_triangles(
+    acceleration: &AccelerationGraph,
+    upward_weight: &mut [u32],
+    downward_weight: &mut [u32],
+) {
+    let source = acceleration.source.as_ref();
+    let downward_slots = acceleration.downward_slots();
+    for (middle_rank, &middle) in source.edge_order.iter().enumerate() {
+        let middle_index = middle as usize;
+        let outgoing_range = source.upward_first_out[middle_index] as usize
+            ..source.upward_first_out[middle_index + 1] as usize;
+        for position in acceleration.ranked.downward_range(middle_rank) {
+            let incoming_arc = downward_slots[position] as usize;
+            let incoming_weight = downward_weight[incoming_arc];
+            if incoming_weight == CCH_WEIGHT_INFINITY {
+                continue;
+            }
+            let (tail_rank, _) = acceleration.ranked.downward_arc(position);
+            let tail = source.edge_order[tail_rank as usize] as usize;
+            for outgoing_arc in outgoing_range.clone() {
+                let head = source.upward_head[outgoing_arc];
+                if head as usize == tail {
+                    continue;
+                }
+                let outgoing_weight = upward_weight[outgoing_arc];
+                if outgoing_weight == CCH_WEIGHT_INFINITY {
+                    continue;
+                }
+                let candidate = add_cch_weights(incoming_weight, outgoing_weight);
+                if source.edge_rank[tail] < source.edge_rank[head as usize] {
+                    if let Some(slot) = acceleration.upward_arc_slot(tail, head)
+                        && candidate < upward_weight[slot]
+                    {
+                        upward_weight[slot] = candidate;
+                    }
+                } else if let Some(slot) = acceleration.downward_arc_slot(tail, head)
+                    && candidate < downward_weight[slot]
+                {
+                    downward_weight[slot] = candidate;
+                }
+            }
+        }
+    }
+}
+
+/// Exact restriction-aware route between edge seeds, for pairs whose
+/// restriction-blind candidate is illegal. Uses the restriction-aware A*
+/// with lower-bound hierarchy potentials when the graph has them, and the
+/// automaton Dijkstra otherwise. Both minimize the same floating-point
+/// metric over the same state space, so they return the same optimal cost.
+/// The A* is only proven for policies without failure modes; those keep the
+/// Dijkstra search.
+pub(crate) fn restricted_route_between_edge_seeds(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    origin_seeds: &[(usize, f64)],
+    destination_seeds: &[(usize, f64)],
+    initial_upper_bound: Option<RoutePath>,
+    fallback: &FallbackPolicy,
+) -> Result<Option<RoutePath>> {
+    if !has_failure_modes(fallback)
+        && let Some(weights) = lower_bound_weights(routing_graph)
+    {
+        return restricted_astar_route(
+            topology,
+            metrics,
+            routing_graph,
+            weights,
+            origin_seeds,
+            destination_seeds,
+            initial_upper_bound,
+            fallback,
+        );
+    }
+    dijkstra_between_edge_seeds_with_failure_modes(
+        topology,
+        metrics,
+        routing_graph,
+        origin_seeds,
+        destination_seeds,
+        initial_upper_bound,
+        fallback,
+    )
+}
+
+pub(crate) fn dijkstra_between_edge_seeds_with_failure_modes(
+    topology: &TopologyBundle,
+    metrics: &CompiledProfileBundle,
+    routing_graph: &RoutingGraph,
+    origin_seeds: &[(usize, f64)],
+    destination_seeds: &[(usize, f64)],
+    initial_upper_bound: Option<RoutePath>,
+    fallback: &FallbackPolicy,
+) -> Result<Option<RoutePath>> {
+    RESTRICTED_SEARCH_SCRATCH.with(|scratch| {
+        scratch.prepare(metrics, routing_graph, origin_seeds, fallback);
+        scratch.route_to(
+            topology,
+            metrics,
+            routing_graph,
+            destination_seeds,
+            initial_upper_bound,
+            fallback,
+        )
+    })
+}

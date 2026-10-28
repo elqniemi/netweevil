@@ -1,0 +1,6 @@
+# Illustrative dates for exercising the public-holiday rule bit. Replace this
+# list with the authoritative calendar for the analysis jurisdiction/year.
+dates:
+  - "2026-01-01"
+  - "2026-07-10"
+  - "2026-12-25"

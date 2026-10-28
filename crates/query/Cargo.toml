@@ -1,0 +1,32 @@
+[package]
+name = "netweevil-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "NetWeevil routing engine: exact CCH-accelerated routes, OD, matrices, service areas, and accessibility"
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytemuck = { workspace = true, features = ["zeroable_atomics"] }
+arrow-json.workspace = true
+chrono.workspace = true
+chrono-tz.workspace = true
+csv.workspace = true
+netweevil-core = { path = "../core" }
+netweevil-profile = { path = "../profile" }
+rayon.workspace = true
+parquet.workspace = true
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+toml.workspace = true
+tracing.workspace = true
+time.workspace = true
+
+[lints]
+workspace = true
