@@ -37,7 +37,8 @@ use crate::import::{
     source_size, write_dataset_bundles,
 };
 use crate::osm_change::{effective_changes, read_osm_change_file};
-use crate::source::{OsmSourceSnapshot, OsmSourceState};
+use crate::scan::ScanOutput;
+use crate::source::{OsmSourceSnapshot, OsmSourceState, open_base};
 use crate::topology::{EnrichmentInputs, build_enriched_topology};
 
 /// Fill growth above which [`ReorderPolicy::Auto`] reorders by default.
@@ -179,6 +180,7 @@ where
                 bail!("dataset update needs at least one change file");
             }
             let mut state = OsmSourceState::from_snapshot(snapshot, &topology)?;
+            drop(topology);
             let mut changed = ChangedObjects::default();
             for file in files {
                 emit_progress(
@@ -192,12 +194,22 @@ where
                 changed.ways += summary.ways;
                 changed.relations += summary.relations;
             }
+            let base_path = PathBuf::from(&manifest.source_path);
+            let base = state.base().cloned();
+            emit_progress(
+                &mut progress,
+                DatasetImportStage::ApplyChanges,
+                None,
+                "Reading objects the changes refer to".to_string(),
+            );
+            state.resolve(|| open_base(&base_path, base.as_ref()))?;
             timer.lap("apply changes");
             (state, "osm_change", files.clone(), Some(changed))
         }
         DatasetUpdateInput::Source(path) => {
+            drop(topology);
             let size = source_size(path)?;
-            let state = OsmSourceState::scan_pbf(path, size, &mut progress)?;
+            let state = OsmSourceState::scan_pbf(path, &mut progress)?;
             manifest.source_path = path.display().to_string();
             manifest.source_paths = vec![manifest.source_path.clone()];
             manifest.source_size_bytes = size;
@@ -205,9 +217,17 @@ where
             (state, "source", vec![path.clone()], None)
         }
     };
-    drop(topology);
 
     let refs = DatasetBundleRefs::new(paths, &manifest.dataset_id);
+    let topology_node_ids = state.topology_node_ids();
+    state.write_snapshot(
+        Path::new(&refs.source.path),
+        refs.topology.bundle_id.clone(),
+        &topology_node_ids,
+        &enrichment,
+    )?;
+    let scan = state.into_scan_output(&topology_node_ids, enrichment.admin_boundaries.is_none());
+    timer.lap("write source snapshot");
     let ordering = manifest.acceleration_ordering.clone().unwrap_or_else(|| {
         // Datasets without an ordering record measure against the build
         // they had.
@@ -223,7 +243,8 @@ where
         }
     });
     let rebuilt = rebuild_dataset(
-        &state,
+        scan,
+        &topology_node_ids,
         &previous,
         Path::new(&manifest.source_path),
         &enrichment,
@@ -232,19 +253,16 @@ where
         options.reorder,
         &mut timer,
         &mut progress,
-    )?;
-    let snapshot = state.to_snapshot(
-        refs.topology.bundle_id.clone(),
-        &rebuilt.topology_node_ids,
-        &enrichment,
-    );
+    )
+    .inspect_err(|_| {
+        let _ = std::fs::remove_file(&refs.source.path);
+    })?;
     let elevation_bundle = write_dataset_bundles(
         &refs,
         &rebuilt.topology,
         &rebuilt.names,
         &rebuilt.acceleration,
         rebuilt.dem.as_ref(),
-        Some(&snapshot),
         &mut progress,
     )?;
     timer.lap("write bundles");
@@ -329,16 +347,17 @@ pub(crate) struct RebuiltDataset {
     pub(crate) acceleration: DatasetAccelerationBundle,
     /// The cropped DEM when the dataset samples one.
     pub(crate) dem: Option<DemRaster>,
-    pub(crate) topology_node_ids: Vec<i64>,
     pub(crate) patched: PatchedOrder,
     pub(crate) patched_shortcut_arc_count: u64,
     pub(crate) reordered: bool,
 }
 
-/// Builds the topology of `state` and its CCH from the previous build's
-/// order, reordering from scratch as `policy` decides.
+/// Builds the topology of `scan`, whose topology nodes have the OSM ids
+/// `topology_node_ids`, and its CCH from the previous build's order,
+/// reordering from scratch as `policy` decides.
 pub(crate) fn rebuild_dataset(
-    state: &OsmSourceState,
+    scan: ScanOutput,
+    topology_node_ids: &[i64],
     previous: &PreviousBuild,
     source_path: &Path,
     enrichment: &EnrichmentInputs,
@@ -348,7 +367,6 @@ pub(crate) fn rebuild_dataset(
     timer: &mut StageTimer,
     progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<RebuiltDataset> {
-    let (scan, topology_node_ids) = state.scan_output(enrichment.admin_boundaries.is_none());
     let built = build_enriched_topology(
         source_path,
         scan,
@@ -362,7 +380,7 @@ pub(crate) fn rebuild_dataset(
 
     let patched = patch_edge_order(
         &topology,
-        &previous_ranks(previous, &topology, &topology_node_ids),
+        &previous_ranks(previous, &topology, topology_node_ids),
     );
     timer.lap("patch order");
     emit_progress(
@@ -409,7 +427,6 @@ pub(crate) fn rebuild_dataset(
         meta,
         acceleration,
         dem,
-        topology_node_ids,
         patched,
         patched_shortcut_arc_count,
         reordered,

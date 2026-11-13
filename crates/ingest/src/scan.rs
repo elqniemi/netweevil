@@ -124,7 +124,7 @@ pub(crate) fn is_structure_way(tags: &osmpbfreader::Tags) -> bool {
         || value("tunnel").is_some_and(|tunnel| tunnel != "no" && tunnel != "building_passage")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub(crate) struct ObjectCounts {
     pub(crate) nodes: u64,
     pub(crate) ways: u64,

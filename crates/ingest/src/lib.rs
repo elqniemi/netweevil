@@ -20,6 +20,7 @@ mod mapping;
 mod opening_hours;
 mod osm_change;
 mod overture;
+mod pbf;
 mod restrictions;
 mod scan;
 mod source;

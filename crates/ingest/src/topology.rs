@@ -2,10 +2,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 use netweevil_core::{
-    AdminBoundarySource, ConnectedComponentKind, ConnectedComponentsMeta, DemImportSummary,
-    DirectedEdge, EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL, EdgeBasedTopology, EdgeId,
-    EdgeNameBundle, NodeId, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle, TopologyBundleMeta,
-    TopologyElevation, TopologyNode, VehicleRestriction, VehicleRestrictionTable,
+    AdminBoundarySource, CacheBundleId, ConnectedComponentKind, ConnectedComponentsMeta,
+    DemImportSummary, DirectedEdge, EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL,
+    EdgeBasedTopology, EdgeId, EdgeNameBundle, NodeId, TOPOLOGY_BUNDLE_SCHEMA_VERSION,
+    TopologyBundle, TopologyBundleMeta, TopologyElevation, TopologyNode, VehicleRestriction,
+    VehicleRestrictionTable,
 };
 use std::collections::BTreeMap;
 
@@ -41,33 +42,54 @@ pub(crate) struct BuiltTopology {
     pub(crate) bundle: TopologyBundle,
     pub(crate) names: EdgeNameBundle,
     pub(crate) meta: TopologyBundleMeta,
-    /// For OSM sources: the scanned source objects and the OSM ids of the
-    /// topology nodes, which become the dataset's source snapshot.
-    pub(crate) osm_source: Option<(OsmSourceState, Vec<i64>)>,
+    /// Whether the build wrote a source snapshot (OSM sources).
+    pub(crate) source_snapshot_written: bool,
     /// The cropped DEM, for the runtime elevation raster.
     pub(crate) dem: Option<DemRaster>,
     pub(crate) warnings: Vec<String>,
 }
 
+/// Where an OSM build writes its source snapshot: the snapshot file and the
+/// id of the topology bundle it belongs to.
+pub(crate) struct SnapshotTarget<'a> {
+    pub(crate) path: &'a Path,
+    pub(crate) topology_bundle_id: CacheBundleId,
+}
+
+/// Scans the dataset source and builds its topology. An OSM source writes
+/// its snapshot to `snapshot` right after the scan and releases the source
+/// state before the topology build.
 pub(crate) fn build_topology_bundle(
     source_paths: &[PathBuf],
     source_size_bytes: u64,
     source_format: SourceFormat,
     mapping: Option<&crate::GeoPackageMapping>,
     enrichment: &EnrichmentInputs,
+    snapshot: SnapshotTarget<'_>,
     progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<BuiltTopology> {
     let source_path = source_paths
         .first()
         .ok_or_else(|| anyhow::anyhow!("dataset import requires at least one source"))?;
-    let mut osm_source = None;
+    let mut source_snapshot_written = false;
     let scan = match source_format {
         SourceFormat::OsmPbf => {
-            let state = OsmSourceState::scan_pbf(source_path, source_size_bytes, progress)?;
-            let (scan, topology_node_ids) =
-                state.scan_output(enrichment.admin_boundaries.is_none());
-            osm_source = Some((state, topology_node_ids));
-            scan
+            let state = OsmSourceState::scan_pbf(source_path, progress)?;
+            let topology_node_ids = state.topology_node_ids();
+            emit_progress(
+                progress,
+                DatasetImportStage::WriteTopologyBundle,
+                None,
+                format!("Writing source snapshot bundle {}", snapshot.path.display()),
+            );
+            state.write_snapshot(
+                snapshot.path,
+                snapshot.topology_bundle_id,
+                &topology_node_ids,
+                enrichment,
+            )?;
+            source_snapshot_written = true;
+            state.into_scan_output(&topology_node_ids, enrichment.admin_boundaries.is_none())
         }
         SourceFormat::OvertureParquet => {
             crate::overture::scan_overture(source_path, source_size_bytes, progress)?
@@ -85,7 +107,7 @@ pub(crate) fn build_topology_bundle(
         .map(|path| path.display().to_string())
         .collect::<Vec<_>>()
         .join(";");
-    built.osm_source = osm_source;
+    built.source_snapshot_written = source_snapshot_written;
     Ok(built)
 }
 
@@ -192,7 +214,7 @@ pub(crate) fn build_enriched_topology(
         bundle,
         names,
         meta,
-        osm_source: None,
+        source_snapshot_written: false,
         dem,
         warnings,
     })

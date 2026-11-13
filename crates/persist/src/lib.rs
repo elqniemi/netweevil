@@ -315,7 +315,7 @@ pub fn read_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
 }
 
 /// Schema version of [`SourceSnapshot`]. Readers accept this value only.
-pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
+pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: u32 = 5;
 
 /// The OSM source objects a dataset retains so `dataset update` can apply
 /// change files without the original extract.
