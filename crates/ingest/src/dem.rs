@@ -133,21 +133,41 @@ impl DemRaster {
             .extension()
             .and_then(|extension| extension.to_str())
             .is_some_and(|extension| extension.eq_ignore_ascii_case("asc"));
-        let (format, source_grid, grid, values, file_crs) = if ascii {
-            let (source_grid, grid, values) = read_ascii_grid(path, override_crs.as_ref(), crop)?;
-            (DemFormat::AsciiGrid, source_grid, grid, values, None)
-        } else {
-            let (grid, values, file_crs) = read_geotiff(path)?;
-            (DemFormat::GeoTiff, grid, grid, values, file_crs)
+        let resolve = |file_crs: Option<RasterCrs>, grid: &RasterGrid| -> Result<RasterCrs> {
+            Ok(match (override_crs.clone(), file_crs) {
+                (Some(crs), _) | (None, Some(crs)) => crs,
+                (None, None) if looks_geographic(grid) => RasterCrs::Geographic,
+                (None, None) => bail!(
+                    "{} has no CRS and its coordinates are not longitude/latitude; pass --dem-crs",
+                    path.display()
+                ),
+            })
         };
-        let crs = match (override_crs, file_crs) {
-            (Some(crs), _) | (None, Some(crs)) => crs,
-            (None, None) if looks_geographic(&grid) => RasterCrs::Geographic,
-            (None, None) => bail!(
-                "{} has no CRS and its coordinates are not longitude/latitude; pass --dem-crs",
-                path.display()
-            ),
-        };
+        if !ascii {
+            // GeoTIFFs decode only the strips or tiles the crop overlaps.
+            let tiff = GeoTiff::open(path)?;
+            let crs = resolve(tiff.crs.clone(), &tiff.grid)?;
+            let transform = CrsTransform::new(&crs)?;
+            let source_grid = tiff.grid;
+            let window = match crop {
+                Some(bounds) => window_for(&source_grid, &transform, bounds)
+                    .context("the DEM does not cover the network")?,
+                None => (0, 0, source_grid.columns, source_grid.rows),
+            };
+            let values = tiff.read_window(window)?;
+            let (first_column, first_row, columns, rows) = window;
+            return Ok(Self {
+                grid: cropped_grid(&source_grid, first_column, first_row, columns, rows),
+                crs,
+                format: DemFormat::GeoTiff,
+                source_grid,
+                values,
+                transform,
+            });
+        }
+        let (source_grid, grid, values) = read_ascii_grid(path, override_crs.as_ref(), crop)?;
+        let format = DemFormat::AsciiGrid;
+        let crs = resolve(None, &grid)?;
         let transform = CrsTransform::new(&crs)?;
         let mut raster = Self {
             grid,
@@ -512,79 +532,163 @@ const RASTER_PIXEL_IS_POINT: u16 = 2;
 /// ModelPixelScale/ModelTiepoint (or a north-up ModelTransformation) and
 /// its CRS from the GeoKey directory when the EPSG code is in the built-in
 /// table.
-fn read_geotiff(path: &Path) -> Result<(RasterGrid, Vec<f32>, Option<RasterCrs>)> {
-    use tiff::decoder::{Decoder, DecodingResult, Limits};
-    use tiff::tags::Tag;
+/// An opened single-band GeoTIFF: its georeferencing, read up front, and
+/// the decoder for its pixel data.
+struct GeoTiff {
+    path: std::path::PathBuf,
+    decoder: tiff::decoder::Decoder<BufReader<File>>,
+    grid: RasterGrid,
+    crs: Option<RasterCrs>,
+    nodata: Option<f64>,
+}
 
-    let file = File::open(path).with_context(|| format!("opening DEM {}", path.display()))?;
-    let mut decoder = Decoder::new(BufReader::new(file))
-        .with_context(|| format!("reading GeoTIFF {}", path.display()))?
-        .with_limits(Limits::unlimited());
-    let (columns, rows) = decoder.dimensions()?;
-    let geokeys = decoder
-        .find_tag_unsigned_vec::<u16>(Tag::GeoKeyDirectoryTag)?
-        .unwrap_or_default();
-    let geokey = |id: u16| {
-        geokeys
-            .get(4..)
-            .unwrap_or_default()
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .find(|entry| entry[0] == id && entry[1] == 0)
-            .map(|entry| entry[3])
-    };
-    let scale = decoder
-        .find_tag(Tag::ModelPixelScaleTag)?
-        .map(|value| value.into_f64_vec())
-        .transpose()?;
-    let tiepoint = decoder
-        .find_tag(Tag::ModelTiepointTag)?
-        .map(|value| value.into_f64_vec())
-        .transpose()?;
-    let transformation = decoder
-        .find_tag(Tag::ModelTransformationTag)?
-        .map(|value| value.into_f64_vec())
-        .transpose()?;
-    let (cell_width, cell_height, origin_x, origin_y) = match (scale, tiepoint, transformation) {
-        (Some(scale), Some(tiepoint), _) if scale.len() >= 2 && tiepoint.len() >= 6 => (
-            scale[0],
-            scale[1],
-            tiepoint[3] - tiepoint[0] * scale[0],
-            tiepoint[4] + tiepoint[1] * scale[1],
-        ),
-        (_, _, Some(matrix)) if matrix.len() >= 8 => {
-            if matrix[1] != 0.0 || matrix[4] != 0.0 || matrix[5] >= 0.0 {
-                bail!(
-                    "{} is rotated or not north-up; reproject it first",
-                    path.display()
-                );
+impl GeoTiff {
+    fn open(path: &Path) -> Result<Self> {
+        use tiff::decoder::{Decoder, Limits};
+        use tiff::tags::Tag;
+
+        let file = File::open(path).with_context(|| format!("opening DEM {}", path.display()))?;
+        let mut decoder = Decoder::new(BufReader::new(file))
+            .with_context(|| format!("reading GeoTIFF {}", path.display()))?
+            .with_limits(Limits::unlimited());
+        let (columns, rows) = decoder.dimensions()?;
+        let geokeys = decoder
+            .find_tag_unsigned_vec::<u16>(Tag::GeoKeyDirectoryTag)?
+            .unwrap_or_default();
+        let geokey = |id: u16| {
+            geokeys
+                .get(4..)
+                .unwrap_or_default()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .find(|entry| entry[0] == id && entry[1] == 0)
+                .map(|entry| entry[3])
+        };
+        let scale = decoder
+            .find_tag(Tag::ModelPixelScaleTag)?
+            .map(|value| value.into_f64_vec())
+            .transpose()?;
+        let tiepoint = decoder
+            .find_tag(Tag::ModelTiepointTag)?
+            .map(|value| value.into_f64_vec())
+            .transpose()?;
+        let transformation = decoder
+            .find_tag(Tag::ModelTransformationTag)?
+            .map(|value| value.into_f64_vec())
+            .transpose()?;
+        let (cell_width, cell_height, origin_x, origin_y) = match (scale, tiepoint, transformation)
+        {
+            (Some(scale), Some(tiepoint), _) if scale.len() >= 2 && tiepoint.len() >= 6 => (
+                scale[0],
+                scale[1],
+                tiepoint[3] - tiepoint[0] * scale[0],
+                tiepoint[4] + tiepoint[1] * scale[1],
+            ),
+            (_, _, Some(matrix)) if matrix.len() >= 8 => {
+                if matrix[1] != 0.0 || matrix[4] != 0.0 || matrix[5] >= 0.0 {
+                    bail!(
+                        "{} is rotated or not north-up; reproject it first",
+                        path.display()
+                    );
+                }
+                (matrix[0], -matrix[5], matrix[3], matrix[7])
             }
-            (matrix[0], -matrix[5], matrix[3], matrix[7])
+            _ => bail!("{} has no GeoTIFF georeferencing tags", path.display()),
+        };
+        // PixelIsPoint places the tie point at the first cell's centre.
+        let (min_x, max_y) = if geokey(GEOKEY_RASTER_TYPE) == Some(RASTER_PIXEL_IS_POINT) {
+            (origin_x - cell_width / 2.0, origin_y + cell_height / 2.0)
+        } else {
+            (origin_x, origin_y)
+        };
+        let crs = match geokey(GEOKEY_MODEL_TYPE) {
+            Some(2) => Some(RasterCrs::Geographic),
+            _ => geokey(GEOKEY_PROJECTED_TYPE)
+                .or_else(|| geokey(GEOKEY_GEOGRAPHIC_TYPE))
+                .and_then(|code| epsg_crs(u32::from(code))),
+        };
+        let nodata = decoder
+            .find_tag(Tag::GdalNodata)?
+            .and_then(|value| value.into_string().ok())
+            .and_then(|text| text.trim_end_matches('\0').trim().parse::<f64>().ok());
+        match decoder.colortype()? {
+            tiff::ColorType::Gray(_) => {}
+            other => bail!("{} is not a single-band raster ({other:?})", path.display()),
         }
-        _ => bail!("{} has no GeoTIFF georeferencing tags", path.display()),
-    };
-    // PixelIsPoint places the tie point at the first cell's centre.
-    let (min_x, max_y) = if geokey(GEOKEY_RASTER_TYPE) == Some(RASTER_PIXEL_IS_POINT) {
-        (origin_x - cell_width / 2.0, origin_y + cell_height / 2.0)
-    } else {
-        (origin_x, origin_y)
-    };
-    let crs = match geokey(GEOKEY_MODEL_TYPE) {
-        Some(2) => Some(RasterCrs::Geographic),
-        _ => geokey(GEOKEY_PROJECTED_TYPE)
-            .or_else(|| geokey(GEOKEY_GEOGRAPHIC_TYPE))
-            .and_then(|code| epsg_crs(u32::from(code))),
-    };
-    let nodata = decoder
-        .find_tag(Tag::GdalNodata)?
-        .and_then(|value| value.into_string().ok())
-        .and_then(|text| text.trim_end_matches('\0').trim().parse::<f64>().ok());
-    let samples = match decoder.colortype()? {
-        tiff::ColorType::Gray(_) => 1,
-        other => bail!("{} is not a single-band raster ({other:?})", path.display()),
-    };
-    let image = decoder.read_image()?;
+        Ok(Self {
+            path: path.to_path_buf(),
+            decoder,
+            grid: RasterGrid {
+                columns,
+                rows,
+                min_x,
+                max_y,
+                cell_width,
+                cell_height,
+            },
+            crs,
+            nodata,
+        })
+    }
+
+    /// Values of the cell window `(first_column, first_row, columns, rows)`,
+    /// row-major, decoding only the strips or tiles it overlaps.
+    fn read_window(mut self, window: (u32, u32, u32, u32)) -> Result<Vec<f32>> {
+        let (first_column, first_row, columns, rows) = window;
+        let mut values = vec![f32::NAN; columns as usize * rows as usize];
+        if columns == 0 || rows == 0 {
+            return Ok(values);
+        }
+        let (chunk_width, chunk_height) = self.decoder.chunk_dimensions();
+        if chunk_width == 0 || chunk_height == 0 {
+            bail!("{} has empty strips or tiles", self.path.display());
+        }
+        let chunks_across = self.grid.columns.div_ceil(chunk_width);
+        let (last_column, last_row) = (first_column + columns - 1, first_row + rows - 1);
+        for chunk_row in first_row / chunk_height..=last_row / chunk_height {
+            for chunk_column in first_column / chunk_width..=last_column / chunk_width {
+                let index = chunk_row * chunks_across + chunk_column;
+                let (data_width, data_height) = self.decoder.chunk_data_dimensions(index);
+                let chunk = self
+                    .decoder
+                    .read_chunk(index)
+                    .with_context(|| format!("decoding {}", self.path.display()))?;
+                let chunk = decoded_f32(chunk, self.nodata).with_context(|| {
+                    format!("{} uses an unsupported sample type", self.path.display())
+                })?;
+                if chunk.len() != data_width as usize * data_height as usize {
+                    bail!(
+                        "{} decoded to an unexpected number of samples",
+                        self.path.display()
+                    );
+                }
+                let (x0, y0) = (chunk_column * chunk_width, chunk_row * chunk_height);
+                let column_start = first_column.max(x0);
+                let column_end = (last_column + 1).min(x0 + data_width);
+                if column_start >= column_end {
+                    continue;
+                }
+                for row in first_row.max(y0)..=last_row.min(y0 + data_height - 1) {
+                    let source = (row - y0) as usize * data_width as usize;
+                    let target = (row - first_row) as usize * columns as usize;
+                    values[target + (column_start - first_column) as usize
+                        ..target + (column_end - first_column) as usize]
+                        .copy_from_slice(
+                            &chunk[source + (column_start - x0) as usize
+                                ..source + (column_end - x0) as usize],
+                        );
+                }
+            }
+        }
+        Ok(values)
+    }
+}
+
+/// Samples of a decoded chunk as `f32`, with `nodata` and non-finite values
+/// as `NaN`; `None` for sample types DEMs do not use.
+fn decoded_f32(decoded: tiff::decoder::DecodingResult, nodata: Option<f64>) -> Option<Vec<f32>> {
+    use tiff::decoder::DecodingResult;
     let to_f32 = |value: f64| -> f32 {
         if Some(value) == nodata || !value.is_finite() {
             f32::NAN
@@ -592,7 +696,7 @@ fn read_geotiff(path: &Path) -> Result<(RasterGrid, Vec<f32>, Option<RasterCrs>)
             value as f32
         }
     };
-    let values: Vec<f32> = match image {
+    Some(match decoded {
         DecodingResult::U8(data) => data.into_iter().map(|v| to_f32(f64::from(v))).collect(),
         DecodingResult::U16(data) => data.into_iter().map(|v| to_f32(f64::from(v))).collect(),
         DecodingResult::U32(data) => data.into_iter().map(|v| to_f32(f64::from(v))).collect(),
@@ -601,23 +705,8 @@ fn read_geotiff(path: &Path) -> Result<(RasterGrid, Vec<f32>, Option<RasterCrs>)
         DecodingResult::I32(data) => data.into_iter().map(|v| to_f32(f64::from(v))).collect(),
         DecodingResult::F32(data) => data.into_iter().map(|v| to_f32(f64::from(v))).collect(),
         DecodingResult::F64(data) => data.into_iter().map(to_f32).collect(),
-        _ => bail!("{} uses an unsupported sample type", path.display()),
-    };
-    if values.len() != columns as usize * rows as usize * samples {
-        bail!(
-            "{} decoded to an unexpected number of samples",
-            path.display()
-        );
-    }
-    let grid = RasterGrid {
-        columns,
-        rows,
-        min_x,
-        max_y,
-        cell_width,
-        cell_height,
-    };
-    Ok((grid, values, crs))
+        _ => return None,
+    })
 }
 
 // --- Runtime sampling -------------------------------------------------------

@@ -252,3 +252,58 @@ fn stored_tiles_sample_like_the_in_memory_raster() {
     }
     assert_eq!(sampler.sample(5.0, 53.0).unwrap(), None);
 }
+
+#[test]
+fn geotiff_crops_decode_only_the_overlapping_strips() {
+    use tiff::encoder::{TiffEncoder, colortype::Gray32Float};
+    use tiff::tags::Tag;
+    let dir = TempDir::new("dem-geotiff-crop");
+    let path = dir.join("dem.tif");
+    let (columns, rows) = (20_u32, 30_u32);
+    {
+        let mut encoder = TiffEncoder::new(File::create(&path).unwrap()).unwrap();
+        let mut image = encoder.new_image::<Gray32Float>(columns, rows).unwrap();
+        image.rows_per_strip(4).unwrap();
+        image
+            .encoder()
+            .write_tag(Tag::ModelPixelScaleTag, &[0.01_f64, 0.01, 0.0][..])
+            .unwrap();
+        image
+            .encoder()
+            .write_tag(
+                Tag::ModelTiepointTag,
+                &[0.0_f64, 0.0, 0.0, 6.0, 53.3, 0.0][..],
+            )
+            .unwrap();
+        let values = (0..columns * rows)
+            .map(|index| index as f32)
+            .collect::<Vec<_>>();
+        image.write_data(&values).unwrap();
+    }
+    let bounds = LonLatBounds {
+        min_lon: 6.055,
+        min_lat: 53.105,
+        max_lon: 6.085,
+        max_lat: 53.155,
+    };
+    let full = DemRaster::read(&path, None, None).unwrap();
+    let cropped = DemRaster::read(&path, None, Some(bounds)).unwrap();
+    assert_eq!(cropped.source_grid, full.grid);
+    assert!(cropped.grid.columns < columns && cropped.grid.rows < rows);
+    let first_column = ((cropped.grid.min_x - full.grid.min_x) / 0.01).round() as u32;
+    let first_row = ((full.grid.max_y - cropped.grid.max_y) / 0.01).round() as u32;
+    for row in 0..cropped.grid.rows {
+        for column in 0..cropped.grid.columns {
+            assert_eq!(
+                cropped.value(column, row),
+                full.value(first_column + column, first_row + row),
+                "({column}, {row})"
+            );
+        }
+    }
+    let (cropped, full) = (
+        cropped.sample(6.07, 53.13).unwrap(),
+        full.sample(6.07, 53.13).unwrap(),
+    );
+    assert!((cropped - full).abs() < 1e-9, "{cropped} {full}");
+}
