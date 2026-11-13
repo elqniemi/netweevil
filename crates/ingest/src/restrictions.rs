@@ -5,11 +5,11 @@ use netweevil_core::{
 use osmpbfreader::{OsmId, Relation, Tags};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::classify::tag;
 use crate::conditional::parse_conditional;
+use crate::pbf::IdIndex;
 use crate::scan::{PendingWay, RuleSetInterner};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -42,7 +42,7 @@ pub(crate) enum ViaSpec {
 pub(crate) fn build_turn_restrictions(
     candidates: &[TurnRestrictionCandidate],
     ways: &[PendingWay],
-    node_lookup: &FxHashMap<i64, (NodeId, f64, f64, f64)>,
+    node_ids: &IdIndex,
     edges: &[DirectedEdge],
 ) -> Vec<TurnRestriction> {
     let mut incoming_by_way_and_node: HashMap<(i64, NodeId), Vec<EdgeId>> = HashMap::new();
@@ -75,7 +75,7 @@ pub(crate) fn build_turn_restrictions(
     for candidate in candidates {
         match &candidate.via {
             ViaSpec::Node(via_node_id) => {
-                let Some(&(via_node, _, _, _)) = node_lookup.get(via_node_id) else {
+                let Some(via_node) = topology_node(node_ids, *via_node_id) else {
                     continue;
                 };
                 let Some(incoming_edges) =
@@ -119,11 +119,10 @@ pub(crate) fn build_turn_restrictions(
                 let Some(shared_nodes) = via_shared_nodes(from_way, &via_ways, to_way) else {
                     continue;
                 };
-                let Some(&(entry_node, _, _, _)) = node_lookup.get(&shared_nodes[0]) else {
+                let Some(entry_node) = topology_node(node_ids, shared_nodes[0]) else {
                     continue;
                 };
-                let Some(&(exit_node, _, _, _)) = node_lookup.get(shared_nodes.last().unwrap())
-                else {
+                let Some(exit_node) = topology_node(node_ids, *shared_nodes.last().unwrap()) else {
                     continue;
                 };
                 let Some(incoming_edges) =
@@ -144,7 +143,7 @@ pub(crate) fn build_turn_restrictions(
                         way,
                         pair[0],
                         pair[1],
-                        node_lookup,
+                        node_ids,
                         &edge_by_way_and_nodes,
                     ) else {
                         valid = false;
@@ -328,11 +327,19 @@ fn unique_shared_node(left: &PendingWay, right: &PendingWay) -> Option<i64> {
     }
 }
 
+/// The topology node of source node `id`; `node_ids` are the topology's
+/// source node ids in node order.
+fn topology_node(node_ids: &IdIndex, id: i64) -> Option<NodeId> {
+    node_ids
+        .position(id)
+        .map(|position| NodeId(position as u32))
+}
+
 fn way_edge_sequence_between(
     way: &PendingWay,
     start_osm_node_id: i64,
     end_osm_node_id: i64,
-    node_lookup: &FxHashMap<i64, (NodeId, f64, f64, f64)>,
+    node_ids: &IdIndex,
     edge_by_way_and_nodes: &HashMap<(i64, NodeId, NodeId), EdgeId>,
 ) -> Option<Vec<EdgeId>> {
     if start_osm_node_id == end_osm_node_id {
@@ -367,11 +374,11 @@ fn way_edge_sequence_between(
                 let next = cursor + step;
                 let from_osm = way.node_ids[cursor as usize];
                 let to_osm = way.node_ids[next as usize];
-                let Some(&(from_node, _, _, _)) = node_lookup.get(&from_osm) else {
+                let Some(from_node) = topology_node(node_ids, from_osm) else {
                     valid = false;
                     break;
                 };
-                let Some(&(to_node, _, _, _)) = node_lookup.get(&to_osm) else {
+                let Some(to_node) = topology_node(node_ids, to_osm) else {
                     valid = false;
                     break;
                 };

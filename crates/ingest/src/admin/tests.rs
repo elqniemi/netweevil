@@ -220,3 +220,16 @@ fn osm_relations_parse_country_and_state_codes() {
         .is_none()
     );
 }
+
+#[test]
+fn pbf_boundaries_assemble_from_relations_ways_and_nodes() {
+    let dir = TempDir::new("admin-pbf");
+    let path = dir.join("boundaries.osm.pbf");
+    crate::test_util::write_pbf(&path, &crate::test_util::osm_grid());
+    let (boundaries, incomplete) = read_boundaries_file(&path).unwrap();
+    assert!(incomplete.is_empty());
+    assert_eq!(boundaries.len(), 1);
+    assert_eq!(boundaries[0].code.as_deref(), Some("NL"));
+    assert_eq!(boundaries[0].rings.len(), 1);
+    assert_eq!(boundaries[0].rings[0].len(), 5);
+}

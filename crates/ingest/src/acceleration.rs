@@ -1,3 +1,4 @@
+use anyhow::Result;
 use netweevil_core::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, AccelerationBundleStats, CCH_ALGORITHM, CacheBundleId,
     DatasetAccelerationBundle, TopologyBundle,
@@ -5,6 +6,7 @@ use netweevil_core::{
 use rayon::prelude::*;
 
 use crate::import::{DatasetImportProgress, DatasetImportStage, PercentReporter, emit_progress};
+use crate::topology::checked_u32;
 
 /// Builds the metric-independent CCH topology for a dataset.
 ///
@@ -18,7 +20,7 @@ pub(crate) fn build_dataset_acceleration_bundle_with_progress(
     topology: &TopologyBundle,
     source_topology_bundle_id: CacheBundleId,
     progress: &mut impl FnMut(DatasetImportProgress),
-) -> DatasetAccelerationBundle {
+) -> Result<DatasetAccelerationBundle> {
     let edge_count = topology.edge_count();
 
     emit_progress(
@@ -28,14 +30,14 @@ pub(crate) fn build_dataset_acceleration_bundle_with_progress(
         format!("Ordering {edge_count} edge states by nested dissection"),
     );
 
-    let edge_order = nested_dissection_order(topology);
+    let edge_order = nested_dissection_order(topology)?;
 
     build_with_order(topology, source_topology_bundle_id, edge_order, progress)
 }
 
 /// Full nested-dissection elimination order of the topology's edge states.
-pub(crate) fn nested_dissection_order(topology: &TopologyBundle) -> Vec<u32> {
-    dissect(build_edge_cell(topology), LEAF_NODES)
+pub(crate) fn nested_dissection_order(topology: &TopologyBundle) -> Result<Vec<u32>> {
+    Ok(dissect(build_edge_cell(topology)?, LEAF_NODES))
 }
 
 /// An elimination order carried over from a previous build of the dataset.
@@ -65,9 +67,11 @@ pub(crate) struct PatchedOrder {
 pub(crate) fn patch_edge_order(
     topology: &TopologyBundle,
     previous_rank: &[Option<u32>],
-) -> PatchedOrder {
+) -> Result<PatchedOrder> {
     const UNPLACED: u32 = u32::MAX;
     let edge_count = topology.edge_count();
+    // Edge ids stay below the `UNPLACED` marker.
+    checked_u32(edge_count, "edge states")?;
     assert_eq!(
         previous_rank.len(),
         edge_count,
@@ -159,7 +163,7 @@ pub(crate) fn patch_edge_order(
     let mut order = if isolated.is_empty() {
         Vec::with_capacity(edge_count)
     } else {
-        dissect(build_edge_cell(topology).induced(&isolated), LEAF_NODES)
+        dissect(build_edge_cell(topology)?.induced(&isolated), LEAF_NODES)
     };
     let mut placed = (0..edge_count as u32)
         .filter(|&edge| anchor[edge as usize] != UNPLACED)
@@ -170,11 +174,11 @@ pub(crate) fn patch_edge_order(
     });
     order.extend(placed);
     let reused = previous_rank.iter().flatten().count();
-    PatchedOrder {
+    Ok(PatchedOrder {
         order,
         reused,
         inserted: edge_count - reused,
-    }
+    })
 }
 
 /// Builds the CCH bundle for `topology` contracted in `edge_order`.
@@ -183,8 +187,9 @@ pub(crate) fn build_with_order(
     source_topology_bundle_id: CacheBundleId,
     edge_order: Vec<u32>,
     progress: &mut impl FnMut(DatasetImportProgress),
-) -> DatasetAccelerationBundle {
+) -> Result<DatasetAccelerationBundle> {
     let edge_count = topology.edge_count();
+    checked_u32(edge_count, "edge states")?;
     let transition_topology = &topology.edge_based_topology;
     let has_transitions = transition_topology.edge_transition_first_out.len() == edge_count + 1;
     let mut edge_rank = vec![0_u32; edge_count];
@@ -330,10 +335,11 @@ pub(crate) fn build_with_order(
     upward.par_sort_unstable();
     downward.par_sort_unstable();
 
-    let (upward_first_out, upward_head) = arcs_to_csr(&upward, edge_count);
-    let (downward_first_out, downward_head) = arcs_to_csr(&downward, edge_count);
+    let (upward_first_out, upward_head) = arcs_to_csr(&upward, edge_count, "upward CCH arcs")?;
+    let (downward_first_out, downward_head) =
+        arcs_to_csr(&downward, edge_count, "downward CCH arcs")?;
 
-    DatasetAccelerationBundle {
+    Ok(DatasetAccelerationBundle {
         schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
         source_topology_bundle_id,
         algorithm: CCH_ALGORITHM.to_string(),
@@ -344,10 +350,17 @@ pub(crate) fn build_with_order(
         upward_head,
         downward_first_out,
         downward_head,
-    }
+    })
 }
 
-fn arcs_to_csr(sorted_arcs: &[(u32, u32)], edge_count: usize) -> (Vec<u32>, Vec<u32>) {
+/// CSR offsets and heads of arcs sorted by tail. `what` names the arcs in
+/// the error for more arcs than 32-bit offsets address.
+fn arcs_to_csr(
+    sorted_arcs: &[(u32, u32)],
+    edge_count: usize,
+    what: &str,
+) -> Result<(Vec<u32>, Vec<u32>)> {
+    checked_u32(sorted_arcs.len(), what)?;
     let mut first_out = vec![0_u32; edge_count + 1];
     let mut heads = vec![0_u32; sorted_arcs.len()];
     for (slot, &(tail, head)) in sorted_arcs.iter().enumerate() {
@@ -357,7 +370,7 @@ fn arcs_to_csr(sorted_arcs: &[(u32, u32)], edge_count: usize) -> (Vec<u32>, Vec<
     for edge_index in 0..edge_count {
         first_out[edge_index + 1] += first_out[edge_index];
     }
-    (first_out, heads)
+    Ok((first_out, heads))
 }
 
 /// Node count below which a cell is ordered directly by minimum degree.
@@ -445,7 +458,7 @@ struct Split {
 
 /// The undirected transition graph is used only to choose elimination ranks.
 /// Contraction retains every directed transition, including legal u-turns.
-fn build_edge_cell(topology: &TopologyBundle) -> Cell {
+fn build_edge_cell(topology: &TopologyBundle) -> Result<Cell> {
     let edge_count = topology.edge_count();
     let transitions = &topology.edge_based_topology;
     let mut pairs = Vec::with_capacity(transitions.edge_transition_edges.len() * 2);
@@ -463,7 +476,7 @@ fn build_edge_cell(topology: &TopologyBundle) -> Cell {
     }
     pairs.par_sort_unstable();
     pairs.dedup();
-    let (first_out, heads) = arcs_to_csr(&pairs, edge_count);
+    let (first_out, heads) = arcs_to_csr(&pairs, edge_count, "undirected edge transitions")?;
     drop(pairs);
     let mean_lat = if topology.nodes.is_empty() {
         0.0
@@ -480,13 +493,13 @@ fn build_edge_cell(topology: &TopologyBundle) -> Cell {
         x.push(((from.lon() + to.lon()) * 0.5 * longitude_scale) as f32);
         y.push(((from.lat() + to.lat()) * 0.5) as f32);
     }
-    Cell {
+    Ok(Cell {
         ids: (0..edge_count as u32).collect(),
         first_out,
         heads,
         x,
         y,
-    }
+    })
 }
 
 /// Splits a cell into two size-balanced groups of whole connected

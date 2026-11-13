@@ -31,7 +31,7 @@ fn bridge_nodes_interpolate_between_their_ground_anchors() {
     let dem = valley();
     let sampling = DemSampling::new(&dem, LAT);
     assert!((sampling.spacing_m - 11.132).abs() < 0.01);
-    let mut node_coords = FxHashMap::from_iter(
+    let mut node_coords = NodeCoords::from_iter(
         [
             (1, 5.0),
             (2, 10.0),
@@ -74,7 +74,7 @@ fn bridge_nodes_interpolate_between_their_ground_anchors() {
 fn nodes_outside_the_dem_have_unknown_height() {
     let dem = valley();
     let sampling = DemSampling::new(&dem, LAT);
-    let mut node_coords = FxHashMap::from_iter([(1, (lon(5.0), LAT, 0.0)), (2, (1.0, 1.0, 0.0))]);
+    let mut node_coords = NodeCoords::from_iter([(1, (lon(5.0), LAT, 0.0)), (2, (1.0, 1.0, 0.0))]);
     let stats = assign_node_elevations(
         &sampling,
         &mut node_coords,

@@ -1,9 +1,4 @@
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{
-    Arc,
-    atomic::{AtomicU64, Ordering},
-};
 
 use anyhow::{Context, Result, bail};
 use netweevil_core::{
@@ -13,15 +8,14 @@ use netweevil_core::{
 use netweevil_persist::manifest::{AccelerationOrdering, BundleRef, DatasetManifest, now_rfc3339};
 use netweevil_persist::{
     WorkspacePaths, write_acceleration_bundle, write_dataset_manifest, write_edge_name_bundle,
-    write_elevation_raster, write_source_snapshot_bundle, write_topology_bundle,
+    write_elevation_raster, write_topology_bundle,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::acceleration::build_dataset_acceleration_bundle_with_progress;
 use crate::dem::DemRaster;
-use crate::source::OsmSourceSnapshot;
-use crate::topology::{EnrichmentInputs, build_topology_bundle};
+use crate::topology::{EnrichmentInputs, SnapshotTarget, build_topology_bundle};
 
 #[derive(Debug, Clone, Default)]
 pub struct DatasetImportOptions {
@@ -159,34 +153,34 @@ where
     };
     let dataset_id = DatasetId::new(options.name);
     let bundles = DatasetBundleRefs::new(paths, &dataset_id);
+    let snapshot_path = Path::new(&bundles.source.path);
     let built = build_topology_bundle(
         source_paths,
         size,
         source_format,
         mapping.as_ref(),
         &enrichment,
+        SnapshotTarget {
+            path: snapshot_path,
+            topology_bundle_id: bundles.topology.bundle_id.clone(),
+        },
         &mut progress,
-    )?;
+    )
+    .inspect_err(|_| {
+        let _ = std::fs::remove_file(snapshot_path);
+    })?;
     emit_warnings(&built.warnings, &mut progress);
     let acceleration_bundle = build_dataset_acceleration_bundle_with_progress(
         &built.bundle,
         bundles.topology.bundle_id.clone(),
         &mut progress,
-    );
-    let snapshot = built.osm_source.as_ref().map(|(state, topology_node_ids)| {
-        state.to_snapshot(
-            bundles.topology.bundle_id.clone(),
-            topology_node_ids,
-            &enrichment,
-        )
-    });
+    )?;
     let elevation_bundle = write_dataset_bundles(
         &bundles,
         &built.bundle,
         &built.names,
         &acceleration_bundle,
         built.dem.as_ref(),
-        snapshot.as_ref(),
         &mut progress,
     )?;
     let imported_at = now_rfc3339()?;
@@ -206,7 +200,7 @@ where
         edge_name_bundle: Some(bundles.edge_names),
         acceleration_bundle: Some(bundles.acceleration),
         elevation_bundle,
-        source_snapshot_bundle: snapshot.is_some().then_some(bundles.source),
+        source_snapshot_bundle: built.source_snapshot_written.then_some(bundles.source),
         topology_meta: Some(built.meta),
         acceleration_ordering: Some(AccelerationOrdering {
             ordered_at: imported_at.clone(),
@@ -292,16 +286,15 @@ impl DatasetBundleRefs {
     }
 }
 
-/// Writes the bundles of one dataset build: the elevation raster when a DEM
-/// was sampled (its reference is returned), the snapshot only for OSM
-/// sources.
+/// Writes the bundles of one dataset build besides the source snapshot,
+/// which the build writes before its topology: the elevation raster when a
+/// DEM was sampled (its reference is returned).
 pub(crate) fn write_dataset_bundles(
     refs: &DatasetBundleRefs,
     topology: &TopologyBundle,
     names: &EdgeNameBundle,
     acceleration: &DatasetAccelerationBundle,
     dem: Option<&DemRaster>,
-    snapshot: Option<&OsmSourceSnapshot>,
     progress: &mut impl FnMut(DatasetImportProgress),
 ) -> Result<Option<BundleRef>> {
     let mut announce = |what: &str, bundle: &BundleRef| {
@@ -318,10 +311,6 @@ pub(crate) fn write_dataset_bundles(
     write_edge_name_bundle(&refs.edge_names.path, names)?;
     announce("acceleration", &refs.acceleration);
     write_acceleration_bundle(&refs.acceleration.path, acceleration)?;
-    if let Some(snapshot) = snapshot {
-        announce("source snapshot", &refs.source);
-        write_source_snapshot_bundle(&refs.source.path, snapshot)?;
-    }
     let (Some(dem), Some(summary)) = (dem, topology.elevation.dem.as_ref()) else {
         return Ok(None);
     };
@@ -401,24 +390,5 @@ impl PercentReporter {
             Some(quantized_percent),
             message(quantized_percent),
         );
-    }
-}
-
-pub(crate) struct CountingReader<R> {
-    inner: R,
-    bytes_read: Arc<AtomicU64>,
-}
-
-impl<R> CountingReader<R> {
-    pub(crate) fn new(inner: R, bytes_read: Arc<AtomicU64>) -> Self {
-        Self { inner, bytes_read }
-    }
-}
-
-impl<R: Read> Read for CountingReader<R> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let read = self.inner.read(buf)?;
-        self.bytes_read.fetch_add(read as u64, Ordering::Relaxed);
-        Ok(read)
     }
 }

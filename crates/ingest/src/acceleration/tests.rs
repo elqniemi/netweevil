@@ -14,6 +14,7 @@ fn build(topology: &TopologyBundle) -> DatasetAccelerationBundle {
         CacheBundleId::new("topology-test"),
         &mut |_| {},
     )
+    .expect("CCH builds")
 }
 
 fn upward(bundle: &DatasetAccelerationBundle, edge: usize) -> &[u32] {
@@ -294,7 +295,7 @@ fn patched_order_keeps_previous_ranks_and_places_new_states_by_neighbours() {
         .map(|index| index.map(|index| previous.edge_rank[index]))
         .collect::<Vec<_>>();
 
-    let patched = patch_edge_order(&after, &previous_rank);
+    let patched = patch_edge_order(&after, &previous_rank).expect("order patches");
 
     let edge_count = after.edge_count();
     assert_eq!(patched.reused + patched.inserted, edge_count);
@@ -342,7 +343,8 @@ fn patched_order_keeps_previous_ranks_and_places_new_states_by_neighbours() {
         CacheBundleId::new("topology-test"),
         patched.order,
         &mut |_| {},
-    );
+    )
+    .expect("CCH builds");
     assert_contraction_complete(&bundle);
 }
 
@@ -357,7 +359,7 @@ fn patched_order_without_changes_is_the_previous_order() {
         .map(Some)
         .collect::<Vec<_>>();
 
-    let patched = patch_edge_order(&topology, &previous_rank);
+    let patched = patch_edge_order(&topology, &previous_rank).expect("order patches");
 
     assert_eq!(patched.order, previous.edge_order);
     assert_eq!(

@@ -279,12 +279,14 @@ fn incremental_update_matches_a_full_import_of_the_edited_extract() {
     assert!(assigned(&rebuilt) > 0 && assigned(&rebuilt) < rebuilt.nodes.len());
     assert!(!rebuilt.regions.timezones.is_empty());
     // The retained objects match the full import's, so the next update
-    // starts from the same source state.
+    // starts from the same source state; the update also keeps the changed
+    // objects and the imported extract's fingerprint.
     let snapshot = |manifest: &DatasetManifest| -> OsmSourceSnapshot {
-        let mut snapshot =
+        let mut snapshot: OsmSourceSnapshot =
             read_source_snapshot_bundle(&manifest.source_snapshot_bundle.as_ref().unwrap().path)
                 .expect("snapshot reads");
         snapshot.source_topology_bundle_id = CacheBundleId::new("");
+        snapshot.extras = snapshot.extras.without_changes();
         snapshot
     };
     assert_eq!(snapshot(&updated), snapshot(&full));
@@ -782,4 +784,27 @@ fn extract_pairs(base: &[OsmObj], edits: &[OsmEdit]) -> Vec<(Point, Point)> {
         pairs.push((origin, edited[(index * 7 + 3) % edited.len()]));
     }
     pairs
+}
+
+#[test]
+fn change_files_read_new_references_from_the_unchanged_extract_only() {
+    let dir = TempDir::new("update-base");
+    let paths = WorkspacePaths::discover(dir.path()).expect("workspace");
+    let fixture = write_fixture(&dir, &osm_grid(), &osm_grid_edits());
+    import(&paths, &fixture.base, "city");
+    // The building that becomes a road refers to nodes only the extract
+    // holds; a replaced extract must not supply them.
+    std::fs::copy(&fixture.edited, &fixture.base).expect("extract replaced");
+
+    let error = update_dataset(
+        &paths,
+        DatasetUpdateOptions {
+            dataset_id: "city".to_string(),
+            input: DatasetUpdateInput::OsmChanges(vec![fixture.change]),
+            reorder: ReorderPolicy::Never,
+        },
+        |_| {},
+    )
+    .expect_err("a replaced extract is rejected");
+    assert!(error.to_string().contains("differs"), "{error:#}");
 }

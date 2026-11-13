@@ -78,7 +78,8 @@ struct TrafficHeader {
 
 pub fn write_traffic_bundle(path: impl AsRef<Path>, bundle: &TrafficSpeedBundle) -> Result<()> {
     bundle.validate().map_err(anyhow::Error::msg)?;
-    let mut writer = SectionWriter::new();
+    let path = path.as_ref();
+    let mut writer = SectionWriter::create(path)?;
     writer.write_bincode(&TRAFFIC_TAG)?;
     writer.write_bincode(&TrafficHeader {
         schema_version: bundle.schema_version,
@@ -102,7 +103,7 @@ pub fn write_traffic_bundle(path: impl AsRef<Path>, bundle: &TrafficSpeedBundle)
             .collect::<Vec<_>>(),
     )?;
     writer.write_u32s(&bundle.feature_patterns)?;
-    writer.finish(path.as_ref())
+    writer.finish()
 }
 
 pub fn read_traffic_bundle(path: impl AsRef<Path>) -> Result<TrafficSpeedBundle> {

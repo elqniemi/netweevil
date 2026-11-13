@@ -466,7 +466,8 @@ pub(crate) fn topology(nodes: &[(f64, f64, f64)], edges: &[DirectedEdge]) -> Top
         edge_layers: TopologyEdgeLayers::from_directed_edges(edges),
         turn_restrictions: Vec::new(),
         names: Vec::new(),
-        edge_based_topology: build_edge_based_topology(nodes.len(), edges),
+        edge_based_topology: build_edge_based_topology(nodes.len(), edges)
+            .expect("transitions fit"),
         spatial_index: None,
         node_component_ids: vec![0; nodes.len()],
         edge_component_ids: vec![0; edges.len()],

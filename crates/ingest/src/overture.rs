@@ -98,7 +98,7 @@ pub(crate) fn scan_overture(
     Ok(ScanOutput {
         pending_ways: state.pending_ways,
         restriction_candidates,
-        node_coords: state.node_coords,
+        node_coords: state.node_coords.into_iter().collect(),
         traffic_signal_nodes: Default::default(),
         junction_nodes: Default::default(),
         counts: state.counts,

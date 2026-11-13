@@ -10,16 +10,17 @@
 //! bookkeeping.
 
 use std::collections::BTreeMap;
-use std::fs::File;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use netweevil_core::{AdminArea, NO_ADMIN_AREA, TopologyNode};
-use osmpbfreader::{OsmId, OsmObj, OsmPbfReader, Relation};
+use osmpbfreader::{OsmId, OsmObj, Relation};
 use rayon::prelude::*;
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+use crate::pbf::{IdIndex, ObjectKind, OsmSource, PbfFile};
 
 /// `admin_level` values NetWeevil keeps.
 const COUNTRY_LEVEL: u8 = 2;
@@ -175,61 +176,68 @@ fn close_rings(ways: Vec<Vec<i64>>) -> Option<Vec<Vec<i64>>> {
 }
 
 /// Reads the admin boundaries of an OSM PBF: relations first, then their
-/// member ways, then the ways' nodes.
+/// member ways, then the ways' nodes, each pass decoded in parallel.
 pub(crate) fn read_osm_boundaries(path: &Path) -> Result<(Vec<AdminBoundary>, Vec<i64>)> {
-    let open = || -> Result<OsmPbfReader<File>> {
-        Ok(OsmPbfReader::new(File::open(path).with_context(|| {
-            format!("opening boundaries {}", path.display())
-        })?))
-    };
+    let mut pbf =
+        PbfFile::open(path).with_context(|| format!("opening boundaries {}", path.display()))?;
     let mut candidates = Vec::new();
-    for object in open()?.iter() {
-        if let OsmObj::Relation(relation) = object.context("reading PBF relation")?
-            && let Some(candidate) = parse_admin_relation(&relation)
-        {
-            candidates.push(candidate);
-        }
+    pbf.read_pass(
+        ObjectKind::Relation,
+        |objects| {
+            objects
+                .filter_map(|object| match object {
+                    OsmObj::Relation(relation) => parse_admin_relation(&relation),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        },
+        |block| candidates.extend(block),
+        &mut |_| {},
+    )?;
+    let wanted = IdIndex::new(
+        candidates
+            .iter()
+            .flat_map(|candidate| candidate.member_way_ids.iter().copied())
+            .collect(),
+    );
+    let mut way_nodes = FxHashMap::default();
+    if !wanted.is_empty() {
+        pbf.read_pass(
+            ObjectKind::Way,
+            |objects| {
+                objects
+                    .filter_map(|object| match object {
+                        OsmObj::Way(way) if wanted.contains(way.id.0) => {
+                            Some((way.id.0, way.nodes.iter().map(|node| node.0).collect()))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<(i64, Vec<i64>)>>()
+            },
+            |block| way_nodes.extend(block),
+            &mut |_| {},
+        )?;
     }
-    let way_nodes = load_boundary_ways(path, &candidates)?;
-    let node_ids = boundary_node_ids(&way_nodes);
+    let node_ids = IdIndex::new(way_nodes.values().flatten().copied().collect());
     let mut node_coords = FxHashMap::default();
-    for object in open()?.iter() {
-        if let OsmObj::Node(node) = object.context("reading PBF node")?
-            && node_ids.contains(&node.id.0)
-        {
-            node_coords.insert(node.id.0, (node.lon(), node.lat()));
-        }
+    if !node_ids.is_empty() {
+        pbf.read_pass(
+            ObjectKind::Node,
+            |objects| {
+                objects
+                    .filter_map(|object| match object {
+                        OsmObj::Node(node) if node_ids.contains(node.id.0) => {
+                            Some((node.id.0, (node.lon(), node.lat())))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+            },
+            |block| node_coords.extend(block),
+            &mut |_| {},
+        )?;
     }
     Ok(assemble_boundaries(&candidates, &way_nodes, &node_coords))
-}
-
-/// Node lists of the member ways of `candidates`.
-pub(crate) fn load_boundary_ways(
-    path: &Path,
-    candidates: &[AdminRelationCandidate],
-) -> Result<FxHashMap<i64, Vec<i64>>> {
-    let wanted = candidates
-        .iter()
-        .flat_map(|candidate| candidate.member_way_ids.iter().copied())
-        .collect::<FxHashSet<_>>();
-    let mut way_nodes = FxHashMap::default();
-    if wanted.is_empty() {
-        return Ok(way_nodes);
-    }
-    let file =
-        File::open(path).with_context(|| format!("opening boundaries {}", path.display()))?;
-    for object in OsmPbfReader::new(file).iter() {
-        if let OsmObj::Way(way) = object.context("reading PBF way")?
-            && wanted.contains(&way.id.0)
-        {
-            way_nodes.insert(way.id.0, way.nodes.iter().map(|node| node.0).collect());
-        }
-    }
-    Ok(way_nodes)
-}
-
-pub(crate) fn boundary_node_ids(way_nodes: &FxHashMap<i64, Vec<i64>>) -> FxHashSet<i64> {
-    way_nodes.values().flatten().copied().collect()
 }
 
 /// Reads a GeoJSON FeatureCollection of Polygon/MultiPolygon features.

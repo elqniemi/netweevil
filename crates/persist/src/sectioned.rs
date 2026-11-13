@@ -130,22 +130,68 @@ fn inflate_chunked(payload: &[u8]) -> Result<Vec<u8>> {
     Ok(inflated)
 }
 
-/// Collects encoded sections and writes them, deflating large sections in
-/// parallel when that saves at least a tenth of their size.
+/// Streams encoded sections to a bundle file as they are produced,
+/// deflating large sections on all cores when that saves at least a tenth
+/// of their size. Only the section being written is held in memory.
 pub(crate) struct SectionWriter {
-    sections: Vec<Vec<u8>>,
+    sink: SectionSink,
+}
+
+enum SectionSink {
+    File(crate::AtomicFile),
+    #[cfg(test)]
+    Memory(Vec<u8>),
+}
+
+impl SectionSink {
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        match self {
+            Self::File(file) => file.write_all(bytes),
+            #[cfg(test)]
+            Self::Memory(buffer) => buffer.write_all(bytes),
+        }
+    }
 }
 
 impl SectionWriter {
-    pub(crate) fn new() -> Self {
+    /// Starts the bundle at `path`; it replaces any file there once
+    /// [`Self::finish`] succeeds.
+    pub(crate) fn create(path: &Path) -> Result<Self> {
+        let mut writer = Self {
+            sink: SectionSink::File(crate::AtomicFile::create(path)?),
+        };
+        writer.write_magic()?;
+        Ok(writer)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn in_memory() -> Self {
         Self {
-            sections: Vec::new(),
+            sink: SectionSink::Memory(CURRENT_MAGIC.to_vec()),
         }
     }
 
-    fn write_section(&mut self, bytes: Vec<u8>) -> Result<()> {
-        self.sections.push(bytes);
-        Ok(())
+    fn write_magic(&mut self) -> Result<()> {
+        self.sink
+            .write_all(CURRENT_MAGIC)
+            .context("writing bundle magic")
+    }
+
+    fn write_section(&mut self, section: Vec<u8>) -> Result<()> {
+        let (header, payload) = if section.len() >= DEFLATE_MIN_BYTES {
+            let compressed = deflate_chunked(&section).context("compressing bundle section")?;
+            if compressed.len() * 10 <= section.len() * 9 {
+                (compressed.len() as u64 | DEFLATED, compressed)
+            } else {
+                (section.len() as u64, section)
+            }
+        } else {
+            (section.len() as u64, section)
+        };
+        self.sink
+            .write_all(&header.to_le_bytes())
+            .context("writing section length")?;
+        self.sink.write_all(&payload).context("writing section")
     }
 
     pub(crate) fn write_bincode<T: Serialize>(&mut self, value: &T) -> Result<()> {
@@ -200,35 +246,21 @@ impl SectionWriter {
         self.write_u32s(&indexes)
     }
 
-    fn finish_into(self, writer: &mut impl Write) -> Result<()> {
-        let framed: Vec<(u64, Vec<u8>)> = self
-            .sections
-            .into_par_iter()
-            .map(|section| {
-                if section.len() >= DEFLATE_MIN_BYTES {
-                    let compressed = deflate_chunked(&section)?;
-                    if compressed.len() * 10 <= section.len() * 9 {
-                        return Ok((compressed.len() as u64 | DEFLATED, compressed));
-                    }
-                }
-                Ok((section.len() as u64, section))
-            })
-            .collect::<std::io::Result<_>>()
-            .context("compressing bundle sections")?;
-        writer
-            .write_all(CURRENT_MAGIC)
-            .context("writing bundle magic")?;
-        for (header, payload) in framed {
-            writer
-                .write_all(&header.to_le_bytes())
-                .context("writing section length")?;
-            writer.write_all(&payload).context("writing section")?;
+    /// Completes the bundle and moves it into place.
+    pub(crate) fn finish(self) -> Result<()> {
+        match self.sink {
+            SectionSink::File(file) => file.commit(),
+            #[cfg(test)]
+            SectionSink::Memory(_) => Ok(()),
         }
-        writer.flush().context("flushing bundle")
     }
 
-    pub(crate) fn finish(self, path: &Path) -> Result<()> {
-        crate::write_atomically(path, |writer| self.finish_into(writer))
+    #[cfg(test)]
+    pub(crate) fn into_bytes(self) -> Vec<u8> {
+        match self.sink {
+            SectionSink::Memory(buffer) => buffer,
+            SectionSink::File(_) => panic!("file-backed section writer"),
+        }
     }
 }
 
@@ -405,9 +437,9 @@ pub(crate) fn write_acceleration_sectioned(
     path: &Path,
     bundle: &DatasetAccelerationBundle,
 ) -> Result<()> {
-    let mut writer = SectionWriter::new();
+    let mut writer = SectionWriter::create(path)?;
     encode_acceleration(&mut writer, bundle)?;
-    writer.finish(path)
+    writer.finish()
 }
 
 fn encode_acceleration(
@@ -517,9 +549,9 @@ fn guidance_fields(record: &EdgeGuidance) -> [Option<u32>; GUIDANCE_FIELDS] {
 }
 
 pub(crate) fn write_edge_names_sectioned(path: &Path, bundle: &EdgeNameBundle) -> Result<()> {
-    let mut writer = SectionWriter::new();
+    let mut writer = SectionWriter::create(path)?;
     encode_edge_names(&mut writer, bundle)?;
-    writer.finish(path)
+    writer.finish()
 }
 
 fn encode_edge_names(writer: &mut SectionWriter, bundle: &EdgeNameBundle) -> Result<()> {
@@ -631,9 +663,9 @@ pub(crate) fn write_compiled_profile_sectioned(
     path: &Path,
     bundle: &CompiledProfileBundle,
 ) -> Result<()> {
-    let mut writer = SectionWriter::new();
+    let mut writer = SectionWriter::create(path)?;
     encode_compiled_profile(&mut writer, bundle)?;
-    writer.finish(path)
+    writer.finish()
 }
 
 fn encode_compiled_profile(
@@ -831,7 +863,7 @@ pub(crate) fn write_source_snapshot_sectioned<W: Serialize, R: Serialize, E: Ser
         .sum::<usize>();
     ensure_len("way node ids", snapshot.way_node_ids.len(), node_refs)?;
 
-    let mut writer = SectionWriter::new();
+    let mut writer = SectionWriter::create(path)?;
     writer.write_bincode(&"source_snapshot")?;
     writer.write_bincode(&SourceSnapshotHeader {
         schema_version: snapshot.schema_version,
@@ -881,7 +913,7 @@ pub(crate) fn write_source_snapshot_sectioned<W: Serialize, R: Serialize, E: Ser
     writer.write_i64s(&snapshot.other_way_node_ids)?;
     writer.write_i64s(&snapshot.other_relation_ids)?;
     writer.write_bincode(&snapshot.extras)?;
-    writer.finish(path)
+    writer.finish()
 }
 
 pub(crate) fn read_source_snapshot_sectioned<W, R, E>(
@@ -1177,9 +1209,9 @@ fn derived_edge_component_ids(
 }
 
 pub(crate) fn write_topology_sectioned(path: &Path, bundle: &TopologyBundle) -> Result<()> {
-    let mut writer = SectionWriter::new();
+    let mut writer = SectionWriter::create(path)?;
     encode_topology(&mut writer, bundle)?;
-    writer.finish(path)
+    writer.finish()
 }
 
 fn encode_topology(writer: &mut SectionWriter, bundle: &TopologyBundle) -> Result<()> {
@@ -1570,13 +1602,13 @@ pub(crate) fn write_elevation_raster_sectioned(
             header.tile_count()
         );
     }
-    let mut writer = SectionWriter::new();
+    let mut writer = SectionWriter::create(path)?;
     writer.write_bincode(&"elevation")?;
     writer.write_bincode(header)?;
     for tile in tiles {
         writer.write_f64s(tile)?;
     }
-    writer.finish(path)
+    writer.finish()
 }
 
 /// Lazily decoded elevation raster bundle backed by a memory map.

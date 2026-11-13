@@ -381,7 +381,7 @@ pub(crate) fn scan_geopackages(
     Ok(ScanOutput {
         pending_ways,
         restriction_candidates: Vec::new(),
-        node_coords,
+        node_coords: node_coords.into_iter().collect(),
         traffic_signal_nodes: FxHashSet::default(),
         junction_nodes: Default::default(),
         counts: ObjectCounts {

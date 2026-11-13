@@ -3,7 +3,7 @@ use std::path::Path;
 
 use rustc_hash::FxHashMap;
 
-use crate::scan::{ObjectCounts, ScanOutput};
+use crate::scan::{NodeCoords, ObjectCounts, ScanOutput};
 use crate::test_util::pending_way;
 
 fn tags(pairs: &[(&str, &str)]) -> Tags {
@@ -137,7 +137,7 @@ fn topology_build_keeps_lanes_per_direction_and_exit_numbers_on_links() {
     link.reverse_access_mask = netweevil_core::AccessMask::new(0);
     let scan = ScanOutput {
         pending_ways: vec![road, link],
-        node_coords: FxHashMap::from_iter([
+        node_coords: NodeCoords::from_iter([
             (100, (6.0, 53.0, 0.0)),
             (200, (6.001, 53.0, 0.0)),
             (300, (6.002, 53.0, 0.0)),

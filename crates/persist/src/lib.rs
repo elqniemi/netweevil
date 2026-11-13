@@ -242,27 +242,70 @@ pub(crate) fn write_atomically(
     path: &Path,
     write: impl FnOnce(&mut BufWriter<File>) -> Result<()>,
 ) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("creating directory {}", parent.display()))?;
-    }
-    let mut temporary = path.as_os_str().to_owned();
-    temporary.push(format!(".partial-{}", std::process::id()));
-    let temporary = PathBuf::from(temporary);
-    let result = (|| {
+    let mut file = AtomicFile::create(path)?;
+    write(&mut file.writer)?;
+    file.commit()
+}
+
+/// A file written through a sibling temporary file that [`Self::commit`]
+/// renames into place. Dropping it uncommitted removes the temporary file.
+pub(crate) struct AtomicFile {
+    writer: BufWriter<File>,
+    temporary: PathBuf,
+    path: PathBuf,
+    committed: bool,
+}
+
+impl AtomicFile {
+    pub(crate) fn create(path: &Path) -> Result<Self> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating directory {}", parent.display()))?;
+        }
+        let mut temporary = path.as_os_str().to_owned();
+        temporary.push(format!(".partial-{}", std::process::id()));
+        let temporary = PathBuf::from(temporary);
         let file = File::create(&temporary)
             .with_context(|| format!("creating {}", temporary.display()))?;
-        let mut writer = BufWriter::new(file);
-        write(&mut writer)?;
-        writer
-            .flush()
-            .with_context(|| format!("flushing {}", temporary.display()))?;
-        fs::rename(&temporary, path).with_context(|| format!("replacing {}", path.display()))
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+        Ok(Self {
+            writer: BufWriter::new(file),
+            temporary,
+            path: path.to_path_buf(),
+            committed: false,
+        })
     }
-    result
+
+    pub(crate) fn commit(mut self) -> Result<()> {
+        self.writer
+            .flush()
+            .with_context(|| format!("flushing {}", self.temporary.display()))?;
+        fs::rename(&self.temporary, &self.path)
+            .with_context(|| format!("replacing {}", self.path.display()))?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Write for AtomicFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.writer.write(buf)
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        self.writer.write_all(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+impl Drop for AtomicFile {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = fs::remove_file(&self.temporary);
+        }
+    }
 }
 
 pub fn read_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
@@ -272,7 +315,7 @@ pub fn read_json<T: DeserializeOwned>(path: impl AsRef<Path>) -> Result<T> {
 }
 
 /// Schema version of [`SourceSnapshot`]. Readers accept this value only.
-pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: u32 = 4;
+pub const SOURCE_SNAPSHOT_SCHEMA_VERSION: u32 = 5;
 
 /// The OSM source objects a dataset retains so `dataset update` can apply
 /// change files without the original extract.

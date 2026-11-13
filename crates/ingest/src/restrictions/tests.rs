@@ -1,10 +1,11 @@
 use super::{
-    FxHashMap, RestrictionKind, TurnRestrictionCandidate, ViaSpec, build_turn_restrictions,
+    RestrictionKind, TurnRestrictionCandidate, ViaSpec, build_turn_restrictions,
     parse_turn_restriction_relation,
 };
+use crate::pbf::IdIndex;
 use crate::scan::RuleSetInterner;
 use crate::test_util::{edge, pending_way};
-use netweevil_core::{AccessMask, EdgeId, NodeId, TemporalEffect, TurnRestrictionKind};
+use netweevil_core::{AccessMask, EdgeId, TemporalEffect, TurnRestrictionKind};
 use osmpbfreader::{NodeId as OsmNodeId, OsmId, Ref, Relation, RelationId, Tags, WayId};
 
 fn relation(id: i64, tags: &[(&str, &str)], via: OsmId) -> Relation {
@@ -43,13 +44,9 @@ fn only_turn(
     }
 }
 
-/// Maps OSM node `osm_id` to graph node `index` for each listed id.
-fn node_lookup(osm_ids: &[i64]) -> FxHashMap<i64, (NodeId, f64, f64, f64)> {
-    osm_ids
-        .iter()
-        .enumerate()
-        .map(|(index, &osm_id)| (osm_id, (NodeId(index as u32), 0.0, 0.0, 0.0)))
-        .collect()
+/// Maps OSM node `osm_id` to graph node `index` for each listed, sorted id.
+fn node_lookup(osm_ids: &[i64]) -> IdIndex {
+    IdIndex::from_sorted(osm_ids.to_vec())
 }
 
 #[test]
@@ -222,8 +219,7 @@ fn parses_time_conditional_and_lifted_restrictions() {
 #[test]
 fn expands_only_turn_relations_into_prohibited_transitions() {
     let candidates = [only_turn(7, 10, ViaSpec::Node(100), 11)];
-    let mut node_lookup = FxHashMap::default();
-    node_lookup.insert(100_i64, (NodeId(1), 0.0, 0.0, 0.0));
+    let node_lookup = node_lookup(&[99, 100]);
     let edges = [edge(0, 0, 1, 10), edge(1, 1, 2, 11), edge(2, 1, 3, 12)];
 
     let restrictions = build_turn_restrictions(&candidates, &[], &node_lookup, &edges);
