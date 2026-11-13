@@ -2,6 +2,20 @@
 
 All notable changes to NetWeevil are in this file.
 
+## Unreleased
+
+### Added
+
+- The `netweevil-indoor` crate routes on walkable surfaces (a navigation
+  mesh), on node/edge networks, and on both, indoors and outdoors across
+  levels. It compiles an input document of surfaces, edges, nodes, portals,
+  barriers, verticals and POIs into one graph, and gives routes, costs from
+  one point to many, multi-stop trips, closures, access groups and
+  reachability checks. A profile `mode` (`mixed`, `edges_only`,
+  `surfaces_only`) limits the element kinds that a route uses. The concepts
+  page "Indoor and surface routing" describes the model. The CLI and the API
+  do not use the crate yet.
+
 ## 0.4.0-alpha - 2026-10-28
 
 ### Breaking changes

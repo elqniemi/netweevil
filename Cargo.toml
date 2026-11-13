@@ -3,6 +3,7 @@ members = [
     "crates/api",
     "crates/cli",
     "crates/core",
+    "crates/indoor",
     "crates/ingest",
     "crates/persist",
     "crates/profile",
@@ -49,6 +50,7 @@ rustc-hash = "2.1.1"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.145", features = ["float_roundtrip"] }
 serde_yaml = "0.9.34"
+spade = "2.15.1"
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 tiff = { version = "0.11.3", default-features = false, features = ["deflate", "lzw"] }
 time = { version = "0.3.44", features = ["formatting", "parsing", "serde"] }

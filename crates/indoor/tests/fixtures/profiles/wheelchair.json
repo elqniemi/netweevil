@@ -1,0 +1,49 @@
+{
+  "name": "wheelchair",
+  "speed": 1.0,
+  "class_factor": {
+    "corridor": 1.0,
+    "room": 1.6,
+    "service": 2.5,
+    "stairs": 1.0,
+    "lift": 1.0,
+    "entrance": 1.0,
+    "connector": 1.0,
+    "indoor_way": 1.0,
+    "sidewalk": 1.0,
+    "crossing": 1.0,
+    "footway": 1.0,
+    "plaza": 1.0,
+    "ramp": 1.0,
+    "travelator": 1.0,
+    "outdoor": 1.0,
+    "road": null
+  },
+  "tag_factor": {},
+  "avoid_tags": [
+    "stairs",
+    "steps"
+  ],
+  "require_tags": [],
+  "step_free": true,
+  "min_width": 0.85,
+  "incline": {
+    "up": 6.0,
+    "down": 2.0,
+    "max": 0.08
+  },
+  "kind_penalty": {
+    "door": 3.0,
+    "crossing": 0.0,
+    "lift": 0.0
+  },
+  "kind_factor": {
+    "stairs": null,
+    "escalator": null,
+    "lift": 1.0
+  },
+  "turn_penalty": 0.0,
+  "clearance": 0.5,
+  "corner": "round",
+  "corner_radius": 0.8
+}

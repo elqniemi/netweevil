@@ -1,0 +1,21 @@
+[package]
+name = "netweevil-indoor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "NetWeevil indoor and surface routing: navmesh walks, edge networks, portals and verticals across levels"
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bincode.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json = { workspace = true, features = ["raw_value"] }
+spade.workspace = true
+
+[lints]
+workspace = true

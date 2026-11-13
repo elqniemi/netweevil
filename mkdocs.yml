@@ -91,6 +91,7 @@ nav:
       - State directory: concepts/state-layout.md
       - Profiles: concepts/profiles.md
       - Routing engine: concepts/routing-engine.md
+      - Indoor and surface routing: concepts/indoor-routing.md
   - Guides:
       - Street routing:
           - Routing: guides/routing.md

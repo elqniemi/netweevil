@@ -1,0 +1,117 @@
+{
+ "version": 1,
+ "crs": "local",
+ "levels": [
+  {
+   "id": "L0",
+   "z": 0.0,
+   "props": {}
+  }
+ ],
+ "defaults": {
+  "snap": 0.05,
+  "edge_attach": 1.0
+ },
+ "surfaces": [
+  {
+   "id": "A",
+   "level": "L0",
+   "polygon": [
+    [
+     [
+      0,
+      0
+     ],
+     [
+      5,
+      0
+     ],
+     [
+      5,
+      4
+     ],
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      0
+     ]
+    ]
+   ],
+   "space": "A",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "B",
+   "level": "L0",
+   "polygon": [
+    [
+     [
+      5,
+      0
+     ],
+     [
+      10,
+      0
+     ],
+     [
+      10,
+      4
+     ],
+     [
+      5,
+      4
+     ],
+     [
+      5,
+      0
+     ]
+    ]
+   ],
+   "space": "B",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {}
+  }
+ ],
+ "edges": [],
+ "nodes": [],
+ "portals": [
+  {
+   "id": "d1",
+   "kind": "door",
+   "segment": [
+    [
+     5,
+     1.55
+    ],
+    [
+     5,
+     2.45
+    ]
+   ],
+   "level": "L0",
+   "spaces": [
+    "A",
+    "B"
+   ],
+   "penalty": 0.0,
+   "width": 0.9,
+   "step_free": true,
+   "tags": [],
+   "props": {}
+  }
+ ],
+ "barriers": [],
+ "verticals": []
+}

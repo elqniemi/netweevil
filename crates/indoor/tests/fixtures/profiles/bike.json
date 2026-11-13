@@ -1,0 +1,47 @@
+{
+  "name": "bike",
+  "speed": 4.5,
+  "class_factor": {
+    "road": 1.0,
+    "crossing": 1.2,
+    "sidewalk": null,
+    "footway": 2.0,
+    "plaza": 1.5,
+    "ramp": 1.0,
+    "travelator": null,
+    "corridor": null,
+    "room": null,
+    "service": null,
+    "stairs": null,
+    "lift": null
+  },
+  "tag_factor": {
+    "unpaved": 1.5
+  },
+  "avoid_tags": [
+    "steps",
+    "stairs",
+    "indoor"
+  ],
+  "require_tags": [],
+  "step_free": true,
+  "min_width": 0.6,
+  "incline": {
+    "up": 8.0,
+    "down": 0.0,
+    "max": 0.15
+  },
+  "kind_penalty": {
+    "crossing": 0.0,
+    "door": 10.0
+  },
+  "kind_factor": {
+    "stairs": null,
+    "lift": null,
+    "escalator": null
+  },
+  "turn_penalty": 0.5,
+  "clearance": 0.4,
+  "corner": "round",
+  "corner_radius": 2.0
+}

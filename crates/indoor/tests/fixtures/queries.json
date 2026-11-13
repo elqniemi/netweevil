@@ -1,0 +1,514 @@
+{
+ "version": 1,
+ "profiles_dir": "profiles",
+ "fixtures": {
+  "two_rooms_door.json": [
+   {
+    "name": "through_door",
+    "profile": "walk",
+    "from": {
+     "at": [
+      2.5,
+      2
+     ],
+     "level": "L0"
+    },
+    "to": {
+     "at": [
+      7.5,
+      2
+     ],
+     "level": "L0"
+    },
+    "expect": {
+     "found": true,
+     "must_visit_spaces": [
+      "A",
+      "B"
+     ],
+     "must_use_ids": [
+      "d1"
+     ],
+     "must_use_kind": [
+      "door"
+     ],
+     "min_length": 5.0,
+     "max_length": 5.6,
+     "min_duration": 3.8,
+     "max_duration": 12.0
+    }
+   },
+   {
+    "name": "corner_to_corner",
+    "profile": "walk",
+    "from": {
+     "at": [
+      0.5,
+      3.5
+     ],
+     "level": "L0"
+    },
+    "to": {
+     "at": [
+      9.5,
+      0.5
+     ],
+     "level": "L0"
+    },
+    "expect": {
+     "found": true,
+     "must_use_ids": [
+      "d1"
+     ],
+     "min_length": 9.4,
+     "max_length": 11.0
+    }
+   },
+   {
+    "name": "by_space",
+    "profile": "wheelchair",
+    "from": {
+     "space": "A"
+    },
+    "to": {
+     "space": "B"
+    },
+    "expect": {
+     "found": true,
+     "must_use_ids": [
+      "d1"
+     ]
+    }
+   }
+  ],
+  "l_corridor.json": [
+   {
+    "name": "around_the_corner",
+    "profile": "walk",
+    "from": {
+     "space": "R2"
+    },
+    "to": {
+     "space": "R3"
+    },
+    "expect": {
+     "found": true,
+     "must_visit_spaces": [
+      "R2",
+      "corridor",
+      "R3"
+     ],
+     "must_use_ids": [
+      "d_r2",
+      "d_r3"
+     ],
+     "min_length": 25.0,
+     "max_length": 36.0,
+     "forbid_spaces": [
+      "R1"
+     ],
+     "note": "the corridor is walked near its centreline, not along the inner wall"
+    }
+   },
+   {
+    "name": "corner_sharp_is_shorter",
+    "profile": "walk",
+    "from": {
+     "at": [
+      1,
+      15
+     ],
+     "level": "L0"
+    },
+    "to": {
+     "at": [
+      15,
+      1
+     ],
+     "level": "L0"
+    },
+    "expect": {
+     "found": true,
+     "must_visit_spaces": [
+      "corridor"
+     ],
+     "min_length": 26.0,
+     "max_length": 28.5,
+     "note": "28 m Manhattan; clearance/rounding cut the inner corner at (2,2)"
+    }
+   },
+   {
+    "name": "inner_room",
+    "profile": "walk",
+    "from": {
+     "space": "R1"
+    },
+    "to": {
+     "portal": "d_r3"
+    },
+    "expect": {
+     "found": true,
+     "must_use_ids": [
+      "d_r1"
+     ],
+     "max_length": 16.0
+    }
+   }
+  ],
+  "two_floors.json": [
+   {
+    "name": "walk_up_takes_stairs",
+    "profile": "walk",
+    "from": {
+     "space": "L0_Ra"
+    },
+    "to": {
+     "space": "L1_Ra"
+    },
+    "expect": {
+     "found": true,
+     "must_use_ids": [
+      "stair_1"
+     ],
+     "must_use_kind": [
+      "stairs"
+     ],
+     "forbid_kind": [
+      "lift"
+     ],
+     "must_visit_spaces": [
+      "L0_Ra",
+      "L0_corridor",
+      "L0_stairs",
+      "L1_stairs",
+      "L1_corridor",
+      "L1_Ra"
+     ]
+    }
+   },
+   {
+    "name": "wheelchair_takes_lift",
+    "profile": "wheelchair",
+    "from": {
+     "space": "L0_Ra"
+    },
+    "to": {
+     "space": "L1_Rb"
+    },
+    "expect": {
+     "found": true,
+     "must_use_ids": [
+      "lift_1"
+     ],
+     "forbid_kind": [
+      "stairs"
+     ],
+     "min_duration": 20.0
+    }
+   },
+   {
+    "name": "wheelchair_blocked_by_threshold",
+    "profile": "wheelchair",
+    "from": {
+     "space": "L0_Rb"
+    },
+    "to": {
+     "space": "L1_Ra"
+    },
+    "expect": {
+     "found": false
+    }
+   },
+   {
+    "name": "walk_threshold_ok",
+    "profile": "walk",
+    "from": {
+     "space": "L0_Rb"
+    },
+    "to": {
+     "space": "L0_Ra"
+    },
+    "expect": {
+     "found": true,
+     "must_use_ids": [
+      "L0_d_rb",
+      "L0_d_ra"
+     ]
+    }
+   },
+   {
+    "name": "3d_point_on_upper_floor",
+    "profile": "walk",
+    "from": {
+     "at": [
+      3,
+      1.5
+     ],
+     "level": "L0"
+    },
+    "to": {
+     "at": [
+      3,
+      1.5,
+      3.5
+     ]
+    },
+    "expect": {
+     "found": true,
+     "must_use_kind": [
+      "stairs"
+     ],
+     "min_length": 18.0,
+     "max_length": 26.0
+    }
+   }
+  ],
+  "street_crossing.json": [
+   {
+    "name": "signals",
+    "profile": "walk",
+    "from": {
+     "at": [
+      21,
+      2
+     ],
+     "level": "street"
+    },
+    "to": {
+     "at": [
+      21,
+      14
+     ],
+     "level": "street"
+    },
+    "expect": {
+     "found": true,
+     "must_use_ids": [
+      "tl_S",
+      "tl_N"
+     ],
+     "forbid_spaces": [
+      "road_W",
+      "road_M",
+      "road_E"
+     ],
+     "min_duration": 36.0,
+     "max_duration": 45.0
+    }
+   },
+   {
+    "name": "zebra_wins_midblock",
+    "profile": "walk",
+    "from": {
+     "at": [
+      45,
+      2
+     ],
+     "level": "street"
+    },
+    "to": {
+     "at": [
+      45,
+      14
+     ],
+     "level": "street"
+    },
+    "expect": {
+     "found": true,
+     "must_use_ids": [
+      "zebra_S"
+     ],
+     "forbid_ids": [
+      "tl_S"
+     ]
+    }
+   },
+   {
+    "name": "travelator_east",
+    "profile": "walk",
+    "from": {
+     "at": [
+      50,
+      30
+     ],
+     "level": "street"
+    },
+    "to": {
+     "at": [
+      90,
+      30
+     ],
+     "level": "street"
+    },
+    "expect": {
+     "found": true,
+     "must_use_ids": [
+      "travelator",
+      "path_down_oneway"
+     ],
+     "max_duration": 45.0
+    }
+   },
+   {
+    "name": "oneway_forces_detour",
+    "profile": "walk",
+    "from": {
+     "at": [
+      90,
+      30
+     ],
+     "level": "street"
+    },
+    "to": {
+     "at": [
+      50,
+      30
+     ],
+     "level": "street"
+    },
+    "expect": {
+     "found": true,
+     "forbid_ids": [
+      "travelator"
+     ],
+     "must_visit_spaces": [
+      "sidewalk_N"
+     ],
+     "min_length": 64.0
+    }
+   },
+   {
+    "name": "wheelchair_no_steps",
+    "profile": "wheelchair",
+    "from": {
+     "at": [
+      21,
+      2
+     ],
+     "level": "street"
+    },
+    "to": {
+     "at": [
+      30,
+      -30,
+      2.0
+     ]
+    },
+    "expect": {
+     "found": false
+    }
+   },
+   {
+    "name": "bike_uses_road",
+    "profile": "bike",
+    "from": {
+     "at": [
+      10,
+      8
+     ],
+     "level": "street"
+    },
+    "to": {
+     "at": [
+      90,
+      8
+     ],
+     "level": "street"
+    },
+    "expect": {
+     "found": true,
+     "must_visit_spaces": [
+      "road_W",
+      "road_E"
+     ],
+     "max_duration": 25.0
+    }
+   }
+  ],
+  "ramp.json": [
+   {
+    "name": "walk_takes_steep",
+    "profile": "walk",
+    "from": {
+     "at": [
+      5,
+      5
+     ],
+     "level": "site"
+    },
+    "to": {
+     "at": [
+      25,
+      5
+     ],
+     "level": "site"
+    },
+    "expect": {
+     "found": true,
+     "must_visit_spaces": [
+      "plaza_low",
+      "steep_ramp",
+      "plaza_high"
+     ],
+     "forbid_spaces": [
+      "long_ramp"
+     ],
+     "max_length": 21.0
+    }
+   },
+   {
+    "name": "wheelchair_takes_long",
+    "profile": "wheelchair",
+    "from": {
+     "at": [
+      5,
+      5
+     ],
+     "level": "site"
+    },
+    "to": {
+     "at": [
+      25,
+      5
+     ],
+     "level": "site"
+    },
+    "expect": {
+     "found": true,
+     "must_visit_spaces": [
+      "plaza_low",
+      "long_ramp",
+      "plaza_high"
+     ],
+     "forbid_spaces": [
+      "steep_ramp"
+     ],
+     "min_length": 35.0
+    }
+   },
+   {
+    "name": "climb_reported",
+    "profile": "walk",
+    "from": {
+     "at": [
+      1,
+      1
+     ],
+     "level": "site"
+    },
+    "to": {
+     "at": [
+      29,
+      9
+     ],
+     "level": "site"
+    },
+    "expect": {
+     "found": true,
+     "min_climb": 1.15,
+     "max_climb": 1.25
+    }
+   }
+  ]
+ }
+}
