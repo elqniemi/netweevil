@@ -2,6 +2,17 @@
 
 All notable changes to NetWeevil are in this file.
 
+## Unreleased
+
+### Added
+
+- `netweevil dataset fetch <REGION>` downloads an OSM extract from Geofabrik.
+  `<REGION>` is a Geofabrik path (`europe/netherlands`), a region id or a
+  region name; `--url` takes any `.osm.pbf` URL and `--list [FILTER]` prints
+  the regions. The download continues a partial file with a range request,
+  checks the Geofabrik `.md5` file and skips a file that is current.
+  `--import` imports the file as a dataset in the same command.
+
 ## 0.4.0-alpha - 2026-10-28
 
 ### Breaking changes

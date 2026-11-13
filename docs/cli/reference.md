@@ -47,6 +47,7 @@ Usage: netweevil dataset <COMMAND>
 
 Commands:
   import  Import a road network from OSM, Overture or GeoPackage sources
+  fetch   Download an OSM extract from Geofabrik or a URL, and optionally import it
   update  Apply OSM change files or a newer extract to an imported OSM dataset
   audit   Compare a GeoPackage dataset with its source files
   list    List the imported datasets
@@ -83,6 +84,26 @@ Options:
           Vertical datum label recorded with DEM heights (for example `HKPD`)
   -h, --help
           Print help
+```
+
+#### `netweevil dataset fetch` { #netweevil-dataset-fetch }
+
+```text
+Download an OSM extract from Geofabrik or a URL, and optionally import it
+
+Usage: netweevil dataset fetch [OPTIONS] <REGION|--url <URL>|--list [<FILTER>]>
+
+Arguments:
+  [REGION]  Geofabrik region: a path such as `europe/netherlands` or `europe/germany/berlin`, or a region id or name such as `netherlands` looked up in the Geofabrik index
+
+Options:
+      --url <URL>        Direct `.osm.pbf` URL to download instead of a Geofabrik region
+      --list [<FILTER>]  Print the Geofabrik region ids (id, name, parent), optionally filtered by a substring of the id or name
+      --out <OUT>        Directory for the downloaded file [default: datasets]
+      --import           Import the downloaded file as a dataset
+      --name <NAME>      Id of the imported dataset; derived from the region or file name when omitted
+      --force            Download again even when the local file is current
+  -h, --help             Print help
 ```
 
 #### `netweevil dataset update` { #netweevil-dataset-update }
