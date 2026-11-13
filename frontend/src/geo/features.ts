@@ -56,6 +56,8 @@ export const SLOT_COLORS: Record<string, string> = {
   stops: PALETTE.blue,
   probe: PALETTE.ochre,
   traffic_ways: PALETTE.crimson,
+  indoor_origin: PALETTE.crimson,
+  indoor_destination: PALETTE.blue,
 };
 
 const GEOMETRY_TYPES = new Set(["Point", "LineString", "Polygon", "MultiPoint", "MultiLineString", "MultiPolygon"]);

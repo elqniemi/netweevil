@@ -11,9 +11,21 @@ use netweevil_persist::indoor::{
     read_indoor_site_manifest, read_indoor_site_manifests, remove_indoor_site,
 };
 use netweevil_persist::{WorkspacePaths, write_json};
+use netweevil_profile::load_profile;
+use netweevil_query::PreparedRoutingEngine;
 use netweevil_query::read_request_document;
 use netweevil_site::geojson::indoor_route_geojson;
-use netweevil_site::{IndoorRouteRequest, SiteCatalog, build_site, route_indoor};
+use netweevil_site::transit_access::{
+    IndoorStreetEstimator, is_indoor_point, prepare_indoor_transit_request,
+};
+use netweevil_site::{
+    DoorToDoorRequest, IndoorRouteRequest, SiteCatalog, build_site, door_to_door_geojson,
+    door_to_door_route, route_indoor,
+};
+use netweevil_site::{DoorToDoorSettings, IndoorProfileSpec};
+use std::sync::Arc;
+
+use crate::analyze::load_route_execution_inputs;
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum IndoorCommand {
@@ -72,6 +84,23 @@ pub(crate) struct IndoorRouteArgs {
     request: PathBuf,
     /// Result file: `.json` writes the result, `.geojson` one feature per
     /// segment. Omit it to write JSON to the runs directory.
+    #[arg(long)]
+    out: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
+pub(crate) struct DoorToDoorArgs {
+    /// Id of an imported street dataset.
+    #[arg(long)]
+    dataset: String,
+    /// Street routing profile file (YAML or TOML), compiled for the dataset.
+    #[arg(long)]
+    profile: PathBuf,
+    /// Door-to-door request (JSON or YAML).
+    #[arg(long)]
+    request: PathBuf,
+    /// Result file: `.json` writes the result, `.geojson` one feature per
+    /// leg. Omit it to write JSON to the runs directory.
     #[arg(long)]
     out: Option<PathBuf>,
 }
@@ -230,6 +259,64 @@ fn wants_geojson(path: Option<&Path>) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("geojson"))
 }
 
+pub(crate) fn analyze_door_to_door(paths: &WorkspacePaths, args: DoorToDoorArgs) -> Result<()> {
+    let profile = load_profile(&args.profile)?;
+    profile.validate()?;
+    let request: DoorToDoorRequest = read_request_document(&args.request, "door-to-door request")?;
+    let (topology, acceleration, _, compiled) =
+        load_route_execution_inputs(paths, &args.dataset, &profile)?;
+    let engine = PreparedRoutingEngine::new(
+        Arc::new(topology),
+        Arc::new(compiled),
+        acceleration.map(Arc::new),
+    )
+    .context("preparing routing engine")?;
+    let catalog = SiteCatalog::new(paths.clone());
+    let result = door_to_door_route(&engine, &catalog, &request)
+        .with_context(|| format!("door-to-door route '{}'", request.route_id))?;
+    let out = args.out.unwrap_or_else(|| {
+        paths
+            .runs_dir
+            .join(format!("door-to-door-{}.json", request.route_id))
+    });
+    if wants_geojson(Some(&out)) {
+        write_json(&out, &door_to_door_geojson(&result))?;
+    } else {
+        write_json(&out, &result)?;
+    }
+    for w in &result.warnings {
+        eprintln!("warning: {w}");
+    }
+    let legs: Vec<String> = result
+        .legs
+        .iter()
+        .map(|l| match &l.site_id {
+            Some(site) => format!("indoor[{site}] {:.0} s", l.duration_s),
+            None => format!("street {:.0} s", l.duration_s),
+        })
+        .collect();
+    println!(
+        "door-to-door '{}': {:.0} s, {:.0} m: {}",
+        result.route_id,
+        result.summary.duration_s,
+        result.summary.length_m,
+        legs.join(" > ")
+    );
+    for (side, e) in [
+        ("origin", &result.origin_entrance),
+        ("destination", &result.destination_entrance),
+    ] {
+        if let Some(e) = e {
+            println!(
+                "{side} entrance: {} of '{}' (indoor {:.0} s, snapped {:.1} m from the street)",
+                e.entrance.id, e.site_id, e.indoor_duration_s, e.snap_distance_m
+            );
+        }
+    }
+    println!("door-to-door result written to {}", out.display());
+    Ok(())
+}
+
 pub(crate) fn analyze_indoor_route(paths: &WorkspacePaths, args: IndoorRouteArgs) -> Result<()> {
     let request: IndoorRouteRequest = read_request_document(&args.request, "indoor route request")?;
     let catalog = SiteCatalog::new(paths.clone());
@@ -261,4 +348,42 @@ pub(crate) fn analyze_indoor_route(paths: &WorkspacePaths, args: IndoorRouteArgs
     );
     println!("indoor route result written to {}", out.display());
     Ok(())
+}
+
+/// The indoor-aware street estimator for a transit request with an indoor
+/// origin or destination (None otherwise). Moves the indoor ends' `lon`,
+/// `lat` to the indoor points.
+pub(crate) fn indoor_transit_estimator<'a>(
+    catalog: &SiteCatalog,
+    request: &mut netweevil_transit::TransitRouteRequest,
+    inner: Option<&'a dyn netweevil_transit::StreetTimeEstimator>,
+    indoor_profile: &str,
+) -> Result<Option<IndoorStreetEstimator<'a>>> {
+    if !is_indoor_point(&request.origin) && !is_indoor_point(&request.destination) {
+        return Ok(None);
+    }
+    let Some(inner) = inner else {
+        bail!(
+            "transit route '{}' starts or ends indoors; set modes.street_access to network and give --street-dataset and --street-profile",
+            request.route_id
+        );
+    };
+    let profile = if indoor_profile.trim_start().starts_with('{') {
+        IndoorProfileSpec::Inline(Box::new(
+            serde_json::from_str(indoor_profile).context("parsing --indoor-profile")?,
+        ))
+    } else {
+        IndoorProfileSpec::Name(indoor_profile.to_string())
+    };
+    let settings = DoorToDoorSettings {
+        profile,
+        ..DoorToDoorSettings::default()
+    };
+    let (origin, destination) = prepare_indoor_transit_request(
+        catalog,
+        &mut request.origin,
+        &mut request.destination,
+        &settings,
+    )?;
+    Ok(Some(IndoorStreetEstimator::new(inner, origin, destination)))
 }

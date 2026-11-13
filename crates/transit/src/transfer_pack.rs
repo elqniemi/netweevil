@@ -382,6 +382,7 @@ impl PackedTransitTransferTable {
                     edge_path,
                     geometry,
                     components,
+                    indoor: None,
                 });
                 if matches!(mode, Decode::One(_)) {
                     return Ok(paths);

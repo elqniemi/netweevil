@@ -24,7 +24,9 @@ export type ToolId =
   | "simulation"
   | "trip"
   | "height"
-  | "traffic";
+  | "traffic"
+  | "indoor_route"
+  | "door_to_door";
 
 export type Basemap = "positron" | "dark" | "osm";
 export type ResponseFormat = "json" | "geojson";

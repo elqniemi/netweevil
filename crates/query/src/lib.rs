@@ -86,3 +86,7 @@ pub use waypoints::*;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub mod testing;

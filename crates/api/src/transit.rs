@@ -10,6 +10,9 @@ use netweevil_query::{
     LabeledPoint, PreparedRoutingEngine, RouteRequest, ServiceAreaReturnOptions, ServiceAreaSeed,
     SnapOptions, SnappedPoint,
 };
+use netweevil_site::transit_access::{
+    IndoorStreetEstimator, is_indoor_point, prepare_indoor_transit_request,
+};
 use netweevil_transit::{
     AccessMode, StreetTimeEstimator, TransitCatchmentMode, TransitIsochroneFeature, TransitLeg,
     TransitLegType, TransitModeOptions, TransitPoint, TransitRouteResult,
@@ -167,17 +170,36 @@ pub(crate) async fn transit_route_handler(
         .and_then(|engines| side_profile_ids(&engines.egress));
     let topology = runtime.topology.clone();
     let replace_geometry = matches!(walking_geometry, TransitWalkingGeometry::Network);
+    let indoor_settings = payload.indoor;
+    let workspace = state.workspace.clone();
     let result = execute_on_routing_worker(runtime.as_ref(), move || {
         let estimator = street_engines
             .as_ref()
             .filter(|_| network_street_access)
             .map(StreetEngineTimeEstimator::new);
-        let mut result = router.execute_route_with_street_estimator(
-            &request,
-            estimator
-                .as_ref()
-                .map(|estimator| estimator as &dyn StreetTimeEstimator),
-        )?;
+        let indoor_ends = is_indoor_point(&request.origin) || is_indoor_point(&request.destination);
+        let composite = match estimator.as_ref() {
+            Some(inner) if indoor_ends => {
+                let (origin, destination) = prepare_indoor_transit_request(
+                    &workspace.indoor,
+                    &mut request.origin,
+                    &mut request.destination,
+                    &indoor_settings,
+                )
+                .map_err(|e| anyhow::anyhow!("{e:#}"))?;
+                Some(IndoorStreetEstimator::new(inner, origin, destination))
+            }
+            None if indoor_ends => anyhow::bail!(
+                "transit route '{}' starts or ends indoors; set modes.street_access to network",
+                request.route_id
+            ),
+            _ => None,
+        };
+        let street: Option<&dyn StreetTimeEstimator> = match composite.as_ref() {
+            Some(composite) => Some(composite),
+            None => estimator.as_ref().map(|e| e as &dyn StreetTimeEstimator),
+        };
+        let mut result = router.execute_route_with_street_estimator(&request, street)?;
         if replace_geometry && let Some(engines) = street_engines.as_ref() {
             replace_transit_street_leg_geometries(
                 &mut result,
@@ -934,6 +956,7 @@ fn api_route_to_street_path(route: netweevil_query::RouteResult) -> TransitStree
         edge_path: route.edge_path,
         geometry: route.geometry.unwrap_or_default(),
         components: route.summary.components,
+        indoor: None,
     }
 }
 

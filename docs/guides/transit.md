@@ -197,6 +197,38 @@ netweevil analyze transit-batch \
 An endpoint can carry `z`. Network access and egress then use a one-metre
 height window around that height.
 
+### Indoor origins and destinations
+
+An endpoint can be inside an [indoor site](indoor-routing.md): give
+`site_id` with `lon`, `lat` and `level`, or with `poi`, or with `space`.
+A point with a `level` and no `site_id` is in the site that contains it.
+Indoor endpoints need `street_access: "network"`.
+
+```json
+"origin": {"id": "room-1.14", "site_id": "demo", "poi": "1.14"}
+```
+
+The service routes from the point to the 8 site entrances with the least
+indoor time. For each stop it takes the entrance with the least indoor time
+plus street time from the entrance to the stop. The itinerary then has an
+`indoor` leg before the `access` leg (or after the `egress` leg). The indoor
+leg has the site, the entrance and the indoor route in
+`network_path.indoor`. `summary.indoor_time_s` gives the indoor time; it is
+not part of `access_egress_time_s`.
+
+The API takes the indoor profile in `indoor.profile` (default `walk`) next
+to `request`. The CLI takes `--indoor-profile` on `analyze transit-route`:
+
+```bash
+netweevil analyze transit-route --feed groningen_gtfs \
+  --request examples/indoor/transit_indoor_request.json \
+  --street-dataset groningen \
+  --street-profile examples/profiles/pedestrian_research_v1.yml \
+  --indoor-profile wheelchair
+```
+
+`analyze transit-batch` does not accept indoor endpoints.
+
 ## Depart-after and arrive-by searches
 
 Transit routes and transit service areas plan in both directions:

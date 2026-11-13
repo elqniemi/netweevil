@@ -25,6 +25,7 @@ This folder contains request bodies for the NetWeevil HTTP API. The
 | `ile_de_france_od.json` | `POST /v1/od` | Île-de-France | default profile |
 | `ile_de_france_matrix.json` | `POST /v1/matrix` | Île-de-France | default profile |
 | `indoor_route.json` | `POST /v1/indoor/route` | indoor site `demo` | `wheelchair` (indoor) |
+| `door_to_door.json` | `POST /v1/door-to-door/route` | Groningen and indoor site `demo` | `pedestrian_research_v1`, `wheelchair` (indoor) |
 | `groningen_province_admin_bounds.geojson` | `dataset import --admin-boundaries` | Groningen | none |
 
 The Groningen and North Netherlands examples use points in the city of
@@ -248,6 +249,16 @@ cargo run --release -p netweevil-cli -- indoor import \
 curl -X POST 'http://127.0.0.1:8080/v1/indoor/route?format=geojson' \
   -H 'content-type: application/json' \
   --data @examples/api/indoor_route.json
+```
+
+`door_to_door.json` routes from a street point at Groningen station to room
+1.14 of the demo site. It needs a Groningen dataset with the pedestrian
+profile loaded:
+
+```bash
+curl -X POST 'http://127.0.0.1:8080/v1/door-to-door/route?format=geojson' \
+  -H 'content-type: application/json' \
+  --data @examples/api/door_to_door.json
 ```
 
 See the [indoor routing guide](../../docs/guides/indoor-routing.md).

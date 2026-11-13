@@ -196,6 +196,12 @@ pub struct TransitStreetPath {
     pub geometry: Vec<[f64; 3]>,
     #[serde(default)]
     pub components: BTreeMap<String, f64>,
+    /// The indoor part of an access path (at its start) or of an egress
+    /// path (at its end), when the end of the request is inside a building.
+    /// `travel_time_s`, `distance_m` and `geometry` above include it; the
+    /// itinerary shows it as a separate `indoor` leg.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indoor: Option<Box<TransitIndoorPart>>,
 }
 
 impl TransitStreetPath {
@@ -206,8 +212,26 @@ impl TransitStreetPath {
             edge_path: Vec::new(),
             geometry: Vec::new(),
             components: BTreeMap::new(),
+            indoor: None,
         }
     }
+}
+
+/// The walk inside a building between a request end and one of its
+/// entrances, supplied by the host's street estimator.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TransitIndoorPart {
+    pub site_id: String,
+    pub entrance_id: String,
+    pub entrance_name: String,
+    pub travel_time_s: u32,
+    pub distance_m: f64,
+    /// `[lon, lat, z]` from the request end to the entrance (access) or from
+    /// the entrance to the request end (egress).
+    pub geometry: Vec<[f64; 3]>,
+    /// The host's indoor route result.
+    #[serde(default)]
+    pub detail: serde_json::Value,
 }
 
 /// Directed, profile-specific stop-to-stop network transfer table.
@@ -495,12 +519,29 @@ fn default_transit_alternative_max_time_ratio() -> f64 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransitPoint {
     pub id: String,
+    /// May be omitted for an indoor end given by `poi` or `space`.
+    #[serde(default = "f64_nan")]
     pub lon: f64,
+    #[serde(default = "f64_nan")]
     pub lat: f64,
+    /// An indoor end: the site, and a level, POI or space in it. Hosts with
+    /// indoor sites resolve these; the transit router ignores them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub level: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poi: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<String>,
     /// Optional elevation in the street graph's source datum. Network hosts
     /// constrain endpoint snaps to within one metre of this elevation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub z: Option<f64>,
+}
+
+fn f64_nan() -> f64 {
+    f64::NAN
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -876,6 +917,9 @@ pub struct TransitRouteSummary {
     pub transfer_time_s: u32,
     pub wait_time_s: u32,
     pub boarding_count: u8,
+    /// Time of the `indoor` legs; not part of `access_egress_time_s`.
+    #[serde(default)]
+    pub indoor_time_s: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -970,6 +1014,8 @@ pub struct TransitRouteStopSegment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransitLegType {
+    /// A walk inside the building at the origin or the destination.
+    Indoor,
     Access,
     Transit,
     Transfer,

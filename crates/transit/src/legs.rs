@@ -339,6 +339,104 @@ pub(crate) fn coalesce_transit_legs(legs: &mut Vec<TransitLeg>) {
         coalesced.push(leg);
     }
     *legs = coalesced;
+    split_indoor_legs(legs);
+}
+
+/// Moves the indoor part of an access or egress path into its own `indoor`
+/// leg, before the access leg or after the egress leg. The street leg keeps
+/// the rest of the time, distance and geometry.
+pub(crate) fn split_indoor_legs(legs: &mut Vec<TransitLeg>) {
+    if !legs.iter().any(|leg| {
+        leg.network_path
+            .as_ref()
+            .is_some_and(|path| path.indoor.is_some())
+    }) {
+        return;
+    }
+    let mut out = Vec::with_capacity(legs.len() + 2);
+    for mut leg in legs.drain(..) {
+        let access = leg.leg_type == TransitLegType::Access;
+        if !access && leg.leg_type != TransitLegType::Egress {
+            out.push(leg);
+            continue;
+        }
+        let Some(part) = leg.network_path.as_mut().and_then(|p| p.indoor.take()) else {
+            out.push(leg);
+            continue;
+        };
+        let time_s = part
+            .travel_time_s
+            .min(leg.arrival_s.saturating_sub(leg.departure_s));
+        let n = part.geometry.len();
+        // Remove the indoor stretch from the street geometry (keeping the
+        // shared entrance point).
+        let trim = |geometry: &mut Vec<[f64; 3]>| {
+            if n >= 2 && geometry.len() > n {
+                if access {
+                    geometry.drain(..n - 1);
+                } else {
+                    geometry.truncate(geometry.len() + 1 - n);
+                }
+            }
+        };
+        trim(&mut leg.geometry);
+        if let Some(path) = leg.network_path.as_mut() {
+            path.travel_time_s = path.travel_time_s.saturating_sub(time_s);
+            if let Some(d) = path.distance_m.as_mut() {
+                *d = (*d - part.distance_m).max(0.0);
+            }
+            trim(&mut path.geometry);
+        }
+        let mut indoor = TransitLeg {
+            leg_type: TransitLegType::Indoor,
+            from_id: String::new(),
+            to_id: String::new(),
+            from_name: String::new(),
+            to_name: String::new(),
+            departure_s: 0,
+            arrival_s: 0,
+            mode: None,
+            street_mode: None,
+            route_id: None,
+            route_short_name: None,
+            trip_id: None,
+            run_index: None,
+            headsign: None,
+            geometry: part.geometry.clone(),
+            geometry_elevation_source: Some("indoor".into()),
+            network_path: None,
+        };
+        let entrance = (part.entrance_id.clone(), part.entrance_name.clone());
+        let path = crate::model::TransitStreetPath {
+            travel_time_s: time_s,
+            distance_m: Some(part.distance_m),
+            edge_path: Vec::new(),
+            geometry: part.geometry.clone(),
+            components: Default::default(),
+            indoor: Some(part),
+        };
+        indoor.network_path = Some(path);
+        if access {
+            indoor.from_id = std::mem::replace(&mut leg.from_id, entrance.0.clone());
+            indoor.from_name = std::mem::replace(&mut leg.from_name, entrance.1.clone());
+            (indoor.to_id, indoor.to_name) = entrance;
+            indoor.departure_s = leg.departure_s;
+            indoor.arrival_s = leg.departure_s.saturating_add(time_s);
+            leg.departure_s = indoor.arrival_s;
+            out.push(indoor);
+            out.push(leg);
+        } else {
+            indoor.to_id = std::mem::replace(&mut leg.to_id, entrance.0.clone());
+            indoor.to_name = std::mem::replace(&mut leg.to_name, entrance.1.clone());
+            (indoor.from_id, indoor.from_name) = entrance;
+            indoor.arrival_s = leg.arrival_s;
+            indoor.departure_s = leg.arrival_s.saturating_sub(time_s);
+            leg.arrival_s = indoor.departure_s;
+            out.push(leg);
+            out.push(indoor);
+        }
+    }
+    *legs = out;
 }
 
 pub(crate) fn build_transit_route_stops(legs: &[TransitLeg]) -> Vec<TransitRouteStop> {
@@ -499,6 +597,7 @@ pub(crate) fn summarize_legs(
             TransitLegType::Access | TransitLegType::Egress => {
                 summary.access_egress_time_s += duration
             }
+            TransitLegType::Indoor => summary.indoor_time_s += duration,
             TransitLegType::Transfer => summary.transfer_time_s += duration,
             TransitLegType::Transit => {
                 summary.transit_time_s += duration;

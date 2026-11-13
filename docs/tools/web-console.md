@@ -303,6 +303,21 @@ selector. **Revert** removes the built feed. **Export GTFS** downloads the
 scenario as a zip file. The editor does not change the original feed or its
 zip file. Scenario documents are in `.netweevil/gtfs_scenarios/`.
 
+## Indoor tools
+
+**Indoor route** and **Door to door** use the indoor sites of the workspace.
+Pick the site and the level at the top of the panel. The map shows the
+surfaces, portals, lifts, stairs, POIs and entrances of that level. A map
+point is on the shown level, unless the end has its own level. An end can
+also be a POI or room name or ref.
+
+- Indoor route calls `POST /v1/indoor/route`. It needs no dataset.
+- Door to door calls `POST /v1/door-to-door/route` with the selected street
+  profile. Each end is in the site or on the street. The result shows one
+  line per leg: indoor, street, indoor.
+
+See the [indoor routing guide](../guides/indoor-routing.md).
+
 ## Simulation
 
 The simulation tool makes a scenario from the form: agents, duration,

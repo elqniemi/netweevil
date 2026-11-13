@@ -88,6 +88,9 @@ pub(crate) enum AnalyzeCommand {
     Trip(TripArgs),
     /// Route inside an imported indoor site.
     IndoorRoute(crate::indoor::IndoorRouteArgs),
+    /// Route from a street point or an indoor point to another, through
+    /// the best pair of site entrances.
+    DoorToDoor(crate::indoor::DoorToDoorArgs),
 }
 
 #[derive(Args, Debug)]
@@ -483,6 +486,10 @@ pub(crate) struct TransitRouteArgs {
     /// Foot profile used when the request selects network access/egress.
     #[arg(long)]
     street_profile: Option<PathBuf>,
+    /// Indoor profile for an origin or destination inside an indoor site:
+    /// a built-in name (`walk`, `wheelchair`, ...) or a JSON object.
+    #[arg(long, default_value = "walk")]
+    indoor_profile: String,
     /// Result file (JSON). Omit it to write to the runs directory.
     #[arg(long)]
     out: Option<PathBuf>,
@@ -962,7 +969,7 @@ pub(crate) fn analyze_transit_route(paths: &WorkspacePaths, args: TransitRouteAr
     let manifest = read_transit_manifest(paths, &args.feed)?;
     let bundle = read_transit_bundle(&manifest.bundle_path)
         .with_context(|| format!("reading transit bundle {}", manifest.bundle_path))?;
-    let request = load_transit_request(&args.request)?;
+    let mut request = load_transit_request(&args.request)?;
     let street_estimator = if validate_network_street_access_modes(&request)? {
         let (Some(dataset_id), Some(profile_path)) = (
             args.street_dataset.as_deref(),
@@ -983,13 +990,23 @@ pub(crate) fn analyze_transit_route(paths: &WorkspacePaths, args: TransitRouteAr
         None
     };
     let router = prepare_registered_transit_router(&manifest, bundle)?;
+    let catalog = netweevil_site::SiteCatalog::new(paths.clone());
+    let composite = crate::indoor::indoor_transit_estimator(
+        &catalog,
+        &mut request,
+        street_estimator
+            .as_ref()
+            .map(|estimator| estimator as &dyn netweevil_transit::StreetTimeEstimator),
+        &args.indoor_profile,
+    )?;
+    let street: Option<&dyn netweevil_transit::StreetTimeEstimator> = match composite.as_ref() {
+        Some(composite) => Some(composite),
+        None => street_estimator
+            .as_ref()
+            .map(|estimator| estimator as &dyn netweevil_transit::StreetTimeEstimator),
+    };
     let result = router
-        .execute_route_with_street_estimator(
-            &request,
-            street_estimator
-                .as_ref()
-                .map(|estimator| estimator as &dyn netweevil_transit::StreetTimeEstimator),
-        )
+        .execute_route_with_street_estimator(&request, street)
         .with_context(|| format!("executing transit route '{}'", request.route_id))?;
     let result_path = args.out.unwrap_or_else(|| {
         paths
@@ -1008,6 +1025,14 @@ pub(crate) fn analyze_transit_batch(paths: &WorkspacePaths, args: TransitBatchAr
     let document = load_transit_batch(&args.requests)?;
     let mut first_network_request = None;
     for request in &document.requests {
+        if netweevil_site::transit_access::is_indoor_point(&request.origin)
+            || netweevil_site::transit_access::is_indoor_point(&request.destination)
+        {
+            anyhow::bail!(
+                "transit request '{}' starts or ends indoors; route it with `analyze transit-route`",
+                request.route_id
+            );
+        }
         if validate_network_street_access_modes(request)? && first_network_request.is_none() {
             first_network_request = Some(request);
         }

@@ -221,3 +221,22 @@ test("axis ticks are clean numbers", () => {
   assert.deepEqual(niceTicks(12, 87, 3), [25, 50, 75]);
   assert.deepEqual(niceTicks(5, 5), [5]);
 });
+
+test("indoor route and door-to-door bodies carry the site, level, POI and indoor profile", () => {
+  const origin = [{ id: "o", lon: 6.56668, lat: 53.21942 }];
+  const destination = [{ id: "d", lon: 6.5641, lat: 53.2108 }];
+  assert.match(build("indoor_route", {}, { indoor_origin: origin }).ready, /indoor site/);
+  const indoor = build("indoor_route", { site_id: "demo", site_level: "1", destination_poi: "1.14", indoor_profile: "wheelchair" }, { indoor_origin: origin });
+  assert.deepEqual(indoor.origin, { lon: 6.56668, lat: 53.21942, level: "1" });
+  assert.deepEqual(indoor.destination, { poi: "1.14" });
+  assert.equal(indoor.site_id, "demo");
+  assert.equal(indoor.profile, "wheelchair");
+  assert.equal(indoor.mode, undefined);
+
+  const d2d = build("door_to_door", { site_id: "demo", site_level: "0", origin_level: "1", indoor_mode: "surfaces_only" }, { indoor_origin: origin, indoor_destination: destination });
+  assert.equal(d2d.profile_id, "car");
+  assert.deepEqual(d2d.request.origin, { site_id: "demo", lon: 6.56668, lat: 53.21942, level: "1" });
+  assert.deepEqual(d2d.request.destination, { lon: 6.5641, lat: 53.2108 });
+  assert.equal(d2d.request.indoor.mode, "surfaces_only");
+  assert.match(build("door_to_door", { site_id: "demo", origin_indoor: false }, { indoor_origin: origin, indoor_destination: destination }).ready, /in the site/);
+});

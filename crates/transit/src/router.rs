@@ -243,6 +243,14 @@ impl PreparedTransitRouter {
         request: &TransitRouteRequest,
         street_estimator: Option<&dyn StreetTimeEstimator>,
     ) -> Result<TransitRouteResult> {
+        for (side, point) in [
+            ("origin", &request.origin),
+            ("destination", &request.destination),
+        ] {
+            if !point.lon.is_finite() || !point.lat.is_finite() {
+                anyhow::bail!("transit {side} '{}' needs lon and lat", point.id);
+            }
+        }
         let transfers = self.transfer_candidates_for(&request.modes)?;
         let backward_index = request
             .time

@@ -1073,6 +1073,13 @@ paths:
         transit, transfer and egress legs. Times in the result are seconds
         from `result.time_context.time_origin_unix_s`.
 
+        The origin and the destination can be inside an indoor site (see
+        `TransitPoint`). The service then prices the way to each stop as the
+        least, over the site entrances, of the indoor route plus the street
+        path from the entrance, and adds an `indoor` leg before the access
+        leg or after the egress leg. This needs
+        `modes.street_access: network`.
+
         With `returns.walking_geometry: network` or
         `modes.street_access: network`, the service uses street profiles for
         the street legs. A foot profile must be loaded. Use
@@ -2898,6 +2905,70 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '422':
           $ref: '#/components/responses/UnprocessableBody'
+
+  /v1/door-to-door/route:
+    post:
+      tags: [Indoor]
+      operationId: doorToDoorRoute
+      summary: Find a route from door to door through indoor sites and streets
+      description: |
+        Finds a route between two ends. Each end is a street point
+        (`lon`, `lat`) or an indoor point (`site_id` with `lon`, `lat` and
+        `level`, or with `poi`, or with `space`). A point with a `level` and
+        no `site_id` is in the site whose footprint contains it.
+
+        The street leg uses a loaded street profile, chosen with `profile_id`,
+        `profile` and `profile_overrides` as in `POST /v1/route`. The indoor
+        legs use `request.indoor.profile` and `request.indoor.mode`.
+
+        The service compares the 8 entrances of each indoor end with the
+        least indoor travel time, snaps their outdoor side to the street
+        (`request.indoor.entrance_snap_m`, default 50 m), and gets the
+        street times between them with one many-to-many query. It chooses
+        the pair with the least total travel time. The street leg keeps its
+        own generalized cost. When both ends are in the same site and the
+        indoor route is no slower, the result is that one indoor leg.
+      parameters:
+        - $ref: '#/components/parameters/Format'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DoorToDoorExecutionRequest'
+            example:
+              profile_id: pedestrian_research_v1
+              request:
+                route_id: station-to-room-1.14
+                origin: {lon: 6.5641, lat: 53.2108}
+                destination: {site_id: demo, poi: '1.14'}
+                indoor: {profile: wheelchair}
+      responses:
+        '200':
+          description: |
+            The route. The GeoJSON variant has one `LineString` feature for
+            each leg with the properties `leg_index`, `leg_type` (`indoor` or
+            `street`), `site_id`, `duration_s` and `length_m`. Its top-level
+            `properties` has `route_id`, `summary`, `origin_entrance`,
+            `destination_entrance` and `warnings`, and its `service` member
+            has the dataset and profile.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DoorToDoorResponse'
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/GeoJsonFeatureCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableBody'
+        '503':
+          $ref: '#/components/responses/SetupMode'
 
 components:
   parameters:
@@ -5909,14 +5980,33 @@ components:
       enum: [tram, subway, rail, bus, ferry, cable_car, gondola, funicular, coach, air, other]
     TransitPoint:
       type: object
-      required: [id, lon, lat]
+      description: |
+        A street point (`lon`, `lat`), or an indoor point: `site_id` with
+        `lon`, `lat` and `level`, or with `poi`, or with `space`. A point
+        with a `level` and no `site_id` is in the site that contains it.
+        Indoor points need `modes.street_access: network`.
+      required: [id]
       properties:
         id: {type: string}
-        lon: {type: number}
+        lon:
+          type: number
+          description: Required, except for an indoor point with `poi` or `space`.
         lat: {type: number}
         z:
           type: number
           description: Elevation in the street graph datum. Network hosts keep endpoint snaps within one metre of it.
+        site_id:
+          type: string
+          description: Indoor site of the point.
+        level:
+          type: [string, number]
+          description: Level id or level number of an indoor point.
+        poi:
+          type: string
+          description: POI id, name or ref in the site.
+        space:
+          type: string
+          description: Space id in the site, or the name or ref of a POI.
     TransitQueryTime:
       type: object
       required: [datetime]
@@ -6026,6 +6116,18 @@ components:
         egress_profile_id:
           type: [string, 'null']
           description: Profile for bicycle or car egress legs.
+        indoor:
+          type: object
+          description: Indoor profile, mode and entrance limit for indoor request ends.
+          properties:
+            profile:
+              $ref: '#/components/schemas/IndoorProfile'
+            mode:
+              $ref: '#/components/schemas/IndoorRouteMode'
+            max_entrances:
+              type: integer
+              default: 8
+              maximum: 8
         request:
           $ref: '#/components/schemas/TransitRouteRequest'
     TransitExecutionContext:
@@ -6068,6 +6170,9 @@ components:
         transfer_time_s: {type: integer}
         wait_time_s: {type: integer}
         boarding_count: {type: integer}
+        indoor_time_s:
+          type: integer
+          description: Time of the `indoor` legs. It is not part of `access_egress_time_s`.
     TransitStreetPath:
       type: object
       required: [travel_time_s, distance_m, edge_path, geometry, components]
@@ -6083,13 +6188,21 @@ components:
             $ref: '#/components/schemas/Coordinate3'
         components:
           $ref: '#/components/schemas/CostComponents'
+        indoor:
+          type: object
+          description: |
+            Indoor legs: the walk inside the site, with `site_id`,
+            `entrance_id`, `entrance_name`, `travel_time_s`, `distance_m`,
+            `geometry` and `detail` (an indoor route result).
+          additionalProperties: true
     TransitLeg:
       type: object
       required: [leg_type, from_id, to_id, from_name, to_name, departure_s, arrival_s]
       properties:
         leg_type:
           type: string
-          enum: [access, transit, transfer, egress]
+          description: '`indoor` legs walk inside the site at an indoor origin (before `access`) or destination (after `egress`).'
+          enum: [indoor, access, transit, transfer, egress]
         from_id: {type: string}
         to_id: {type: string}
         from_name: {type: string}
@@ -7831,3 +7944,133 @@ components:
         warnings:
           type: array
           items: {type: string}
+    DoorToDoorPoint:
+      type: object
+      description: |
+        A street point (`lon`, `lat`), or an indoor point: `site_id` with
+        `lon`, `lat` and `level`, or with `poi`, or with `space`.
+      properties:
+        id: {type: string}
+        site_id: {type: string}
+        lon: {type: number}
+        lat: {type: number}
+        level:
+          type: [string, number]
+        poi: {type: string}
+        space: {type: string}
+    DoorToDoorRequest:
+      type: object
+      required: [route_id, origin, destination]
+      properties:
+        route_id: {type: string}
+        origin:
+          $ref: '#/components/schemas/DoorToDoorPoint'
+        destination:
+          $ref: '#/components/schemas/DoorToDoorPoint'
+        indoor:
+          type: object
+          properties:
+            profile:
+              $ref: '#/components/schemas/IndoorProfile'
+            mode:
+              $ref: '#/components/schemas/IndoorRouteMode'
+            entrance_snap_m:
+              type: number
+              default: 50
+              description: Distance within which the outdoor side of an entrance snaps to a street.
+            max_entrances:
+              type: integer
+              default: 8
+              maximum: 8
+              description: Entrances compared on each indoor side, the fastest by indoor travel time.
+        snap:
+          type: object
+          description: Snap options of street ends, as in a route request.
+          additionalProperties: true
+    DoorToDoorExecutionRequest:
+      type: object
+      required: [request]
+      properties:
+        profile_id:
+          type: string
+          description: Loaded street profile. The default profile when absent.
+        profile:
+          type: object
+          additionalProperties: true
+          description: A request-defined street profile, as in `POST /v1/route`.
+        profile_overrides:
+          type: object
+          additionalProperties: true
+          description: Changes to the street profile, as in `POST /v1/route`.
+        request:
+          $ref: '#/components/schemas/DoorToDoorRequest'
+    DoorToDoorEntrance:
+      type: object
+      description: An entrance that the route uses, with its indoor time and street snap.
+      allOf:
+        - $ref: '#/components/schemas/IndoorSiteEntrance'
+        - type: object
+          properties:
+            site_id: {type: string}
+            indoor_duration_s: {type: number}
+            snap_distance_m: {type: number}
+    DoorToDoorLeg:
+      type: object
+      required: [leg_type, duration_s, length_m, geometry]
+      properties:
+        leg_type:
+          type: string
+          enum: [indoor, street]
+        site_id: {type: string}
+        duration_s: {type: number}
+        length_m: {type: number}
+        geometry:
+          type: array
+          description: '`[lon, lat, z]` points.'
+          items:
+            type: array
+            items: {type: number}
+        indoor:
+          $ref: '#/components/schemas/IndoorRouteResult'
+        street:
+          type: object
+          description: The street route result, as in `POST /v1/route`.
+          additionalProperties: true
+    DoorToDoorResult:
+      type: object
+      required: [route_id, legs, summary, warnings]
+      properties:
+        route_id: {type: string}
+        legs:
+          type: array
+          description: The legs in travel order.
+          items:
+            $ref: '#/components/schemas/DoorToDoorLeg'
+        origin_entrance:
+          $ref: '#/components/schemas/DoorToDoorEntrance'
+        destination_entrance:
+          $ref: '#/components/schemas/DoorToDoorEntrance'
+        summary:
+          type: object
+          properties:
+            duration_s: {type: number}
+            length_m: {type: number}
+            indoor_duration_s: {type: number}
+            street_duration_s: {type: number}
+            street_generalized_cost: {type: number}
+            origin_candidates: {type: integer}
+            destination_candidates: {type: integer}
+        warnings:
+          type: array
+          items: {type: string}
+    DoorToDoorResponse:
+      type: object
+      required: [service, result]
+      properties:
+        service:
+          type: object
+          properties:
+            dataset_id: {type: string}
+            profile_id: {type: string}
+        result:
+          $ref: '#/components/schemas/DoorToDoorResult'
