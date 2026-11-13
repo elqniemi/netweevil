@@ -68,11 +68,9 @@ fn topology() -> TopologyBundle {
 }
 
 fn topology_bytes(bundle: &TopologyBundle) -> Vec<u8> {
-    let mut writer = SectionWriter::new();
+    let mut writer = SectionWriter::in_memory();
     encode_topology(&mut writer, bundle).unwrap();
-    let mut bytes = Vec::new();
-    writer.finish_into(&mut bytes).unwrap();
-    bytes
+    writer.into_bytes()
 }
 
 #[test]
@@ -108,11 +106,10 @@ fn large_sections_deflate_and_round_trip() {
     // Spans three deflate chunks.
     let compressible: Vec<u8> = (0..2_500_000_u32).map(|value| (value % 7) as u8).collect();
     let small = vec![1_u8, 2, 3];
-    let mut writer = SectionWriter::new();
+    let mut writer = SectionWriter::in_memory();
     writer.write_section(compressible.clone()).unwrap();
     writer.write_section(small.clone()).unwrap();
-    let mut bytes = Vec::new();
-    writer.finish_into(&mut bytes).unwrap();
+    let mut bytes = writer.into_bytes();
     assert!(
         bytes.len() < compressible.len() / 4,
         "large section is deflated"
@@ -209,5 +206,26 @@ fn elevation_raster_tiles_load_individually() {
     assert_eq!(reader.tile(5).unwrap(), vec![24.5]);
     assert!(reader.tile(6).is_err());
     assert!(write_elevation_raster_sectioned(&path, &header, &tiles[1..]).is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn file_writer_streams_the_same_bytes_and_cleans_up_when_dropped() {
+    let dir = std::env::temp_dir().join(format!("netweevil-stream-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("topology.bin");
+    write_topology_sectioned(&path, &topology()).expect("topology writes");
+    assert_eq!(std::fs::read(&path).unwrap(), topology_bytes(&topology()));
+
+    let dropped = dir.join("dropped.bin");
+    let mut writer = SectionWriter::create(&dropped).unwrap();
+    writer.write_section(vec![1, 2, 3]).unwrap();
+    drop(writer);
+    let leftovers = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with("dropped"))
+        .count();
+    assert_eq!(leftovers, 0, "an unfinished bundle leaves no file");
     std::fs::remove_dir_all(&dir).unwrap();
 }
