@@ -52,6 +52,10 @@ fn topology() -> TopologyBundle {
     bundle
 }
 
+fn shared(bytes: Vec<u8>) -> BundleBytes {
+    std::sync::Arc::new(bytes)
+}
+
 fn topology_bytes(bundle: &TopologyBundle) -> Vec<u8> {
     let mut writer = SectionWriter::in_memory();
     encode_topology(&mut writer, bundle).unwrap();
@@ -61,7 +65,7 @@ fn topology_bytes(bundle: &TopologyBundle) -> Vec<u8> {
 #[test]
 fn derived_and_explicit_structures_round_trip() {
     let bundle = topology();
-    let read = read_topology_sectioned(&topology_bytes(&bundle), Path::new("t.bin"))
+    let read = read_topology_sectioned(&shared(topology_bytes(&bundle)), Path::new("t.bin"))
         .expect("current topology reads");
     assert_eq!(read.edge_based_topology, bundle.edge_based_topology);
     assert_eq!(read.spatial_index, bundle.spatial_index);
@@ -84,12 +88,16 @@ fn derived_and_explicit_structures_round_trip() {
 
     // Structures that do not match their rebuild are stored verbatim.
     let mut edited = bundle.clone();
-    edited.edge_based_topology.edge_transition_edges.reverse();
+    edited
+        .edge_based_topology
+        .edge_transition_edges
+        .make_mut()
+        .reverse();
     edited.edge_component_ids = vec![5, 6];
     if let Some(index) = edited.spatial_index.as_mut() {
         index.columns += 1;
     }
-    let read = read_topology_sectioned(&topology_bytes(&edited), Path::new("t.bin"))
+    let read = read_topology_sectioned(&shared(topology_bytes(&edited)), Path::new("t.bin"))
         .expect("explicit structures read");
     assert_eq!(read.edge_based_topology, edited.edge_based_topology);
     assert_eq!(read.edge_component_ids, vec![5, 6]);
@@ -125,7 +133,7 @@ fn large_sections_deflate_and_round_trip() {
 fn rejects_an_unrecognized_magic_or_schema() {
     let mut bytes = topology_bytes(&topology());
     bytes[..8].copy_from_slice(b"INVALID!");
-    let error = read_topology_sectioned(&bytes, Path::new("topology.bin"))
+    let error = read_topology_sectioned(&shared(bytes), Path::new("topology.bin"))
         .expect_err("an unrecognized magic is rejected");
     assert!(
         error.to_string().contains("re-import the dataset"),
@@ -134,7 +142,7 @@ fn rejects_an_unrecognized_magic_or_schema() {
 
     let mut stale = topology();
     stale.schema_version -= 1;
-    let error = read_topology_sectioned(&topology_bytes(&stale), Path::new("topology.bin"))
+    let error = read_topology_sectioned(&shared(topology_bytes(&stale)), Path::new("topology.bin"))
         .expect_err("a mismatched schema version is rejected");
     assert!(
         error.to_string().contains("re-import the dataset"),

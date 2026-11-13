@@ -167,7 +167,7 @@ pub(crate) fn clear_acceleration_weights(metrics: &mut CompiledProfileBundle) {
             &mut acceleration.distance_upward_weight,
             &mut acceleration.distance_downward_weight,
         ] {
-            *weights = Vec::new();
+            *weights = Default::default();
         }
     }
 }

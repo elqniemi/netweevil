@@ -431,10 +431,10 @@ fn compiles_acceleration_weights_from_dataset_bundle() {
     ]);
     topology.nodes = nodes(&[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0)]);
     topology.edge_based_topology = EdgeBasedTopology {
-        node_first_out: vec![0, 1, 2, 2],
-        node_edge_order: vec![0, 1],
-        edge_transition_first_out: vec![0, 1, 1],
-        edge_transition_edges: vec![1],
+        node_first_out: vec![0, 1, 2, 2].into(),
+        node_edge_order: vec![0, 1].into(),
+        edge_transition_first_out: vec![0, 1, 1].into(),
+        edge_transition_edges: vec![1].into(),
     };
     let acceleration = DatasetAccelerationBundle {
         hierarchy_key: 0,
@@ -442,12 +442,12 @@ fn compiles_acceleration_weights_from_dataset_bundle() {
         source_topology_bundle_id: CacheBundleId::new("topology-test"),
         algorithm: netweevil_core::CCH_ALGORITHM.to_string(),
         stats: Default::default(),
-        edge_order: vec![0, 1],
-        edge_rank: vec![0, 1],
-        upward_first_out: vec![0, 1, 1],
-        upward_head: vec![1],
-        downward_first_out: vec![0, 0, 0],
-        downward_head: vec![],
+        edge_order: vec![0, 1].into(),
+        edge_rank: vec![0, 1].into(),
+        upward_first_out: vec![0, 1, 1].into(),
+        upward_head: vec![1].into(),
+        downward_first_out: vec![0, 0, 0].into(),
+        downward_head: vec![].into(),
     };
     let compile_with_acceleration = |topology: &TopologyBundle| {
         compile_profile_bundle_with_acceleration(

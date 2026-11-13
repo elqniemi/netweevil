@@ -898,10 +898,10 @@ pub(crate) fn build_test_cch(
         stats: Default::default(),
         edge_order: (0..edge_count as u32).collect(),
         edge_rank: (0..edge_count as u32).collect(),
-        upward_first_out,
-        upward_head,
-        downward_first_out,
-        downward_head,
+        upward_first_out: upward_first_out.into(),
+        upward_head: upward_head.into(),
+        downward_first_out: downward_first_out.into(),
+        downward_head: downward_head.into(),
     });
     let mut metrics = metrics.clone();
     metrics.acceleration = Some(CompiledAcceleration {
@@ -909,12 +909,12 @@ pub(crate) fn build_test_cch(
         schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
         source_acceleration_bundle_id: CacheBundleId::new("test-cch"),
         algorithm: CCH_ALGORITHM.to_string(),
-        upward_weight,
-        downward_weight,
-        time_upward_weight,
-        time_downward_weight,
-        distance_upward_weight,
-        distance_downward_weight,
+        upward_weight: upward_weight.into(),
+        downward_weight: downward_weight.into(),
+        time_upward_weight: time_upward_weight.into(),
+        time_downward_weight: time_downward_weight.into(),
+        distance_upward_weight: distance_upward_weight.into(),
+        distance_downward_weight: distance_downward_weight.into(),
     });
     (bundle, metrics)
 }

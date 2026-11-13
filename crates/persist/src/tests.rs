@@ -318,17 +318,17 @@ fn edge_name_bundle_rejects_out_of_range_guidance_indexes() {
 #[test]
 fn round_trips_acceleration_bundle_binary() {
     let bundle = DatasetAccelerationBundle {
-        hierarchy_key: 0,
+        hierarchy_key: 0x0123_4567_89ab_cdef,
         schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
         source_topology_bundle_id: CacheBundleId::new("topology-test"),
         algorithm: CCH_ALGORITHM.to_string(),
         stats: Default::default(),
-        edge_order: vec![0, 2, 1],
-        edge_rank: vec![0, 2, 1],
-        upward_first_out: vec![0, 1, 1, 1],
-        upward_head: vec![2],
-        downward_first_out: vec![0, 0, 1, 1],
-        downward_head: vec![0],
+        edge_order: vec![0, 2, 1].into(),
+        edge_rank: vec![0, 2, 1].into(),
+        upward_first_out: vec![0, 1, 1, 1].into(),
+        upward_head: vec![2].into(),
+        downward_first_out: vec![0, 0, 1, 1].into(),
+        downward_head: vec![0].into(),
     };
     let file = TempFile::new("acceleration");
     write_acceleration_bundle(file.path(), &bundle).expect("bundle should serialize");
@@ -338,6 +338,8 @@ fn round_trips_acceleration_bundle_binary() {
     assert_eq!(read.schema_version, bundle.schema_version);
     assert_eq!(read.algorithm, bundle.algorithm);
     assert_eq!(read.stats, bundle.stats);
+    assert!(read.upward_head.is_shared() && read.edge_order.is_shared());
+    assert_eq!(read.hierarchy_key, bundle.hierarchy_key);
     assert_eq!(read.edge_order, bundle.edge_order);
     assert_eq!(read.edge_rank, bundle.edge_rank);
     assert_eq!(read.upward_first_out, bundle.upward_first_out);
@@ -515,12 +517,12 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
         source_acceleration_bundle_id: CacheBundleId::new("acceleration-test"),
         source_hierarchy_key: 0x1234_5678_9abc_def0,
         algorithm: CCH_ALGORITHM.into(),
-        upward_weight: weights.clone(),
-        downward_weight: weights.clone(),
-        time_upward_weight: weights.clone(),
-        time_downward_weight: weights.clone(),
-        distance_upward_weight: weights.clone(),
-        distance_downward_weight: weights.clone(),
+        upward_weight: weights.clone().into(),
+        downward_weight: weights.clone().into(),
+        time_upward_weight: weights.clone().into(),
+        time_downward_weight: weights.clone().into(),
+        distance_upward_weight: weights.clone().into(),
+        distance_downward_weight: weights.clone().into(),
     });
     write_compiled_profile_bundle(file.path(), &bundle).expect("fixed-point bundle serializes");
     let read = read_compiled_profile_bundle(file.path()).expect("fixed-point bundle reads");
@@ -538,6 +540,7 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
         &acceleration.distance_upward_weight,
         &acceleration.distance_downward_weight,
     ] {
+        assert!(actual.is_shared());
         assert_eq!(actual, &weights);
     }
     assert_eq!(read.edge_metrics[0].travel_time_s(), Some(12.0));
@@ -556,7 +559,7 @@ fn prune_keeps_the_newest_compile_and_referenced_bundles() {
     let paths = super::WorkspacePaths::discover(&root).expect("workspace");
     let bundle = |dir: &Path, name: &str| {
         let path = dir.join(name);
-        std::fs::write(&path, b"NWSECB07").expect("bundle written");
+        std::fs::write(&path, b"NWSECB08").expect("bundle written");
         BundleRef {
             bundle_id: CacheBundleId::new(name),
             path: path.display().to_string(),

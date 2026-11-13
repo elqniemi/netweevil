@@ -271,8 +271,8 @@ pub(crate) fn cached_failure_mode_bundle(
     {
         // The ranked hierarchy keeps the only copy of the cost weights.
         failure_weights = Some((
-            std::mem::take(&mut customized.upward_weight),
-            std::mem::take(&mut customized.downward_weight),
+            std::mem::take(&mut customized.upward_weight).into_vec(),
+            std::mem::take(&mut customized.downward_weight).into_vec(),
         ));
         degraded_metrics.acceleration = Some(customized);
     }

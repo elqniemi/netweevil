@@ -132,9 +132,10 @@ OSM imports also keep vehicle restrictions (see
 
 ### Bundle format
 
-Imports write `.bin` bundles in the compact sectioned format (`NWSECB07`:
-lossless column encodings plus deflate). The reader rejects a bundle in
-another format with a message to re-import.
+Imports write `.bin` bundles in the sectioned format (`NWSECB08`: lossless
+column encodings plus deflate, and raw arrays that the engine maps without
+copying). The reader rejects a bundle in another format with a message to
+re-import.
 
 Each profile change compiles a new metric bundle. To remove old files:
 

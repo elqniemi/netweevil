@@ -1,5 +1,5 @@
 use netweevil_core::{
-    CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, add_cch_weights, encode_cch_weight,
+    CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, Column, add_cch_weights, encode_cch_weight,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -1050,7 +1050,7 @@ fn elimination_tasks(
     // With one or two workers the tree costs more than it saves: run every
     // middle in rank order instead.
     if rayon::current_num_threads() <= 2 {
-        return (vec![0], Vec::new(), bundle.edge_order.clone());
+        return (vec![0], Vec::new(), bundle.edge_order.to_vec());
     }
     // Elimination tree (Liu's algorithm with path compression). Middle
     // `v` reads `x -> v` and `v -> y`, whose lower triangles have middles
@@ -1342,12 +1342,12 @@ fn compile_acceleration_with_progress(
         source_acceleration_bundle_id: source_acceleration_bundle_id.clone(),
         source_hierarchy_key: bundle.hierarchy_key,
         algorithm: bundle.algorithm.clone(),
-        upward_weight,
-        downward_weight,
-        time_upward_weight: Vec::new(),
-        time_downward_weight: Vec::new(),
-        distance_upward_weight: Vec::new(),
-        distance_downward_weight: Vec::new(),
+        upward_weight: upward_weight.into(),
+        downward_weight: downward_weight.into(),
+        time_upward_weight: Column::new(),
+        time_downward_weight: Column::new(),
+        distance_upward_weight: Column::new(),
+        distance_downward_weight: Column::new(),
     };
     if !customization_shapes_match(bundle, topology, edge_metrics) {
         // Shape mismatch: emit empty weights; engine preparation rejects the
@@ -1408,10 +1408,10 @@ fn compile_acceleration_with_progress(
     );
 
     CompiledAcceleration {
-        time_upward_weight: time.0,
-        time_downward_weight: time.1,
-        distance_upward_weight: distance.0,
-        distance_downward_weight: distance.1,
+        time_upward_weight: time.0.into(),
+        time_downward_weight: time.1.into(),
+        distance_upward_weight: distance.0.into(),
+        distance_downward_weight: distance.1.into(),
         ..result(cost.upward, cost.downward)
     }
 }

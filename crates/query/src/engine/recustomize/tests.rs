@@ -54,7 +54,10 @@ fn customized(
         source,
         CacheBundleId::new("recustomize-test"),
     );
-    (weights.upward_weight, weights.downward_weight)
+    (
+        weights.upward_weight.into_vec(),
+        weights.downward_weight.into_vec(),
+    )
 }
 
 #[test]
@@ -169,8 +172,8 @@ fn closing_edges_filters_the_base_graph_like_a_fresh_build() {
     // Keep the acceleration header without weights, as an avoid set does.
     let mut changed_metrics = compiled;
     let header = changed_metrics.acceleration.as_mut().expect("header");
-    header.upward_weight.clear();
-    header.downward_weight.clear();
+    header.upward_weight = Default::default();
+    header.downward_weight = Default::default();
     for (edge, cost) in [
         (3, None),
         (8, Some(30.0)),

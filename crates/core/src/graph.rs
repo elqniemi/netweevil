@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AdminArea, DrivingSide, FeatureAttributeTable, NO_FEATURE_ROW, TemporalRuleSet,
+    AdminArea, Column, DrivingSide, FeatureAttributeTable, NO_FEATURE_ROW, TemporalRuleSet,
     TopologyElevation, TopologyRegions, VehicleRestrictionTable,
 };
 
@@ -713,10 +713,10 @@ pub struct NodeSpatialIndex {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct EdgeBasedTopology {
-    pub node_first_out: Vec<u32>,
-    pub node_edge_order: Vec<u32>,
-    pub edge_transition_first_out: Vec<u32>,
-    pub edge_transition_edges: Vec<u32>,
+    pub node_first_out: Column<u32>,
+    pub node_edge_order: Column<u32>,
+    pub edge_transition_first_out: Column<u32>,
+    pub edge_transition_edges: Column<u32>,
 }
 
 impl EdgeBasedTopology {
@@ -767,10 +767,10 @@ impl EdgeBasedTopology {
         }
 
         Self {
-            node_first_out,
-            node_edge_order,
-            edge_transition_first_out,
-            edge_transition_edges,
+            node_first_out: node_first_out.into(),
+            node_edge_order: node_edge_order.into(),
+            edge_transition_first_out: edge_transition_first_out.into(),
+            edge_transition_edges: edge_transition_edges.into(),
         }
     }
 }

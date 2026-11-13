@@ -336,86 +336,6 @@ pub(crate) fn decode_u32s(bytes: &[u8]) -> Result<Vec<u32>> {
     Ok(values)
 }
 
-/// Encodes CSR head ids whose rows are each sorted ascending. The first
-/// head of a row is stored relative to the row's tail id and the rest as
-/// gaps, which keeps most entries to one or two bytes on road networks
-/// whose ids carry spatial locality. Falls back to [`encode_u32s`] when a
-/// row is unsorted.
-pub(crate) fn encode_sorted_rows(first_out: &[u32], heads: &[u32]) -> Vec<u8> {
-    let sorted = first_out.windows(2).all(|range| {
-        heads[range[0] as usize..range[1] as usize]
-            .windows(2)
-            .all(|pair| pair[0] <= pair[1])
-    });
-    if !sorted || first_out.last().copied().unwrap_or_default() as usize != heads.len() {
-        let mut out = vec![0_u8];
-        out.extend(encode_u32s(heads));
-        return out;
-    }
-    let mut out = Vec::with_capacity(heads.len() * 2 + 16);
-    out.push(1_u8);
-    put_varint(&mut out, heads.len() as u64);
-    for (tail, range) in first_out.windows(2).enumerate() {
-        let mut previous = tail as i64;
-        for (offset, &head) in heads[range[0] as usize..range[1] as usize]
-            .iter()
-            .enumerate()
-        {
-            let head = i64::from(head);
-            if offset == 0 {
-                put_varint(&mut out, zigzag(head - previous));
-            } else {
-                put_varint(&mut out, (head - previous) as u64);
-            }
-            previous = head;
-        }
-    }
-    out
-}
-
-pub(crate) fn decode_sorted_rows(first_out: &[u32], bytes: &[u8]) -> Result<Vec<u32>> {
-    let Some((&mode, rest)) = bytes.split_first() else {
-        bail!("empty CSR head column");
-    };
-    let heads = match mode {
-        0 => decode_u32s(rest)?,
-        1 => {
-            let mut cursor = Cursor::new(rest);
-            let count = cursor.count()?;
-            if first_out.last().copied().unwrap_or_default() as usize != count {
-                bail!("CSR head column does not match its offsets");
-            }
-            let mut heads = Vec::with_capacity(count);
-            for (tail, range) in first_out.windows(2).enumerate() {
-                if range[1] < range[0] {
-                    bail!("CSR offsets are not monotonic");
-                }
-                let mut previous = tail as i64;
-                for offset in 0..(range[1] - range[0]) {
-                    let raw = cursor.varint()?;
-                    let head = if offset == 0 {
-                        previous + unzigzag(raw)
-                    } else {
-                        previous + raw as i64
-                    };
-                    heads.push(
-                        u32::try_from(head)
-                            .map_err(|_| anyhow::anyhow!("CSR head out of range"))?,
-                    );
-                    previous = head;
-                }
-            }
-            cursor.finish()?;
-            heads
-        }
-        other => bail!("unsupported CSR head encoding {other}"),
-    };
-    if first_out.last().copied().unwrap_or_default() as usize != heads.len() {
-        bail!("CSR head column does not match its offsets");
-    }
-    Ok(heads)
-}
-
 // --- Floating-point columns -----------------------------------------------
 
 fn fixed_e7(value: f64) -> Option<i64> {
@@ -669,18 +589,6 @@ mod tests {
         ] {
             assert_eq!(decode_i64s(&encode_i64s(&values)).unwrap(), values);
         }
-    }
-
-    #[test]
-    fn sorted_rows_round_trip_and_reject_mismatched_offsets() {
-        let first_out = vec![0_u32, 2, 2, 5];
-        let heads = vec![3_u32, 9, 0, 1, 4_000_000_000];
-        let encoded = encode_sorted_rows(&first_out, &heads);
-        assert_eq!(decode_sorted_rows(&first_out, &encoded).unwrap(), heads);
-        assert!(decode_sorted_rows(&[0, 1], &encoded).is_err());
-        let unsorted = vec![9_u32, 3, 0, 1, 2];
-        let encoded = encode_sorted_rows(&first_out, &unsorted);
-        assert_eq!(decode_sorted_rows(&first_out, &encoded).unwrap(), unsorted);
     }
 
     #[test]

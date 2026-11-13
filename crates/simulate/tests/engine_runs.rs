@@ -173,10 +173,10 @@ fn build_edge_based_topology(node_count: usize, edges: &[RoutingEdge]) -> EdgeBa
         }
     }
     EdgeBasedTopology {
-        node_first_out,
-        node_edge_order,
-        edge_transition_first_out,
-        edge_transition_edges,
+        node_first_out: node_first_out.into(),
+        node_edge_order: node_edge_order.into(),
+        edge_transition_first_out: edge_transition_first_out.into(),
+        edge_transition_edges: edge_transition_edges.into(),
     }
 }
 

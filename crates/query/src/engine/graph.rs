@@ -454,10 +454,10 @@ pub(crate) fn build_edge_based_topology_fallback(
     }
 
     netweevil_core::EdgeBasedTopology {
-        node_first_out,
-        node_edge_order,
-        edge_transition_first_out,
-        edge_transition_edges,
+        node_first_out: node_first_out.into(),
+        node_edge_order: node_edge_order.into(),
+        edge_transition_first_out: edge_transition_first_out.into(),
+        edge_transition_edges: edge_transition_edges.into(),
     }
 }
 
@@ -1172,24 +1172,6 @@ pub(crate) fn has_weights_for(
     })
 }
 
-/// Moves the generalized-cost weights `metrics` carries for `source` out of
-/// the bundle when the caller holds its only reference, so the ranked
-/// hierarchy keeps the only copy. `None` when the bundle carries no weights
-/// for `source` or is shared; the graph then reads them from the bundle.
-pub(crate) fn take_persisted_weights(
-    metrics: &mut Arc<CompiledProfileBundle>,
-    source: Option<&DatasetAccelerationBundle>,
-) -> Option<CchWeights> {
-    if !has_weights_for(metrics, source?) {
-        return None;
-    }
-    let compiled = Arc::get_mut(metrics)?.acceleration.as_mut()?;
-    Some(CchWeights::Slots((
-        std::mem::take(&mut compiled.upward_weight),
-        std::mem::take(&mut compiled.downward_weight),
-    )))
-}
-
 /// When `metrics` carries an acceleration header for `dataset_acceleration`
 /// but no arc weights customized on it (metrics derived in memory, or a
 /// bundle compiled against another hierarchy), customize the
@@ -1230,8 +1212,8 @@ pub(crate) fn customize_loaded_metrics(
         compiled.source_acceleration_bundle_id.clone(),
     );
     Some(CchWeights::Slots((
-        weights.upward_weight,
-        weights.downward_weight,
+        weights.upward_weight.into_vec(),
+        weights.downward_weight.into_vec(),
     )))
 }
 

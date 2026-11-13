@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::CacheBundleId;
+use crate::{CacheBundleId, Column};
 
 /// Algorithm identifier for the current CCH acceleration bundle format.
 pub const CCH_ALGORITHM: &str = "edge_based_cch_v2";
@@ -32,12 +32,12 @@ pub struct DatasetAccelerationBundle {
     /// Customized weights record the key they were computed for, so weights
     /// of another hierarchy are never paired with this one.
     pub hierarchy_key: u64,
-    pub edge_order: Vec<u32>,
-    pub edge_rank: Vec<u32>,
-    pub upward_first_out: Vec<u32>,
-    pub upward_head: Vec<u32>,
-    pub downward_first_out: Vec<u32>,
-    pub downward_head: Vec<u32>,
+    pub edge_order: Column<u32>,
+    pub edge_rank: Column<u32>,
+    pub upward_first_out: Column<u32>,
+    pub upward_head: Column<u32>,
+    pub downward_first_out: Column<u32>,
+    pub downward_head: Column<u32>,
 }
 
 impl DatasetAccelerationBundle {

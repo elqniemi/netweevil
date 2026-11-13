@@ -14,12 +14,12 @@ fn hierarchy(upward_head_0: u32) -> Arc<DatasetAccelerationBundle> {
         source_topology_bundle_id: CacheBundleId::new("witness-test"),
         algorithm: netweevil_core::CCH_ALGORITHM.into(),
         stats: Default::default(),
-        edge_order: vec![0, 1, 2],
-        edge_rank: vec![0, 1, 2],
-        upward_first_out: vec![0, 1, 2, 2],
-        upward_head: vec![upward_head_0, 2],
-        downward_first_out: vec![0, 0, 1, 1],
-        downward_head: vec![0],
+        edge_order: vec![0, 1, 2].into(),
+        edge_rank: vec![0, 1, 2].into(),
+        upward_first_out: vec![0, 1, 2, 2].into(),
+        upward_head: vec![upward_head_0, 2].into(),
+        downward_first_out: vec![0, 0, 1, 1].into(),
+        downward_head: vec![0].into(),
     })
 }
 
@@ -42,12 +42,12 @@ fn graph(source: Arc<DatasetAccelerationBundle>, direct_weight: u32) -> Accelera
             schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
             source_acceleration_bundle_id: CacheBundleId::new("witness-test"),
             algorithm: netweevil_core::CCH_ALGORITHM.into(),
-            upward_weight: vec![4, direct_weight],
-            downward_weight: vec![2],
-            time_upward_weight: vec![],
-            time_downward_weight: vec![],
-            distance_upward_weight: vec![],
-            distance_downward_weight: vec![],
+            upward_weight: vec![4, direct_weight].into(),
+            downward_weight: vec![2].into(),
+            time_upward_weight: vec![].into(),
+            time_downward_weight: vec![].into(),
+            distance_upward_weight: vec![].into(),
+            distance_downward_weight: vec![].into(),
         }),
     });
     build_acceleration_graph(metrics, None, Some(source), 3)

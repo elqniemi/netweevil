@@ -345,12 +345,12 @@ pub(crate) fn build_with_order(
         algorithm: CCH_ALGORITHM.to_string(),
         stats,
         hierarchy_key: 0,
-        edge_order,
-        edge_rank,
-        upward_first_out,
-        upward_head,
-        downward_first_out,
-        downward_head,
+        edge_order: edge_order.into(),
+        edge_rank: edge_rank.into(),
+        upward_first_out: upward_first_out.into(),
+        upward_head: upward_head.into(),
+        downward_first_out: downward_first_out.into(),
+        downward_head: downward_head.into(),
     };
     bundle.hierarchy_key = bundle.compute_hierarchy_key();
     Ok(bundle)

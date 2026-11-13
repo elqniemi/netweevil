@@ -171,7 +171,7 @@ where
             .zip(&topology.edge_layers.source_way_ids)
             .map(|(edge, &source_way_id)| (edge.from.0, edge.to.0, source_way_id))
             .collect(),
-        edge_rank: acceleration.edge_rank,
+        edge_rank: acceleration.edge_rank.into_vec(),
     };
     timer.lap("load previous build");
 

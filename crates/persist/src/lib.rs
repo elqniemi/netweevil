@@ -1,8 +1,9 @@
 //! Local state layout and IO for the `.netweevil/` directory: dataset,
 //! profile, and run manifests plus binary bundle reading and writing.
 //!
-//! Large bundles use one sectioned fast-load format whose big primitive
-//! arrays load with a single memcpy per array from the mapped file.
+//! Large bundles use one sectioned fast-load format. Its raw sections are
+//! memory-mapped and read in place, so the hierarchy, customized weights and
+//! edge-transition arrays cost no load time and stay file-backed.
 
 mod codec;
 pub mod manifest;
@@ -407,8 +408,8 @@ pub fn write_acceleration_bundle(
 
 pub fn read_topology_bundle(path: impl AsRef<Path>) -> Result<TopologyBundle> {
     let path = path.as_ref();
-    let mmap = sectioned::map_file(path)?;
-    sectioned::read_topology_sectioned(&mmap, path)
+    let bytes = sectioned::map_shared(path)?;
+    sectioned::read_topology_sectioned(&bytes, path)
         .with_context(|| format!("parsing topology bundle {}", path.display()))
 }
 
@@ -421,8 +422,8 @@ pub fn read_edge_name_bundle(path: impl AsRef<Path>) -> Result<EdgeNameBundle> {
 
 pub fn read_acceleration_bundle(path: impl AsRef<Path>) -> Result<DatasetAccelerationBundle> {
     let path = path.as_ref();
-    let mmap = sectioned::map_file(path)?;
-    sectioned::read_acceleration_sectioned(&mmap, path)
+    let bytes = sectioned::map_shared(path)?;
+    sectioned::read_acceleration_sectioned(&bytes, path)
         .with_context(|| format!("parsing acceleration bundle {}", path.display()))
 }
 
@@ -435,8 +436,8 @@ pub fn write_compiled_profile_bundle(
 
 pub fn read_compiled_profile_bundle(path: impl AsRef<Path>) -> Result<CompiledProfileBundle> {
     let path = path.as_ref();
-    let mmap = sectioned::map_file(path)?;
-    sectioned::read_compiled_profile_sectioned(&mmap, path)
+    let bytes = sectioned::map_shared(path)?;
+    sectioned::read_compiled_profile_sectioned(&bytes, path)
         .with_context(|| format!("parsing compiled profile bundle {}", path.display()))
 }
 

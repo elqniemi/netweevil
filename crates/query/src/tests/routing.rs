@@ -797,8 +797,8 @@ fn bucket_engines_share_the_ranked_hierarchy() {
     let (_, slower) = build_test_cch(&topology, &metrics(&[10.0, 40.0, 100.0]));
     let mut stored = slower.clone();
     let header = stored.acceleration.as_mut().expect("fixture header");
-    header.upward_weight.clear();
-    header.downward_weight.clear();
+    header.upward_weight = Default::default();
+    header.downward_weight = Default::default();
     let stored = Arc::new(stored);
     let engine = PreparedRoutingEngine::new(
         Arc::new(topology.clone()),
@@ -819,7 +819,10 @@ fn bucket_engines_share_the_ranked_hierarchy() {
     let (base, bucket_graph, fresh_graph) = (ranked(&engine), ranked(&bucket), ranked(&fresh));
     assert!(bucket_graph.ranked.shares_topology(&base.ranked));
     let reference = slower.acceleration.expect("reference weights");
-    let weights = (reference.upward_weight, reference.downward_weight);
+    let weights = (
+        reference.upward_weight.into_vec(),
+        reference.downward_weight.into_vec(),
+    );
     assert_eq!(
         bucket_graph.ranked.slot_weights(&bucket_graph.source),
         weights
@@ -856,7 +859,7 @@ fn engine_customizes_stored_metrics_like_the_reference_cch() {
         &mut header.distance_upward_weight,
         &mut header.distance_downward_weight,
     ] {
-        weights.clear();
+        *weights = Default::default();
     }
     let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(stored), Some(bundle))
         .expect("engine prepares");
@@ -871,8 +874,8 @@ fn engine_customizes_stored_metrics_like_the_reference_cch() {
     assert_eq!(
         acceleration.ranked.slot_weights(&acceleration.source),
         (
-            reference.upward_weight.clone(),
-            reference.downward_weight.clone()
+            reference.upward_weight.to_vec(),
+            reference.downward_weight.to_vec()
         )
     );
     let time = ServiceAreaMetricKind::TravelTimeS;
@@ -900,8 +903,8 @@ fn engine_loads_stored_weights_only_for_their_hierarchy() {
     let expected = {
         let compiled = reference.acceleration.as_ref().expect("reference weights");
         (
-            compiled.upward_weight.clone(),
-            compiled.downward_weight.clone(),
+            compiled.upward_weight.to_vec(),
+            compiled.downward_weight.to_vec(),
         )
     };
     assert!(crate::engine::has_weights_for(&reference, &bundle));
@@ -914,6 +917,7 @@ fn engine_loads_stored_weights_only_for_their_hierarchy() {
     header.source_hierarchy_key = bundle.hierarchy_key ^ 1;
     header
         .upward_weight
+        .make_mut()
         .iter_mut()
         .for_each(|weight| *weight = 1);
     assert!(!crate::engine::has_weights_for(&foreign, &bundle));

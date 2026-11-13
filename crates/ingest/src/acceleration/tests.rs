@@ -139,7 +139,7 @@ fn edge_order_is_a_valid_elimination_order() {
 
     // The order is a permutation of all edge states and the rank table
     // is exactly its inverse, so contraction visits every state once.
-    let mut sorted = bundle.edge_order.clone();
+    let mut sorted = bundle.edge_order.to_vec();
     sorted.sort_unstable();
     assert!(sorted.into_iter().eq(0..edge_count as u32));
     for (rank, &edge_index) in bundle.edge_order.iter().enumerate() {

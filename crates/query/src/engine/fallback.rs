@@ -569,12 +569,12 @@ pub(crate) fn customize_failure_mode_acceleration(
         source_acceleration_bundle_id: base_compiled.source_acceleration_bundle_id.clone(),
         source_hierarchy_key: source.hierarchy_key,
         algorithm: source.algorithm.clone(),
-        upward_weight,
-        downward_weight,
-        time_upward_weight: Vec::new(),
-        time_downward_weight: Vec::new(),
-        distance_upward_weight: Vec::new(),
-        distance_downward_weight: Vec::new(),
+        upward_weight: upward_weight.into(),
+        downward_weight: downward_weight.into(),
+        time_upward_weight: Default::default(),
+        time_downward_weight: Default::default(),
+        distance_upward_weight: Default::default(),
+        distance_downward_weight: Default::default(),
     })
 }
 
