@@ -50,8 +50,11 @@ impl StateHeapEntry {
 impl StateHeap {
     const ARITY: usize = 4;
 
+    /// Empties the queue, keeping at most [`RETAINED_SCRATCH_ENTRIES`] of
+    /// capacity.
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.entries.shrink_to(crate::RETAINED_SCRATCH_ENTRIES);
     }
 
     /// Cost of the next entry to pop, or infinity when empty.

@@ -24,9 +24,9 @@ impl RestrictedSearchScratch {
         origin_seeds: &[(usize, f64)],
         fallback: &FallbackPolicy,
     ) {
-        self.dist.clear();
-        self.previous.clear();
-        self.settled_edges.clear();
+        clear_map(&mut self.dist);
+        clear_map(&mut self.previous);
+        clear_map(&mut self.settled_edges);
         self.heap.clear();
         for &(edge_index, cost) in origin_seeds {
             let (_, edge_penalty_cost) =

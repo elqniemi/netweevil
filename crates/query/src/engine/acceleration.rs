@@ -43,66 +43,28 @@ impl UnpackTable {
 
 #[derive(Default)]
 pub(crate) struct BidirectionalAccelerationScratch {
-    forward_dist: Vec<f64>,
-    forward_parent: Vec<u32>,
-    forward_touched: Vec<u32>,
+    /// Forward costs and previous arcs.
+    forward: SearchLabels,
     forward_heap: BinaryHeap<State>,
-    backward_dist: Vec<f64>,
-    backward_parent: Vec<u32>,
-    backward_touched: Vec<u32>,
+    /// Backward costs and next arcs.
+    backward: SearchLabels,
     backward_heap: BinaryHeap<State>,
 }
 
 impl BidirectionalAccelerationScratch {
     fn prepare(&mut self, edge_count: usize) {
-        if self.forward_dist.len() < edge_count {
-            self.forward_dist.resize(edge_count, f64::INFINITY);
-            self.forward_parent.resize(edge_count, NO_PREVIOUS_ARC);
-            self.backward_dist.resize(edge_count, f64::INFINITY);
-            self.backward_parent.resize(edge_count, NO_PREVIOUS_ARC);
-        }
-        for &edge_index in &self.forward_touched {
-            self.forward_dist[edge_index as usize] = f64::INFINITY;
-            self.forward_parent[edge_index as usize] = NO_PREVIOUS_ARC;
-        }
-        for &edge_index in &self.backward_touched {
-            self.backward_dist[edge_index as usize] = f64::INFINITY;
-            self.backward_parent[edge_index as usize] = NO_PREVIOUS_ARC;
-        }
-        self.forward_touched.clear();
-        self.forward_heap.clear();
-        self.backward_touched.clear();
-        self.backward_heap.clear();
+        self.forward.prepare(edge_count);
+        self.backward.prepare(edge_count);
+        clear_heap(&mut self.forward_heap);
+        clear_heap(&mut self.backward_heap);
     }
 
     fn update_forward(&mut self, edge_index: usize, cost: f64, previous_arc: u32) -> bool {
-        if !cost.is_finite() {
-            return false;
-        }
-        if cost + f64::EPSILON >= self.forward_dist[edge_index] {
-            return false;
-        }
-        if !self.forward_dist[edge_index].is_finite() {
-            self.forward_touched.push(edge_index as u32);
-        }
-        self.forward_dist[edge_index] = cost;
-        self.forward_parent[edge_index] = previous_arc;
-        true
+        self.forward.update(edge_index, cost, previous_arc)
     }
 
     fn update_backward(&mut self, edge_index: usize, cost: f64, next_arc: u32) -> bool {
-        if !cost.is_finite() {
-            return false;
-        }
-        if cost + f64::EPSILON >= self.backward_dist[edge_index] {
-            return false;
-        }
-        if !self.backward_dist[edge_index].is_finite() {
-            self.backward_touched.push(edge_index as u32);
-        }
-        self.backward_dist[edge_index] = cost;
-        self.backward_parent[edge_index] = next_arc;
-        true
+        self.backward.update(edge_index, cost, next_arc)
     }
 }
 
@@ -417,14 +379,15 @@ impl CchSearchSpace {
     }
 }
 
-fn space_entries(dist: &[f64], parent: &[u32], touched: &[u32]) -> Vec<CchSpaceEntry> {
-    touched
+fn space_entries(labels: &SearchLabels) -> Vec<CchSpaceEntry> {
+    labels
+        .touched
         .iter()
         .map(|&edge_index| CchSpaceEntry {
             edge_index,
-            cost: dist[edge_index as usize],
+            cost: labels.cost.get(edge_index as usize),
             arc: NO_PREVIOUS_ARC,
-            parent: parent[edge_index as usize],
+            parent: labels.link.get(edge_index as usize),
         })
         .collect()
 }
@@ -458,7 +421,7 @@ pub(crate) fn build_forward_cch_space(
             edge_index, cost, ..
         }) = scratch.forward_heap.pop()
         {
-            if cost > scratch.forward_dist[edge_index] {
+            if cost > scratch.forward.cost.get(edge_index) {
                 continue;
             }
             let rank = source.edge_rank[edge_index] as usize;
@@ -477,14 +440,9 @@ pub(crate) fn build_forward_cch_space(
             }
         }
 
-        CchSearchSpace::from_unsorted(
-            space_entries(
-                &scratch.forward_dist,
-                &scratch.forward_parent,
-                &scratch.forward_touched,
-            ),
-            |edge, previous| acceleration.upward_arc_slot(previous as usize, edge),
-        )
+        CchSearchSpace::from_unsorted(space_entries(&scratch.forward), |edge, previous| {
+            acceleration.upward_arc_slot(previous as usize, edge)
+        })
     })
 }
 
@@ -517,7 +475,7 @@ pub(crate) fn build_backward_cch_space(
             edge_index, cost, ..
         }) = scratch.backward_heap.pop()
         {
-            if cost > scratch.backward_dist[edge_index] {
+            if cost > scratch.backward.cost.get(edge_index) {
                 continue;
             }
             let rank = source.edge_rank[edge_index] as usize;
@@ -536,14 +494,9 @@ pub(crate) fn build_backward_cch_space(
             }
         }
 
-        CchSearchSpace::from_unsorted(
-            space_entries(
-                &scratch.backward_dist,
-                &scratch.backward_parent,
-                &scratch.backward_touched,
-            ),
-            |edge, next| acceleration.downward_arc_slot(edge as usize, next),
-        )
+        CchSearchSpace::from_unsorted(space_entries(&scratch.backward), |edge, next| {
+            acceleration.downward_arc_slot(edge as usize, next)
+        })
     })
 }
 
@@ -684,11 +637,11 @@ pub(crate) fn seeded_bidirectional_dijkstra_on_edge_transitions(
                 else {
                     break;
                 };
-                if cost > scratch.forward_dist[edge_index] {
+                if cost > scratch.forward.cost.get(edge_index) {
                     continue;
                 }
-                if scratch.backward_dist[edge_index].is_finite() {
-                    let candidate_cost = cost + scratch.backward_dist[edge_index];
+                if scratch.backward.cost.get(edge_index).is_finite() {
+                    let candidate_cost = cost + scratch.backward.cost.get(edge_index);
                     if candidate_cost < best_cost {
                         best_cost = candidate_cost;
                         best_edge = Some(edge_index);
@@ -721,11 +674,11 @@ pub(crate) fn seeded_bidirectional_dijkstra_on_edge_transitions(
                 else {
                     break;
                 };
-                if cost > scratch.backward_dist[edge_index] {
+                if cost > scratch.backward.cost.get(edge_index) {
                     continue;
                 }
-                if scratch.forward_dist[edge_index].is_finite() {
-                    let candidate_cost = scratch.forward_dist[edge_index] + cost;
+                if scratch.forward.cost.get(edge_index).is_finite() {
+                    let candidate_cost = scratch.forward.cost.get(edge_index) + cost;
                     if candidate_cost < best_cost {
                         best_cost = candidate_cost;
                         best_edge = Some(edge_index);
