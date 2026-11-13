@@ -149,6 +149,9 @@ pub(crate) struct TransitRouteExecutionRequest {
     /// (bicycle or car last mile).
     #[serde(default)]
     pub(crate) egress_profile_id: Option<String>,
+    /// Indoor profile, mode and entrance limits for indoor request ends.
+    #[serde(default)]
+    pub(crate) indoor: netweevil_site::DoorToDoorSettings,
     pub(crate) request: TransitRouteRequest,
 }
 

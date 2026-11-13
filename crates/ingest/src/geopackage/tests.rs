@@ -710,6 +710,10 @@ fn mini_station_step_free_transfer_feeds_door_to_door_transit_routing() {
         id: id.to_string(),
         lon,
         lat: 22.0,
+        site_id: None,
+        level: None,
+        poi: None,
+        space: None,
     };
     let transit_result = transit_router
         .execute_route(&netweevil_transit::TransitRouteRequest {
@@ -803,6 +807,7 @@ impl netweevil_transit::StreetTimeEstimator for StationTransferEstimator<'_> {
             edge_path: route.edge_path,
             geometry: route.geometry.unwrap_or_default(),
             components: route.summary.components,
+            indoor: None,
         })
     }
 }

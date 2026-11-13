@@ -11,6 +11,8 @@
 //! - [`geojson`]: site elements and routes as GeoJSON.
 //! - [`door_to_door`]: routes that join indoor legs and a street leg at the
 //!   best pair of entrances.
+//! - [`transit_access`]: a street estimator that starts and ends transit
+//!   itineraries indoors.
 //!
 //! The crate sits above `netweevil-query` (street routing) and
 //! `netweevil-persist` (state layout) so that the API and the CLI share one
@@ -25,6 +27,7 @@ pub mod runtime;
 pub mod store;
 #[cfg(test)]
 mod tests;
+pub mod transit_access;
 
 pub use door_to_door::{
     DoorToDoorLeg, DoorToDoorLegType, DoorToDoorPoint, DoorToDoorRequest, DoorToDoorResult,

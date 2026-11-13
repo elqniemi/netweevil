@@ -784,6 +784,7 @@ fn route_result_to_street_path(route: netweevil_query::RouteResult) -> TransitSt
         edge_path: route.edge_path,
         geometry: route.geometry.unwrap_or_default(),
         components: route.summary.components,
+        indoor: None,
     }
 }
 

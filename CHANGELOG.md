@@ -42,6 +42,14 @@ All notable changes to NetWeevil are in this file.
   entrances with the least total travel time: up to 8 entrances per side,
   compared with one many-to-many street query. The street leg uses a
   compiled street profile; the indoor legs use an indoor profile and mode.
+- Transit journeys start and end indoors: transit route requests accept
+  `site_id`, `level`, `poi` and `space` on the origin and the destination
+  (with `modes.street_access: network`). Access and egress are priced over
+  the site entrances, and the itinerary has new `indoor` legs
+  (`TransitLegType::Indoor`) before the access leg and after the egress leg,
+  with `summary.indoor_time_s`. `TransitStreetPath.indoor` carries the
+  indoor part from the host estimator. The API takes `indoor.profile` next
+  to `request`; `analyze transit-route` takes `--indoor-profile`.
 
 ## 0.4.0-alpha - 2026-10-28
 

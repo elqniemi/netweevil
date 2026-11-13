@@ -69,6 +69,7 @@ graph TD
     site --> persist
     site --> query
     site --> profile
+    site --> transit
     site --> indoor
     site --> core
 

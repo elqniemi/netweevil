@@ -15,10 +15,14 @@ use netweevil_profile::load_profile;
 use netweevil_query::PreparedRoutingEngine;
 use netweevil_query::read_request_document;
 use netweevil_site::geojson::indoor_route_geojson;
+use netweevil_site::transit_access::{
+    IndoorStreetEstimator, is_indoor_point, prepare_indoor_transit_request,
+};
 use netweevil_site::{
     DoorToDoorRequest, IndoorRouteRequest, SiteCatalog, build_site, door_to_door_geojson,
     door_to_door_route, route_indoor,
 };
+use netweevil_site::{DoorToDoorSettings, IndoorProfileSpec};
 use std::sync::Arc;
 
 use crate::analyze::load_route_execution_inputs;
@@ -344,4 +348,42 @@ pub(crate) fn analyze_indoor_route(paths: &WorkspacePaths, args: IndoorRouteArgs
     );
     println!("indoor route result written to {}", out.display());
     Ok(())
+}
+
+/// The indoor-aware street estimator for a transit request with an indoor
+/// origin or destination (None otherwise). Moves the indoor ends' `lon`,
+/// `lat` to the indoor points.
+pub(crate) fn indoor_transit_estimator<'a>(
+    catalog: &SiteCatalog,
+    request: &mut netweevil_transit::TransitRouteRequest,
+    inner: Option<&'a dyn netweevil_transit::StreetTimeEstimator>,
+    indoor_profile: &str,
+) -> Result<Option<IndoorStreetEstimator<'a>>> {
+    if !is_indoor_point(&request.origin) && !is_indoor_point(&request.destination) {
+        return Ok(None);
+    }
+    let Some(inner) = inner else {
+        bail!(
+            "transit route '{}' starts or ends indoors; set modes.street_access to network and give --street-dataset and --street-profile",
+            request.route_id
+        );
+    };
+    let profile = if indoor_profile.trim_start().starts_with('{') {
+        IndoorProfileSpec::Inline(Box::new(
+            serde_json::from_str(indoor_profile).context("parsing --indoor-profile")?,
+        ))
+    } else {
+        IndoorProfileSpec::Name(indoor_profile.to_string())
+    };
+    let settings = DoorToDoorSettings {
+        profile,
+        ..DoorToDoorSettings::default()
+    };
+    let (origin, destination) = prepare_indoor_transit_request(
+        catalog,
+        &mut request.origin,
+        &mut request.destination,
+        &settings,
+    )?;
+    Ok(Some(IndoorStreetEstimator::new(inner, origin, destination)))
 }

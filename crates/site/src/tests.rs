@@ -193,7 +193,7 @@ mod door_to_door {
     };
 
     /// A 60 x 4 m hall with an entrance in each end wall.
-    fn hall() -> netweevil_indoor::Input {
+    pub(super) fn hall() -> netweevil_indoor::Input {
         serde_json::from_value(json!({
             "levels": [{"id": "0", "z": 0.0}],
             "surfaces": [{"id": "hall", "level": "0", "space": "hall", "walls": true,
@@ -233,7 +233,7 @@ mod door_to_door {
         .unwrap()
     }
 
-    fn catalog() -> SiteCatalog {
+    pub(super) fn catalog() -> SiteCatalog {
         let paths = temp_workspace();
         let source = IndoorSiteSource {
             path: "hall.json".into(),
@@ -364,5 +364,112 @@ mod door_to_door {
         let r = door_to_door_route(&engine, &catalog, &req).unwrap();
         assert_eq!(r.origin_entrance.unwrap().entrance.id, "west");
         assert_eq!(r.summary.origin_candidates, 1);
+    }
+}
+
+mod transit_access {
+    use netweevil_transit::{
+        AccessMode, StreetTimeEstimator, TransitPoint, TransitStop, TransitStreetPath,
+    };
+    use serde_json::json;
+
+    use super::door_to_door::catalog;
+    use super::*;
+    use crate::door_to_door::DoorToDoorSettings;
+    use crate::transit_access::{IndoorStreetEstimator, prepare_indoor_transit_request};
+
+    /// Street paths whose time grows with the distance west of a stop far to
+    /// the east: 1000 s from the west entrance, 100 s from the east one.
+    struct EastIsFast;
+
+    impl StreetTimeEstimator for EastIsFast {
+        fn street_time_s(
+            &self,
+            _: AccessMode,
+            _: bool,
+            _: f64,
+            _: f64,
+            _: f64,
+            _: f64,
+        ) -> Option<u32> {
+            None
+        }
+
+        fn point_to_stop_path(
+            &self,
+            _: AccessMode,
+            lon: f64,
+            lat: f64,
+            stop: &TransitStop,
+        ) -> Option<TransitStreetPath> {
+            let west = lon < ANCHOR.to_lonlat(30.0, 0.0)[0];
+            let mut path = TransitStreetPath::time_only(if west { 1000 } else { 100 });
+            path.distance_m = Some(150.0);
+            path.geometry = vec![[lon, lat, 0.0], [stop.lon, stop.lat, 0.0]];
+            Some(path)
+        }
+    }
+
+    fn point(id: &str) -> TransitPoint {
+        serde_json::from_value(json!({"id": id})).unwrap()
+    }
+
+    #[test]
+    fn indoor_origins_take_the_entrance_with_the_least_total_time() {
+        let catalog = catalog();
+        let mut origin = point("o");
+        origin.site_id = Some("hall".into());
+        origin.poi = Some("Desk".into());
+        let mut destination = point("d");
+        (destination.lon, destination.lat) = (6.6, 53.22);
+        let (o, d) = prepare_indoor_transit_request(
+            &catalog,
+            &mut origin,
+            &mut destination,
+            &DoorToDoorSettings::default(),
+        )
+        .unwrap();
+        assert!(d.is_none());
+        let o = o.unwrap();
+        assert_eq!(o.entrances.len(), 2);
+        // The request origin moves to the desk.
+        let desk = ANCHOR.to_lonlat(20.0, 2.0);
+        assert!((origin.lon - desk[0]).abs() < 1e-5 && (origin.lat - desk[1]).abs() < 1e-5);
+
+        let estimator = IndoorStreetEstimator::new(&EastIsFast, Some(o), None);
+        let [slon, slat] = ANCHOR.to_lonlat(500.0, 0.0);
+        let stop = TransitStop {
+            stop_id: "s".into(),
+            name: "Stop".into(),
+            lon: slon,
+            lat: slat,
+            binding: None,
+        };
+        let path = estimator
+            .point_to_stop_path_with_snap_limit(AccessMode::Walk, &origin, &stop, 50.0)
+            .unwrap();
+        let part = path.indoor.as_ref().unwrap();
+        assert_eq!(part.entrance_id, "east");
+        assert_eq!(part.site_id, "hall");
+        assert!(
+            part.travel_time_s > 20 && part.travel_time_s < 60,
+            "{}",
+            part.travel_time_s
+        );
+        assert!(path.travel_time_s >= 100 + part.travel_time_s);
+        // The geometry starts at the desk and runs through the entrance to the stop.
+        let first = path.geometry.first().unwrap();
+        assert!((first[0] - desk[0]).abs() < 1e-5);
+        assert_eq!(path.geometry.last().unwrap()[0], slon);
+        assert_eq!(
+            &path.geometry[..part.geometry.len()],
+            part.geometry.as_slice()
+        );
+        // Points without indoor fields pass through to the wrapped estimator.
+        let plain = IndoorStreetEstimator::new(&EastIsFast, None, None);
+        let p = plain
+            .point_to_stop_path_with_snap_limit(AccessMode::Walk, &destination, &stop, 50.0)
+            .unwrap();
+        assert!(p.indoor.is_none());
     }
 }

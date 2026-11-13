@@ -280,3 +280,10 @@ The result has:
 
 The GeoJSON output has one line feature for each leg with the property
 `leg_type`.
+
+## Transit journeys from and to indoor points
+
+Transit route requests accept indoor endpoints too. The itinerary then
+starts or ends with an `indoor` leg through the best entrance for each
+stop. See [indoor origins and destinations](transit.md#indoor-origins-and-destinations)
+in the transit guide and `examples/indoor/transit_indoor_request.json`.

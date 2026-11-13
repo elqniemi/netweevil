@@ -158,6 +158,7 @@ fn network_endpoint_snap_limit_rejects_remote_attachments_and_accounts_for_small
                 geometry,
                 edge_path: Vec::new(),
                 components: BTreeMap::new(),
+                indoor: None,
             }
         }
     }
@@ -274,6 +275,7 @@ fn transfer_builder_routes_bound_stops_directionally() {
                 edge_path: vec![*from_node, *to_node],
                 geometry: Vec::new(),
                 components: BTreeMap::new(),
+                indoor: None,
             })
         }
     }
@@ -340,6 +342,7 @@ fn csa_consumes_network_transfer_table_and_exposes_station_path() {
                 edge_path: vec![41, 42, 43],
                 geometry: vec![[6.01, 53.0, -12.0], [6.0101, 53.0, -2.0]],
                 components: components.clone(),
+                indoor: None,
             },
         )],
     };
@@ -370,4 +373,118 @@ fn csa_consumes_network_transfer_table_and_exposes_station_path() {
     assert_eq!(path.components, components);
     assert_eq!(path.geometry[0][2], -12.0);
     assert_eq!(transfer.geometry, path.geometry);
+}
+
+/// Access and egress paths that start and end inside buildings: 120 s
+/// indoors then 180 s on the street to the stop, and 180 s on the street
+/// from the stop then 60 s indoors.
+struct IndoorEnds;
+
+fn indoor_part(entrance: &str, seconds: u32, geometry: Vec<[f64; 3]>) -> Box<TransitIndoorPart> {
+    Box::new(TransitIndoorPart {
+        site_id: "site".into(),
+        entrance_id: entrance.into(),
+        entrance_name: format!("{entrance} door"),
+        travel_time_s: seconds,
+        distance_m: 50.0,
+        geometry,
+        detail: serde_json::Value::Null,
+    })
+}
+
+impl StreetTimeEstimator for IndoorEnds {
+    fn street_time_s(&self, _: AccessMode, _: bool, _: f64, _: f64, _: f64, _: f64) -> Option<u32> {
+        Some(300)
+    }
+
+    fn point_to_stop_path(
+        &self,
+        _: AccessMode,
+        lon: f64,
+        lat: f64,
+        stop: &TransitStop,
+    ) -> Option<TransitStreetPath> {
+        let indoor = vec![[lon, lat, 3.5], [lon + 1e-5, lat, 0.0]];
+        Some(TransitStreetPath {
+            travel_time_s: 300,
+            distance_m: Some(250.0),
+            edge_path: Vec::new(),
+            geometry: vec![indoor[0], indoor[1], [stop.lon, stop.lat, 0.0]],
+            components: BTreeMap::new(),
+            indoor: Some(indoor_part("west", 120, indoor)),
+        })
+    }
+
+    fn stop_to_point_path(
+        &self,
+        _: AccessMode,
+        stop: &TransitStop,
+        lon: f64,
+        lat: f64,
+    ) -> Option<TransitStreetPath> {
+        let indoor = vec![[lon - 1e-5, lat, 0.0], [lon, lat, 0.0]];
+        Some(TransitStreetPath {
+            travel_time_s: 240,
+            distance_m: Some(250.0),
+            edge_path: Vec::new(),
+            geometry: vec![[stop.lon, stop.lat, 0.0], indoor[0], indoor[1]],
+            components: BTreeMap::new(),
+            indoor: Some(indoor_part("east", 60, indoor)),
+        })
+    }
+}
+
+#[test]
+fn indoor_parts_of_access_and_egress_paths_become_indoor_legs() {
+    let unbound = router(import(line_feed(), 7));
+    for arrive in [false, true] {
+        let mut request = if arrive {
+            arrive_by(hm(8, 35))
+        } else {
+            depart_at(hm(8, 0))
+        };
+        request.modes.street_access = TransitStreetAccessModel::Network;
+        request.returns.include_geometry = true;
+        let result = unbound
+            .execute_route_with_street_estimator(&request, Some(&IndoorEnds))
+            .unwrap();
+        assert_eq!(
+            result.outcome,
+            TransitOutcome::Scheduled,
+            "arrive_by {arrive}"
+        );
+        let types: Vec<_> = result.legs.iter().map(|leg| leg.leg_type).collect();
+        assert_eq!(types.first(), Some(&TransitLegType::Indoor));
+        assert_eq!(types[1], TransitLegType::Access);
+        assert_eq!(types[types.len() - 2], TransitLegType::Egress);
+        assert_eq!(types.last(), Some(&TransitLegType::Indoor));
+        let (first, access) = (&result.legs[0], &result.legs[1]);
+        assert_eq!(first.arrival_s - first.departure_s, 120);
+        assert_eq!(first.arrival_s, access.departure_s);
+        assert_eq!(access.arrival_s - access.departure_s, 180);
+        assert_eq!(first.to_id, "west");
+        assert_eq!(access.from_id, "west");
+        assert_eq!(access.from_name, "west door");
+        assert_eq!(first.geometry.len(), 2);
+        assert_eq!(access.geometry.len(), 2);
+        let path = access.network_path.as_ref().unwrap();
+        assert!(path.indoor.is_none());
+        assert_eq!(path.travel_time_s, 180);
+        assert_eq!(path.distance_m, Some(200.0));
+        let indoor = first
+            .network_path
+            .as_ref()
+            .unwrap()
+            .indoor
+            .as_ref()
+            .unwrap();
+        assert_eq!(indoor.site_id, "site");
+        let (egress, last) = (&result.legs[types.len() - 2], result.legs.last().unwrap());
+        assert_eq!(egress.arrival_s, last.departure_s);
+        assert_eq!(last.arrival_s - last.departure_s, 60);
+        assert_eq!(egress.to_id, "east");
+        assert_eq!(last.from_id, "east");
+        assert_eq!(result.summary.indoor_time_s, 180);
+        assert_eq!(result.summary.access_egress_time_s, 360);
+    }
 }

@@ -209,7 +209,7 @@ fn resolve_end(catalog: &SiteCatalog, p: &DoorToDoorPoint, side: &str) -> Result
     Ok(End::Indoor { site, loc })
 }
 
-fn entrance_loc(e: &IndoorSiteEntrance) -> Loc {
+pub(crate) fn entrance_loc(e: &IndoorSiteEntrance) -> Loc {
     let mut l = Loc::default();
     match e.kind {
         IndoorEntranceKind::Portal => l.portal = Some(e.id.clone()),
@@ -220,7 +220,7 @@ fn entrance_loc(e: &IndoorSiteEntrance) -> Loc {
 }
 
 /// Whether the profile may pass the entrance itself (step-free and width).
-fn passable(site: &IndoorSite, e: &IndoorSiteEntrance, profile: &Profile) -> bool {
+pub(crate) fn passable(site: &IndoorSite, e: &IndoorSiteEntrance, profile: &Profile) -> bool {
     if profile.step_free && !e.step_free {
         return false;
     }

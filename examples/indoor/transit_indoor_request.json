@@ -1,0 +1,15 @@
+{
+  "route_id": "room-1.14-to-zernike",
+  "origin": {"id": "room-1.14", "site_id": "demo", "poi": "1.14"},
+  "destination": {"id": "zernike", "lon": 6.5303, "lat": 53.2410},
+  "time": {"datetime": "2026-09-10T09:00:00+02:00", "arrive_by": false, "search_window_s": 7200},
+  "modes": {
+    "access": ["walk"],
+    "egress": ["walk"],
+    "street_access": "network",
+    "max_access_distance_m": 1000,
+    "max_egress_distance_m": 1000,
+    "max_endpoint_snap_distance_m": 50
+  },
+  "returns": {"include_geometry": true}
+}

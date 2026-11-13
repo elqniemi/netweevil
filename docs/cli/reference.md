@@ -881,6 +881,8 @@ Options:
           Street dataset used when the request selects network access/egress
       --street-profile <STREET_PROFILE>
           Foot profile used when the request selects network access/egress
+      --indoor-profile <INDOOR_PROFILE>
+          Indoor profile for an origin or destination inside an indoor site: a built-in name (`walk`, `wheelchair`, ...) or a JSON object [default: walk]
       --out <OUT>
           Result file (JSON). Omit it to write to the runs directory
   -h, --help

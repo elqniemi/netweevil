@@ -35,17 +35,17 @@ pub use gtfs::{import_gtfs, read_transit_bundle, transit_import_summary, write_t
 pub use model::{
     AccessMode, TRANSIT_BUNDLE_SCHEMA_VERSION, TRANSIT_STOP_BINDING_SCHEMA_VERSION,
     TRANSIT_TRANSFER_TABLE_SCHEMA_VERSION, TransitAlternativeOptions, TransitBundle,
-    TransitConnection, TransitFeedManifest, TransitImportOptions, TransitImportSummary, TransitLeg,
-    TransitLegType, TransitMode, TransitModeOptions, TransitNetworkTransfer, TransitOutcome,
-    TransitPoint, TransitQueryTime, TransitReturnOptions, TransitRoute, TransitRouteAlternative,
-    TransitRouteRequest, TransitRouteResult, TransitRouteStop, TransitRouteStopSegment,
-    TransitRouteSummary, TransitServiceAreaRequest, TransitServiceAreaResult,
-    TransitServiceAreaReturnOptions, TransitServiceAreaSegment, TransitServiceAreaStop,
-    TransitShape, TransitStop, TransitStopBinding, TransitStopBindingSummary,
-    TransitStopBindingTable, TransitStopBindingTarget, TransitStreetAccessModel, TransitStreetPath,
-    TransitTimeContext, TransitTransferBuildOptions, TransitTransferRule, TransitTransferTable,
-    TransitTransferTableManifest, TransitTransferType, TransitTrip, TransitWalkingGeometry,
-    load_transit_request,
+    TransitConnection, TransitFeedManifest, TransitImportOptions, TransitImportSummary,
+    TransitIndoorPart, TransitLeg, TransitLegType, TransitMode, TransitModeOptions,
+    TransitNetworkTransfer, TransitOutcome, TransitPoint, TransitQueryTime, TransitReturnOptions,
+    TransitRoute, TransitRouteAlternative, TransitRouteRequest, TransitRouteResult,
+    TransitRouteStop, TransitRouteStopSegment, TransitRouteSummary, TransitServiceAreaRequest,
+    TransitServiceAreaResult, TransitServiceAreaReturnOptions, TransitServiceAreaSegment,
+    TransitServiceAreaStop, TransitShape, TransitStop, TransitStopBinding,
+    TransitStopBindingSummary, TransitStopBindingTable, TransitStopBindingTarget,
+    TransitStreetAccessModel, TransitStreetPath, TransitTimeContext, TransitTransferBuildOptions,
+    TransitTransferRule, TransitTransferTable, TransitTransferTableManifest, TransitTransferType,
+    TransitTrip, TransitWalkingGeometry, load_transit_request,
 };
 pub use model::{TransitCatchmentMode, TransitIsochroneFeature};
 pub use router::{PreparedTransitRouter, execute_transit_route};

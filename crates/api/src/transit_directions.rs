@@ -316,6 +316,7 @@ fn build_directions(
                 )?);
             }
             let kind = match leg.leg_type {
+                TransitLegType::Indoor => "indoor",
                 TransitLegType::Access => "access",
                 TransitLegType::Transfer => "transfer",
                 TransitLegType::Egress => "egress",

@@ -23,6 +23,7 @@ fn path(
             .iter()
             .map(|(key, value)| (key.to_string(), *value))
             .collect(),
+        indoor: None,
     }
 }
 
@@ -184,12 +185,20 @@ fn routes_expose_the_exact_packed_transfer_path_in_both_directions() {
                     lon: 6.0,
                     lat: 53.0,
                     z: None,
+                    site_id: None,
+                    level: None,
+                    poi: None,
+                    space: None,
                 },
                 destination: TransitPoint {
                     id: "destination".to_string(),
                     lon: 6.02,
                     lat: 53.0,
                     z: None,
+                    site_id: None,
+                    level: None,
+                    poi: None,
+                    space: None,
                 },
                 time: TransitQueryTime {
                     datetime: datetime.to_string(),

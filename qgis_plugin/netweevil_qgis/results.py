@@ -825,6 +825,7 @@ class ResultsMixin:
         if QgsWkbTypes.geometryType(layer.wkbType()) != GEOM_LINE:
             return
         specs = {
+            "indoor": ("#7048e8", "dot"),
             "access": ("#2b8a3e", "dash"),
             "egress": ("#2b8a3e", "dash"),
             "transfer": ("#d9480f", "dot"),

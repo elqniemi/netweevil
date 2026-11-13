@@ -1073,6 +1073,13 @@ paths:
         transit, transfer and egress legs. Times in the result are seconds
         from `result.time_context.time_origin_unix_s`.
 
+        The origin and the destination can be inside an indoor site (see
+        `TransitPoint`). The service then prices the way to each stop as the
+        least, over the site entrances, of the indoor route plus the street
+        path from the entrance, and adds an `indoor` leg before the access
+        leg or after the egress leg. This needs
+        `modes.street_access: network`.
+
         With `returns.walking_geometry: network` or
         `modes.street_access: network`, the service uses street profiles for
         the street legs. A foot profile must be loaded. Use
@@ -5973,14 +5980,33 @@ components:
       enum: [tram, subway, rail, bus, ferry, cable_car, gondola, funicular, coach, air, other]
     TransitPoint:
       type: object
-      required: [id, lon, lat]
+      description: |
+        A street point (`lon`, `lat`), or an indoor point: `site_id` with
+        `lon`, `lat` and `level`, or with `poi`, or with `space`. A point
+        with a `level` and no `site_id` is in the site that contains it.
+        Indoor points need `modes.street_access: network`.
+      required: [id]
       properties:
         id: {type: string}
-        lon: {type: number}
+        lon:
+          type: number
+          description: Required, except for an indoor point with `poi` or `space`.
         lat: {type: number}
         z:
           type: number
           description: Elevation in the street graph datum. Network hosts keep endpoint snaps within one metre of it.
+        site_id:
+          type: string
+          description: Indoor site of the point.
+        level:
+          type: [string, number]
+          description: Level id or level number of an indoor point.
+        poi:
+          type: string
+          description: POI id, name or ref in the site.
+        space:
+          type: string
+          description: Space id in the site, or the name or ref of a POI.
     TransitQueryTime:
       type: object
       required: [datetime]
@@ -6090,6 +6116,18 @@ components:
         egress_profile_id:
           type: [string, 'null']
           description: Profile for bicycle or car egress legs.
+        indoor:
+          type: object
+          description: Indoor profile, mode and entrance limit for indoor request ends.
+          properties:
+            profile:
+              $ref: '#/components/schemas/IndoorProfile'
+            mode:
+              $ref: '#/components/schemas/IndoorRouteMode'
+            max_entrances:
+              type: integer
+              default: 8
+              maximum: 8
         request:
           $ref: '#/components/schemas/TransitRouteRequest'
     TransitExecutionContext:
@@ -6132,6 +6170,9 @@ components:
         transfer_time_s: {type: integer}
         wait_time_s: {type: integer}
         boarding_count: {type: integer}
+        indoor_time_s:
+          type: integer
+          description: Time of the `indoor` legs. It is not part of `access_egress_time_s`.
     TransitStreetPath:
       type: object
       required: [travel_time_s, distance_m, edge_path, geometry, components]
@@ -6147,13 +6188,21 @@ components:
             $ref: '#/components/schemas/Coordinate3'
         components:
           $ref: '#/components/schemas/CostComponents'
+        indoor:
+          type: object
+          description: |
+            Indoor legs: the walk inside the site, with `site_id`,
+            `entrance_id`, `entrance_name`, `travel_time_s`, `distance_m`,
+            `geometry` and `detail` (an indoor route result).
+          additionalProperties: true
     TransitLeg:
       type: object
       required: [leg_type, from_id, to_id, from_name, to_name, departure_s, arrival_s]
       properties:
         leg_type:
           type: string
-          enum: [access, transit, transfer, egress]
+          description: '`indoor` legs walk inside the site at an indoor origin (before `access`) or destination (after `egress`).'
+          enum: [indoor, access, transit, transfer, egress]
         from_id: {type: string}
         to_id: {type: string}
         from_name: {type: string}

@@ -16,6 +16,7 @@ netweevil-indoor = { path = "../indoor" }
 netweevil-persist = { path = "../persist" }
 netweevil-profile = { path = "../profile" }
 netweevil-query = { path = "../query" }
+netweevil-transit = { path = "../transit" }
 serde.workspace = true
 serde_json.workspace = true
 

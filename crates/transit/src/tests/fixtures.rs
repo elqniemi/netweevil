@@ -251,6 +251,10 @@ pub fn point(id: &str, lon: f64) -> TransitPoint {
         lon,
         lat: 53.0,
         z: None,
+        site_id: None,
+        level: None,
+        poi: None,
+        space: None,
     }
 }
 
