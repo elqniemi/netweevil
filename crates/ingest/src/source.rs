@@ -105,25 +105,66 @@ impl SourceNode {
     }
 }
 
-/// A node with what its tags classify to.
+impl From<&osmpbfreader::Node> for SourceNode {
+    fn from(node: &osmpbfreader::Node) -> Self {
+        Self {
+            id: node.id.0,
+            lon_e7: node.decimicro_lon,
+            lat_e7: node.decimicro_lat,
+        }
+    }
+}
+
+/// What a node's tags classify to, for the few nodes whose tags matter.
 #[derive(Debug, Clone, PartialEq)]
-struct TaggedNode {
-    node: SourceNode,
+struct NodeTags {
     traffic_signal: bool,
     junction: Option<JunctionNodeTags>,
 }
 
-impl TaggedNode {
-    fn of(node: &osmpbfreader::Node) -> Self {
-        Self {
-            node: SourceNode {
-                id: node.id.0,
-                lon_e7: node.decimicro_lon,
-                lat_e7: node.decimicro_lat,
-            },
-            traffic_signal: is_traffic_signal_node(&node.tags),
-            junction: junction_node_tags(&node.tags),
+impl NodeTags {
+    fn of(tags: &osmpbfreader::Tags) -> Option<Self> {
+        Self::new(is_traffic_signal_node(tags), junction_node_tags(tags))
+    }
+
+    /// `None` for an untagged node.
+    fn new(traffic_signal: bool, junction: Option<JunctionNodeTags>) -> Option<Self> {
+        (traffic_signal || junction.is_some()).then_some(Self {
+            traffic_signal,
+            junction,
+        })
+    }
+}
+
+/// Nodes in the order they were found, with the tags of the tagged ones
+/// (by position) kept apart, so untagged nodes cost 16 bytes.
+#[derive(Debug, Default)]
+struct FoundNodes {
+    nodes: Vec<SourceNode>,
+    tags: Vec<(usize, NodeTags)>,
+}
+
+impl FoundNodes {
+    fn push(&mut self, node: SourceNode, tags: Option<NodeTags>) {
+        if let Some(tags) = tags {
+            self.tags.push((self.nodes.len(), tags));
         }
+        self.nodes.push(node);
+    }
+
+    fn push_osm(&mut self, node: &osmpbfreader::Node) {
+        self.push(node.into(), NodeTags::of(&node.tags));
+    }
+
+    fn append(&mut self, mut other: FoundNodes) {
+        let offset = self.nodes.len();
+        self.tags.extend(
+            other
+                .tags
+                .into_iter()
+                .map(|(position, tags)| (position + offset, tags)),
+        );
+        self.nodes.append(&mut other.nodes);
     }
 }
 
@@ -317,18 +358,18 @@ impl OsmSourceState {
         drop(members);
 
         let needed = IdIndex::new(state.referenced_node_ids());
-        let mut found = Vec::new();
+        let mut found = FoundNodes::default();
         let mut node_count = 0;
         source.read_pass(
             ObjectKind::Node,
             |objects| {
                 let mut count = 0_u64;
-                let mut kept = Vec::new();
+                let mut kept = FoundNodes::default();
                 for object in objects {
                     if let OsmObj::Node(node) = object {
                         count += 1;
                         if needed.contains(node.id.0) {
-                            kept.push(TaggedNode::of(&node));
+                            kept.push_osm(&node);
                         }
                     }
                 }
@@ -336,7 +377,7 @@ impl OsmSourceState {
             },
             |(count, kept)| {
                 node_count += count;
-                found.extend(kept);
+                found.append(kept);
             },
             &mut |fraction| pass_progress(2, fraction),
         )?;
@@ -451,32 +492,46 @@ impl OsmSourceState {
 
     /// Replaces the retained nodes with `found` (in source order; a repeated
     /// id keeps its last version) and records the `needed` ids not found.
-    fn set_retained_nodes(&mut self, mut found: Vec<TaggedNode>, needed: &IdIndex) {
-        if !found
-            .windows(2)
-            .all(|pair| pair[0].node.id < pair[1].node.id)
-        {
-            found.sort_by_key(|tagged| tagged.node.id);
-            let mut kept: Vec<TaggedNode> = Vec::with_capacity(found.len());
-            for tagged in found {
-                match kept.last_mut() {
-                    Some(last) if last.node.id == tagged.node.id => *last = tagged,
-                    _ => kept.push(tagged),
+    fn set_retained_nodes(&mut self, found: FoundNodes, needed: &IdIndex) {
+        let FoundNodes {
+            mut nodes,
+            mut tags,
+        } = found;
+        if !nodes.windows(2).all(|pair| pair[0].id < pair[1].id) {
+            // Sort by id, keeping the last version of a repeated id and the
+            // tags of that version only.
+            let mut order = (0..nodes.len()).collect::<Vec<_>>();
+            order.sort_by_key(|&position| (nodes[position].id, position));
+            order.dedup_by(|later, earlier| {
+                let same = nodes[*later].id == nodes[*earlier].id;
+                if same {
+                    *earlier = *later;
                 }
+                same
+            });
+            let mut new_position = vec![usize::MAX; nodes.len()];
+            for (position, &old) in order.iter().enumerate() {
+                new_position[old] = position;
             }
-            found = kept;
+            nodes = order.iter().map(|&old| nodes[old]).collect();
+            tags = tags
+                .into_iter()
+                .filter_map(|(old, tags)| {
+                    let position = new_position[old];
+                    (position != usize::MAX).then_some((position, tags))
+                })
+                .collect();
         }
         self.traffic_signals.clear();
         self.junction_nodes.clear();
-        let mut nodes = Vec::with_capacity(found.len());
-        for tagged in found {
-            if tagged.traffic_signal {
-                self.traffic_signals.insert(tagged.node.id);
+        for (position, tags) in tags {
+            let id = nodes[position].id;
+            if tags.traffic_signal {
+                self.traffic_signals.insert(id);
             }
-            if let Some(junction) = tagged.junction {
-                self.junction_nodes.insert(tagged.node.id, junction);
+            if let Some(junction) = tags.junction {
+                self.junction_nodes.insert(id, junction);
             }
-            nodes.push(tagged.node);
         }
         let mut found_ids = nodes.iter().map(|node| node.id).peekable();
         self.absent_nodes = needed
@@ -533,14 +588,13 @@ impl OsmSourceState {
                 OsmObj::Node(node) => {
                     summary.nodes += 1;
                     count(&mut self.counts.nodes);
-                    let tagged = TaggedNode::of(&node);
                     self.changed_nodes.insert(
-                        tagged.node.id,
-                        (!deleted).then_some(ChangedNode {
-                            lon_e7: tagged.node.lon_e7,
-                            lat_e7: tagged.node.lat_e7,
-                            traffic_signal: tagged.traffic_signal,
-                            junction: tagged.junction,
+                        node.id.0,
+                        (!deleted).then(|| ChangedNode {
+                            lon_e7: node.decimicro_lon,
+                            lat_e7: node.decimicro_lat,
+                            traffic_signal: is_traffic_signal_node(&node.tags),
+                            junction: junction_node_tags(&node.tags),
                         }),
                     );
                 }
@@ -657,26 +711,30 @@ impl OsmSourceState {
         self.absent_member_ways.sort_unstable();
 
         let needed = IdIndex::new(self.referenced_node_ids());
-        let mut kept = Vec::with_capacity(needed.len());
+        let mut kept = FoundNodes {
+            nodes: Vec::with_capacity(needed.len()),
+            tags: Vec::new(),
+        };
         let mut missing_nodes = Vec::new();
         for &id in needed.ids() {
             match self.changed_nodes.get(&id) {
-                Some(Some(changed)) => kept.push(TaggedNode {
-                    node: SourceNode {
+                Some(Some(changed)) => kept.push(
+                    SourceNode {
                         id,
                         lon_e7: changed.lon_e7,
                         lat_e7: changed.lat_e7,
                     },
-                    traffic_signal: changed.traffic_signal,
-                    junction: changed.junction.clone(),
-                }),
+                    NodeTags::new(changed.traffic_signal, changed.junction.clone()),
+                ),
                 Some(None) => {}
                 None => match self.node(id) {
-                    Some(node) => kept.push(TaggedNode {
+                    Some(node) => kept.push(
                         node,
-                        traffic_signal: self.traffic_signals.contains(&id),
-                        junction: self.junction_nodes.get(&id).cloned(),
-                    }),
+                        NodeTags::new(
+                            self.traffic_signals.contains(&id),
+                            self.junction_nodes.get(&id).cloned(),
+                        ),
+                    ),
                     None if self.absent_nodes.binary_search(&id).is_ok() => {}
                     None => missing_nodes.push(id),
                 },
@@ -685,23 +743,22 @@ impl OsmSourceState {
         if !missing_nodes.is_empty() {
             base_source(&mut base)?;
             let missing = IdIndex::new(missing_nodes);
-            let mut fetched = Vec::new();
             base.as_mut().expect("base opened").read_pass(
                 ObjectKind::Node,
                 |objects| {
-                    objects
-                        .filter_map(|object| match object {
-                            OsmObj::Node(node) if missing.contains(node.id.0) => {
-                                Some(TaggedNode::of(&node))
-                            }
-                            _ => None,
-                        })
-                        .collect::<Vec<_>>()
+                    let mut fetched = FoundNodes::default();
+                    for object in objects {
+                        if let OsmObj::Node(node) = object
+                            && missing.contains(node.id.0)
+                        {
+                            fetched.push_osm(&node);
+                        }
+                    }
+                    fetched
                 },
-                |nodes| fetched.extend(nodes),
+                |fetched| kept.append(fetched),
                 &mut |_| {},
             )?;
-            kept.extend(fetched);
         }
         self.set_retained_nodes(kept, &needed);
         Ok(())

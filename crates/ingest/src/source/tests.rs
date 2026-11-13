@@ -182,3 +182,21 @@ fn decimicro_accepts_only_exact_osm_positions() {
     assert_eq!(decimicro(6.566_501_85), None);
     assert_eq!(decimicro(f64::NAN), None);
 }
+
+#[test]
+fn a_repeated_node_keeps_its_last_version_and_tags() {
+    let signal = grid_node(2, 2);
+    let mut objects = osm_grid();
+    // A later, untagged and moved copy of a signal node, after the ways.
+    objects.push(crate::test_util::osm_node(
+        signal,
+        65_020_500,
+        532_020_500,
+        &[],
+    ));
+    let state = OsmSourceState::from_objects(objects);
+    assert_eq!(state.node(signal).unwrap().lon_e7, 65_020_500);
+    assert!(!state.traffic_signals.contains(&signal));
+    assert_eq!(state.traffic_signals.len(), 1);
+    assert!(state.nodes.windows(2).all(|pair| pair[0].id < pair[1].id));
+}

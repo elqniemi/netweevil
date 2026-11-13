@@ -96,7 +96,7 @@ pub(crate) struct PbfFile {
 }
 
 /// Raw bytes decoded per batch and thread; bounds the memory of a pass.
-const BATCH_BYTES_PER_THREAD: u64 = 8 << 20;
+const BATCH_BYTES_PER_THREAD: u64 = 2 << 20;
 /// Largest blob header and blob body the PBF format allows.
 const MAX_HEADER_BYTES: u64 = 64 << 10;
 const MAX_BLOB_BYTES: u64 = 32 << 20;
