@@ -80,9 +80,7 @@ impl DatasetAccelerationBundle {
         downward: &[(u32, u32)],
     ) -> Result<Self, String> {
         let states = edge_order.len();
-        if u32::try_from(states).is_err() {
-            return Err(format!("{states} edge states exceed 32-bit state ids"));
-        }
+        check_state_count(states)?;
         let mut edge_rank = vec![u32::MAX; states];
         for (rank, &edge) in edge_order.iter().enumerate() {
             match edge_rank.get_mut(edge as usize) {
@@ -208,6 +206,7 @@ impl DatasetAccelerationBundle {
     /// all of its entries, and that the rank table has one entry per state.
     pub fn validate(&self) -> Result<(), String> {
         let states = self.state_count();
+        check_state_count(states)?;
         if self.edge_rank.len() != states {
             return Err("CCH rank table does not match the order".to_string());
         }
@@ -266,6 +265,18 @@ impl DatasetAccelerationBundle {
     }
 }
 
+/// Ranks are 32-bit and searches reserve `u32::MAX` as "no state", so a
+/// hierarchy holds fewer than `u32::MAX` states. Arc counts are unbounded.
+fn check_state_count(states: usize) -> Result<(), String> {
+    if states >= u32::MAX as usize {
+        return Err(format!(
+            "{states} edge states exceed the {} a CCH hierarchy addresses with 32-bit ranks",
+            u32::MAX - 1
+        ));
+    }
+    Ok(())
+}
+
 /// FNV-1a style mixing over 32-bit words, finished with a 64-bit avalanche.
 struct FingerprintHasher(u64);
 
@@ -292,5 +303,55 @@ impl FingerprintHasher {
         value ^= value >> 33;
         value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
         value ^ (value >> 33)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hierarchies_keep_u32_max_free_as_a_rank_sentinel() {
+        assert!(check_state_count(u32::MAX as usize - 1).is_ok());
+        assert!(check_state_count(u32::MAX as usize).is_err());
+        assert!(check_state_count(u32::MAX as usize + 1).is_err());
+    }
+
+    #[test]
+    fn from_arcs_lays_out_rank_ordered_rows() {
+        // Order 2, 0, 1: edge 2 has rank 0, edge 0 rank 1, edge 1 rank 2.
+        let bundle = DatasetAccelerationBundle::from_arcs(
+            CacheBundleId::new("t"),
+            AccelerationBundleStats::default(),
+            vec![2, 0, 1],
+            &[(2, 1), (2, 0), (0, 1)],
+            &[(1, 2), (1, 0), (0, 2)],
+        )
+        .expect("valid hierarchy");
+        bundle.validate().expect("consistent");
+        assert_eq!(bundle.edge_rank, vec![1, 2, 0]);
+        // Upward rows by tail rank, heads ascending by rank.
+        assert_eq!(bundle.upward_first_out, vec![0, 2, 3, 3]);
+        assert_eq!(bundle.upward_head, vec![1, 2, 2]);
+        // Downward arcs by head rank, tails ascending by rank.
+        assert_eq!(bundle.downward_first_in, vec![0, 2, 3, 3]);
+        assert_eq!(bundle.downward_tail, vec![1, 2, 2]);
+        // By tail rank, heads in edge order: edge 1 (rank 2) reaches
+        // edge 0 (rank 1) before edge 2 (rank 0).
+        assert_eq!(bundle.downward_first_out, vec![0, 0, 1, 3]);
+        assert_eq!(bundle.downward_head, vec![0, 1, 0]);
+        assert_eq!(bundle.upward_position(0, 2), Some(1));
+        assert_eq!(bundle.downward_position(2, 1), Some(2));
+        assert_eq!(bundle.downward_position(1, 2), None);
+        assert_eq!(bundle.hierarchy_key, bundle.compute_hierarchy_key());
+
+        let reversed = DatasetAccelerationBundle::from_arcs(
+            CacheBundleId::new("t"),
+            AccelerationBundleStats::default(),
+            vec![2, 0, 1],
+            &[(1, 2)],
+            &[],
+        );
+        assert!(reversed.is_err());
     }
 }
