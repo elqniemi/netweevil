@@ -34,6 +34,14 @@ All notable changes to NetWeevil are in this file.
   `GET /v1/indoor/sites/{site_id}/geojson?level=` list sites and show them on
   a map. The new `netweevil-site` crate holds the site storage, runtime and
   routes. See the guide "Indoor routing" and `examples/indoor/`.
+- Door-to-door routes: `POST /v1/door-to-door/route` and
+  `netweevil analyze door-to-door` route between street points and indoor
+  points (`{site_id, lon, lat, level}`, `{site_id, poi}`, `{site_id, space}`;
+  a point with a level and no site is in the site that contains it). The
+  route joins an indoor leg, a street leg and an indoor leg at the pair of
+  entrances with the least total travel time: up to 8 entrances per side,
+  compared with one many-to-many street query. The street leg uses a
+  compiled street profile; the indoor legs use an indoor profile and mode.
 
 ## 0.4.0-alpha - 2026-10-28
 

@@ -28,5 +28,9 @@ toml.workspace = true
 tracing.workspace = true
 time.workspace = true
 
+[features]
+# Street network fixtures for tests in other crates.
+test-fixtures = []
+
 [lints]
 workspace = true

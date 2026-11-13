@@ -1,0 +1,6 @@
+{
+  "route_id": "station-to-room-1.14",
+  "origin": {"lon": 6.5641, "lat": 53.2108},
+  "destination": {"site_id": "demo", "poi": "1.14"},
+  "indoor": {"profile": "wheelchair", "entrance_snap_m": 50}
+}

@@ -203,3 +203,80 @@ the site elements of one level as GeoJSON. Each feature has the property
 
 The API loads a site when a request first uses it. It reloads the site
 after a new import.
+
+## Door-to-door routes
+
+A door-to-door route goes from a street point or an indoor point to another
+street point or indoor point. It joins up to three legs: an indoor leg out of
+the origin site, a street leg, and an indoor leg into the destination site.
+At least one end must be indoors.
+
+```json
+{
+  "route_id": "station-to-room-1.14",
+  "origin": {"lon": 6.5641, "lat": 53.2108},
+  "destination": {"site_id": "demo", "poi": "1.14"},
+  "indoor": {"profile": "wheelchair", "entrance_snap_m": 50}
+}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `origin`, `destination` | A street point `{lon, lat}`, or an indoor point: `{site_id, lon, lat, level}`, `{site_id, poi}` or `{site_id, space}`. A point with a `level` and no `site_id` is in the site whose footprint contains it. |
+| `indoor.profile`, `indoor.mode` | The indoor profile and mode of the indoor legs. Default `walk`. |
+| `indoor.entrance_snap_m` | The outdoor side of an entrance must be within this distance of a street that the street profile can use. Default 50 m. |
+| `indoor.max_entrances` | Entrances compared on each indoor side. Default and maximum 8. |
+| `snap` | Snap options of street ends, as in a route request. |
+
+### How the entrances are chosen
+
+1. For an indoor origin, one indoor search gives the travel time from the
+   point to each entrance of its site. For an indoor destination, the
+   travel time from each entrance to the point.
+2. Entrances that the indoor profile cannot reach or pass are dropped. A
+   step-free profile does not use an entrance that is not step-free.
+3. The 8 entrances with the least indoor travel time are kept on each side.
+4. The outdoor side of each entrance snaps to the street graph. Entrances
+   that do not snap are dropped with a warning.
+5. One many-to-many street query gives the street travel time between all
+   candidates. When each side has one candidate, one route is used.
+6. The pair with the least `indoor out + street + indoor in` travel time
+   wins. Only this pair is routed with geometry.
+
+The choice is by travel time of both engines. The street leg keeps the
+generalized cost of the street profile, reported in
+`summary.street_generalized_cost`. The choice is exact over the candidates.
+An entrance outside the 8 fastest indoor entrances is not compared.
+
+When both ends are in the same site, the result is the indoor route alone
+when it is no slower than leaving the site and entering again.
+
+Run it with the CLI. The street dataset and profile are those of
+`analyze route`:
+
+```bash
+netweevil analyze door-to-door --dataset groningen \
+  --profile examples/profiles/pedestrian_research_v1.yml \
+  --request examples/indoor/door_to_door_request.json --out d2d.geojson
+```
+
+Or with the API. Choose the street profile with `profile_id` (or `profile`
+and `profile_overrides`) as in `POST /v1/route`:
+
+```bash
+curl -X POST 'http://127.0.0.1:8080/v1/door-to-door/route?format=geojson' \
+  -H 'content-type: application/json' \
+  --data @examples/api/door_to_door.json
+```
+
+The result has:
+
+| Field | Meaning |
+| ----- | ------- |
+| `legs` | The legs in travel order. Each leg has `leg_type` (`indoor` or `street`), `duration_s`, `length_m`, `geometry` (`[lon, lat, z]`) and its own result: `indoor` (an indoor route result) or `street` (a street route result). |
+| `origin_entrance`, `destination_entrance` | The entrances used, with `indoor_duration_s` and `snap_distance_m`. |
+| `summary` | `duration_s`, `length_m`, `indoor_duration_s`, `street_duration_s`, `street_generalized_cost` and the number of candidates on each side. |
+| `warnings` | For example, entrances that are too far from a street. |
+
+The GeoJSON output has one line feature for each leg with the property
+`leg_type`.

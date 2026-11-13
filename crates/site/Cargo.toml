@@ -14,9 +14,13 @@ anyhow.workspace = true
 netweevil-core = { path = "../core" }
 netweevil-indoor = { path = "../indoor" }
 netweevil-persist = { path = "../persist" }
+netweevil-profile = { path = "../profile" }
 netweevil-query = { path = "../query" }
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+netweevil-query = { path = "../query", features = ["test-fixtures"] }
 
 [lints]
 workspace = true

@@ -89,7 +89,7 @@ geometry. These operations accept the switch:
 - `/v1/service-area`, `/v1/service-area-sequence`
 - `/v1/betweenness`, `/v1/scenario-batch`
 - `/v1/transit-service-area`
-- `/v1/indoor/route`
+- `/v1/indoor/route`, `/v1/door-to-door/route`
 - `/v1/simulation/{simulation_id}/frames` (last frame only)
 
 Some operations always send GeoJSON, for example `/v1/expansion`,

@@ -575,6 +575,7 @@ Commands:
   transit-batch          Find a public transit journey for each request in a batch file
   trip                   Put stops in the best visiting order and route the legs
   indoor-route           Route inside an imported indoor site
+  door-to-door           Route from a street point or an indoor point to another, through the best pair of site entrances
   help                   Print this message or the help of the given subcommand(s)
 
 Options:
@@ -933,6 +934,21 @@ Usage: netweevil analyze indoor-route [OPTIONS] --request <REQUEST>
 Options:
       --request <REQUEST>  Indoor route request (JSON or YAML)
       --out <OUT>          Result file: `.json` writes the result, `.geojson` one feature per segment. Omit it to write JSON to the runs directory
+  -h, --help               Print help
+```
+
+#### `netweevil analyze door-to-door` { #netweevil-analyze-door-to-door }
+
+```text
+Route from a street point or an indoor point to another, through the best pair of site entrances
+
+Usage: netweevil analyze door-to-door [OPTIONS] --dataset <DATASET> --profile <PROFILE> --request <REQUEST>
+
+Options:
+      --dataset <DATASET>  Id of an imported street dataset
+      --profile <PROFILE>  Street routing profile file (YAML or TOML), compiled for the dataset
+      --request <REQUEST>  Door-to-door request (JSON or YAML)
+      --out <OUT>          Result file: `.json` writes the result, `.geojson` one feature per leg. Omit it to write JSON to the runs directory
   -h, --help               Print help
 ```
 

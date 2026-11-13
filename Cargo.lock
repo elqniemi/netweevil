@@ -1544,6 +1544,7 @@ dependencies = [
  "netweevil-core",
  "netweevil-indoor",
  "netweevil-persist",
+ "netweevil-profile",
  "netweevil-query",
  "serde",
  "serde_json",

@@ -102,6 +102,7 @@ fn main() -> Result<()> {
             AnalyzeCommand::TransitBatch(args) => analyze_transit_batch(&paths, args),
             AnalyzeCommand::Trip(args) => analyze_trip(&paths, args),
             AnalyzeCommand::IndoorRoute(args) => indoor::analyze_indoor_route(&paths, args),
+            AnalyzeCommand::DoorToDoor(args) => indoor::analyze_door_to_door(&paths, args),
         },
         Command::Experiment {
             command: experiment,

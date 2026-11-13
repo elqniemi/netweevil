@@ -88,6 +88,9 @@ pub(crate) enum AnalyzeCommand {
     Trip(TripArgs),
     /// Route inside an imported indoor site.
     IndoorRoute(crate::indoor::IndoorRouteArgs),
+    /// Route from a street point or an indoor point to another, through
+    /// the best pair of site entrances.
+    DoorToDoor(crate::indoor::DoorToDoorArgs),
 }
 
 #[derive(Args, Debug)]

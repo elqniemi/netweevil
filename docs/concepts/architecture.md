@@ -14,7 +14,7 @@ the API give the same result for the same request.
 | `crates/persist` | `netweevil-persist` | The `.netweevil/` state directory, manifests, binary bundle IO and cache reads. |
 | `crates/ingest` | `netweevil-ingest` | OSM, Overture and GeoPackage import, topology build, turn restrictions, road classification and preprocessing. |
 | `crates/indoor` | `netweevil-indoor` | Indoor and surface routing: navigation mesh walks, edge networks, portals, verticals and POIs across levels, in site metres. |
-| `crates/site` | `netweevil-site` | Indoor sites placed on the globe: site storage, the site cache, indoor routes in WGS84 and site GeoJSON. |
+| `crates/site` | `netweevil-site` | Indoor sites placed on the globe: site storage, the site cache, indoor routes in WGS84, site GeoJSON and door-to-door routes. |
 | `crates/transit` | `netweevil-transit` | GTFS import, street access (walk, bicycle, car) and transit routing. |
 | `crates/simulate` | `netweevil-simulate` | Agent-based traffic simulation. |
 | `crates/report` | `netweevil-report` | Report rendering and local exports. |
@@ -68,6 +68,7 @@ graph TD
 
     site --> persist
     site --> query
+    site --> profile
     site --> indoor
     site --> core
 

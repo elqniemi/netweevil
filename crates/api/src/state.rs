@@ -246,6 +246,7 @@ fn service_capabilities() -> ServiceCapabilities {
             "transit_service_area",
             "simulation",
             "indoor_route",
+            "door_to_door",
         ],
         geometry: vec!["none", "full", "segments"],
         breakdown_metrics: vec!["time_s", "distance_m"],
