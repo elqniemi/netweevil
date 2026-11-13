@@ -180,7 +180,7 @@ fn temporal_reachability_prepass_returns_unreachable_before_tradeoff_overflow() 
             TemporalEffect::Closed,
         )],
     }];
-    topology.edge_layers.routing[5].temporal_rule_id = Some(0);
+    topology.edge_layers.routing[5].set_temporal_rule_id(Some(0));
     for (index, (travel_time_s, generalized_cost)) in [
         (10.0, 1.0),
         (10.0, 1.0),
@@ -192,8 +192,8 @@ fn temporal_reachability_prepass_returns_unreachable_before_tradeoff_overflow() 
     .into_iter()
     .enumerate()
     {
-        metrics.edge_metrics[index].travel_time_s = Some(travel_time_s);
-        metrics.edge_metrics[index].generalized_cost = Some(generalized_cost);
+        metrics.edge_metrics[index].set_travel_time_s(Some(travel_time_s));
+        metrics.edge_metrics[index].set_generalized_cost(Some(generalized_cost));
     }
     let mut request = component_label_overflow_request(Some("2026-07-10T10:00:00Z"));
     request.temporal.pareto = None;
@@ -328,7 +328,7 @@ fn temporal_component_arrive_by_finds_narrow_later_window_without_waiting() {
         rules: vec![open_only(9 * 60, 10 * 60), open_only(11 * 60, 11 * 60 + 1)],
     }];
     for edge in &mut topology.edge_layers.routing {
-        edge.temporal_rule_id = Some(0);
+        edge.set_temporal_rule_id(Some(0));
     }
     let mut metrics = test_metrics();
     metrics.components = vec![cost_component("exposure", &[0.0, 0.0, 10.0])];
@@ -390,7 +390,7 @@ fn temporal_component_arrive_by_maps_overlay_boundary_across_edge_waiting() {
     topology.temporal_rule_sets = vec![TemporalRuleSet {
         rules: vec![open_only(8 * 60, 10 * 60 + 55), open_only(11 * 60, 13 * 60)],
     }];
-    topology.edge_layers.routing[1].temporal_rule_id = Some(0);
+    topology.edge_layers.routing[1].set_temporal_rule_id(Some(0));
     let mut metrics = test_metrics();
     set_edge_cost(&mut metrics, 2, None);
     metrics.temporal.allow_wait = true;
@@ -419,9 +419,9 @@ fn temporal_component_arrive_by_maps_overlay_boundary_across_edge_waiting() {
 #[test]
 fn executes_scenario_batch_and_diffs_rerouting_burden() {
     let mut topology = test_topology();
-    topology.edge_layers.routing[0].feature_row = 0;
-    topology.edge_layers.routing[1].feature_row = 0;
-    topology.edge_layers.routing[2].feature_row = 1;
+    topology.edge_layers.feature_rows[0] = 0;
+    topology.edge_layers.feature_rows[1] = 0;
+    topology.edge_layers.feature_rows[2] = 1;
     topology.feature_attributes =
         string_attribute_table("AssetGroup", "asset_group", &["mall", "street"]);
     let engine = exact_engine(topology, test_metrics());
@@ -903,9 +903,9 @@ fn pure_summary_routes_omit_path_payloads() {
 #[test]
 fn routes_between_phantom_edge_snaps_with_partial_edge_costs() {
     let mut topology = test_topology();
-    topology.nodes[0].z = 10.0;
-    topology.nodes[1].z = 20.0;
-    topology.nodes[2].z = 30.0;
+    topology.nodes[0].set_z(10.0);
+    topology.nodes[1].set_z(20.0);
+    topology.nodes[2].set_z(30.0);
     let mut request = route_request(
         "phantom-route",
         point("a_mid", 6.0005, 53.0),
@@ -956,13 +956,14 @@ fn rejects_snap_beyond_threshold() {
 #[test]
 fn snap_respects_elevation_window_and_feature_attribute_filters() {
     let mut topology = test_topology();
-    topology.nodes[1].lon = topology.nodes[0].lon;
-    topology.nodes[1].lat = topology.nodes[0].lat;
-    topology.nodes[0].z = 0.0;
-    topology.nodes[1].z = 20.0;
-    topology.edge_layers.routing[0].feature_row = 0;
-    topology.edge_layers.routing[1].feature_row = 1;
-    topology.edge_layers.routing[2].feature_row = 0;
+    let (lon, lat) = (topology.nodes[0].lon(), topology.nodes[0].lat());
+    topology.nodes[1].set_lon(lon);
+    topology.nodes[1].set_lat(lat);
+    topology.nodes[0].set_z(0.0);
+    topology.nodes[1].set_z(20.0);
+    topology.edge_layers.feature_rows[0] = 0;
+    topology.edge_layers.feature_rows[1] = 1;
+    topology.edge_layers.feature_rows[2] = 0;
     topology.feature_attributes =
         string_attribute_table("Location", "indoor_location", &["outdoor", "indoor"]);
     let graph = build_routing_graph(&topology, &test_metrics()).expect("graph builds");
@@ -1214,7 +1215,9 @@ fn destination_only_entry_penalty_diverts_through_routes_in_every_engine() {
     // b -> c is destination-only for cars; entering it costs 600 s of
     // generalized cost, so a -> c takes the slow direct service road.
     let mut topology = test_topology();
-    topology.edge_layers.profile[1].destination_only = AccessMask::new(AccessMask::CAR);
+    topology.edge_layers.update_profile(1, |profile| {
+        profile.destination_only = AccessMask::new(AccessMask::CAR)
+    });
     let mut metrics = test_metrics();
     metrics.turn_costs.cost_time_weight = 1.0;
     metrics.turn_costs.destination_only_penalty_s = 600.0;
@@ -1244,15 +1247,19 @@ fn destination_only_entry_penalty_diverts_through_routes_in_every_engine() {
 #[test]
 fn recosted_graphs_keep_destination_only_entry_costs_bit_identical() {
     let mut topology = test_topology();
-    topology.edge_layers.profile[1].destination_only = AccessMask::new(AccessMask::CAR);
+    topology.edge_layers.update_profile(1, |profile| {
+        profile.destination_only = AccessMask::new(AccessMask::CAR)
+    });
     let mut base = test_metrics();
     base.turn_costs.cost_time_weight = 1.0;
     base.turn_costs.destination_only_penalty_s = 600.0;
     let graph = crate::build_routing_graph(&topology, &base).expect("graph builds");
     let mut slower = base.clone();
     for metric in &mut slower.edge_metrics {
-        metric.generalized_cost = metric.generalized_cost.map(|cost| cost * 1.7);
-        metric.travel_time_s = metric.travel_time_s.map(|time| time * 1.7);
+        *metric = netweevil_core::CompiledEdgeMetric::new(
+            metric.travel_time_s().map(|time| time * 1.7),
+            metric.generalized_cost().map(|cost| cost * 1.7),
+        );
     }
 
     let recosted = graph
@@ -1303,18 +1310,18 @@ fn accelerated_engine_matches_exact_engine_under_pairwise_restrictions() {
 
     // All-pairs differential against the exact engine, including the pair
     // affected by the pairwise turn restriction.
-    for origin in &topology.nodes {
-        for destination in &topology.nodes {
-            if origin.node_id == destination.node_id {
+    for (origin_index, origin) in topology.nodes.iter().enumerate() {
+        for (destination_index, destination) in topology.nodes.iter().enumerate() {
+            if origin_index == destination_index {
                 continue;
             }
-            let (from, to) = (origin.node_id.0, destination.node_id.0);
+            let (from, to) = (origin_index as u32, destination_index as u32);
             let request = RouteRequest {
                 returns: full_geometry(),
                 ..route_request(
                     &format!("diff_{from}_{to}"),
-                    point(&format!("o{from}"), origin.lon, origin.lat),
-                    point(&format!("d{to}"), destination.lon, destination.lat),
+                    point(&format!("o{from}"), origin.lon(), origin.lat()),
+                    point(&format!("d{to}"), destination.lon(), destination.lat()),
                 )
             };
             match (
@@ -1920,9 +1927,9 @@ fn component_service_area_labels_bypass_scalar_phast() {
 fn fixed_point_near_tie_keeps_reconstruction_legal_and_error_bounded() {
     let topology = test_topology();
     let mut metrics = test_metrics();
-    metrics.edge_metrics[0].generalized_cost = Some(10.0);
-    metrics.edge_metrics[1].generalized_cost = Some(20.0001);
-    metrics.edge_metrics[2].generalized_cost = Some(30.00005);
+    metrics.edge_metrics[0].set_generalized_cost(Some(10.0));
+    metrics.edge_metrics[1].set_generalized_cost(Some(20.0001));
+    metrics.edge_metrics[2].set_generalized_cost(Some(30.00005));
     let (graph, _) = cch_graph(&topology, &metrics);
     let path = crate::accelerated_route_query(&topology, &graph, 0, 2)
         .expect("query succeeds")
@@ -1936,7 +1943,7 @@ fn fixed_point_near_tie_keeps_reconstruction_legal_and_error_bounded() {
     let actual: f64 = path
         .edge_indexes
         .iter()
-        .map(|&edge| metrics.edge_metrics[edge].generalized_cost.unwrap())
+        .map(|&edge| metrics.edge_metrics[edge].generalized_cost().unwrap())
         .sum();
     let exact = 30.00005;
     assert!(actual >= exact);
@@ -1950,7 +1957,7 @@ fn fixed_point_near_tie_keeps_reconstruction_legal_and_error_bounded() {
 fn finite_weight_overflow_disables_acceleration_without_losing_route() {
     let topology = test_topology();
     let mut metrics = test_metrics();
-    metrics.edge_metrics[1].generalized_cost = Some(1e12);
+    metrics.edge_metrics[1].set_generalized_cost(Some(1e12));
     let (graph, _) = cch_graph(&topology, &metrics);
     assert!(graph.acceleration.is_none());
     assert_eq!(graph.edge_costs[1], 1e12);
@@ -1960,7 +1967,7 @@ fn finite_weight_overflow_disables_acceleration_without_losing_route() {
 fn phast_fractional_time_labels_obey_fixed_point_error_bound() {
     let topology = test_topology();
     let mut base_metrics = test_metrics();
-    base_metrics.edge_metrics[1].travel_time_s = Some(20.0001);
+    base_metrics.edge_metrics[1].set_travel_time_s(Some(20.0001));
     let (graph, metrics) = cch_graph(&topology, &base_metrics);
     let origin = point("origin", 6.0, 53.0);
     let candidates = crate::snapping::snap_candidates(&topology, &graph, &origin, 1.0, true)
@@ -2021,8 +2028,8 @@ fn compiled_sub_metre_spur_does_not_add_a_free_backtrack() {
         CacheBundleId::new("sub-metre-spur"),
     )
     .unwrap();
-    assert!(metrics.edge_metrics[1].generalized_cost.unwrap() > 0.0);
-    assert!(metrics.edge_metrics[2].generalized_cost.unwrap() > 0.0);
+    assert!(metrics.edge_metrics[1].generalized_cost().unwrap() > 0.0);
+    assert!(metrics.edge_metrics[2].generalized_cost().unwrap() > 0.0);
     let (graph, _) = cch_graph(&topology, &metrics);
     let path = crate::accelerated_route_query(&topology, &graph, 0, 3)
         .unwrap()
@@ -2046,7 +2053,7 @@ fn fixed_point_shortcut_unpacks_lower_triangle_including_zero_costs() {
     let topology = with_edge_based_topology(topology);
     for middle_cost in [20.0001, 0.0] {
         let mut metrics = test_metrics();
-        metrics.edge_metrics[0].generalized_cost = Some(middle_cost);
+        metrics.edge_metrics[0].set_generalized_cost(Some(middle_cost));
         let (bundle, compiled) = build_test_cch(&topology, &metrics);
         let shortcut_row = bundle.upward_first_out[1] as usize..bundle.upward_first_out[2] as usize;
         assert!(
@@ -2063,7 +2070,7 @@ fn fixed_point_shortcut_unpacks_lower_triangle_including_zero_costs() {
         let original: f64 = path
             .edge_indexes
             .iter()
-            .map(|&edge| metrics.edge_metrics[edge].generalized_cost.unwrap())
+            .map(|&edge| metrics.edge_metrics[edge].generalized_cost().unwrap())
             .sum();
         assert!((original - path.total_generalized_cost).abs() <= 2.0 / 2048.0);
     }
@@ -2204,10 +2211,10 @@ fn snap_cache_preserves_each_point_id_and_separates_radius_and_elevation_window(
 #[test]
 fn snaps_long_edge_midpoints_even_when_a_nearer_node_search_finds_other_edges() {
     let mut topology = test_topology();
-    topology.nodes[0].lon = 6.0;
-    topology.nodes[1].lon = 6.1;
-    topology.nodes[2].lon = 6.05;
-    topology.nodes[2].lat = 53.00005;
+    topology.nodes[0].set_lon(6.0);
+    topology.nodes[1].set_lon(6.1);
+    topology.nodes[2].set_lon(6.05);
+    topology.nodes[2].set_lat(53.00005);
     topology = with_edge_based_topology(topology);
     let graph = build_routing_graph(&topology, &test_metrics()).unwrap();
     let candidates = crate::snapping::snap_candidates(

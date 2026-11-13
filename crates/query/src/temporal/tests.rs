@@ -199,7 +199,7 @@ fn exact_route_changes_across_direction_reversal_boundary() {
             every_day(10 * 60, 24 * 60, TemporalEffect::ForwardOnly),
         ],
     );
-    topology.edge_layers.routing[0].source_direction = 1;
+    topology.edge_layers.source_directions[0] = 1;
     let metrics = test_metrics(false);
 
     let before = crate::execute_route(&topology, &metrics, &depart_at("2026-07-10T09:59:00+08:00"))
@@ -217,8 +217,8 @@ fn exact_route_changes_across_direction_reversal_boundary() {
 fn earliest_arrival_incumbent_does_not_replace_a_cheaper_slower_route() {
     let topology = test_topology();
     let mut metrics = test_metrics(false);
-    metrics.edge_metrics[2].travel_time_s = Some(5.0);
-    metrics.edge_metrics[2].generalized_cost = Some(100.0);
+    metrics.edge_metrics[2].set_travel_time_s(Some(5.0));
+    metrics.edge_metrics[2].set_generalized_cost(Some(100.0));
 
     let route = crate::execute_route(&topology, &metrics, &depart_at("2026-07-10T10:00:00+08:00"))
         .expect("generalized search improves the earliest-arrival incumbent");
@@ -464,9 +464,9 @@ fn arrive_by_breaks_equal_latest_departures_by_generalized_cost() {
     let mut metrics = test_metrics(false);
     // Exclude the unrelated direct edge. Both shared-prefix paths take 30
     // seconds, but the edge inserted first has a much higher scalar cost.
-    metrics.edge_metrics[1].generalized_cost = Some(200.0);
-    metrics.edge_metrics[2].travel_time_s = None;
-    metrics.edge_metrics[2].generalized_cost = None;
+    metrics.edge_metrics[1].set_generalized_cost(Some(200.0));
+    metrics.edge_metrics[2].set_travel_time_s(None);
+    metrics.edge_metrics[2].set_generalized_cost(None);
     metrics.edge_metrics.push(edge_metric(20.0));
 
     let route = crate::execute_route(
@@ -540,7 +540,7 @@ fn temporal_scenario_can_enable_a_materialized_direction_hidden_from_static_rout
 fn temporal_overlay_updates_component_vector_and_scalar_cost() {
     let topology = test_topology();
     let mut metrics = test_metrics(false);
-    metrics.edge_metrics[0].generalized_cost = Some(30.0);
+    metrics.edge_metrics[0].set_generalized_cost(Some(30.0));
     metrics.components = vec![CompiledCostComponent {
         weight: 2.0,
         edge_values: vec![10.0, 20.0, 100.0].into(),
@@ -588,7 +588,7 @@ fn slow_until_ten_then_fast() -> Vec<TemporalRule> {
 fn set_rules(topology: &mut TopologyBundle, edges: &[usize], rules: Vec<TemporalRule>) {
     topology.temporal_rule_sets = vec![TemporalRuleSet { rules }];
     for &edge in edges {
-        topology.edge_layers.routing[edge].temporal_rule_id = Some(0);
+        topology.edge_layers.routing[edge].set_temporal_rule_id(Some(0));
     }
 }
 
@@ -674,10 +674,7 @@ fn arrive_by(arrive_by: &str, lookback_s: f64) -> crate::RouteRequest {
 }
 
 fn edge_metric(seconds: f64) -> CompiledEdgeMetric {
-    CompiledEdgeMetric {
-        travel_time_s: Some(seconds),
-        generalized_cost: Some(seconds),
-    }
+    CompiledEdgeMetric::new(Some(seconds), Some(seconds))
 }
 
 /// Edges 0 (a->b, 10 s), 1 (b->c, 20 s) and 2 (a->c direct, 100 s).
@@ -722,20 +719,13 @@ fn test_edge(edge_id: u32, from: u32, to: u32, length_m: u32) -> DirectedEdge {
         max_speed_kph: None,
         lanes: None,
         name_index: None,
-        geometry_offset: 0,
-        geometry_len: 0,
         flags: 0,
     }
 }
 
 /// Three nodes 100 m apart along latitude 53; see `test_metrics` for edges.
 fn test_topology() -> TopologyBundle {
-    let node = |id, lon| TopologyNode {
-        node_id: NodeId(id),
-        lon,
-        lat: 53.0,
-        z: 0.0,
-    };
+    let node = |_id, lon| TopologyNode::new(lon, 53.0, 0.0);
     let mut topology = TopologyBundle {
         schema_version: 1,
         source_path: "test".to_string(),

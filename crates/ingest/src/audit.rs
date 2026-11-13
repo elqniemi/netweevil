@@ -353,23 +353,23 @@ fn edge_attribute_link_drifts(
     let mut drifts = Vec::new();
     const MAX_REPORTED_LINK_DRIFTS: usize = 1_000;
     for edge_index in 0..topology.edge_count() {
-        let edge = topology.routing_edge(edge_index);
-        let row_feature_id = (edge.feature_row < topology.feature_attributes.row_count)
+        let row_feature_id = (topology.edge_feature_row(edge_index)
+            < topology.feature_attributes.row_count)
             .then(|| {
                 feature_id_at(
                     &topology.feature_attributes,
-                    edge.feature_row,
+                    topology.edge_feature_row(edge_index),
                     feature_id_column,
                 )
             })
             .transpose()?;
-        if row_feature_id != Some(edge.source_way_id) {
+        if row_feature_id != Some(topology.edge_source_way_id(edge_index)) {
             count += 1;
             if drifts.len() < MAX_REPORTED_LINK_DRIFTS {
                 drifts.push(EdgeAttributeLinkDrift {
-                    edge_id: edge.edge_id.0,
-                    source_feature_id: edge.source_way_id,
-                    feature_row: edge.feature_row,
+                    edge_id: edge_index as u32,
+                    source_feature_id: topology.edge_source_way_id(edge_index),
+                    feature_row: topology.edge_feature_row(edge_index),
                     row_feature_id,
                 });
             }
@@ -421,23 +421,24 @@ fn coordinate_bits(value: f64) -> u64 {
 fn ordered_feature_segments(topology: &TopologyBundle) -> Result<BTreeMap<i64, Vec<SegmentKey>>> {
     let mut selected_directions = BTreeMap::<i64, i8>::new();
     for index in 0..topology.edge_count() {
-        let edge = topology.routing_edge(index);
         selected_directions
-            .entry(edge.source_way_id)
+            .entry(topology.edge_source_way_id(index))
             .and_modify(|direction| {
-                if edge.source_direction == 1 {
+                if topology.edge_source_direction(index) == 1 {
                     *direction = 1;
                 }
             })
-            .or_insert(edge.source_direction);
+            .or_insert(topology.edge_source_direction(index));
     }
     let mut segments = BTreeMap::<i64, Vec<(u32, SegmentKey)>>::new();
     for index in 0..topology.edge_count() {
         let edge = topology.routing_edge(index);
-        if selected_directions.get(&edge.source_way_id) != Some(&edge.source_direction) {
+        if selected_directions.get(&topology.edge_source_way_id(index))
+            != Some(&topology.edge_source_direction(index))
+        {
             continue;
         }
-        let (from, to) = if edge.source_direction < 0 {
+        let (from, to) = if topology.edge_source_direction(index) < 0 {
             (
                 &topology.nodes[edge.to.0 as usize],
                 &topology.nodes[edge.from.0 as usize],
@@ -448,18 +449,21 @@ fn ordered_feature_segments(topology: &TopologyBundle) -> Result<BTreeMap<i64, V
                 &topology.nodes[edge.to.0 as usize],
             )
         };
-        segments.entry(edge.source_way_id).or_default().push((
-            edge.edge_id.0,
-            SegmentKey {
-                feature_id: edge.source_way_id,
-                from_x: coordinate_bits(from.lon),
-                from_y: coordinate_bits(from.lat),
-                from_z: coordinate_bits(from.z),
-                to_x: coordinate_bits(to.lon),
-                to_y: coordinate_bits(to.lat),
-                to_z: coordinate_bits(to.z),
-            },
-        ));
+        segments
+            .entry(topology.edge_source_way_id(index))
+            .or_default()
+            .push((
+                index as u32,
+                SegmentKey {
+                    feature_id: topology.edge_source_way_id(index),
+                    from_x: coordinate_bits(from.lon()),
+                    from_y: coordinate_bits(from.lat()),
+                    from_z: coordinate_bits(from.z()),
+                    to_x: coordinate_bits(to.lon()),
+                    to_y: coordinate_bits(to.lat()),
+                    to_z: coordinate_bits(to.z()),
+                },
+            ));
     }
     Ok(segments
         .into_iter()

@@ -48,12 +48,7 @@ fn grid_engine_for(
     let mut nodes = Vec::new();
     for y in 0..GRID {
         for x in 0..GRID {
-            nodes.push(TopologyNode {
-                node_id: NodeId(node_index(x, y)),
-                lon: node_lon(x),
-                lat: node_lat(y),
-                z: 0.0,
-            });
+            nodes.push(TopologyNode::new(node_lon(x), node_lat(y), 0.0));
         }
     }
 
@@ -97,8 +92,6 @@ fn grid_engine_for(
                 max_speed_kph: None,
                 lanes: None,
                 name_index: None,
-                geometry_offset: 0,
-                geometry_len: 0,
                 flags: 0,
             });
             edge_count += 1;
@@ -122,10 +115,7 @@ fn grid_engine_for(
     let edge_metrics: Vec<CompiledEdgeMetric> = (0..bundle.edge_count())
         .map(|index| {
             let length = bundle.routing_edge(index).length_m as f64;
-            CompiledEdgeMetric {
-                travel_time_s: Some(length / speed_mps),
-                generalized_cost: Some(length / speed_mps),
-            }
+            CompiledEdgeMetric::new(Some(length / speed_mps), Some(length / speed_mps))
         })
         .collect();
     let metrics = CompiledProfileBundle {

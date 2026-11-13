@@ -179,8 +179,8 @@ fn snap_waypoint(
             && (endpoint_node(candidate).is_some()
                 || match (candidate.snapped_edge_id, nearest.snapped_edge_id) {
                     (Some(left), Some(right)) => {
-                        topology.routing_edge(left as usize).source_way_id
-                            == topology.routing_edge(right as usize).source_way_id
+                        topology.edge_source_way_id(left as usize)
+                            == topology.edge_source_way_id(right as usize)
                     }
                     _ => true,
                 })
@@ -583,7 +583,7 @@ fn render_leg(
                         }
                         BreakdownMetric::TimeS => {
                             *entry.time_s.get_or_insert(0.0) += metrics.edge_metrics[edge_index]
-                                .travel_time_s
+                                .travel_time_s()
                                 .unwrap_or_default()
                                 * factor
                         }

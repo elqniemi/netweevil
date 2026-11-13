@@ -130,10 +130,10 @@ impl EdgeTree {
                 &topology.nodes[edge.from.0 as usize],
                 &topology.nodes[edge.to.0 as usize],
             ] {
-                bounds[0] = bounds[0].min(node.lon);
-                bounds[1] = bounds[1].min(node.lat);
-                bounds[2] = bounds[2].max(node.lon);
-                bounds[3] = bounds[3].max(node.lat);
+                bounds[0] = bounds[0].min(node.lon());
+                bounds[1] = bounds[1].min(node.lat());
+                bounds[2] = bounds[2].max(node.lon());
+                bounds[3] = bounds[3].max(node.lat());
             }
         }
         // This is no larger than any member edge's projection scale. Thus
@@ -164,9 +164,9 @@ impl EdgeTree {
                 let from = &topology.nodes[edge.from.0 as usize];
                 let to = &topology.nodes[edge.to.0 as usize];
                 if longitude_axis {
-                    from.lon + to.lon
+                    from.lon() + to.lon()
                 } else {
-                    from.lat + to.lat
+                    from.lat() + to.lat()
                 }
             };
             center(left)
@@ -245,10 +245,10 @@ impl EdgeTree {
                     let from = &topology.nodes[edge.from.0 as usize];
                     let to = &topology.nodes[edge.to.0 as usize];
                     if intersects([
-                        from.lon.min(to.lon),
-                        from.lat.min(to.lat),
-                        from.lon.max(to.lon),
-                        from.lat.max(to.lat),
+                        from.lon().min(to.lon()),
+                        from.lat().min(to.lat()),
+                        from.lon().max(to.lon()),
+                        from.lat().max(to.lat()),
                     ]) {
                         edges.push(edge_id);
                     }

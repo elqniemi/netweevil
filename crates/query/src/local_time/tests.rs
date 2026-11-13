@@ -13,32 +13,17 @@ fn at(value: &str) -> OffsetDateTime {
 fn zoned_topology() -> TopologyBundle {
     let nodes = [(6.56, 53.21), (6.57, 53.21), (7.45, 53.23), (7.46, 53.23)]
         .iter()
-        .enumerate()
-        .map(|(id, &(lon, lat))| TopologyNode {
-            node_id: NodeId(id as u32),
-            lon,
-            lat,
-            z: 0.0,
-        })
+        .map(|&(lon, lat)| TopologyNode::new(lon, lat, 0.0))
         .collect::<Vec<_>>();
     let routing = [(0, 1), (2, 0)]
-        .map(|(from, to)| RoutingEdge {
-            from: NodeId(from),
-            to: NodeId(to),
-            ..RoutingEdge::default()
-        })
+        .map(|(from, to)| RoutingEdge::new(NodeId(from), NodeId(to), 0, None, 0))
         .to_vec();
     let mut topology = TopologyBundle {
         schema_version: TOPOLOGY_BUNDLE_SCHEMA_VERSION,
         source_path: "zones".to_string(),
         spatial_index: NodeSpatialIndex::build(&nodes),
         nodes,
-        edge_layers: TopologyEdgeLayers {
-            profile: vec![Default::default(); routing.len()],
-            presentation: vec![Default::default(); routing.len()],
-            routing,
-            vehicle_restrictions: Default::default(),
-        },
+        edge_layers: TopologyEdgeLayers::from_routing(routing),
         turn_restrictions: Vec::new(),
         names: Vec::new(),
         edge_based_topology: Default::default(),

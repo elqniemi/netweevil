@@ -134,13 +134,7 @@ fn assignment_interns_areas_per_node() {
     ]);
     let nodes = [(0.5, 0.5), (1.5, 0.5), (0.2, 0.2), (5.0, 5.0)]
         .iter()
-        .enumerate()
-        .map(|(id, &(lon, lat))| TopologyNode {
-            node_id: netweevil_core::NodeId(id as u32),
-            lon,
-            lat,
-            z: 0.0,
-        })
+        .map(|&(lon, lat)| TopologyNode::new(lon, lat, 0.0))
         .collect::<Vec<_>>();
     let (areas, indexes) = index.assign(&nodes);
     assert_eq!(areas.len(), 2);

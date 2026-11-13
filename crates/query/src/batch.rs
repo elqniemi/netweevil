@@ -1184,8 +1184,9 @@ pub(crate) fn batch_route_result_for_path(
                             to_node_id: edge.to.0,
                             source_way_id: edge.source_way_id,
                             length_m: (edge.length_m as f64 * factor).round() as u32,
-                            travel_time_s: metric.travel_time_s.unwrap_or_default() * factor,
-                            generalized_cost: metric.generalized_cost.unwrap_or_default() * factor,
+                            travel_time_s: metric.travel_time_s().unwrap_or_default() * factor,
+                            generalized_cost: metric.generalized_cost().unwrap_or_default()
+                                * factor,
                             components: static_edge_components(metrics, edge_index, factor),
                             waiting_time_s: 0.0,
                             entry_time: None,

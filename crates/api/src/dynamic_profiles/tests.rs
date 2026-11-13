@@ -44,8 +44,6 @@ fn fixture() -> Arc<ServiceRuntime> {
         max_speed_kph: None,
         lanes: None,
         name_index: None,
-        geometry_offset: 0,
-        geometry_len: 0,
         flags: 0,
     })
     .collect::<Vec<_>>();
@@ -53,12 +51,7 @@ fn fixture() -> Arc<ServiceRuntime> {
         schema_version: 1,
         source_path: "fixture".into(),
         nodes: (0..3)
-            .map(|id| TopologyNode {
-                node_id: NodeId(id),
-                lon: 6.0 + f64::from(id) * 0.001,
-                lat: 53.0,
-                z: 0.0,
-            })
+            .map(|id| TopologyNode::new(6.0 + f64::from(id) * 0.001, 53.0, 0.0))
             .collect(),
         edge_layers: TopologyEdgeLayers::from_directed_edges(&edges),
         edge_based_topology: EdgeBasedTopology {

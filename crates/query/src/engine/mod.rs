@@ -803,7 +803,7 @@ pub(crate) fn finalize_route_path(
             origin,
             destination,
         );
-        total_generalized_cost += metric.generalized_cost.unwrap_or_default() * factor;
+        total_generalized_cost += metric.generalized_cost().unwrap_or_default() * factor;
         if let Some(previous_edge_index) = previous_edge_index {
             total_generalized_cost += routing_graph.turn_seconds_between(
                 topology,
@@ -871,9 +871,9 @@ pub(crate) fn build_route_geometry(
         }
         let node = &topology.nodes[topology.routing_edge(edge_index).to.0 as usize];
         geometry.push([
-            node.lon,
-            node.lat,
-            if node.z.is_finite() { node.z } else { 0.0 },
+            node.lon(),
+            node.lat(),
+            if node.z().is_finite() { node.z() } else { 0.0 },
         ]);
     }
     if geometry.last().is_none_or(|point| {
@@ -942,7 +942,9 @@ pub(crate) fn turn_penalty_seconds(
         return penalty_s + metrics.turn_costs.uturn_penalty_s;
     }
 
-    if previous.source_way_id == next.source_way_id {
+    if topology.edge_source_way_id(previous_edge_index)
+        == topology.edge_source_way_id(next_edge_index)
+    {
         return penalty_s;
     }
 
@@ -977,10 +979,10 @@ pub(crate) fn classify_turn(
     let via = &topology.nodes[previous.to.0 as usize];
     let to = &topology.nodes[next.to.0 as usize];
 
-    let in_x = projected_delta_x(from.lon, via.lat, via.lon);
-    let in_y = projected_delta_y(from.lat, via.lat);
-    let out_x = projected_delta_x(via.lon, via.lat, to.lon);
-    let out_y = projected_delta_y(via.lat, to.lat);
+    let in_x = projected_delta_x(from.lon(), via.lat(), via.lon());
+    let in_y = projected_delta_y(from.lat(), via.lat());
+    let out_x = projected_delta_x(via.lon(), via.lat(), to.lon());
+    let out_y = projected_delta_y(via.lat(), to.lat());
 
     let in_norm = (in_x * in_x + in_y * in_y).sqrt();
     let out_norm = (out_x * out_x + out_y * out_y).sqrt();
@@ -1029,7 +1031,7 @@ pub(crate) fn build_breakdowns(
             fill_metric_breakdown(
                 entry,
                 edge.length_m as u64,
-                metric.travel_time_s.unwrap_or_default(),
+                metric.travel_time_s().unwrap_or_default(),
                 returns,
                 true,
             );
@@ -1042,7 +1044,7 @@ pub(crate) fn build_breakdowns(
             fill_metric_breakdown(
                 entry,
                 edge.length_m as u64,
-                metric.travel_time_s.unwrap_or_default(),
+                metric.travel_time_s().unwrap_or_default(),
                 returns,
                 false,
             );

@@ -149,7 +149,7 @@ fn parse_naive_datetime(raw: &str) -> Result<NaiveDateTime> {
 fn nearest_node(topology: &TopologyBundle, lon: f64, lat: f64) -> Option<usize> {
     let distance = |node: usize| {
         let node = &topology.nodes[node];
-        netweevil_core::geo::haversine_meters(lon, lat, node.lon, node.lat)
+        netweevil_core::geo::haversine_meters(lon, lat, node.lon(), node.lat())
     };
     let Some(index) = topology.spatial_index.as_ref() else {
         return (0..topology.nodes.len()).min_by(|a, b| distance(*a).total_cmp(&distance(*b)));

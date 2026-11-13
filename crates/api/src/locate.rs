@@ -197,14 +197,13 @@ fn located_segment(
             );
             LocatedEdge {
                 edge_index: directed.edge_index,
-                edge_id: routing.edge_id.0,
+                edge_id: edge_index as u32,
                 from_node_id: routing.from.0,
                 to_node_id: routing.to.0,
                 fraction: directed.fraction,
-                way_id: routing.source_way_id,
+                way_id: topology.edge_source_way_id(edge_index),
                 name: topology
-                    .edge_presentation(edge_index)
-                    .name_index
+                    .edge_name_index(edge_index)
                     .and_then(|index| names.get(index as usize))
                     .cloned(),
                 road_class: enum_label(&attributes.road_class),

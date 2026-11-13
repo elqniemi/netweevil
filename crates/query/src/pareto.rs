@@ -1181,11 +1181,11 @@ fn build_component_route_result(
                     source_way_id: edge.source_way_id,
                     length_m: (f64::from(edge.length_m) * factor).round() as u32,
                     travel_time_s: metrics.edge_metrics[*edge_index]
-                        .travel_time_s
+                        .travel_time_s()
                         .unwrap_or_default()
                         * factor,
                     generalized_cost: metrics.edge_metrics[*edge_index]
-                        .generalized_cost
+                        .generalized_cost()
                         .unwrap_or_default()
                         * factor,
                     components: static_edge_components(metrics, *edge_index, factor),
@@ -1228,7 +1228,7 @@ fn build_component_route_result(
                 edge_path: alternative
                     .edge_indexes
                     .iter()
-                    .map(|edge_index| topology.routing_edge(*edge_index).edge_id.0)
+                    .map(|edge_index| *edge_index as u32)
                     .collect(),
                 geometry: (!matches!(request.returns.geometry, ReturnGeometry::None)).then(|| {
                     build_route_geometry(
@@ -1271,7 +1271,7 @@ fn build_component_route_result(
             primary
                 .edge_indexes
                 .iter()
-                .map(|edge_index| topology.routing_edge(*edge_index).edge_id.0)
+                .map(|edge_index| *edge_index as u32)
                 .collect()
         } else {
             Vec::new()
@@ -1330,7 +1330,7 @@ fn build_temporal_component_route_result(
                 edge_path: if detailed {
                     edge_indexes
                         .iter()
-                        .map(|edge_index| topology.routing_edge(*edge_index).edge_id.0)
+                        .map(|edge_index| *edge_index as u32)
                         .collect()
                 } else {
                     Vec::new()
@@ -1382,7 +1382,7 @@ fn build_temporal_component_route_result(
         edge_path: if detailed {
             primary_edges
                 .iter()
-                .map(|edge_index| topology.routing_edge(*edge_index).edge_id.0)
+                .map(|edge_index| *edge_index as u32)
                 .collect()
         } else {
             Vec::new()

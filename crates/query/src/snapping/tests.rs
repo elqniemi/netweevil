@@ -1,17 +1,12 @@
 use super::*;
-use netweevil_core::{NodeId, NodeSpatialIndex, SpatialIndexCell, TopologyBounds};
+use netweevil_core::{NodeSpatialIndex, SpatialIndexCell, TopologyBounds};
 
 #[test]
 fn finite_global_snap_radius_is_bounded_by_the_node_grid() {
     let topology = TopologyBundle {
         schema_version: 1,
         source_path: "test".into(),
-        nodes: vec![TopologyNode {
-            node_id: NodeId(0),
-            lon: 6.0,
-            lat: 53.0,
-            z: 0.0,
-        }],
+        nodes: vec![TopologyNode::new(6.0, 53.0, 0.0)],
         edge_layers: Default::default(),
         feature_attributes: Default::default(),
         temporal_rule_sets: vec![],

@@ -290,7 +290,7 @@ pub(crate) fn bench_traffic(
         if features.len() >= largest_batch {
             break;
         }
-        let feature = topology.routing_edge(edge).source_way_id;
+        let feature = topology.edge_source_way_id(edge);
         if seen.insert(feature) {
             features.push(feature);
         }

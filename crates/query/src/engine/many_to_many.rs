@@ -312,10 +312,10 @@ impl<'a> ArcSummaryCache<'a> {
                             .collect::<Arc<[f64]>>()
                     });
                     ArcSummary {
-                        cost: metric.generalized_cost.unwrap_or_default()
+                        cost: metric.generalized_cost().unwrap_or_default()
                             + turn_s * context.metrics.turn_costs.cost_time_weight
                             + transition_access_cost(context.topology, context.metrics, tail, head),
-                        time_s: metric.travel_time_s.unwrap_or_default() + turn_s,
+                        time_s: metric.travel_time_s().unwrap_or_default() + turn_s,
                         distance_m: u64::from(context.topology.routing_edge(head).length_m),
                         edges: 1,
                         run,
@@ -433,8 +433,8 @@ fn summarize_space_path(
     let first_length = f64::from(context.topology.routing_edge(first).length_m);
     let last_length = context.topology.routing_edge(last).length_m;
 
-    let mut cost = first_metric.generalized_cost.unwrap_or_default() * first_factor;
-    let mut time_s = first_metric.travel_time_s.unwrap_or_default() * first_factor;
+    let mut cost = first_metric.generalized_cost().unwrap_or_default() * first_factor;
+    let mut time_s = first_metric.travel_time_s().unwrap_or_default() * first_factor;
     let mut distance_m = (first_length * first_factor).round() as u64;
     let mut edges = 1_usize;
     let component_count = metrics.components.len();
@@ -470,8 +470,8 @@ fn summarize_space_path(
     // Arc summaries count the final edge in full; keep only the part up to
     // the destination, rounding its distance as route analysis does.
     if last_factor != 1.0 {
-        cost += last_metric.generalized_cost.unwrap_or_default() * (last_factor - 1.0);
-        time_s += last_metric.travel_time_s.unwrap_or_default() * (last_factor - 1.0);
+        cost += last_metric.generalized_cost().unwrap_or_default() * (last_factor - 1.0);
+        time_s += last_metric.travel_time_s().unwrap_or_default() * (last_factor - 1.0);
         distance_m = distance_m - u64::from(last_length)
             + (f64::from(last_length) * last_factor).round() as u64;
         for (index, total) in components.iter_mut().enumerate() {

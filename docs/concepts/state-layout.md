@@ -134,7 +134,7 @@ result again.
 ## Bundle format
 
 All bundles use one sectioned binary format with the magic number
-`NWSECB06`. Large arrays load with one memory copy from the mapped file.
+`NWSECB07`. Large arrays load with one memory copy from the mapped file.
 Sections use lossless column encodings and deflate compression.
 
 !!! warning

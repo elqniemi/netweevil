@@ -14,8 +14,8 @@ fn height(height_m: f64) -> VehicleParams {
 fn differing_edges(left: &CompiledProfileBundle, right: &CompiledProfileBundle) -> Vec<usize> {
     let bits = |metric: &netweevil_core::CompiledEdgeMetric| {
         (
-            metric.travel_time_s.map(f64::to_bits),
-            metric.generalized_cost.map(f64::to_bits),
+            metric.travel_time_s().map(f64::to_bits),
+            metric.generalized_cost().map(f64::to_bits),
         )
     };
     left.edge_metrics
@@ -48,14 +48,14 @@ fn profile_compile_keeps_the_metrics_of_vehicle_excluded_edges() {
     for (position, &edge) in truck.vehicle.edges.iter().enumerate() {
         let metric = &open.edge_metrics[edge as usize];
         assert_eq!(
-            metric.travel_time_s,
+            metric.travel_time_s(),
             Some(truck.vehicle.travel_time_s[position])
         );
         assert_eq!(
-            metric.generalized_cost,
+            metric.generalized_cost(),
             Some(truck.vehicle.generalized_cost[position])
         );
-        assert!(truck.edge_metrics[edge as usize].travel_time_s.is_none());
+        assert!(truck.edge_metrics[edge as usize].travel_time_s().is_none());
     }
 }
 

@@ -108,7 +108,7 @@ impl PreparedRoutingEngine {
                         .metrics
                         .edge_metrics
                         .iter()
-                        .map(|metric| metric.generalized_cost.unwrap_or(f64::INFINITY))
+                        .map(|metric| metric.generalized_cost().unwrap_or(f64::INFINITY))
                         .collect::<Vec<_>>();
                     EdgeSpatialIndex::build(topology, &costs)
                 })

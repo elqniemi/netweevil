@@ -133,11 +133,13 @@ impl Net {
             .map(|&[x, y, _]| lonlat([x, y]))
             .collect::<Vec<_>>();
         let mut topology = topology("navigation", &coordinates, &self.edges);
-        for (profile, highway) in topology.edge_layers.profile.iter_mut().zip(&self.highways) {
-            profile.highway = *highway;
+        for (edge_index, highway) in self.highways.iter().enumerate() {
+            topology
+                .edge_layers
+                .update_profile(edge_index, |profile| profile.highway = *highway);
         }
         for (node, point) in topology.nodes.iter_mut().zip(&self.points) {
-            node.z = point[2];
+            node.set_z(point[2]);
         }
         topology.feature_attributes = self.feature_attributes.clone();
         topology
@@ -206,11 +208,11 @@ impl Net {
         let mut cycling = metrics(&costs);
         cycling.mode = netweevil_core::TravelMode::Bicycle;
         let mut topology = self.topology();
-        for profile in &mut topology.edge_layers.profile {
+        topology.edge_layers.update_profile_rows(|profile| {
             profile.access_mask = netweevil_core::AccessMask::new(
                 netweevil_core::AccessMask::CAR | netweevil_core::AccessMask::BICYCLE,
             );
-        }
+        });
         exact_engine(topology, cycling)
             .execute_directions(
                 &self.request(from, to),
@@ -1098,11 +1100,11 @@ fn walking_routes_get_no_ramps_or_lanes() {
     walking.mode = netweevil_core::TravelMode::Foot;
     // Snapping only considers edges the profile's mode may use.
     let mut topology = net.topology();
-    for profile in &mut topology.edge_layers.profile {
+    topology.edge_layers.update_profile_rows(|profile| {
         profile.access_mask = netweevil_core::AccessMask::new(
             netweevil_core::AccessMask::CAR | netweevil_core::AccessMask::FOOT,
         );
-    }
+    });
     let result = exact_engine(topology, walking)
         .execute_directions(
             &net.request([0.0, -200.0], [80.0, 200.0]),

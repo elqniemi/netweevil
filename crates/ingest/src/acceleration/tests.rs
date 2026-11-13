@@ -271,7 +271,7 @@ fn edited_grid(before: &TopologyBundle) -> (TopologyBundle, Vec<Option<usize>>) 
     let mut nodes = before
         .nodes
         .iter()
-        .map(|node| (node.lon, node.lat, node.z))
+        .map(|node| (node.lon(), node.lat(), node.z()))
         .collect::<Vec<_>>();
     nodes.extend([(0.5, 0.5, 0.0), (0.501, 0.5, 0.0)]);
     for (from, to) in [(7, 14), (14, 7), (36, 37), (37, 36)] {

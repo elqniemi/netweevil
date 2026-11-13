@@ -399,7 +399,7 @@ impl BoundStopTransferEstimator {
     fn new(engine: Arc<PreparedRoutingEngine>, bundle: &TransitBundle) -> Result<Self> {
         let topology = engine.topology();
         let edge_index_by_id = (0..topology.edge_count())
-            .map(|index| (topology.routing_edge(index).edge_id.0, index as u32))
+            .map(|index| (index as u32, index as u32))
             .collect::<HashMap<_, _>>();
         let mut stops = HashMap::new();
         for stop in &bundle.stops {
@@ -663,15 +663,14 @@ fn exact_node_candidate(
     let node = topology
         .nodes
         .get(node_id as usize)
-        .filter(|node| node.node_id.0 == node_id)
         .with_context(|| format!("binding references unknown node_id {node_id}"))?;
     Ok(SnappedPoint {
         point_id: point.id.clone(),
         requested_lon: point.lon,
         requested_lat: point.lat,
         snapped_node_id: node_id,
-        snapped_lon: node.lon,
-        snapped_lat: node.lat,
+        snapped_lon: node.lon(),
+        snapped_lat: node.lat(),
         snapped_z: node.elevation_m().unwrap_or_default(),
         snap_distance_m: 0.0,
         snapped_edge_id: None,
@@ -707,8 +706,8 @@ fn exact_edge_candidate(
         } else {
             edge.to.0
         },
-        snapped_lon: from.lon + (to.lon - from.lon) * fraction,
-        snapped_lat: from.lat + (to.lat - from.lat) * fraction,
+        snapped_lon: from.lon() + (to.lon() - from.lon()) * fraction,
+        snapped_lat: from.lat() + (to.lat() - from.lat()) * fraction,
         snapped_z: z,
         snap_distance_m: 0.0,
         // Query endpoint candidates use the routing edge index here.
@@ -728,11 +727,11 @@ fn projected_edge_fraction(
     let edge = topology.routing_edge(edge_index as usize);
     let from = &topology.nodes[edge.from.0 as usize];
     let to = &topology.nodes[edge.to.0 as usize];
-    let cos_lat = from.lat.to_radians().cos().abs().max(0.01);
-    let point_x = (point.lon - from.lon) * cos_lat;
-    let point_y = point.lat - from.lat;
-    let edge_x = (to.lon - from.lon) * cos_lat;
-    let edge_y = to.lat - from.lat;
+    let cos_lat = from.lat().to_radians().cos().abs().max(0.01);
+    let point_x = (point.lon - from.lon()) * cos_lat;
+    let point_y = point.lat - from.lat();
+    let edge_x = (to.lon() - from.lon()) * cos_lat;
+    let edge_y = to.lat() - from.lat();
     let length_sq = edge_x.mul_add(edge_x, edge_y * edge_y);
     if length_sq <= f64::EPSILON {
         0.0

@@ -58,7 +58,7 @@ pub(crate) fn resolve_request_vehicle(
         .filter(|&edge| {
             current.position(edge as usize).is_some()
                 || metrics.edge_metrics[edge as usize]
-                    .generalized_cost
+                    .generalized_cost()
                     .is_some()
         })
         .collect::<Vec<_>>();
@@ -113,12 +113,11 @@ pub(crate) fn exclude_vehicle_edges(metrics: &mut CompiledProfileBundle, edges: 
     for &edge in edges {
         let metric = &mut metrics.edge_metrics[edge as usize];
         let (Some(travel_time_s), Some(generalized_cost)) =
-            (metric.travel_time_s, metric.generalized_cost)
+            (metric.travel_time_s(), metric.generalized_cost())
         else {
             continue;
         };
-        metric.travel_time_s = None;
-        metric.generalized_cost = None;
+        *metric = netweevil_core::CompiledEdgeMetric::ABSENT;
         exclusions.edges.push(edge);
         exclusions.travel_time_s.push(travel_time_s);
         exclusions.generalized_cost.push(generalized_cost);
@@ -143,8 +142,10 @@ pub(crate) fn restore_vehicle_exclusions(metrics: &mut CompiledProfileBundle) {
     let exclusions = std::mem::take(&mut metrics.vehicle);
     for (position, &edge) in exclusions.edges.iter().enumerate() {
         let metric = &mut metrics.edge_metrics[edge as usize];
-        metric.travel_time_s = Some(exclusions.travel_time_s[position]);
-        metric.generalized_cost = Some(exclusions.generalized_cost[position]);
+        *metric = netweevil_core::CompiledEdgeMetric::new(
+            Some(exclusions.travel_time_s[position]),
+            Some(exclusions.generalized_cost[position]),
+        );
         for (component, values) in metrics
             .components
             .iter_mut()

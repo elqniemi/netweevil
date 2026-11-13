@@ -451,10 +451,10 @@ fn topology_bounds(topology: &TopologyBundle) -> Result<TopologyBounds> {
         max_lat: f64::NEG_INFINITY,
     };
     for node in &topology.nodes {
-        bounds.min_lon = bounds.min_lon.min(node.lon);
-        bounds.min_lat = bounds.min_lat.min(node.lat);
-        bounds.max_lon = bounds.max_lon.max(node.lon);
-        bounds.max_lat = bounds.max_lat.max(node.lat);
+        bounds.min_lon = bounds.min_lon.min(node.lon());
+        bounds.min_lat = bounds.min_lat.min(node.lat());
+        bounds.max_lon = bounds.max_lon.max(node.lon());
+        bounds.max_lat = bounds.max_lat.max(node.lat());
     }
     if !bounds.min_lon.is_finite() || bounds.min_lon >= bounds.max_lon {
         bail!("topology has no usable coordinate bounds");

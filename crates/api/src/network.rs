@@ -98,17 +98,16 @@ pub(crate) async fn network_edges_handler(
         for edge_index in edges {
             let routing = topology.routing_edge(edge_index);
             let attributes = topology.edge_profile(edge_index);
-            let presentation = topology.edge_presentation(edge_index);
             let from = &topology.nodes[routing.from.0 as usize];
             let to = &topology.nodes[routing.to.0 as usize];
             let length_m = f64::from(routing.length_m);
-            let mut properties = vertical_properties(from, to, &topology.feature_attributes, routing.feature_row);
-            properties.insert("edge_id".into(), json!(routing.edge_id.0));
-            properties.insert("way_id".into(), json!(routing.source_way_id));
-            properties.insert("direction".into(), json!(routing.source_direction));
+            let mut properties = vertical_properties(from, to, &topology.feature_attributes, topology.edge_feature_row(edge_index));
+            properties.insert("edge_id".into(), json!(edge_index as u32));
+            properties.insert("way_id".into(), json!(topology.edge_source_way_id(edge_index)));
+            properties.insert("direction".into(), json!(topology.edge_source_direction(edge_index)));
             properties.insert("length_m".into(), json!(length_m));
-            properties.insert("ascent_m".into(), json!(routing.ascent_m));
-            properties.insert("descent_m".into(), json!(routing.descent_m));
+            properties.insert("ascent_m".into(), json!(topology.edge_ascent_m(edge_index)));
+            properties.insert("descent_m".into(), json!(topology.edge_descent_m(edge_index)));
             properties.insert("road_class".into(), enum_label(&attributes.road_class));
             properties.insert("highway".into(), enum_label(&attributes.highway));
             properties.insert("surface".into(), enum_label(&attributes.surface));
@@ -129,18 +128,18 @@ pub(crate) async fn network_edges_handler(
             ] {
                 properties.insert(key.into(), json!(attributes.access_mask.contains(bit)));
             }
-            properties.insert("temporal".into(), json!(routing.temporal_rule_id.is_some()));
+            properties.insert("temporal".into(), json!(routing.temporal_rule_id().is_some()));
             properties.insert("oneway".into(), json!(!has_reverse_edge(&topology, edge_index)));
             properties.insert(
                 "name".into(),
-                presentation
-                    .name_index
+                topology
+                    .edge_name_index(edge_index)
                     .and_then(|index| names.names.get(index as usize))
                     .map_or(Value::Null, |name| json!(name)),
             );
             properties.insert("component".into(), json!(topology.edge_component_id(edge_index as u32)));
             let slope = if length_m > 0.0 {
-                Some(f64::from(routing.ascent_m - routing.descent_m) / length_m * 100.0)
+                Some(f64::from(topology.edge_ascent_m(edge_index) - topology.edge_descent_m(edge_index)) / length_m * 100.0)
             } else {
                 None
             };
@@ -202,7 +201,7 @@ pub(crate) async fn network_edges_handler(
             }
             features.push(json!({
                 "type": "Feature",
-                "id": routing.edge_id.0,
+                "id": edge_index as u32,
                 "geometry": {"type": "LineString", "coordinates": [node_coordinate(from), node_coordinate(to)]},
                 "properties": Value::Object(properties),
             }));
@@ -227,7 +226,11 @@ pub(crate) async fn network_edges_handler(
 
 /// Unknown Z is drawn at zero, but remains explicitly unknown in properties.
 fn node_coordinate(node: &TopologyNode) -> [f64; 3] {
-    [node.lon, node.lat, node.elevation_m().unwrap_or_default()]
+    [
+        node.lon(),
+        node.lat(),
+        node.elevation_m().unwrap_or_default(),
+    ]
 }
 
 fn attribute_json(value: FeatureAttributeValueRef<'_>) -> Value {
@@ -358,8 +361,8 @@ pub(crate) fn profile_values(
     access_mask: AccessMask,
     mode_bit: u16,
 ) -> ProfileValues {
-    let travel_time_s = metric.travel_time_s.filter(|value| value.is_finite());
-    let cost = metric.generalized_cost.filter(|value| value.is_finite());
+    let travel_time_s = metric.travel_time_s().filter(|value| value.is_finite());
+    let cost = metric.generalized_cost().filter(|value| value.is_finite());
     let allowed = travel_time_s.is_some() || cost.is_some();
     ProfileValues {
         allowed,
@@ -389,7 +392,9 @@ pub(crate) fn has_reverse_edge(topology: &TopologyBundle, edge_index: usize) -> 
     );
     ebt.node_edge_order[first..last].iter().any(|&other| {
         let candidate = topology.routing_edge(other as usize);
-        candidate.to == routing.from && candidate.source_way_id == routing.source_way_id
+        candidate.to == routing.from
+            && topology.edge_source_way_id(other as usize)
+                == topology.edge_source_way_id(edge_index)
     })
 }
 
@@ -399,7 +404,7 @@ pub(crate) fn has_reverse_edge(topology: &TopologyBundle, edge_index: usize) -> 
 fn edges_in_bbox(topology: &TopologyBundle, bbox: [f64; 4], max_edges: usize) -> Vec<usize> {
     let [west, south, east, north] = bbox;
     let inside = |node: &netweevil_core::TopologyNode| {
-        node.lon >= west && node.lon <= east && node.lat >= south && node.lat <= north
+        node.lon() >= west && node.lon() <= east && node.lat() >= south && node.lat() <= north
     };
     let mut edges = Vec::new();
     let ebt = &topology.edge_based_topology;

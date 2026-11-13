@@ -167,7 +167,8 @@ where
             .edge_layers
             .routing
             .iter()
-            .map(|edge| (edge.from.0, edge.to.0, edge.source_way_id))
+            .zip(&topology.edge_layers.source_way_ids)
+            .map(|(edge, &source_way_id)| (edge.from.0, edge.to.0, source_way_id))
             .collect(),
         edge_rank: acceleration.edge_rank,
     };
@@ -453,7 +454,8 @@ pub(crate) fn previous_ranks(
             .edge_layers
             .routing
             .iter()
-            .map(|edge| (edge.from.0, edge.to.0, edge.source_way_id)),
+            .zip(&topology.edge_layers.source_way_ids)
+            .map(|(edge, &source_way_id)| (edge.from.0, edge.to.0, source_way_id)),
     );
     let mut ranks = current_keys
         .iter()

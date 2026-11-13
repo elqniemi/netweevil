@@ -291,17 +291,18 @@ pub fn traffic_binding_stats(
     let mut matched = vec![false; bundle.feature_ids.len()];
     let mut matched_edge_count = 0;
     for edge_index in 0..topology.edge_count() {
-        let edge = topology.routing_edge(edge_index);
-        let direction = if edge.source_direction < 0 {
+        let direction = if topology.edge_source_direction(edge_index) < 0 {
             TRAFFIC_BACKWARD
         } else {
             TRAFFIC_FORWARD
         };
         let start = bundle
             .feature_ids
-            .partition_point(|id| *id < edge.source_way_id);
+            .partition_point(|id| *id < topology.edge_source_way_id(edge_index));
         if let Some(index) = (start..bundle.feature_ids.len())
-            .take_while(|&index| bundle.feature_ids[index] == edge.source_way_id)
+            .take_while(|&index| {
+                bundle.feature_ids[index] == topology.edge_source_way_id(edge_index)
+            })
             .find(|&index| bundle.directions[index] == direction)
         {
             matched[index] = true;
@@ -475,29 +476,29 @@ pub fn synthesize_traffic_source(
     let mut csv_text = String::from("feature_id,direction,pattern_id\n");
     let mut seen = std::collections::BTreeSet::new();
     for edge_index in 0..topology.edge_count() {
-        let edge = topology.routing_edge(edge_index);
         let profile = topology.edge_profile(edge_index);
         if !profile.access_mask.contains(AccessMask::CAR)
             || !options.road_classes.contains(&profile.road_class)
         {
             continue;
         }
-        let direction = if edge.source_direction < 0 {
+        let direction = if topology.edge_source_direction(edge_index) < 0 {
             "backward"
         } else {
             "forward"
         };
-        if !seen.insert((edge.source_way_id, direction)) {
+        if !seen.insert((topology.edge_source_way_id(edge_index), direction)) {
             continue;
         }
         // A deterministic per-feature variant (SplitMix64 finalizer).
-        let mut mixed = (edge.source_way_id as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut mixed =
+            (topology.edge_source_way_id(edge_index) as u64).wrapping_add(0x9E37_79B9_7F4A_7C15);
         mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         mixed ^= mixed >> 31;
         csv_text.push_str(&format!(
             "{},{direction},{}_{}\n",
-            edge.source_way_id,
+            topology.edge_source_way_id(edge_index),
             road_class_name(profile.road_class),
             mixed % u64::from(variants)
         ));

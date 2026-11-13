@@ -449,8 +449,6 @@ pub(crate) fn edge(edge_id: u32, from: u32, to: u32, source_way_id: i64) -> Dire
         max_speed_kph: None,
         lanes: None,
         name_index: None,
-        geometry_offset: 0,
-        geometry_len: 0,
         flags: 0,
     }
 }
@@ -463,13 +461,7 @@ pub(crate) fn topology(nodes: &[(f64, f64, f64)], edges: &[DirectedEdge]) -> Top
         source_path: "test".to_string(),
         nodes: nodes
             .iter()
-            .enumerate()
-            .map(|(node_id, &(lon, lat, z))| TopologyNode {
-                node_id: NodeId(node_id as u32),
-                lon,
-                lat,
-                z,
-            })
+            .map(|&(lon, lat, z)| TopologyNode::new(lon, lat, z))
             .collect(),
         edge_layers: TopologyEdgeLayers::from_directed_edges(edges),
         turn_restrictions: Vec::new(),

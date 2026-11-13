@@ -389,9 +389,11 @@ pub(crate) fn evaluate_edge_at(
 ) -> Option<EdgeTemporalCost> {
     let routing_edge = topology.routing_edge(edge_index);
     let metric = metrics.edge_metrics.get(edge_index)?;
-    let base_time_s = metric.travel_time_s?;
-    let base_cost = metric.generalized_cost?;
-    let scenario = context.scenario_features.get(&routing_edge.source_way_id);
+    let base_time_s = metric.travel_time_s()?;
+    let base_cost = metric.generalized_cost()?;
+    let scenario = context
+        .scenario_features
+        .get(&topology.edge_source_way_id(edge_index));
     if scenario.is_some_and(|scenario| scenario.force_closed) {
         return None;
     }
@@ -420,7 +422,7 @@ pub(crate) fn evaluate_edge_at(
             rule_set,
             scenario,
             mode_bit,
-            routing_edge.source_direction,
+            topology.edge_source_direction(edge_index),
             timestamp,
             zone,
             &context.holidays,
@@ -490,7 +492,7 @@ pub(crate) fn evaluate_edge_at(
             };
         let overlay_multiplier = component.overlay_name.as_deref().map_or(1.0, |name| {
             let value = context
-                .overlay_value(routing_edge.source_way_id, actual_entry, name)
+                .overlay_value(topology.edge_source_way_id(edge_index), actual_entry, name)
                 .unwrap_or(0.0);
             if component.invert_overlay {
                 1.0 - value
@@ -591,7 +593,7 @@ pub(crate) fn imported_rule_set<'a>(
     metrics.temporal.rules.for_edge(edge_index).or_else(|| {
         topology
             .routing_edge(edge_index)
-            .temporal_rule_id
+            .temporal_rule_id()
             .and_then(|rule_id| topology.temporal_rule_sets.get(rule_id as usize))
     })
 }
@@ -851,16 +853,17 @@ pub(crate) fn validate_speed_factor_wait_policy(
         if metrics
             .edge_metrics
             .get(edge_index)
-            .and_then(|metric| metric.travel_time_s)
+            .and_then(|metric| metric.travel_time_s())
             .is_none()
         {
             continue;
         }
-        let edge = topology.routing_edge(edge_index);
-        let scenario = context.scenario_features.get(&edge.source_way_id);
+        let scenario = context
+            .scenario_features
+            .get(&topology.edge_source_way_id(edge_index));
         let imported = imported_rule_set(topology, metrics, edge_index);
         if has_time_varying_speed_factor(imported, scenario, mode_bit) {
-            speed_factor_edges.push((edge_index, edge.source_way_id));
+            speed_factor_edges.push((edge_index, topology.edge_source_way_id(edge_index)));
         }
     }
     let Some(&(_, first_feature)) = speed_factor_edges.first() else {
@@ -1626,7 +1629,7 @@ fn collect_path_overlay_departure_candidates(
         return;
     }
     for (position, &(edge_index, fraction)) in path.iter().enumerate() {
-        let feature_id = topology.routing_edge(edge_index).source_way_id;
+        let feature_id = topology.edge_source_way_id(edge_index);
         for boundary in overlay_boundaries_for_feature(context, feature_id, overlay_names, range) {
             for requested_entry in requested_entry_candidates_around_actual_boundary(
                 topology,
@@ -1963,15 +1966,16 @@ fn build_edge_arrival_segments(
     fraction: f64,
     range: TimeWindow,
 ) -> Vec<EdgeArrivalSegment> {
-    let edge = topology.routing_edge(edge_index);
     let Some(base_time_s) = metrics
         .edge_metrics
         .get(edge_index)
-        .and_then(|metric| metric.travel_time_s)
+        .and_then(|metric| metric.travel_time_s())
     else {
         return Vec::new();
     };
-    let scenario = context.scenario_features.get(&edge.source_way_id);
+    let scenario = context
+        .scenario_features
+        .get(&topology.edge_source_way_id(edge_index));
     let imported = imported_rule_set(topology, metrics, edge_index);
     let mode_bit = metrics.mode.access_bit();
     if !has_time_varying_rules(imported, scenario, mode_bit) {
@@ -2173,7 +2177,9 @@ fn edge_rule_evaluation(
     timestamp: OffsetDateTime,
 ) -> RuleEvaluation {
     let edge = topology.routing_edge(edge_index);
-    let scenario = context.scenario_features.get(&edge.source_way_id);
+    let scenario = context
+        .scenario_features
+        .get(&topology.edge_source_way_id(edge_index));
     if scenario.is_some_and(|scenario| scenario.force_closed)
         || (edge.flags & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION != 0
             && !scenario.is_some_and(scenario_enables_materialized_direction))
@@ -2184,7 +2190,7 @@ fn edge_rule_evaluation(
         imported_rule_set(topology, metrics, edge_index),
         scenario,
         metrics.mode.access_bit(),
-        edge.source_direction,
+        topology.edge_source_direction(edge_index),
         timestamp,
         context.timezones(topology).edge_zone(topology, edge_index),
         &context.holidays,
@@ -2984,7 +2990,7 @@ pub(crate) fn build_temporal_route_result(
         edge_path: if include_detailed_paths {
             edge_indexes
                 .iter()
-                .map(|edge_index| topology.routing_edge(*edge_index).edge_id.0)
+                .map(|edge_index| *edge_index as u32)
                 .collect()
         } else {
             Vec::new()

@@ -30,14 +30,20 @@ fn builds_directional_three_dimensional_edge_quantities() {
         .expect("3D topology builds");
 
     assert_eq!(bundle.schema_version, TOPOLOGY_BUNDLE_SCHEMA_VERSION);
-    assert_eq!(bundle.nodes[0].z, 10.0);
-    assert_eq!(bundle.nodes[1].z, 22.0);
+    assert_eq!(bundle.nodes[0].z(), 10.0);
+    assert_eq!(bundle.nodes[1].z(), 22.0);
     assert_eq!(bundle.edge_count(), 2);
     let forward = bundle.routing_edge(0);
-    let reverse = bundle.routing_edge(1);
+    let _reverse = bundle.routing_edge(1);
     assert_eq!(forward.length_m, 12);
-    assert_eq!((forward.ascent_m, forward.descent_m), (12.0, 0.0));
-    assert_eq!((reverse.ascent_m, reverse.descent_m), (0.0, 12.0));
+    assert_eq!(
+        (bundle.edge_ascent_m(0), bundle.edge_descent_m(0)),
+        (12.0, 0.0)
+    );
+    assert_eq!(
+        (bundle.edge_ascent_m(1), bundle.edge_descent_m(1)),
+        (0.0, 12.0)
+    );
 }
 
 #[test]
@@ -120,11 +126,11 @@ fn carries_tagged_restrictions_onto_directed_edges() {
     assert_eq!(forward.destination_only.0, AccessMask::HGV);
     let forward_rules = &bundle.temporal_rule_sets[bundle
         .routing_edge(0)
-        .temporal_rule_id
+        .temporal_rule_id()
         .expect("forward rules") as usize];
     assert_eq!(forward_rules.rules[0].effect, TemporalEffect::Closed);
     assert_eq!(forward_rules.rules[0].modes, AccessMask::HGV);
-    assert_eq!(bundle.routing_edge(1).temporal_rule_id, None);
+    assert_eq!(bundle.routing_edge(1).temporal_rule_id(), None);
 
     let restrictions = &bundle.edge_layers.vehicle_restrictions;
     assert_eq!(restrictions.edges, vec![0, 1]);
@@ -140,7 +146,7 @@ fn carries_tagged_restrictions_onto_directed_edges() {
         assert!(pedestrian.conditional_access.contains(AccessMask::CAR));
         let rules = &bundle.temporal_rule_sets[bundle
             .routing_edge(edge_index)
-            .temporal_rule_id
+            .temporal_rule_id()
             .expect("rules") as usize];
         assert!(
             rules

@@ -579,9 +579,9 @@ impl OsmSourceState {
             .map(|(&id, node)| {
                 Ok(SourceNode {
                     id,
-                    lon_e7: decimicro(node.lon)
+                    lon_e7: decimicro(node.lon())
                         .context("topology longitude is not an OSM position")?,
-                    lat_e7: decimicro(node.lat)
+                    lat_e7: decimicro(node.lat())
                         .context("topology latitude is not an OSM position")?,
                 })
             })

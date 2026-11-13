@@ -37,11 +37,11 @@ pub use graph::{
     AccessMask, ConnectedComponentKind, ConnectedComponentsMeta, DirectedEdge,
     EDGE_FLAG_INFERRED_BICYCLE_CONTRAFLOW, EDGE_FLAG_INFERRED_FOOT_REVERSE_ONEWAY,
     EDGE_FLAG_ROUNDABOUT, EDGE_FLAG_TARGET_TRAFFIC_SIGNAL,
-    EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, EdgeBasedTopology, EdgeId, EdgePresentation,
-    EdgeProfileAttributes, HighwayClass, NodeId, NodeSpatialIndex, RoadClass, RoutingEdge,
-    SmoothnessClass, SpatialIndexCell, SurfaceClass, TOPOLOGY_BUNDLE_SCHEMA_VERSION,
-    TopologyBounds, TopologyBundle, TopologyBundleMeta, TopologyEdgeLayers, TopologyNode,
-    TurnRestriction, TurnRestrictionCondition, TurnRestrictionKind,
+    EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION, EdgeBasedTopology, EdgeId, EdgeProfileAttributes,
+    HighwayClass, NodeId, NodeSpatialIndex, RoadClass, RoutingEdge, SmoothnessClass,
+    SpatialIndexCell, SurfaceClass, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBounds, TopologyBundle,
+    TopologyBundleMeta, TopologyEdgeLayers, TopologyNode, TurnRestriction,
+    TurnRestrictionCondition, TurnRestrictionKind,
 };
 pub use guidance::{EDGE_NAME_BUNDLE_SCHEMA_VERSION, EdgeGuidance, EdgeNameBundle};
 pub use metrics::{

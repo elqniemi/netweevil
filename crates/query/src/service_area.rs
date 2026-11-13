@@ -1687,7 +1687,7 @@ pub(crate) fn service_area_edge_cost(
 ) -> Option<f64> {
     match metric_kind {
         ServiceAreaMetricKind::DistanceM => Some(topology.routing_edge(edge_index).length_m as f64),
-        ServiceAreaMetricKind::TravelTimeS => metrics.edge_metrics[edge_index].travel_time_s,
+        ServiceAreaMetricKind::TravelTimeS => metrics.edge_metrics[edge_index].travel_time_s(),
     }
 }
 
@@ -2240,7 +2240,7 @@ fn service_area_segments_for_band(
             let segment_distance_m =
                 full_distance_m * (segment.end_fraction - segment.start_fraction);
             let segment_travel_time_s = metrics.edge_metrics[segment.edge_index]
-                .travel_time_s
+                .travel_time_s()
                 .map(|time_s| time_s * (segment.end_fraction - segment.start_fraction));
             ServiceAreaSegment {
                 origin_id: (!band.origin_id.is_empty()).then_some(band.origin_id.clone()),
@@ -2248,9 +2248,9 @@ fn service_area_segments_for_band(
                 threshold_id: band.threshold_id.clone(),
                 threshold_limit: band.threshold_limit,
                 threshold_metric: band.threshold_metric,
-                edge_id: edge.edge_id.0,
+                edge_id: segment.edge_index as u32,
                 edge_index: segment.edge_index as u32,
-                source_way_id: edge.source_way_id,
+                source_way_id: topology.edge_source_way_id(segment.edge_index),
                 from_node_id: edge.from.0,
                 to_node_id: edge.to.0,
                 start_fraction: segment.start_fraction,
@@ -2396,19 +2396,19 @@ fn service_area_segment_coords(
     let from_node = &topology.nodes[edge.from.0 as usize];
     let to_node = &topology.nodes[edge.to.0 as usize];
     let from = [
-        from_node.lon,
-        from_node.lat,
-        if from_node.z.is_finite() {
-            from_node.z
+        from_node.lon(),
+        from_node.lat(),
+        if from_node.z().is_finite() {
+            from_node.z()
         } else {
             0.0
         },
     ];
     let to = [
-        to_node.lon,
-        to_node.lat,
-        if to_node.z.is_finite() {
-            to_node.z
+        to_node.lon(),
+        to_node.lat(),
+        if to_node.z().is_finite() {
+            to_node.z()
         } else {
             0.0
         },

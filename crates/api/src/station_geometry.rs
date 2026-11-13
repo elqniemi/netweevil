@@ -158,7 +158,7 @@ pub(crate) async fn station_geometry_handler(
                 let Some(node) = runtime.topology.nodes.get(*node_id as usize) else {
                     continue;
                 };
-                (json!([node.lon, node.lat, node.z]), json!({}))
+                (json!([node.lon(), node.lat(), node.z()]), json!({}))
             }
             // An edge binding needs its exact interpolated source geometry;
             // never fabricate a midpoint for a reference boarding marker.

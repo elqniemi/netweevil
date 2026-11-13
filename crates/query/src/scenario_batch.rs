@@ -336,7 +336,7 @@ fn resolve_scenario_overlay(
             }
             let topology = engine.topology();
             let active_source_feature_ids = (0..topology.edge_count())
-                .map(|edge_index| topology.routing_edge(edge_index).source_way_id)
+                .map(|edge_index| topology.edge_source_way_id(edge_index))
                 .collect::<BTreeSet<_>>();
             let stale_source_feature_ids = closed_source_feature_ids
                 .iter()
@@ -365,16 +365,16 @@ fn resolve_scenario_overlay(
             }
             let topology = engine.topology();
             let closed_source_feature_ids = (0..topology.edge_count())
-                .map(|edge_index| topology.routing_edge(edge_index))
-                .filter(|edge| {
-                    edge.feature_row != netweevil_core::NO_FEATURE_ROW
+                .filter(|&edge_index| {
+                    let feature_row = topology.edge_feature_row(edge_index);
+                    feature_row != netweevil_core::NO_FEATURE_ROW
                         && topology.feature_attributes.value_matches(
-                            edge.feature_row,
+                            feature_row,
                             &group.attribute,
                             &group.value,
                         )
                 })
-                .map(|edge| edge.source_way_id)
+                .map(|edge_index| topology.edge_source_way_id(edge_index))
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();
@@ -398,7 +398,7 @@ fn validate_overlay_source_features(
 ) -> Result<()> {
     let topology = engine.topology();
     let active_source_feature_ids = (0..topology.edge_count())
-        .map(|edge_index| topology.routing_edge(edge_index).source_way_id)
+        .map(|edge_index| topology.edge_source_way_id(edge_index))
         .collect::<BTreeSet<_>>();
     let stale_source_feature_ids = overlay
         .features

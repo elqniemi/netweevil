@@ -97,19 +97,12 @@ fn street(node_count: u32) -> TopologyBundle {
                 max_speed_kph: None,
                 lanes: None,
                 name_index: None,
-                geometry_offset: 0,
-                geometry_len: 0,
                 flags: 0,
             });
         }
     }
     let nodes = (0..node_count)
-        .map(|node| TopologyNode {
-            node_id: NodeId(node),
-            lon: 6.5 + f64::from(node) * 0.0015,
-            lat: 53.2,
-            z: 0.0,
-        })
+        .map(|node| TopologyNode::new(6.5 + f64::from(node) * 0.0015, 53.2, 0.0))
         .collect::<Vec<_>>();
     TopologyBundle {
         schema_version: TOPOLOGY_BUNDLE_SCHEMA_VERSION,
@@ -212,9 +205,9 @@ fn reload_swaps_in_an_updated_build_and_recompiles_stale_profiles() {
 #[test]
 fn profile_templates_and_their_examples_compile() {
     let mut topology = street(3);
-    for profile in &mut topology.edge_layers.profile {
+    topology.edge_layers.update_profile_rows(|profile| {
         profile.access_mask = AccessMask::new(AccessMask::ALL);
-    }
+    });
     let example_dir =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/profiles");
     let examples = [
@@ -260,7 +253,7 @@ fn profile_templates_and_their_examples_compile() {
             compiled
                 .edge_metrics
                 .iter()
-                .all(|metric| metric.generalized_cost.is_some()),
+                .all(|metric| metric.generalized_cost().is_some()),
             "{name} cannot use the street"
         );
     }

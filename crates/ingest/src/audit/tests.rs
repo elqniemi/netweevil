@@ -73,7 +73,7 @@ fn schema_comparison_detects_missing_all_null_column() {
 #[test]
 fn detects_an_edge_linked_to_the_wrong_feature_row() {
     let mut topology = feature_topology(&[(0, 1)]);
-    topology.edge_layers.routing[0].feature_row = 0;
+    topology.edge_layers.feature_rows[0] = 0;
     topology.feature_attributes = single_row_table(
         "feature_id",
         Some("feature_id"),

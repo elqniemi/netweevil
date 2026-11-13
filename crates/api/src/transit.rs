@@ -816,14 +816,7 @@ fn api_binding_point(stop: &TransitStop) -> LabeledPoint {
 }
 
 fn api_edge_index(topology: &TopologyBundle, edge_id: u32) -> Option<u32> {
-    if (edge_id as usize) < topology.edge_count()
-        && topology.routing_edge(edge_id as usize).edge_id.0 == edge_id
-    {
-        return Some(edge_id);
-    }
-    (0..topology.edge_count())
-        .find(|&index| topology.routing_edge(index).edge_id.0 == edge_id)
-        .map(|index| index as u32)
+    ((edge_id as usize) < topology.edge_count()).then_some(edge_id)
 }
 
 fn api_exact_node_candidate(
@@ -831,17 +824,14 @@ fn api_exact_node_candidate(
     point: &LabeledPoint,
     node_id: u32,
 ) -> Option<SnappedPoint> {
-    let node = topology
-        .nodes
-        .get(node_id as usize)
-        .filter(|node| node.node_id.0 == node_id)?;
+    let node = topology.nodes.get(node_id as usize)?;
     Some(SnappedPoint {
         point_id: point.id.clone(),
         requested_lon: point.lon,
         requested_lat: point.lat,
         snapped_node_id: node_id,
-        snapped_lon: node.lon,
-        snapped_lat: node.lat,
+        snapped_lon: node.lon(),
+        snapped_lat: node.lat(),
         snapped_z: node.elevation_m().unwrap_or_default(),
         snap_distance_m: 0.0,
         snapped_edge_id: None,
@@ -877,8 +867,8 @@ fn api_exact_edge_candidate(
         } else {
             edge.to.0
         },
-        snapped_lon: from.lon + (to.lon - from.lon) * fraction,
-        snapped_lat: from.lat + (to.lat - from.lat) * fraction,
+        snapped_lon: from.lon() + (to.lon() - from.lon()) * fraction,
+        snapped_lat: from.lat() + (to.lat() - from.lat()) * fraction,
         snapped_z: z,
         snap_distance_m: 0.0,
         snapped_edge_id: Some(edge_index),
@@ -897,11 +887,11 @@ fn api_projected_edge_fraction(
     let edge = topology.routing_edge(edge_index as usize);
     let from = &topology.nodes[edge.from.0 as usize];
     let to = &topology.nodes[edge.to.0 as usize];
-    let cos_lat = from.lat.to_radians().cos().abs().max(0.01);
-    let point_x = (point.lon - from.lon) * cos_lat;
-    let point_y = point.lat - from.lat;
-    let edge_x = (to.lon - from.lon) * cos_lat;
-    let edge_y = to.lat - from.lat;
+    let cos_lat = from.lat().to_radians().cos().abs().max(0.01);
+    let point_x = (point.lon - from.lon()) * cos_lat;
+    let point_y = point.lat - from.lat();
+    let edge_x = (to.lon() - from.lon()) * cos_lat;
+    let edge_y = to.lat() - from.lat();
     let length_sq = edge_x.mul_add(edge_x, edge_y * edge_y);
     if length_sq <= f64::EPSILON {
         0.0
@@ -1251,7 +1241,7 @@ fn bound_stop_coordinate(stop: &TransitStop, topology: &TopologyBundle) -> Optio
         } if z.is_finite() => Some([*lon, *lat, *z]),
         TransitStopBindingTarget::Node { node_id } => {
             let node = topology.nodes.get(*node_id as usize)?;
-            Some([node.lon, node.lat, node.elevation_m()?])
+            Some([node.lon(), node.lat(), node.elevation_m()?])
         }
         TransitStopBindingTarget::Edge { edge_id, fraction } => {
             let edge_index = api_edge_index(topology, *edge_id)?;

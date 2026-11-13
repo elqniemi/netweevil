@@ -79,12 +79,12 @@ fn expansion_geojson(
                 "id": expanded.order,
                 "geometry": {
                     "type": "LineString",
-                    "coordinates": [[from.lon, from.lat], [to.lon, to.lat]],
+                    "coordinates": [[from.lon(), from.lat()], [to.lon(), to.lat()]],
                 },
                 "properties": {
                     "order": expanded.order,
                     "edge_index": expanded.edge_index,
-                    "edge_id": edge.edge_id.0,
+                    "edge_id": expanded.edge_index,
                     "cost": expanded.cost,
                     "previous_edge_index": expanded.previous_edge_index,
                     "side": expanded.side,
