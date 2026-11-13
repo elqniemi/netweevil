@@ -9,6 +9,7 @@ mod bench;
 mod cache;
 mod dataset;
 mod experiment;
+mod indoor;
 mod profile;
 mod report;
 mod simulate;
@@ -37,6 +38,7 @@ use crate::dataset::{
     DatasetCommand, dataset_audit, dataset_fetch, dataset_import, dataset_list, dataset_update,
 };
 use crate::experiment::{ExperimentCommand, experiment_run};
+use crate::indoor::{IndoorCommand, indoor_command};
 use crate::profile::{ProfileCommand, profile_compile, profile_validate};
 use crate::report::{ReportCommand, report_render};
 use crate::simulate::{SimulateCommand, simulate_run, simulate_validate};
@@ -76,6 +78,7 @@ fn main() -> Result<()> {
             TransitCommand::List => transit_list(&paths),
         },
         Command::Traffic { command } => traffic_command(&paths, command),
+        Command::Indoor { command } => indoor_command(&paths, command),
         Command::Profile { command: profile } => match profile {
             ProfileCommand::Validate { profile } => profile_validate(&profile),
             ProfileCommand::Compile { dataset, profile } => {
@@ -98,6 +101,7 @@ fn main() -> Result<()> {
             AnalyzeCommand::TransitRoute(args) => analyze_transit_route(&paths, args),
             AnalyzeCommand::TransitBatch(args) => analyze_transit_batch(&paths, args),
             AnalyzeCommand::Trip(args) => analyze_trip(&paths, args),
+            AnalyzeCommand::IndoorRoute(args) => indoor::analyze_indoor_route(&paths, args),
         },
         Command::Experiment {
             command: experiment,
@@ -157,6 +161,11 @@ enum Command {
     Traffic {
         #[command(subcommand)]
         command: TrafficCommand,
+    },
+    /// Import, list, show and remove indoor sites.
+    Indoor {
+        #[command(subcommand)]
+        command: IndoorCommand,
     },
     /// Validate routing profiles and compile them for a dataset.
     Profile {

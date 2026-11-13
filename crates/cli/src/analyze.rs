@@ -86,6 +86,8 @@ pub(crate) enum AnalyzeCommand {
     TransitBatch(TransitBatchArgs),
     /// Put stops in the best visiting order and route the legs.
     Trip(TripArgs),
+    /// Route inside an imported indoor site.
+    IndoorRoute(crate::indoor::IndoorRouteArgs),
 }
 
 #[derive(Args, Debug)]

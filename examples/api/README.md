@@ -24,6 +24,7 @@ This folder contains request bodies for the NetWeevil HTTP API. The
 | `ile_de_france_route_pedestrian.json` | `POST /v1/route` | Île-de-France | `pedestrian_research_v1` |
 | `ile_de_france_od.json` | `POST /v1/od` | Île-de-France | default profile |
 | `ile_de_france_matrix.json` | `POST /v1/matrix` | Île-de-France | default profile |
+| `indoor_route.json` | `POST /v1/indoor/route` | indoor site `demo` | `wheelchair` (indoor) |
 | `groningen_province_admin_bounds.geojson` | `dataset import --admin-boundaries` | Groningen | none |
 
 The Groningen and North Netherlands examples use points in the city of
@@ -234,3 +235,19 @@ osmium getid -r datasets/groningen-latest.osm.pbf r47826 \
 osmium export groningen_province_admin_bounds.osm.pbf \
   -o examples/api/groningen_province_admin_bounds.geojson -f geojson
 ```
+
+### Indoor routes
+
+`indoor_route.json` routes in the demo site of
+[`examples/indoor/`](../indoor/demo_site.json). Import the site once with an
+anchor in Groningen. Indoor requests need no dataset:
+
+```bash
+cargo run --release -p netweevil-cli -- indoor import \
+  examples/indoor/demo_site.json --name demo --anchor 6.5665,53.2194
+curl -X POST 'http://127.0.0.1:8080/v1/indoor/route?format=geojson' \
+  -H 'content-type: application/json' \
+  --data @examples/api/indoor_route.json
+```
+
+See the [indoor routing guide](../../docs/guides/indoor-routing.md).

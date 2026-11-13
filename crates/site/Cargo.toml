@@ -1,0 +1,22 @@
+[package]
+name = "netweevil-site"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "NetWeevil indoor sites: storage, geographic placement, indoor routes and door-to-door routes that join indoor and street routing"
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+netweevil-core = { path = "../core" }
+netweevil-indoor = { path = "../indoor" }
+netweevil-persist = { path = "../persist" }
+netweevil-query = { path = "../query" }
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

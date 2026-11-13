@@ -1,8 +1,8 @@
 # Indoor and surface routing
 
 The `netweevil-indoor` crate routes on walkable surfaces and on node/edge
-networks, indoors and outdoors, across levels. It is a library. The CLI and
-the API do not use it yet.
+networks, indoors and outdoors, across levels. The CLI and the API use it
+for indoor sites: see the [indoor routing guide](../guides/indoor-routing.md).
 
 The engine has two phases:
 

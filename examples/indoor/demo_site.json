@@ -1,0 +1,925 @@
+{
+ "version": 1,
+ "crs": "local",
+ "levels": [
+  {
+   "id": "0",
+   "z": 0.0,
+   "props": {
+    "name": "Ground floor"
+   }
+  },
+  {
+   "id": "1",
+   "z": 3.5,
+   "props": {
+    "name": "First floor"
+   }
+  }
+ ],
+ "surfaces": [
+  {
+   "id": "corridor_0",
+   "level": "0",
+   "polygon": [
+    [
+     [
+      0,
+      8
+     ],
+     [
+      40,
+      8
+     ],
+     [
+      40,
+      12
+     ],
+     [
+      0,
+      12
+     ],
+     [
+      0,
+      8
+     ]
+    ]
+   ],
+   "space": "corridor_0",
+   "class": "corridor",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {
+    "name": "Corridor 0"
+   }
+  },
+  {
+   "id": "corridor_1",
+   "level": "1",
+   "polygon": [
+    [
+     [
+      0,
+      8
+     ],
+     [
+      40,
+      8
+     ],
+     [
+      40,
+      12
+     ],
+     [
+      0,
+      12
+     ],
+     [
+      0,
+      8
+     ]
+    ]
+   ],
+   "space": "corridor_1",
+   "class": "corridor",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {
+    "name": "Corridor 1"
+   }
+  },
+  {
+   "id": "room_0.01",
+   "level": "0",
+   "polygon": [
+    [
+     [
+      0,
+      0
+     ],
+     [
+      10,
+      0
+     ],
+     [
+      10,
+      8
+     ],
+     [
+      0,
+      8
+     ],
+     [
+      0,
+      0
+     ]
+    ]
+   ],
+   "space": "room_0.01",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {
+    "name": "Workshop",
+    "ref": "0.01"
+   }
+  },
+  {
+   "id": "room_0.02",
+   "level": "0",
+   "polygon": [
+    [
+     [
+      10,
+      0
+     ],
+     [
+      20,
+      0
+     ],
+     [
+      20,
+      8
+     ],
+     [
+      10,
+      8
+     ],
+     [
+      10,
+      0
+     ]
+    ]
+   ],
+   "space": "room_0.02",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {
+    "name": "Office 0.02",
+    "ref": "0.02"
+   }
+  },
+  {
+   "id": "cafe",
+   "level": "0",
+   "polygon": [
+    [
+     [
+      20,
+      0
+     ],
+     [
+      40,
+      0
+     ],
+     [
+      40,
+      8
+     ],
+     [
+      20,
+      8
+     ],
+     [
+      20,
+      0
+     ]
+    ]
+   ],
+   "space": "cafe",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {
+    "name": "Cafe",
+    "ref": "0.03"
+   }
+  },
+  {
+   "id": "room_0.04",
+   "level": "0",
+   "polygon": [
+    [
+     [
+      0,
+      12
+     ],
+     [
+      20,
+      12
+     ],
+     [
+      20,
+      20
+     ],
+     [
+      0,
+      20
+     ],
+     [
+      0,
+      12
+     ]
+    ]
+   ],
+   "space": "room_0.04",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {
+    "name": "Lecture hall",
+    "ref": "0.04"
+   }
+  },
+  {
+   "id": "room_0.05",
+   "level": "0",
+   "polygon": [
+    [
+     [
+      20,
+      12
+     ],
+     [
+      40,
+      12
+     ],
+     [
+      40,
+      20
+     ],
+     [
+      20,
+      20
+     ],
+     [
+      20,
+      12
+     ]
+    ]
+   ],
+   "space": "room_0.05",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {
+    "name": "Library",
+    "ref": "0.05"
+   }
+  },
+  {
+   "id": "room_1.01",
+   "level": "1",
+   "polygon": [
+    [
+     [
+      0,
+      0
+     ],
+     [
+      10,
+      0
+     ],
+     [
+      10,
+      8
+     ],
+     [
+      0,
+      8
+     ],
+     [
+      0,
+      0
+     ]
+    ]
+   ],
+   "space": "room_1.01",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {
+    "name": "Room 1.01",
+    "ref": "1.01"
+   }
+  },
+  {
+   "id": "room_1.02",
+   "level": "1",
+   "polygon": [
+    [
+     [
+      10,
+      0
+     ],
+     [
+      20,
+      0
+     ],
+     [
+      20,
+      8
+     ],
+     [
+      10,
+      8
+     ],
+     [
+      10,
+      0
+     ]
+    ]
+   ],
+   "space": "room_1.02",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {
+    "name": "Room 1.02",
+    "ref": "1.02"
+   }
+  },
+  {
+   "id": "room_1.14",
+   "level": "1",
+   "polygon": [
+    [
+     [
+      20,
+      0
+     ],
+     [
+      40,
+      0
+     ],
+     [
+      40,
+      8
+     ],
+     [
+      20,
+      8
+     ],
+     [
+      20,
+      0
+     ]
+    ]
+   ],
+   "space": "room_1.14",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {
+    "name": "Room 1.14",
+    "ref": "1.14"
+   }
+  },
+  {
+   "id": "room_1.20",
+   "level": "1",
+   "polygon": [
+    [
+     [
+      0,
+      12
+     ],
+     [
+      40,
+      12
+     ],
+     [
+      40,
+      20
+     ],
+     [
+      0,
+      20
+     ],
+     [
+      0,
+      12
+     ]
+    ]
+   ],
+   "space": "room_1.20",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {
+    "name": "Meeting room",
+    "ref": "1.20"
+   }
+  }
+ ],
+ "portals": [
+  {
+   "id": "d_0.01",
+   "kind": "door",
+   "segment": [
+    [
+     4.55,
+     8
+    ],
+    [
+     5.45,
+     8
+    ]
+   ],
+   "level": "0",
+   "spaces": [
+    "room_0.01",
+    "corridor_0"
+   ],
+   "width": 0.9,
+   "step_free": true
+  },
+  {
+   "id": "d_0.02",
+   "kind": "door",
+   "segment": [
+    [
+     14.55,
+     8
+    ],
+    [
+     15.45,
+     8
+    ]
+   ],
+   "level": "0",
+   "spaces": [
+    "room_0.02",
+    "corridor_0"
+   ],
+   "width": 0.9,
+   "step_free": true
+  },
+  {
+   "id": "d_cafe",
+   "kind": "opening",
+   "segment": [
+    [
+     29.1,
+     8
+    ],
+    [
+     30.9,
+     8
+    ]
+   ],
+   "level": "0",
+   "spaces": [
+    "cafe",
+    "corridor_0"
+   ],
+   "width": 1.8,
+   "step_free": true
+  },
+  {
+   "id": "d_0.04",
+   "kind": "door",
+   "segment": [
+    [
+     9.2,
+     12
+    ],
+    [
+     10.8,
+     12
+    ]
+   ],
+   "level": "0",
+   "spaces": [
+    "room_0.04",
+    "corridor_0"
+   ],
+   "width": 1.6,
+   "step_free": true
+  },
+  {
+   "id": "d_0.05",
+   "kind": "door",
+   "segment": [
+    [
+     29.55,
+     12
+    ],
+    [
+     30.45,
+     12
+    ]
+   ],
+   "level": "0",
+   "spaces": [
+    "room_0.05",
+    "corridor_0"
+   ],
+   "width": 0.9,
+   "step_free": true
+  },
+  {
+   "id": "d_1.01",
+   "kind": "door",
+   "segment": [
+    [
+     4.55,
+     8
+    ],
+    [
+     5.45,
+     8
+    ]
+   ],
+   "level": "1",
+   "spaces": [
+    "room_1.01",
+    "corridor_1"
+   ],
+   "width": 0.9,
+   "step_free": true
+  },
+  {
+   "id": "d_1.02",
+   "kind": "door",
+   "segment": [
+    [
+     14.55,
+     8
+    ],
+    [
+     15.45,
+     8
+    ]
+   ],
+   "level": "1",
+   "spaces": [
+    "room_1.02",
+    "corridor_1"
+   ],
+   "width": 0.9,
+   "step_free": true
+  },
+  {
+   "id": "d_1.14",
+   "kind": "door",
+   "segment": [
+    [
+     23.55,
+     8
+    ],
+    [
+     24.45,
+     8
+    ]
+   ],
+   "level": "1",
+   "spaces": [
+    "room_1.14",
+    "corridor_1"
+   ],
+   "width": 0.9,
+   "step_free": true
+  },
+  {
+   "id": "d_1.20",
+   "kind": "door",
+   "segment": [
+    [
+     19.4,
+     12
+    ],
+    [
+     20.6,
+     12
+    ]
+   ],
+   "level": "1",
+   "spaces": [
+    "room_1.20",
+    "corridor_1"
+   ],
+   "width": 1.2,
+   "step_free": true
+  },
+  {
+   "id": "west_entrance",
+   "kind": "entrance",
+   "segment": [
+    [
+     0,
+     9
+    ],
+    [
+     0,
+     11
+    ]
+   ],
+   "level": "0",
+   "spaces": [
+    "corridor_0"
+   ],
+   "width": 2.0,
+   "step_free": false,
+   "tags": [
+    "entrance",
+    "steps"
+   ],
+   "props": {
+    "name": "West entrance"
+   }
+  },
+  {
+   "id": "east_entrance",
+   "kind": "entrance",
+   "segment": [
+    [
+     40,
+     9
+    ],
+    [
+     40,
+     11
+    ]
+   ],
+   "level": "0",
+   "spaces": [
+    "corridor_0"
+   ],
+   "width": 1.8,
+   "step_free": true,
+   "tags": [
+    "entrance"
+   ],
+   "props": {
+    "name": "East entrance"
+   }
+  }
+ ],
+ "verticals": [
+  {
+   "id": "stairs_west",
+   "kind": "stairs",
+   "stops": [
+    {
+     "level": "0",
+     "at": [
+      2.0,
+      9.0
+     ]
+    },
+    {
+     "level": "1",
+     "at": [
+      7.0,
+      9.0
+     ]
+    }
+   ],
+   "step_free": false,
+   "width": 1.4,
+   "line": [
+    [
+     2.0,
+     9.0,
+     0.0
+    ],
+    [
+     7.0,
+     9.0,
+     3.5
+    ]
+   ],
+   "tags": [
+    "stairs"
+   ],
+   "props": {
+    "name": "West stairs"
+   }
+  },
+  {
+   "id": "lift_east",
+   "kind": "lift",
+   "stops": [
+    {
+     "level": "0",
+     "at": [
+      37.0,
+      10.0
+     ]
+    },
+    {
+     "level": "1",
+     "at": [
+      37.0,
+      10.0
+     ]
+    }
+   ],
+   "wait": 20.0,
+   "speed": 1.0,
+   "direction": "both",
+   "step_free": true,
+   "width": 1.1,
+   "tags": [
+    "lift"
+   ],
+   "props": {
+    "name": "East lift"
+   }
+  }
+ ],
+ "pois": [
+  {
+   "id": "corridor_0",
+   "category": "corridor",
+   "access": [
+    {
+     "space": "corridor_0"
+    }
+   ],
+   "props": {
+    "name": "Corridor 0"
+   }
+  },
+  {
+   "id": "corridor_1",
+   "category": "corridor",
+   "access": [
+    {
+     "space": "corridor_1"
+    }
+   ],
+   "props": {
+    "name": "Corridor 1"
+   }
+  },
+  {
+   "id": "room_0.01",
+   "category": "room",
+   "access": [
+    {
+     "space": "room_0.01"
+    }
+   ],
+   "props": {
+    "name": "Workshop",
+    "ref": "0.01"
+   }
+  },
+  {
+   "id": "room_0.02",
+   "category": "room",
+   "access": [
+    {
+     "space": "room_0.02"
+    }
+   ],
+   "props": {
+    "name": "Office 0.02",
+    "ref": "0.02"
+   }
+  },
+  {
+   "id": "cafe",
+   "category": "room",
+   "access": [
+    {
+     "space": "cafe"
+    }
+   ],
+   "props": {
+    "name": "Cafe",
+    "ref": "0.03"
+   }
+  },
+  {
+   "id": "room_0.04",
+   "category": "room",
+   "access": [
+    {
+     "space": "room_0.04"
+    }
+   ],
+   "props": {
+    "name": "Lecture hall",
+    "ref": "0.04"
+   }
+  },
+  {
+   "id": "room_0.05",
+   "category": "room",
+   "access": [
+    {
+     "space": "room_0.05"
+    }
+   ],
+   "props": {
+    "name": "Library",
+    "ref": "0.05"
+   }
+  },
+  {
+   "id": "room_1.01",
+   "category": "room",
+   "access": [
+    {
+     "space": "room_1.01"
+    }
+   ],
+   "props": {
+    "name": "Room 1.01",
+    "ref": "1.01"
+   }
+  },
+  {
+   "id": "room_1.02",
+   "category": "room",
+   "access": [
+    {
+     "space": "room_1.02"
+    }
+   ],
+   "props": {
+    "name": "Room 1.02",
+    "ref": "1.02"
+   }
+  },
+  {
+   "id": "room_1.14",
+   "category": "room",
+   "access": [
+    {
+     "space": "room_1.14"
+    }
+   ],
+   "props": {
+    "name": "Room 1.14",
+    "ref": "1.14"
+   }
+  },
+  {
+   "id": "room_1.20",
+   "category": "room",
+   "access": [
+    {
+     "space": "room_1.20"
+    }
+   ],
+   "props": {
+    "name": "Meeting room",
+    "ref": "1.20"
+   }
+  },
+  {
+   "id": "coffee_bar",
+   "category": "amenity/cafe",
+   "at": [
+    34.0,
+    4.0
+   ],
+   "level": "0",
+   "props": {
+    "name": "Coffee bar"
+   }
+  },
+  {
+   "id": "toilet_1",
+   "category": "toilet/accessible",
+   "at": [
+    38.0,
+    6.0
+   ],
+   "level": "1",
+   "tags": [
+    "wheelchair"
+   ],
+   "props": {
+    "name": "Accessible toilet"
+   }
+  }
+ ]
+}

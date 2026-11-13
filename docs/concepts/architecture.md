@@ -13,6 +13,8 @@ the API give the same result for the same request.
 | `crates/query` | `netweevil-query` | Routing, batches, OD, matrix, service areas, accessibility, alternatives, snapping, and the request and result models. |
 | `crates/persist` | `netweevil-persist` | The `.netweevil/` state directory, manifests, binary bundle IO and cache reads. |
 | `crates/ingest` | `netweevil-ingest` | OSM, Overture and GeoPackage import, topology build, turn restrictions, road classification and preprocessing. |
+| `crates/indoor` | `netweevil-indoor` | Indoor and surface routing: navigation mesh walks, edge networks, portals, verticals and POIs across levels, in site metres. |
+| `crates/site` | `netweevil-site` | Indoor sites placed on the globe: site storage, the site cache, indoor routes in WGS84 and site GeoJSON. |
 | `crates/transit` | `netweevil-transit` | GTFS import, street access (walk, bicycle, car) and transit routing. |
 | `crates/simulate` | `netweevil-simulate` | Agent-based traffic simulation. |
 | `crates/report` | `netweevil-report` | Report rendering and local exports. |
@@ -36,6 +38,8 @@ graph TD
     query[netweevil-query]
     profile[netweevil-profile]
     transit[netweevil-transit]
+    site[netweevil-site]
+    indoor[netweevil-indoor]
     core[netweevil-core]
 
     cli --> api
@@ -46,6 +50,7 @@ graph TD
     cli --> query
     cli --> profile
     cli --> transit
+    cli --> site
     cli --> core
 
     api --> ingest
@@ -54,10 +59,17 @@ graph TD
     api --> query
     api --> profile
     api --> transit
+    api --> site
     api --> core
 
     ingest --> persist
+    ingest --> indoor
     ingest --> core
+
+    site --> persist
+    site --> query
+    site --> indoor
+    site --> core
 
     report --> persist
     report --> query
@@ -81,7 +93,10 @@ graph TD
 Some properties of the graph:
 
 - `netweevil-core` has no workspace dependencies. All crates except
-  `netweevil-transit` use it.
+  `netweevil-transit` and `netweevil-indoor` use it.
+- `netweevil-indoor` has no workspace dependencies and works in site metres.
+  `netweevil-site` places sites on the globe and joins them to street
+  routing; `netweevil-ingest` reads indoor sources into engine input.
 - `netweevil-transit` has no workspace dependencies. The API and the CLI
   connect transit routing to the street network.
 - The manifest types are in `netweevil-persist`, in the module

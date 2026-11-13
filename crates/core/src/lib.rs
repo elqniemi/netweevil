@@ -13,6 +13,7 @@ pub mod elevation;
 pub mod geo;
 pub mod graph;
 pub mod guidance;
+pub mod local_frame;
 pub mod metrics;
 pub mod regions;
 pub mod temporal;
@@ -44,6 +45,7 @@ pub use graph::{
     TurnRestriction, TurnRestrictionCondition, TurnRestrictionKind,
 };
 pub use guidance::{EDGE_NAME_BUNDLE_SCHEMA_VERSION, EdgeGuidance, EdgeNameBundle};
+pub use local_frame::LocalFrame;
 pub use metrics::{
     CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, CCH_WEIGHT_SCALE,
     COMPILED_ACCELERATION_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION,
