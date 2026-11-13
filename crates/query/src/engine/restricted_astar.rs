@@ -107,13 +107,14 @@ static ASTAR_SCRATCH: ScratchPool<AStarScratch> = ScratchPool::new();
 
 impl AStarScratch {
     fn clear(&mut self) {
-        self.backward.clear();
-        self.backward_heap.clear();
-        self.potential.clear();
+        clear_map(&mut self.backward);
+        clear_heap(&mut self.backward_heap);
+        clear_map(&mut self.potential);
         self.potential_stack.clear();
-        self.dist.clear();
-        self.previous.clear();
-        self.heap.clear();
+        self.potential_stack.shrink_to(RETAINED_SCRATCH_ENTRIES);
+        clear_map(&mut self.dist);
+        clear_map(&mut self.previous);
+        clear_heap(&mut self.heap);
     }
 
     /// Complete backward search space of the destination seeds under the

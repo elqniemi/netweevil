@@ -13,6 +13,7 @@ mod scratch_pool;
 mod shared_structure;
 mod state_heap;
 mod vehicle_engine;
+mod zeroed_array;
 
 pub(crate) use acceleration::*;
 pub(crate) use automaton::*;
@@ -29,6 +30,7 @@ pub(crate) use scratch_pool::*;
 pub(crate) use shared_structure::*;
 pub(crate) use state_heap::*;
 pub(crate) use vehicle_engine::*;
+pub(crate) use zeroed_array::*;
 
 use std::cmp::Ordering;
 use std::sync::Arc;

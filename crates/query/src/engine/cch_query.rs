@@ -4,8 +4,9 @@
 //! ([`RankedCch`]). Both searches climb towards high ranks, and every query
 //! shares the top of the hierarchy, so with rank-ordered rows and labels
 //! most of the work hits the same few hot cache lines. One 24-byte label per
-//! state holds both directions' costs and parents, and both queues are 4-ary
-//! [`StateHeap`]s of 16-byte entries.
+//! state holds both directions' costs and parents in a zero-allocated
+//! array, so a query commits memory only for the states it labels. Both
+//! queues are 4-ary [`StateHeap`]s of 16-byte entries.
 
 use std::sync::{Arc, OnceLock};
 
@@ -298,28 +299,85 @@ impl RankedCch {
 /// Search state of one rank. Parents are the neighbouring rank on the path;
 /// the hierarchy has at most one upward and one downward arc per ordered
 /// pair, so the arc is recovered from the pair when unpacking.
+///
+/// Costs are stored with [`encode_cost`] and parents with [`encode_link`],
+/// so the empty label is all zero bytes and the label array can come from a
+/// zeroed allocation. Seed costs are arbitrary `f64` phantom offsets, so the
+/// costs stay `f64` rather than fixed-point sums of hierarchy weights.
 #[derive(Clone, Copy)]
+#[repr(C)]
 struct CchLabel {
-    forward: f64,
-    backward: f64,
+    forward: u64,
+    backward: u64,
     forward_parent: u32,
     backward_parent: u32,
 }
+
+// SAFETY: every field is an integer, for which all-zero bytes are valid.
+unsafe impl bytemuck::Zeroable for CchLabel {}
+// SAFETY: `repr(C)` integer fields of 8, 8, 4 and 4 bytes leave no padding.
+unsafe impl bytemuck::Pod for CchLabel {}
 
 const NO_PARENT: u32 = u32::MAX;
 
 impl CchLabel {
     const EMPTY: Self = Self {
-        forward: f64::INFINITY,
-        backward: f64::INFINITY,
-        forward_parent: NO_PARENT,
-        backward_parent: NO_PARENT,
+        forward: 0,
+        backward: 0,
+        forward_parent: 0,
+        backward_parent: 0,
     };
+
+    #[inline]
+    fn forward(&self) -> f64 {
+        decode_cost(self.forward)
+    }
+
+    #[inline]
+    fn backward(&self) -> f64 {
+        decode_cost(self.backward)
+    }
+
+    #[inline]
+    fn forward_parent(&self) -> u32 {
+        decode_link(self.forward_parent)
+    }
+
+    #[inline]
+    fn backward_parent(&self) -> u32 {
+        decode_link(self.backward_parent)
+    }
+
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.forward == 0 && self.backward == 0
+    }
+
+    /// `(cost, parent)` of one direction.
+    #[inline]
+    fn side(&self, backward: bool) -> (f64, u32) {
+        if backward {
+            (self.backward(), self.backward_parent())
+        } else {
+            (self.forward(), self.forward_parent())
+        }
+    }
+
+    #[inline]
+    fn set_side(&mut self, backward: bool, cost: f64, parent: u32) {
+        if backward {
+            self.backward = encode_cost(cost);
+            self.backward_parent = encode_link(parent);
+        } else {
+            self.forward = encode_cost(cost);
+            self.forward_parent = encode_link(parent);
+        }
+    }
 }
 
 #[derive(Default)]
 struct PairwiseCchScratch {
-    labels: Vec<CchLabel>,
+    labels: ZeroedArray<CchLabel>,
     touched: Vec<u32>,
     forward_heap: StateHeap,
     backward_heap: StateHeap,
@@ -329,47 +387,35 @@ struct PairwiseCchScratch {
 
 impl PairwiseCchScratch {
     fn prepare(&mut self, state_count: usize) {
-        if self.labels.len() < state_count {
-            self.labels.resize(state_count, CchLabel::EMPTY);
-        }
-        for &rank in &self.touched {
-            self.labels[rank as usize] = CchLabel::EMPTY;
-        }
-        self.touched.clear();
+        let release = release_after(self.labels.len(), self.touched.len());
+        self.labels.reset(state_count, &self.touched, release);
+        reset_touched(&mut self.touched, release);
         self.forward_heap.clear();
         self.backward_heap.clear();
     }
 
-    fn update_forward(&mut self, rank: u32, cost: f64, parent: u32) -> bool {
+    #[inline]
+    fn update(&mut self, backward: bool, rank: u32, cost: f64, parent: u32) -> bool {
         if !cost.is_finite() {
             return false;
         }
-        let label = &mut self.labels[rank as usize];
-        if cost + f64::EPSILON >= label.forward {
+        let label = self.labels.get_mut(rank as usize);
+        if cost + f64::EPSILON >= label.side(backward).0 {
             return false;
         }
-        if label.forward == f64::INFINITY && label.backward == f64::INFINITY {
+        if label.is_empty() {
             self.touched.push(rank);
         }
-        label.forward = cost;
-        label.forward_parent = parent;
+        label.set_side(backward, cost, parent);
         true
     }
 
+    fn update_forward(&mut self, rank: u32, cost: f64, parent: u32) -> bool {
+        self.update(false, rank, cost, parent)
+    }
+
     fn update_backward(&mut self, rank: u32, cost: f64, parent: u32) -> bool {
-        if !cost.is_finite() {
-            return false;
-        }
-        let label = &mut self.labels[rank as usize];
-        if cost + f64::EPSILON >= label.backward {
-            return false;
-        }
-        if label.forward == f64::INFINITY && label.backward == f64::INFINITY {
-            self.touched.push(rank);
-        }
-        label.backward = cost;
-        label.backward_parent = parent;
-        true
+        self.update(true, rank, cost, parent)
     }
 }
 
@@ -395,6 +441,26 @@ pub(crate) fn accelerated_route_query_seeded(
     let Some(acceleration) = routing_graph.acceleration.as_ref() else {
         return Ok(None);
     };
+    PAIRWISE_CCH_SCRATCH.with(|scratch| {
+        scratch.prepare(topology.edge_count());
+        Ok(pairwise_query(
+            scratch,
+            acceleration,
+            origin_seeds,
+            destination_seeds,
+            initial_path,
+        ))
+    })
+}
+
+/// The search of [`accelerated_route_query_seeded`] on a prepared scratch.
+fn pairwise_query(
+    scratch: &mut PairwiseCchScratch,
+    acceleration: &AccelerationGraph,
+    origin_seeds: &[(usize, f64)],
+    destination_seeds: &[(usize, f64)],
+    initial_path: Option<RoutePath>,
+) -> Option<RoutePath> {
     let source = acceleration.source.as_ref();
     let ranked = &acceleration.ranked;
     let edge_rank = source.edge_rank.as_slice();
@@ -405,105 +471,101 @@ pub(crate) fn accelerated_route_query_seeded(
     let minimum_origin_cost = minimum_seed_cost(origin_seeds);
     let minimum_destination_cost = minimum_seed_cost(destination_seeds);
 
-    PAIRWISE_CCH_SCRATCH.with(|scratch| {
-        scratch.prepare(topology.edge_count());
-
-        // Queue entries carry the edge index for tie-breaking (lowest cost,
-        // then highest edge, as on the original arrays) and the rank as the
-        // payload.
-        for &(edge_index, cost) in origin_seeds {
-            let rank = edge_rank[edge_index];
-            if scratch.update_forward(rank, cost, NO_PARENT) {
-                scratch.forward_heap.push(edge_index, rank as usize, cost);
-            }
+    // Queue entries carry the edge index for tie-breaking (lowest cost,
+    // then highest edge, as on the original arrays) and the rank as the
+    // payload.
+    for &(edge_index, cost) in origin_seeds {
+        let rank = edge_rank[edge_index];
+        if scratch.update_forward(rank, cost, NO_PARENT) {
+            scratch.forward_heap.push(edge_index, rank as usize, cost);
         }
-        for &(edge_index, cost) in destination_seeds {
-            let rank = edge_rank[edge_index];
-            if scratch.update_backward(rank, cost, NO_PARENT) {
-                scratch.backward_heap.push(edge_index, rank as usize, cost);
-            }
+    }
+    for &(edge_index, cost) in destination_seeds {
+        let rank = edge_rank[edge_index];
+        if scratch.update_backward(rank, cost, NO_PARENT) {
+            scratch.backward_heap.push(edge_index, rank as usize, cost);
+        }
+    }
+
+    let mut best_cost = initial_path
+        .as_ref()
+        .map(|path| path.total_generalized_cost)
+        .unwrap_or(f64::INFINITY);
+    let mut best_rank = None;
+
+    loop {
+        let next_forward_cost = scratch.forward_heap.peek_cost();
+        let next_backward_cost = scratch.backward_heap.peek_cost();
+        let forward_active = next_forward_cost + minimum_destination_cost < best_cost;
+        let backward_active = next_backward_cost + minimum_origin_cost < best_cost;
+        if !forward_active && !backward_active {
+            break;
         }
 
-        let mut best_cost = initial_path
-            .as_ref()
-            .map(|path| path.total_generalized_cost)
-            .unwrap_or(f64::INFINITY);
-        let mut best_rank = None;
-
-        loop {
-            let next_forward_cost = scratch.forward_heap.peek_cost();
-            let next_backward_cost = scratch.backward_heap.peek_cost();
-            let forward_active = next_forward_cost + minimum_destination_cost < best_cost;
-            let backward_active = next_backward_cost + minimum_origin_cost < best_cost;
-            if !forward_active && !backward_active {
+        if forward_active && (next_forward_cost <= next_backward_cost || !backward_active) {
+            let Some((_, rank, cost)) = scratch.forward_heap.pop() else {
                 break;
+            };
+            let label = scratch.labels.get(rank);
+            if cost > label.forward() {
+                continue;
+            }
+            if label.backward().is_finite() {
+                let candidate_cost = cost + label.backward();
+                if candidate_cost < best_cost {
+                    best_cost = candidate_cost;
+                    best_rank = Some(rank);
+                }
             }
 
-            if forward_active && (next_forward_cost <= next_backward_cost || !backward_active) {
-                let Some((_, rank, cost)) = scratch.forward_heap.pop() else {
-                    break;
-                };
-                let label = scratch.labels[rank];
-                if cost > label.forward {
-                    continue;
+            for (head, weight) in ranked.upward_row(rank) {
+                let next_cost = cost + decode_cch_weight(weight);
+                if scratch.update_forward(head, next_cost, rank as u32) {
+                    scratch.forward_heap.push(
+                        edge_order[head as usize] as usize,
+                        head as usize,
+                        next_cost,
+                    );
                 }
-                if label.backward.is_finite() {
-                    let candidate_cost = cost + label.backward;
-                    if candidate_cost < best_cost {
-                        best_cost = candidate_cost;
-                        best_rank = Some(rank);
-                    }
+            }
+        } else {
+            let Some((_, rank, cost)) = scratch.backward_heap.pop() else {
+                break;
+            };
+            let label = scratch.labels.get(rank);
+            if cost > label.backward() {
+                continue;
+            }
+            if label.forward().is_finite() {
+                let candidate_cost = label.forward() + cost;
+                if candidate_cost < best_cost {
+                    best_cost = candidate_cost;
+                    best_rank = Some(rank);
                 }
+            }
 
-                for (head, weight) in ranked.upward_row(rank) {
-                    let next_cost = cost + decode_cch_weight(weight);
-                    if scratch.update_forward(head, next_cost, rank as u32) {
-                        scratch.forward_heap.push(
-                            edge_order[head as usize] as usize,
-                            head as usize,
-                            next_cost,
-                        );
-                    }
-                }
-            } else {
-                let Some((_, rank, cost)) = scratch.backward_heap.pop() else {
-                    break;
-                };
-                let label = scratch.labels[rank];
-                if cost > label.backward {
-                    continue;
-                }
-                if label.forward.is_finite() {
-                    let candidate_cost = label.forward + cost;
-                    if candidate_cost < best_cost {
-                        best_cost = candidate_cost;
-                        best_rank = Some(rank);
-                    }
-                }
-
-                for (tail, weight) in ranked.downward_row(rank) {
-                    let next_cost = cost + decode_cch_weight(weight);
-                    if scratch.update_backward(tail, next_cost, rank as u32) {
-                        scratch.backward_heap.push(
-                            edge_order[tail as usize] as usize,
-                            tail as usize,
-                            next_cost,
-                        );
-                    }
+            for (tail, weight) in ranked.downward_row(rank) {
+                let next_cost = cost + decode_cch_weight(weight);
+                if scratch.update_backward(tail, next_cost, rank as u32) {
+                    scratch.backward_heap.push(
+                        edge_order[tail as usize] as usize,
+                        tail as usize,
+                        next_cost,
+                    );
                 }
             }
         }
+    }
 
-        let Some(meeting_rank) = best_rank else {
-            return Ok(initial_path);
-        };
-        Ok(Some(reconstruct_pairwise_path(
-            acceleration,
-            scratch,
-            meeting_rank,
-            best_cost,
-        )))
-    })
+    let Some(meeting_rank) = best_rank else {
+        return initial_path;
+    };
+    Some(reconstruct_pairwise_path(
+        acceleration,
+        scratch,
+        meeting_rank,
+        best_cost,
+    ))
 }
 
 fn reconstruct_pairwise_path(
@@ -517,7 +579,7 @@ fn reconstruct_pairwise_path(
     forward_arcs.clear();
     let mut cursor = meeting_rank;
     loop {
-        let parent = scratch.labels[cursor].forward_parent;
+        let parent = scratch.labels.get(cursor).forward_parent();
         if parent == NO_PARENT {
             break;
         }
@@ -536,7 +598,7 @@ fn reconstruct_pairwise_path(
 
     let mut cursor = meeting_rank;
     loop {
-        let parent = scratch.labels[cursor].backward_parent;
+        let parent = scratch.labels.get(cursor).backward_parent();
         if parent == NO_PARENT {
             break;
         }
@@ -596,16 +658,16 @@ pub(crate) fn recorded_hierarchy_search(
     for &(edge_index, cost) in origin_seeds {
         let rank = edge_rank[edge_index];
         let label = labels.entry(rank).or_insert(CchLabel::EMPTY);
-        if cost < label.forward {
-            label.forward = cost;
+        if cost < label.forward() {
+            label.set_side(false, cost, NO_PARENT);
             forward_heap.push(edge_index, rank as usize, cost);
         }
     }
     for &(edge_index, cost) in destination_seeds {
         let rank = edge_rank[edge_index];
         let label = labels.entry(rank).or_insert(CchLabel::EMPTY);
-        if cost < label.backward {
-            label.backward = cost;
+        if cost < label.backward() {
+            label.set_side(true, cost, NO_PARENT);
             backward_heap.push(edge_index, rank as usize, cost);
         }
     }
@@ -632,11 +694,8 @@ pub(crate) fn recorded_hierarchy_search(
             break;
         };
         let label = labels[&(rank as u32)];
-        let (own, other, parent) = if backward {
-            (label.backward, label.forward, label.backward_parent)
-        } else {
-            (label.forward, label.backward, label.forward_parent)
-        };
+        let (own, parent) = label.side(backward);
+        let (other, _) = label.side(!backward);
         if cost > own {
             continue;
         }
@@ -656,20 +715,13 @@ pub(crate) fn recorded_hierarchy_search(
         let mut relax = |next: u32, weight: u32| {
             let next_cost = cost + decode_cch_weight(weight);
             let label = labels.entry(next).or_insert(CchLabel::EMPTY);
-            let slot = if backward {
-                &mut label.backward
-            } else {
-                &mut label.forward
-            };
-            if next_cost + f64::EPSILON >= *slot {
+            if next_cost + f64::EPSILON >= label.side(backward).0 {
                 return;
             }
-            *slot = next_cost;
+            label.set_side(backward, next_cost, rank as u32);
             if backward {
-                label.backward_parent = rank as u32;
                 backward_heap.push(edge_order[next as usize] as usize, next as usize, next_cost);
             } else {
-                label.forward_parent = rank as u32;
                 forward_heap.push(edge_order[next as usize] as usize, next as usize, next_cost);
             }
         };
@@ -689,3 +741,6 @@ pub(crate) fn recorded_hierarchy_search(
         best_cost.is_finite().then_some(best_cost),
     ))
 }
+
+#[cfg(test)]
+mod tests;

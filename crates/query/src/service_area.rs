@@ -938,7 +938,7 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
 
     if routing_graph.has_restriction_sequences() {
         // Product-graph Dijkstra: automaton state zero (almost every state)
-        // uses the dense thread-local label array; states inside a
+        // uses the pooled per-edge label array; states inside a
         // restriction prefix use a small hash map.
         SINGLE_SOURCE_SEARCH_SCRATCH.with(|scratch| {
             scratch.prepare(edge_count);
@@ -950,7 +950,7 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
                          edge_index: usize,
                          automaton_state: usize| {
                 if automaton_state == 0 {
-                    scratch.dist[edge_index]
+                    scratch.cost(edge_index)
                 } else {
                     restricted_dist
                         .get(&(edge_index as u32, automaton_state as u32))
@@ -1173,7 +1173,7 @@ pub(crate) fn build_service_area_expansion_with_settle_limit(
 
             while let Some((cost, payload)) = heap.pop() {
                 let (edge_index, _) = heap_state(payload);
-                if cost > scratch.dist[edge_index] {
+                if cost > scratch.cost(edge_index) {
                     continue;
                 }
                 if cost > max_cost {
@@ -1304,6 +1304,44 @@ fn heap_state(payload: u64) -> (usize, usize) {
     )
 }
 
+/// Distance labels of the PHAST service-area sweeps, pooled across
+/// requests. The sweeps read every state but write only the reached ones,
+/// which the touched list resets.
+#[derive(Default)]
+pub(crate) struct PhastScratch {
+    dist: CostArray,
+    touched: Vec<u32>,
+}
+
+pub(crate) static PHAST_SCRATCH: ScratchPool<PhastScratch> = ScratchPool::new();
+
+impl PhastScratch {
+    pub(crate) fn prepare(&mut self, edge_count: usize) {
+        let release = release_after(self.dist.len(), self.touched.len());
+        self.dist.reset(edge_count, &self.touched, release);
+        reset_touched(&mut self.touched, release);
+    }
+
+    #[inline]
+    pub(crate) fn get(&self, edge_index: usize) -> f64 {
+        self.dist.get(edge_index)
+    }
+
+    /// Lowers the distance of `edge_index` to `cost` if strictly smaller.
+    #[inline]
+    pub(crate) fn lower(&mut self, edge_index: usize, cost: f64) -> bool {
+        #[allow(clippy::neg_cmp_op_on_partial_ord)]
+        if !(cost < self.dist.get(edge_index)) {
+            return false;
+        }
+        if self.dist.is_unreached(edge_index) {
+            self.touched.push(edge_index as u32);
+        }
+        self.dist.set(edge_index, cost);
+        true
+    }
+}
+
 /// Bounded one-to-all search over the quantized service-area metric.
 /// Upward Dijkstra and a rank-descending downward sweep produce distances
 /// without unpacking paths. Rounding can move labels across the budget.
@@ -1328,106 +1366,106 @@ fn phast_service_area_expansion(
         .expect("PHAST expansion requires per-metric weights");
     let edge_count = routing_graph.edge_costs.len();
 
-    let mut dist = vec![f64::INFINITY; edge_count];
-    let mut heap = BinaryHeap::new();
-    for candidate in seed_candidates {
-        for seed in
-            service_area_seed_specs(routing_graph, topology, metrics, candidate, metric_kind)
+    PHAST_SCRATCH.with(|dist| {
+        dist.prepare(edge_count);
+        let mut heap = BinaryHeap::new();
+        for candidate in seed_candidates {
+            for seed in
+                service_area_seed_specs(routing_graph, topology, metrics, candidate, metric_kind)
+            {
+                if seed.before_cost > max_cost {
+                    continue;
+                }
+                labels.update(
+                    seed.edge_index,
+                    seed.before_cost,
+                    seed.end_cost,
+                    seed.start_fraction,
+                    Vec::new(),
+                    Vec::new(),
+                );
+                if dist.lower(seed.edge_index, seed.end_cost) {
+                    heap.push(State {
+                        edge_index: seed.edge_index,
+                        automaton_state: 0,
+                        cost: seed.end_cost,
+                        score: seed.end_cost,
+                    });
+                }
+            }
+        }
+
+        // Upward phase: settle the hierarchy states reachable through upward
+        // arcs only.
+        while let Some(State {
+            edge_index, cost, ..
+        }) = heap.pop()
         {
-            if seed.before_cost > max_cost {
+            if cost > dist.get(edge_index) {
+                continue;
+            }
+            if cost > max_cost {
+                continue;
+            }
+            #[allow(clippy::needless_range_loop)]
+            for slot in acceleration.source.upward_first_out[edge_index] as usize
+                ..acceleration.source.upward_first_out[edge_index + 1] as usize
+            {
+                let next_edge = acceleration.source.upward_head[slot] as usize;
+                let next_cost = cost + netweevil_core::decode_cch_weight(upward_weight[slot]);
+                if dist.lower(next_edge, next_cost) {
+                    heap.push(State {
+                        edge_index: next_edge,
+                        automaton_state: 0,
+                        cost: next_cost,
+                        score: next_cost,
+                    });
+                }
+            }
+        }
+
+        // Downward sweep in descending rank order: each state's distance is
+        // final before any of its downward arcs are relaxed.
+        for &state in acceleration.source.edge_order.iter().rev() {
+            let state = state as usize;
+            let cost = dist.get(state);
+            if !cost.is_finite() || cost > max_cost {
+                continue;
+            }
+            #[allow(clippy::needless_range_loop)]
+            for slot in acceleration.source.downward_first_out[state] as usize
+                ..acceleration.source.downward_first_out[state + 1] as usize
+            {
+                let head = acceleration.source.downward_head[slot] as usize;
+                let next_cost = cost + netweevil_core::decode_cch_weight(downward_weight[slot]);
+                if dist.lower(head, next_cost) {}
+            }
+        }
+
+        for edge_index in 0..edge_count {
+            let end_cost = dist.get(edge_index);
+            if !end_cost.is_finite() {
+                continue;
+            }
+            let Some(edge_cost) =
+                service_area_edge_cost(topology, metrics, edge_index, metric_kind)
+            else {
+                continue;
+            };
+            let before_cost = (end_cost - edge_cost).max(0.0);
+            if before_cost > max_cost {
                 continue;
             }
             labels.update(
-                seed.edge_index,
-                seed.before_cost,
-                seed.end_cost,
-                seed.start_fraction,
+                edge_index,
+                before_cost,
+                end_cost,
+                0.0,
                 Vec::new(),
                 Vec::new(),
             );
-            if seed.end_cost < dist[seed.edge_index] {
-                dist[seed.edge_index] = seed.end_cost;
-                heap.push(State {
-                    edge_index: seed.edge_index,
-                    automaton_state: 0,
-                    cost: seed.end_cost,
-                    score: seed.end_cost,
-                });
-            }
         }
-    }
-
-    // Upward phase: settle the hierarchy states reachable through upward
-    // arcs only.
-    while let Some(State {
-        edge_index, cost, ..
-    }) = heap.pop()
-    {
-        if cost > dist[edge_index] {
-            continue;
-        }
-        if cost > max_cost {
-            continue;
-        }
-        #[allow(clippy::needless_range_loop)]
-        for slot in acceleration.source.upward_first_out[edge_index] as usize
-            ..acceleration.source.upward_first_out[edge_index + 1] as usize
-        {
-            let next_edge = acceleration.source.upward_head[slot] as usize;
-            let next_cost = cost + netweevil_core::decode_cch_weight(upward_weight[slot]);
-            if next_cost < dist[next_edge] {
-                dist[next_edge] = next_cost;
-                heap.push(State {
-                    edge_index: next_edge,
-                    automaton_state: 0,
-                    cost: next_cost,
-                    score: next_cost,
-                });
-            }
-        }
-    }
-
-    // Downward sweep in descending rank order: each state's distance is
-    // final before any of its downward arcs are relaxed.
-    for &state in acceleration.source.edge_order.iter().rev() {
-        let state = state as usize;
-        let cost = dist[state];
-        if !cost.is_finite() || cost > max_cost {
-            continue;
-        }
-        #[allow(clippy::needless_range_loop)]
-        for slot in acceleration.source.downward_first_out[state] as usize
-            ..acceleration.source.downward_first_out[state + 1] as usize
-        {
-            let head = acceleration.source.downward_head[slot] as usize;
-            let next_cost = cost + netweevil_core::decode_cch_weight(downward_weight[slot]);
-            if next_cost < dist[head] {
-                dist[head] = next_cost;
-            }
-        }
-    }
-
-    for (edge_index, &end_cost) in dist.iter().enumerate() {
-        if !end_cost.is_finite() {
-            continue;
-        }
-        let Some(edge_cost) = service_area_edge_cost(topology, metrics, edge_index, metric_kind)
-        else {
-            continue;
-        };
-        let before_cost = (end_cost - edge_cost).max(0.0);
-        if before_cost > max_cost {
-            continue;
-        }
-        labels.update(
-            edge_index,
-            before_cost,
-            end_cost,
-            0.0,
-            Vec::new(),
-            Vec::new(),
-        );
-    }
+    });
 }
 
 #[derive(Debug, Clone, Copy)]

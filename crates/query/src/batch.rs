@@ -1314,7 +1314,7 @@ pub(crate) fn build_single_source_edge_tree(
             score: _,
         }) = scratch.heap.pop()
         {
-            if cost > scratch.dist[edge_index] {
+            if cost > scratch.cost(edge_index) {
                 continue;
             }
             for transition_index in routing_graph.transition_range(edge_index) {
@@ -1332,10 +1332,8 @@ pub(crate) fn build_single_source_edge_tree(
             }
         }
 
-        Ok(SingleSourceEdgeTree {
-            dist: scratch.dist.clone(),
-            previous: scratch.previous.clone(),
-        })
+        let (dist, previous) = scratch.labels.take_snapshot();
+        Ok(SingleSourceEdgeTree { dist, previous })
     })
 }
 
@@ -1353,7 +1351,7 @@ pub(crate) fn best_path_from_origin_tree(
     let mut best_edge = None;
 
     for (edge_index, adjustment) in destination_edge_seeds(routing_graph, destination) {
-        let base_cost = tree.dist.get(edge_index).copied().unwrap_or(f64::INFINITY);
+        let base_cost = tree.dist.get(edge_index);
         if !base_cost.is_finite() {
             continue;
         }
@@ -1382,7 +1380,7 @@ fn reconstruct_single_source_route_path(
     let mut cursor = target_edge;
     loop {
         edge_indexes.push(cursor);
-        let previous_edge = tree.previous[cursor];
+        let previous_edge = tree.previous.get(cursor);
         if previous_edge == NO_PREVIOUS_EDGE {
             break;
         }

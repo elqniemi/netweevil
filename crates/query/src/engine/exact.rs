@@ -16,36 +16,20 @@ pub(crate) static SINGLE_SOURCE_SEARCH_SCRATCH: ScratchPool<SingleSourceEdgeSear
 
 #[derive(Default)]
 pub(crate) struct BidirectionalEdgeSearchScratch {
-    pub(crate) forward_dist: Vec<f64>,
-    forward_previous: Vec<u32>,
-    forward_touched: Vec<u32>,
+    /// Forward costs and previous edges.
+    pub(crate) forward: SearchLabels,
     pub(crate) forward_heap: BinaryHeap<State>,
-    pub(crate) backward_dist: Vec<f64>,
-    backward_next: Vec<u32>,
-    backward_touched: Vec<u32>,
+    /// Backward costs and next edges.
+    pub(crate) backward: SearchLabels,
     pub(crate) backward_heap: BinaryHeap<State>,
 }
 
 impl BidirectionalEdgeSearchScratch {
     pub(crate) fn prepare(&mut self, edge_count: usize) {
-        if self.forward_dist.len() < edge_count {
-            self.forward_dist.resize(edge_count, f64::INFINITY);
-            self.forward_previous.resize(edge_count, NO_PREVIOUS_EDGE);
-            self.backward_dist.resize(edge_count, f64::INFINITY);
-            self.backward_next.resize(edge_count, NO_PREVIOUS_EDGE);
-        }
-        for &edge_index in &self.forward_touched {
-            self.forward_dist[edge_index as usize] = f64::INFINITY;
-            self.forward_previous[edge_index as usize] = NO_PREVIOUS_EDGE;
-        }
-        for &edge_index in &self.backward_touched {
-            self.backward_dist[edge_index as usize] = f64::INFINITY;
-            self.backward_next[edge_index as usize] = NO_PREVIOUS_EDGE;
-        }
-        self.forward_touched.clear();
-        self.forward_heap.clear();
-        self.backward_touched.clear();
-        self.backward_heap.clear();
+        self.forward.prepare(edge_count);
+        self.backward.prepare(edge_count);
+        clear_heap(&mut self.forward_heap);
+        clear_heap(&mut self.backward_heap);
     }
 
     pub(crate) fn update_forward(
@@ -54,75 +38,42 @@ impl BidirectionalEdgeSearchScratch {
         cost: f64,
         previous_edge: u32,
     ) -> bool {
-        if !cost.is_finite() {
-            return false;
-        }
-        if cost + f64::EPSILON >= self.forward_dist[edge_index] {
-            return false;
-        }
-        if !self.forward_dist[edge_index].is_finite() {
-            self.forward_touched.push(edge_index as u32);
-        }
-        self.forward_dist[edge_index] = cost;
-        self.forward_previous[edge_index] = previous_edge;
-        true
+        self.forward.update(edge_index, cost, previous_edge)
     }
 
     pub(crate) fn update_backward(&mut self, edge_index: usize, cost: f64, next_edge: u32) -> bool {
-        if !cost.is_finite() {
-            return false;
-        }
-        if cost + f64::EPSILON >= self.backward_dist[edge_index] {
-            return false;
-        }
-        if !self.backward_dist[edge_index].is_finite() {
-            self.backward_touched.push(edge_index as u32);
-        }
-        self.backward_dist[edge_index] = cost;
-        self.backward_next[edge_index] = next_edge;
-        true
+        self.backward.update(edge_index, cost, next_edge)
     }
 }
 
 #[derive(Default)]
 pub(crate) struct SingleSourceEdgeSearchScratch {
-    pub(crate) dist: Vec<f64>,
-    pub(crate) previous: Vec<u32>,
-    touched: Vec<u32>,
+    pub(crate) labels: SearchLabels,
     pub(crate) heap: BinaryHeap<State>,
 }
 
 impl SingleSourceEdgeSearchScratch {
     pub(crate) fn prepare(&mut self, edge_count: usize) {
-        if self.dist.len() < edge_count {
-            self.dist.resize(edge_count, f64::INFINITY);
-            self.previous.resize(edge_count, NO_PREVIOUS_EDGE);
-        }
-        for &edge_index in &self.touched {
-            self.dist[edge_index as usize] = f64::INFINITY;
-            self.previous[edge_index as usize] = NO_PREVIOUS_EDGE;
-        }
-        self.touched.clear();
-        self.heap.clear();
+        self.labels.prepare(edge_count);
+        clear_heap(&mut self.heap);
     }
 
     pub(crate) fn update(&mut self, edge_index: usize, cost: f64, previous_edge: u32) -> bool {
-        if !cost.is_finite() || cost + f64::EPSILON >= self.dist[edge_index] {
-            return false;
-        }
-        if !self.dist[edge_index].is_finite() {
-            self.touched.push(edge_index as u32);
-        }
-        self.dist[edge_index] = cost;
-        self.previous[edge_index] = previous_edge;
-        true
+        self.labels.update(edge_index, cost, previous_edge)
+    }
+
+    /// Cost of `edge_index`, `+inf` when unreached.
+    #[inline]
+    pub(crate) fn cost(&self, edge_index: usize) -> f64 {
+        self.labels.cost.get(edge_index)
     }
 }
 
+/// Costs and previous edges of a complete single-source search.
 #[derive(Clone)]
 pub(crate) struct SingleSourceEdgeTree {
-    pub(crate) dist: Vec<f64>,
-    pub(crate) previous: Vec<u32>,
+    pub(crate) dist: CostArray,
+    pub(crate) previous: LinkArray,
 }
 
 pub(crate) fn route_between_candidates(
@@ -686,11 +637,12 @@ fn seeded_bidirectional_dijkstra_with_banned_edges(
                 else {
                     break;
                 };
-                if banned_edges.contains(&edge_index) || cost > scratch.forward_dist[edge_index] {
+                if banned_edges.contains(&edge_index) || cost > scratch.forward.cost.get(edge_index)
+                {
                     continue;
                 }
-                if scratch.backward_dist[edge_index].is_finite() {
-                    let candidate_cost = cost + scratch.backward_dist[edge_index];
+                if scratch.backward.cost.get(edge_index).is_finite() {
+                    let candidate_cost = cost + scratch.backward.cost.get(edge_index);
                     if candidate_cost < best_cost {
                         best_cost = candidate_cost;
                         best_edge = Some(edge_index);
@@ -728,11 +680,13 @@ fn seeded_bidirectional_dijkstra_with_banned_edges(
                 else {
                     break;
                 };
-                if banned_edges.contains(&edge_index) || cost > scratch.backward_dist[edge_index] {
+                if banned_edges.contains(&edge_index)
+                    || cost > scratch.backward.cost.get(edge_index)
+                {
                     continue;
                 }
-                if scratch.forward_dist[edge_index].is_finite() {
-                    let candidate_cost = scratch.forward_dist[edge_index] + cost;
+                if scratch.forward.cost.get(edge_index).is_finite() {
+                    let candidate_cost = scratch.forward.cost.get(edge_index) + cost;
                     if candidate_cost < best_cost {
                         best_cost = candidate_cost;
                         best_edge = Some(edge_index);
@@ -1039,7 +993,7 @@ pub(crate) fn reconstruct_bidirectional_route_path(
     let mut edge_indexes = Vec::new();
     loop {
         edge_indexes.push(cursor);
-        let previous_edge = scratch.forward_previous[cursor];
+        let previous_edge = scratch.forward.link.get(cursor);
         if previous_edge == NO_PREVIOUS_EDGE {
             break;
         }
@@ -1049,7 +1003,7 @@ pub(crate) fn reconstruct_bidirectional_route_path(
 
     let mut cursor = meeting_edge;
     loop {
-        let next_edge = scratch.backward_next[cursor];
+        let next_edge = scratch.backward.link.get(cursor);
         if next_edge == NO_PREVIOUS_EDGE {
             break;
         }

@@ -2,7 +2,7 @@
 
 use std::sync::{Mutex, PoisonError};
 
-/// A stack of reusable search scratch values (dense per-edge label arrays
+/// A stack of reusable search scratch values (per-edge label arrays
 /// and queues). A search borrows the most recently returned value, which is
 /// also the most likely to be cache-warm, and hands it back afterwards.
 ///
@@ -38,6 +38,26 @@ impl<T: Default> ScratchPool<T> {
             .push(scratch);
         result
     }
+}
+
+/// Entries a pooled queue or hash map keeps capacity for between searches.
+/// A search that grew one beyond this hands the excess back when cleared.
+pub(crate) const RETAINED_SCRATCH_ENTRIES: usize = 1 << 16;
+
+/// Empties a pooled queue, keeping at most [`RETAINED_SCRATCH_ENTRIES`]
+/// of capacity.
+pub(crate) fn clear_heap<T: Ord>(heap: &mut std::collections::BinaryHeap<T>) {
+    heap.clear();
+    heap.shrink_to(RETAINED_SCRATCH_ENTRIES);
+}
+
+/// Empties a pooled hash map, keeping at most about
+/// [`RETAINED_SCRATCH_ENTRIES`] of capacity.
+pub(crate) fn clear_map<K: Eq + std::hash::Hash, V, S: std::hash::BuildHasher>(
+    map: &mut std::collections::HashMap<K, V, S>,
+) {
+    map.clear();
+    map.shrink_to(RETAINED_SCRATCH_ENTRIES);
 }
 
 #[cfg(test)]

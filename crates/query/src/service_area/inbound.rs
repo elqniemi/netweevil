@@ -213,7 +213,7 @@ fn backward_dijkstra(
                      edge_index: usize,
                      state: usize| {
             if state == 0 {
-                scratch.dist[edge_index]
+                scratch.cost(edge_index)
             } else {
                 restricted_dist
                     .get(&(edge_index as u32, state as u32))
@@ -344,93 +344,94 @@ fn backward_phast(
         service_area_edge_cost(topology, metrics, edge_index, metric_kind).unwrap_or(f64::INFINITY)
     };
 
-    let mut dist = vec![f64::INFINITY; edge_count];
-    let mut heap = BinaryHeap::new();
-    for seed in seeds {
-        labels.update(
-            seed.edge_index,
-            0.0,
-            seed.cost,
-            seed.limit_fraction,
-            Vec::new(),
-            Vec::new(),
-        );
-        let from_end = seed.cost - full_cost(seed.edge_index);
-        if from_end < dist[seed.edge_index] {
-            dist[seed.edge_index] = from_end;
-            heap.push(State {
-                edge_index: seed.edge_index,
-                automaton_state: 0,
-                cost: from_end,
-                score: from_end,
-            });
-        }
-    }
-
-    // Upward phase of the reverse graph: downward arcs x -> y relaxed from
-    // y to the higher-ranked x.
-    while let Some(State {
-        edge_index, cost, ..
-    }) = heap.pop()
-    {
-        if cost > dist[edge_index] || cost > max_cost {
-            continue;
-        }
-        let rank = source.edge_rank[edge_index] as usize;
-        for position in acceleration.ranked.downward_range(rank) {
-            let (tail_rank, _) = acceleration.ranked.downward_arc(position);
-            let tail = source.edge_order[tail_rank as usize] as usize;
-            let arc = downward_slots[position] as usize;
-            let next_cost = cost + netweevil_core::decode_cch_weight(downward_weight[arc]);
-            if next_cost < dist[tail] {
-                dist[tail] = next_cost;
+    PHAST_SCRATCH.with(|dist| {
+        dist.prepare(edge_count);
+        let mut heap = BinaryHeap::new();
+        for seed in seeds {
+            labels.update(
+                seed.edge_index,
+                0.0,
+                seed.cost,
+                seed.limit_fraction,
+                Vec::new(),
+                Vec::new(),
+            );
+            let from_end = seed.cost - full_cost(seed.edge_index);
+            if dist.lower(seed.edge_index, from_end) {
                 heap.push(State {
-                    edge_index: tail,
+                    edge_index: seed.edge_index,
                     automaton_state: 0,
-                    cost: next_cost,
-                    score: next_cost,
+                    cost: from_end,
+                    score: from_end,
                 });
             }
         }
-    }
 
-    // Pull sweep in descending rank: every upward arc u -> v leads to a
-    // higher-ranked v whose distance is already final.
-    for &edge in source.edge_order.iter().rev() {
-        let edge = edge as usize;
-        let mut best = dist[edge];
-        #[allow(clippy::needless_range_loop)]
-        for slot in
-            source.upward_first_out[edge] as usize..source.upward_first_out[edge + 1] as usize
+        // Upward phase of the reverse graph: downward arcs x -> y relaxed from
+        // y to the higher-ranked x.
+        while let Some(State {
+            edge_index, cost, ..
+        }) = heap.pop()
         {
-            let head = source.upward_head[slot] as usize;
-            let head_cost = dist[head];
-            if !head_cost.is_finite() || head_cost > max_cost {
+            if cost > dist.get(edge_index) || cost > max_cost {
                 continue;
             }
-            let candidate = head_cost + netweevil_core::decode_cch_weight(upward_weight[slot]);
-            if candidate < best {
-                best = candidate;
+            let rank = source.edge_rank[edge_index] as usize;
+            for position in acceleration.ranked.downward_range(rank) {
+                let (tail_rank, _) = acceleration.ranked.downward_arc(position);
+                let tail = source.edge_order[tail_rank as usize] as usize;
+                let arc = downward_slots[position] as usize;
+                let next_cost = cost + netweevil_core::decode_cch_weight(downward_weight[arc]);
+                if dist.lower(tail, next_cost) {
+                    heap.push(State {
+                        edge_index: tail,
+                        automaton_state: 0,
+                        cost: next_cost,
+                        score: next_cost,
+                    });
+                }
             }
         }
-        dist[edge] = best;
-    }
 
-    for (edge_index, &from_end) in dist.iter().enumerate() {
-        if !from_end.is_finite() || from_end > max_cost {
-            continue;
+        // Pull sweep in descending rank: every upward arc u -> v leads to a
+        // higher-ranked v whose distance is already final.
+        for &edge in source.edge_order.iter().rev() {
+            let edge = edge as usize;
+            let mut best = dist.get(edge);
+            #[allow(clippy::needless_range_loop)]
+            for slot in
+                source.upward_first_out[edge] as usize..source.upward_first_out[edge + 1] as usize
+            {
+                let head = source.upward_head[slot] as usize;
+                let head_cost = dist.get(head);
+                if !head_cost.is_finite() || head_cost > max_cost {
+                    continue;
+                }
+                let candidate = head_cost + netweevil_core::decode_cch_weight(upward_weight[slot]);
+                if candidate < best {
+                    best = candidate;
+                }
+            }
+            dist.lower(edge, best);
         }
-        let far = from_end + full_cost(edge_index);
-        if !far.is_finite() {
-            continue;
+
+        for edge_index in 0..edge_count {
+            let from_end = dist.get(edge_index);
+            if !from_end.is_finite() || from_end > max_cost {
+                continue;
+            }
+            let far = from_end + full_cost(edge_index);
+            if !far.is_finite() {
+                continue;
+            }
+            labels.update(
+                edge_index,
+                from_end.max(0.0),
+                far,
+                1.0,
+                Vec::new(),
+                Vec::new(),
+            );
         }
-        labels.update(
-            edge_index,
-            from_end.max(0.0),
-            far,
-            1.0,
-            Vec::new(),
-            Vec::new(),
-        );
-    }
+    });
 }
