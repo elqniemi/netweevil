@@ -1,3 +1,5 @@
+mod fetch;
+
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -10,10 +12,15 @@ use netweevil_ingest::{
 };
 use netweevil_persist::{WorkspacePaths, read_dataset_manifests, read_topology_bundle};
 
+pub(crate) use fetch::{DatasetFetchArgs, dataset_fetch};
+
 #[derive(Subcommand, Debug)]
 pub(crate) enum DatasetCommand {
     /// Import a road network from OSM, Overture or GeoPackage sources.
     Import(DatasetImportArgs),
+    /// Download an OSM extract from Geofabrik or a URL, and optionally
+    /// import it.
+    Fetch(DatasetFetchArgs),
     /// Apply OSM change files or a newer extract to an imported OSM dataset.
     ///
     /// The update reuses the CCH elimination order of the dataset.

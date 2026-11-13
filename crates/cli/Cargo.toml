@@ -19,6 +19,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 clap.workspace = true
 csv.workspace = true
+md5.workspace = true
 netweevil-api = { path = "../api" }
 netweevil-core = { path = "../core" }
 netweevil-ingest = { path = "../ingest" }

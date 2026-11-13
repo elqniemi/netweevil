@@ -17,6 +17,60 @@ with change files.
 
 `datasets/README.md` has download commands for the example sources.
 
+## Download an OSM extract
+
+`netweevil dataset fetch` downloads an OSM extract from
+[Geofabrik](https://download.geofabrik.de/) or from a URL.
+
+1. Find the region. A region is a Geofabrik path, a region id or a region
+   name:
+
+    ```bash
+    netweevil dataset fetch --list nether
+    ```
+
+    The output has one line for each region: id, name and parent region.
+
+2. Download the extract:
+
+    ```bash
+    netweevil dataset fetch europe/netherlands
+    ```
+
+    The command writes `datasets/netherlands-latest.osm.pbf` and prints its
+    path on stdout. Progress goes to stderr.
+
+3. Optional: download and import in one command:
+
+    ```bash
+    netweevil dataset fetch netherlands --import
+    ```
+
+    The dataset id is the last part of the region (`netherlands`). Use
+    `--name` to set a different id.
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `<REGION>` | none | Geofabrik path (`europe/germany/berlin`), region id (`us/georgia`) or region name (`finland`) |
+| `--url` | none | Direct `.osm.pbf` URL, used instead of a region |
+| `--list [FILTER]` | none | Print the Geofabrik regions whose id or name contains `FILTER` |
+| `--out` | `datasets` | Directory for the file |
+| `--import` | off | Import the file after the download |
+| `--name` | from the region | Id of the imported dataset |
+| `--force` | off | Download the file again |
+
+A path that starts with a continent (`europe/...`, `asia/...`) maps directly
+to `https://download.geofabrik.de/<path>-latest.osm.pbf`. Other values are
+looked up in the Geofabrik region index. If a name matches more than one
+region (`georgia`), or no region, the command fails and shows the candidates.
+
+The download goes to `<file>.part` first. The command renames the file when
+the download is complete and its md5 sum agrees with the `.md5` file on the
+server. If the download stops, run the same command again: it continues from
+the end of the `.part` file when the server accepts range requests. If the
+local file has the same length and md5 sum as the remote file, the command
+does not download it again.
+
 ## Import a dataset
 
 === "CLI"

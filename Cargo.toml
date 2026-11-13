@@ -37,6 +37,7 @@ arrow-array = "56.2.0"
 arrow-json = "56.2.0"
 arrow-schema = "56.2.0"
 hex = "0.4.3"
+md5 = "0.8.0"
 memmap2 = "0.9.8"
 mime_guess = "2.0.5"
 mvt = "0.15.0"
@@ -59,7 +60,7 @@ futures-util = { version = "0.3.31", default-features = false, features = ["std"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 tzf-rs = { version = "2.1.2", default-features = false, features = ["bundled"] }
-ureq = { version = "3.4.0", default-features = false, features = ["json"] }
+ureq = { version = "3.4.0", default-features = false, features = ["json", "rustls"] }
 uuid = { version = "1.18.1", features = ["serde", "v4"] }
 zip = { version = "2.2.2", default-features = false, features = ["deflate"] }
 

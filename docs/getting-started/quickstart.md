@@ -16,9 +16,11 @@ Run all commands from the repository root. NetWeevil writes its state to
 1.  Download the Groningen province extract from Geofabrik:
 
     ```bash
-    curl -L -o datasets/groningen-latest.osm.pbf \
-      https://download.geofabrik.de/europe/netherlands/groningen-latest.osm.pbf
+    netweevil dataset fetch europe/netherlands/groningen
     ```
+
+    The command writes `datasets/groningen-latest.osm.pbf` and prints its
+    path. It checks the file against the Geofabrik `.md5` file.
 
 2.  Optional: reduce the extract to the routing objects with `osmium`. See
     [Datasets](../guides/datasets.md). The full extract also imports
@@ -44,6 +46,10 @@ Run all commands from the repository root. NetWeevil writes its state to
     ```
 
     The numbers depend on the date of the extract.
+
+!!! tip
+    `netweevil dataset fetch europe/netherlands/groningen --import` does
+    steps 1 and 2 in one command. The dataset id is `groningen`.
 
 The import builds the topology and the routing hierarchy. It writes the
 dataset manifest to `.netweevil/datasets/groningen.json`.
