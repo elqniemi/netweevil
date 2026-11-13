@@ -198,6 +198,10 @@ for the arcs that routes use.
   candidate path against multi-edge turn restrictions.
 - If the candidate violates a restriction, the engine uses an exact
   automaton search. A legal candidate needs no exact search.
+- Without failure modes, the exact automaton search is an A* search. Its
+  potentials come from a lower-bound customization of the hierarchy. The engine calculates it at
+  the first request that needs it, so an engine that never meets an illegal
+  candidate does not keep it.
 - Matrix searches share complete CCH search spaces. They validate each
   reconstructed path. When a candidate is illegal, they resume the
   restriction-aware Dijkstra frontier of the current origin.

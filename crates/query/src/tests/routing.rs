@@ -1452,22 +1452,21 @@ fn single_route_restricted_fallback_matches_the_exact_engine() {
 }
 
 #[test]
-fn engines_with_restriction_sequences_customize_lower_bounds_in_the_background() {
+fn engines_customize_lower_bounds_on_the_first_restricted_fallback() {
     let topology = multi_edge_restricted_topology();
-    let (bundle, compiled) = build_test_cch(&topology, &restricted_metrics());
+    let mut metrics = restricted_metrics();
+    set_edge_cost(&mut metrics, 3, Some(25.0));
+    let (bundle, compiled) = build_test_cch(&topology, &metrics);
     let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(compiled), Some(bundle))
         .expect("accelerated engine builds");
     let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
     let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while acceleration.lower_bounds.get().is_none() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "lower bounds were not customized in the background"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    assert!(crate::lower_bound_weights(graph).is_some());
+    assert!(graph.has_restriction_sequences());
+    assert!(acceleration.lower_bounds.get().is_none());
+    engine
+        .execute_route(&restricted_a_to_d("lower-bounds"))
+        .expect("restricted route succeeds");
+    assert!(acceleration.lower_bounds.get().is_some_and(Option::is_some));
 }
 
 /// Each reverse transition `previous -> edge` costs exactly what the forward
