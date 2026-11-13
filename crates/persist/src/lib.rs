@@ -60,6 +60,8 @@ pub struct WorkspacePaths {
     pub indoor_sites_dir: PathBuf,
     /// Indoor site input documents and compiled graphs, one directory per site.
     pub indoor_bundles_dir: PathBuf,
+    /// H3 cell layers: named values per cell, one JSON document per layer.
+    pub cell_layers_dir: PathBuf,
     /// Active dataset/profile/feed selection used when `api serve` runs without arguments.
     pub workspace_config_path: PathBuf,
 }
@@ -88,6 +90,7 @@ impl WorkspacePaths {
             gtfs_scenarios_dir: state_dir.join("gtfs_scenarios"),
             indoor_sites_dir: state_dir.join("indoor_sites"),
             indoor_bundles_dir: state_dir.join("bundles").join("indoor"),
+            cell_layers_dir: state_dir.join("cell_layers"),
             workspace_config_path: state_dir.join("workspace.json"),
             state_dir,
         };
@@ -116,6 +119,7 @@ impl WorkspacePaths {
             &self.gtfs_scenarios_dir,
             &self.indoor_sites_dir,
             &self.indoor_bundles_dir,
+            &self.cell_layers_dir,
         ] {
             fs::create_dir_all(dir)
                 .with_context(|| format!("creating workspace directory {}", dir.display()))?;
@@ -186,6 +190,11 @@ impl WorkspacePaths {
                 "indoor_sites",
                 &self.indoor_sites_dir,
                 "One manifest per imported indoor site, with its anchor, levels and entrances.",
+            ),
+            entry(
+                "cell_layers",
+                &self.cell_layers_dir,
+                "H3 cell layers: named values per cell, imported from tables or painted.",
             ),
             entry(
                 "bundles",

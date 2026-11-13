@@ -1534,6 +1534,7 @@ dependencies = [
  "chrono-tz",
  "csv",
  "netweevil-core",
+ "netweevil-h3",
  "netweevil-profile",
  "parquet",
  "rayon",

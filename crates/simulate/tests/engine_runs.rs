@@ -236,6 +236,8 @@ fn base_scenario(agent_count: u32) -> SimulationScenario {
             departures: DepartureConfig::Instant { at_s: 0.0 },
             behavior: Default::default(),
             speed: Default::default(),
+            vehicle_types: Vec::new(),
+            ride_hailing: None,
         }],
         zones: Vec::new(),
         traffic: Default::default(),
@@ -369,6 +371,8 @@ fn car_and_bicycle_fleets_run_simultaneously() {
         departures: DepartureConfig::Instant { at_s: 0.0 },
         behavior: Default::default(),
         speed: Default::default(),
+        vehicle_types: Vec::new(),
+        ride_hailing: None,
     });
     let mut engines = profiles();
     engines.insert(
@@ -396,4 +400,136 @@ fn car_and_bicycle_fleets_run_simultaneously() {
     );
     // ...and bikes never exceed their 5.5 m/s free-flow profile speed.
     assert!(bike_speed <= 5.6, "bike speed {bike_speed:.2} m/s");
+}
+
+#[test]
+fn vehicle_types_split_a_fleet_by_share() {
+    let mut scenario = base_scenario(60);
+    scenario.fleets[0].departures = DepartureConfig::Uniform {
+        start_s: 0.0,
+        end_s: 600.0,
+    };
+    scenario.fleets[0].behavior.heterogeneity = 0.0;
+    scenario.fleets[0].speed.speed_multiplier_std = 0.0;
+    scenario.fleets[0].vehicle_types = serde_json::from_value(serde_json::json!([
+        {"type_id": "compact", "share": 3.0},
+        {"type_id": "truck", "share": 1.0, "pcu": 2.5, "max_speed_kph": 15.0}
+    ]))
+    .unwrap();
+    scenario.validate().unwrap();
+    let result = run(scenario);
+
+    let types = &result.fleets[0].vehicle_types;
+    assert_eq!(types.len(), 2);
+    assert_eq!(types[0].type_id, "compact");
+    assert_eq!(types[0].dispatched + types[1].dispatched, 60);
+    assert!(
+        types[0].dispatched > types[1].dispatched && types[1].dispatched > 3,
+        "{types:?}"
+    );
+    assert_eq!(types[0].arrived + types[1].arrived, 60);
+    assert!(
+        types[1].mean_travel_time_s.unwrap() > types[0].mean_travel_time_s.unwrap() * 1.5,
+        "the capped trucks are slower: {types:?}"
+    );
+    let trajectories = result.trajectories.as_ref().unwrap();
+    assert!(
+        trajectories
+            .iter()
+            .all(|trajectory| trajectory.vehicle_type.is_some())
+    );
+}
+
+#[test]
+fn ride_hailing_fleet_picks_riders_up_and_reports_surge() {
+    let mut scenario = base_scenario(12);
+    let fleet = &mut scenario.fleets[0];
+    fleet.demand.origins = point(3, 3);
+    fleet.departures = DepartureConfig::Uniform {
+        start_s: 0.0,
+        end_s: 240.0,
+    };
+    fleet.vehicle_types = serde_json::from_value(serde_json::json!([
+        {"type_id": "standard", "share": 2.0},
+        {"type_id": "van", "share": 1.0, "request_share": 1.0}
+    ]))
+    .unwrap();
+    fleet.ride_hailing = Some(
+        serde_json::from_value(serde_json::json!({
+            "vehicle_count": 6,
+            "vehicles": {"kind": "points", "points": [{"lon": node_lon(0), "lat": node_lat(3)}]},
+            "max_wait_s": 900.0,
+            "surge": {"interval_s": 120.0, "config": {"resolution": 9, "smoothing_rings": 0}}
+        }))
+        .unwrap(),
+    );
+    scenario.validate().unwrap();
+    let result = run(scenario.clone());
+
+    let ride = result.fleets[0]
+        .ride_hailing
+        .as_ref()
+        .expect("ride summary");
+    assert_eq!((ride.requests, ride.vehicles, ride.priced_out), (12, 6, 0));
+    assert_eq!(ride.served + ride.unserved, 12);
+    assert!(ride.served >= 6, "{ride:?}");
+    assert_eq!(ride.picked_up, ride.served);
+    assert_eq!(ride.completed, ride.served);
+    assert!(ride.mean_wait_s.unwrap() > 0.0);
+    assert!(ride.mean_planned_wait_s.unwrap() > 0.0);
+    assert_eq!(ride.surge_periods.len(), 2);
+    // Twelve requests at one place against six vehicles.
+    assert!(ride.mean_surge_multiplier.unwrap() > 1.0, "{ride:?}");
+    assert_eq!(result.fleets[0].dispatched, ride.served);
+
+    let pickup_edge_end = node_lon(3);
+    for trajectory in result.trajectories.as_ref().unwrap() {
+        let (request_s, pickup_s) = (trajectory.request_s.unwrap(), trajectory.pickup_s.unwrap());
+        assert!(pickup_s > request_s && pickup_s < trajectory.arrive_s.unwrap());
+        // Requests need a van here, and the trip starts where the vehicle is.
+        assert_eq!(trajectory.vehicle_type.as_deref(), Some("van"));
+        assert!(trajectory.origin[0] < pickup_edge_end || trajectory.depart_s > 0.0);
+        assert!(trajectory.edges.len() >= 6, "via the pickup to the dropoff");
+    }
+
+    // Price-sensitive riders leave under surge; the run stays deterministic.
+    let mut elastic = scenario;
+    elastic.fleets[0]
+        .ride_hailing
+        .as_mut()
+        .unwrap()
+        .surge
+        .as_mut()
+        .unwrap()
+        .price_elasticity = 3.0;
+    let first = run(elastic.clone());
+    let second = run(elastic);
+    let priced_out =
+        |result: &SimulationResult| result.fleets[0].ride_hailing.as_ref().unwrap().priced_out;
+    assert!(priced_out(&first) > 0);
+    assert_eq!(priced_out(&first), priced_out(&second));
+    assert_eq!(first.summary.agents_arrived, second.summary.agents_arrived);
+}
+
+#[test]
+fn large_vehicles_pass_edges_shorter_than_themselves() {
+    // 100 m residential edges store 13 PCU; a capacity cut leaves 0.4 PCU,
+    // less than one car, on the middle column.
+    let mut scenario = base_scenario(6);
+    scenario.fleets[0].speed.pcu = Some(3.0);
+    let mid_lon = node_lon(GRID / 2);
+    scenario.zones.push(ZoneConfig {
+        zone_id: "narrow".to_string(),
+        label: String::new(),
+        cells: Vec::new(),
+        polygon: vec![
+            [mid_lon - LON_STEP * 0.6, BASE_LAT - LAT_STEP],
+            [mid_lon + LON_STEP * 0.6, BASE_LAT - LAT_STEP],
+            [mid_lon + LON_STEP * 0.6, node_lat(GRID - 1) + LAT_STEP],
+            [mid_lon - LON_STEP * 0.6, node_lat(GRID - 1) + LAT_STEP],
+        ],
+        effect: ZoneEffect::CapacityFactor { factor: 0.03 },
+    });
+    let result = run(scenario);
+    assert_eq!(result.summary.agents_arrived, 6);
 }

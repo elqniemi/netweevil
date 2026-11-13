@@ -14,7 +14,9 @@ pub(crate) fn serialize_cell<S: Serializer>(
     serializer.collect_str(cell)
 }
 
-fn deserialize_cell<'de, D: Deserializer<'de>>(deserializer: D) -> Result<CellIndex, D::Error> {
+pub(crate) fn deserialize_cell<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<CellIndex, D::Error> {
     let text = String::deserialize(deserializer)?;
     parse_cell(&text).map_err(serde::de::Error::custom)
 }

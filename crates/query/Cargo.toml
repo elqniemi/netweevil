@@ -17,6 +17,7 @@ chrono.workspace = true
 chrono-tz.workspace = true
 csv.workspace = true
 netweevil-core = { path = "../core" }
+netweevil-h3 = { path = "../h3" }
 netweevil-profile = { path = "../profile" }
 rayon.workspace = true
 parquet.workspace = true

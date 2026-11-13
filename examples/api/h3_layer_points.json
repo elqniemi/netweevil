@@ -1,0 +1,12 @@
+{
+  "layer_id": "city",
+  "label": "Groningen demand and supply",
+  "replace": true,
+  "csv": "lon,lat,riders,income\n6.5665,53.2194,40,31000\n6.5670,53.2190,25,42000\n6.5716,53.2148,30,28000\n6.5362,53.2405,6,39000\n6.5903,53.2101,4,35000\n",
+  "resolution": 8,
+  "columns": [
+    {"source": "riders"},
+    {"source": "income", "aggregation": "mean", "name": "mean_income"},
+    {"name": "points", "aggregation": "count"}
+  ]
+}

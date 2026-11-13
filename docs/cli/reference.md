@@ -525,6 +525,9 @@ Commands:
   cover      List the H3 cells whose centre is in a bounding box or polygon
   points     Write the centres of H3 cells as a point set
   resample   Move a weighted cell table to another resolution
+  layer      Store, edit and export cell layers with named values per cell
+  surge      Compute surge multipliers from demand and supply per cell
+  dispatch   Match ride requests to vehicles by network travel time
   help       Print this message or the help of the given subcommand(s)
 
 Options:
@@ -679,6 +682,208 @@ Options:
 
       --out <OUT>
           Output file: `.csv`, `.geojson` or `.json`
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `netweevil h3 layer` { #netweevil-h3-layer }
+
+```text
+Store, edit and export cell layers with named values per cell
+
+Usage: netweevil h3 layer <COMMAND>
+
+Commands:
+  import  Import a cell table or a point table into a layer
+  list    List the stored cell layers
+  show    Print the columns and statistics of a layer
+  export  Write a layer as CSV, GeoJSON or JSON
+  paint   Set, add to, scale or clear one column on cells or on an area
+  remove  Delete a stored layer
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+##### `netweevil h3 layer import` { #netweevil-h3-layer-import }
+
+```text
+Import a cell table or a point table into a layer.
+
+A table with a `cell` column sets values per cell. With `--resolution`, the rows are points and aggregate into cells.
+
+Usage: netweevil h3 layer import [OPTIONS] --name <NAME> <TABLE>
+
+Arguments:
+  <TABLE>
+          CSV with a header row
+
+Options:
+      --name <NAME>
+          Layer id. An existing layer keeps its other cells and columns
+
+      --resolution <RESOLUTION>
+          Aggregate the rows as points into cells of this resolution
+
+      --value <VALUES>
+          Column to import: `column`, `column:aggregation` or `column:aggregation=name`. Aggregations: sum, mean, min, max, count, last. `:count=name` counts rows. Repeat the flag for more columns. Without it, every numeric column is summed
+
+      --lon-column <LON_COLUMN>
+          Longitude column of a point table
+          
+          [default: lon]
+
+      --lat-column <LAT_COLUMN>
+          Latitude column of a point table
+          
+          [default: lat]
+
+      --label <LABEL>
+          Label of the layer
+
+      --replace
+          Start from an empty layer instead of merging into the stored one
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+##### `netweevil h3 layer list` { #netweevil-h3-layer-list }
+
+```text
+List the stored cell layers
+
+Usage: netweevil h3 layer list
+
+Options:
+  -h, --help  Print help
+```
+
+##### `netweevil h3 layer show` { #netweevil-h3-layer-show }
+
+```text
+Print the columns and statistics of a layer
+
+Usage: netweevil h3 layer show <LAYER>
+
+Arguments:
+  <LAYER>  Layer id
+
+Options:
+  -h, --help  Print help
+```
+
+##### `netweevil h3 layer export` { #netweevil-h3-layer-export }
+
+```text
+Write a layer as CSV, GeoJSON or JSON
+
+Usage: netweevil h3 layer export --out <OUT> <LAYER>
+
+Arguments:
+  <LAYER>  Layer id
+
+Options:
+      --out <OUT>  Output file: `.csv`, `.geojson` or `.json`
+  -h, --help       Print help
+```
+
+##### `netweevil h3 layer paint` { #netweevil-h3-layer-paint }
+
+```text
+Set, add to, scale or clear one column on cells or on an area
+
+Usage: netweevil h3 layer paint [OPTIONS] --column <COLUMN> <LAYER>
+
+Arguments:
+  <LAYER>  Layer id; a new layer is created when there is none
+
+Options:
+      --column <COLUMN>          Column to change
+      --op <OP>                  How the value changes the cells [default: set] [possible values: set, add, multiply, clear]
+      --value <VALUE>            Value to paint [default: 0]
+      --cells <CELLS>            Cell ids, separated by commas
+      --bbox <BBOX>              Paint the cells with their centre in `min_lon,min_lat,max_lon,max_lat`
+      --polygon <POLYGON>        Paint the cells with their centre in the polygon of a GeoJSON file
+      --resolution <RESOLUTION>  Resolution of the cells of `--bbox` and `--polygon`
+  -h, --help                     Print help
+```
+
+##### `netweevil h3 layer remove` { #netweevil-h3-layer-remove }
+
+```text
+Delete a stored layer
+
+Usage: netweevil h3 layer remove <LAYER>
+
+Arguments:
+  <LAYER>  Layer id
+
+Options:
+  -h, --help  Print help
+```
+
+#### `netweevil h3 surge` { #netweevil-h3-surge }
+
+```text
+Compute surge multipliers from demand and supply per cell.
+
+A cell with more demand than supply gets a multiplier above one.
+
+Usage: netweevil h3 surge [OPTIONS] --demand <DEMAND> --supply <SUPPLY> --out <OUT>
+
+Options:
+      --demand <DEMAND>
+          Demand: `layer:column`, or a cell table (`.csv` or `.json`)
+
+      --supply <SUPPLY>
+          Supply: `layer:column`, or a cell table (`.csv` or `.json`)
+
+      --config <CONFIG>
+          Surge settings (JSON); the defaults apply without it
+
+      --resolution <RESOLUTION>
+          Resolution of the surge cells; replaces the one of `--config`
+
+      --rebalance-rings <REBALANCE_RINGS>
+          Also plan moves of surplus supply from at most this many rings away
+
+      --out <OUT>
+          Output file: `.csv`, `.geojson` or `.json`
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `netweevil h3 dispatch` { #netweevil-h3-dispatch }
+
+```text
+Match ride requests to vehicles by network travel time.
+
+The request file lists vehicles and requests, with optional surge and pricing settings.
+
+Usage: netweevil h3 dispatch [OPTIONS] --dataset <DATASET> --profile <PROFILE> --request <REQUEST>
+
+Options:
+      --dataset <DATASET>
+          Id of an imported dataset
+
+      --profile <PROFILE>
+          Routing profile file (YAML or TOML)
+
+      --request <REQUEST>
+          Dispatch request (JSON) with `vehicles` and `requests`
+
+      --surge-demand <SURGE_DEMAND>
+          Surge demand: `layer:column`, or a cell table
+
+      --surge-supply <SURGE_SUPPLY>
+          Surge supply: `layer:column`, or a cell table
+
+      --out <OUT>
+          Result file (JSON). Omit it to write to the runs directory
 
   -h, --help
           Print help (see a summary with '-h')

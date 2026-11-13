@@ -133,10 +133,17 @@ pub(crate) async fn create_simulation(
     State(state): State<ApiState>,
     Json(payload): Json<SimulationCreateRequest>,
 ) -> Result<Json<SimulationCreateResponse>, ApiError> {
-    let scenario = payload.scenario;
+    let mut scenario = payload.scenario;
     scenario
         .validate()
         .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let layers_dir = state.workspace.paths.cell_layers_dir.clone();
+    let load_cells = move |layer_id: &str, column: &str| {
+        netweevil_h3::CellLayer::load(&layers_dir, layer_id)?.weighted(column)
+    };
+    scenario
+        .resolve_cell_layers(&load_cells)
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
 
     let service = state.runtime()?;
     let mut profiles: BTreeMap<String, Arc<PreparedRoutingEngine>> = BTreeMap::new();
@@ -250,6 +257,15 @@ pub(crate) async fn control_simulation(
         && !zone.cells.is_empty()
     {
         zone.validate()
+            .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    }
+    let mut command = command;
+    if let SimulationCommand::SpawnFleet { fleet } = &mut command {
+        let layers_dir = state.workspace.paths.cell_layers_dir.clone();
+        fleet
+            .resolve_cell_layers(&|layer_id, column| {
+                netweevil_h3::CellLayer::load(&layers_dir, layer_id)?.weighted(column)
+            })
             .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
     }
     info!(simulation_id = %simulation_id, command = ?command, "simulation control");

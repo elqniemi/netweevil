@@ -180,6 +180,22 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
         .route("/v1/scenario-batch", post(handlers::scenario_batch_handler))
         .route("/v1/h3/network", get(h3::h3_network_handler))
         .route("/v1/h3/aggregate", post(h3::h3_aggregate_handler))
+        .route(
+            "/v1/h3/layers",
+            get(h3::layers::list_layers)
+                .post(h3::layers::write_layer)
+                .layer(DefaultBodyLimit::max(256 * 1024 * 1024)),
+        )
+        .route(
+            "/v1/h3/layers/{layer_id}",
+            get(h3::layers::get_layer).delete(h3::layers::delete_layer),
+        )
+        .route(
+            "/v1/h3/layers/{layer_id}/paint",
+            post(h3::layers::paint_layer),
+        )
+        .route("/v1/h3/surge", post(h3::layers::surge_handler))
+        .route("/v1/dispatch", post(h3::layers::dispatch_handler))
         .route("/v1/network/edges", post(network::network_edges_handler))
         .route("/v1/tiles/{z}/{x}/{tile}", get(tiles::network_tile_handler))
         .route(

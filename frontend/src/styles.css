@@ -2521,3 +2521,13 @@ details.points:not([open]) > summary.points-head {
 .trip-status { display: flex; gap: 8px; align-items: center; margin: 0; }
 .trip-visits td, .trip-visits th { font-variant-numeric: tabular-nums; white-space: nowrap; }
 .trip-visits tr.is-late td { color: var(--err); }
+
+/* --- Cells tool --- */
+.tool-panel.is-full { max-height: none; flex: 1 1 auto; }
+.cells-panel { display: flex; flex-direction: column; gap: 10px; font-size: 12.5px; }
+.cells-panel .points { margin-bottom: 0; }
+.cells-panel .points-head .field-check { gap: 6px; }
+.cells-panel .segmented { align-self: flex-start; }
+.cells-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.cells-row input[type="text"] { flex: 1; min-width: 0; }
+.cells-error { padding: 0 10px 8px; margin: 0; }

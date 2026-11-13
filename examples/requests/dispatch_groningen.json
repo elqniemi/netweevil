@@ -1,0 +1,24 @@
+{
+  "vehicles": [
+    {"id": "car_1", "lon": 6.5665, "lat": 53.2194},
+    {"id": "car_2", "lon": 6.5716, "lat": 53.2148},
+    {"id": "car_3", "lon": 6.5362, "lat": 53.2405},
+    {"id": "van_1", "lon": 6.5903, "lat": 53.2101, "vehicle_type": "van"}
+  ],
+  "requests": [
+    {"id": "ride_1", "pickup": {"lon": 6.5601, "lat": 53.2212}, "dropoff": {"lon": 6.5362, "lat": 53.2405}},
+    {"id": "ride_2", "pickup": {"lon": 6.5760, "lat": 53.2101}, "dropoff": {"lon": 6.5665, "lat": 53.2194}},
+    {"id": "ride_3", "pickup": {"lon": 6.5689, "lat": 53.2176}, "dropoff": {"lon": 6.6021, "lat": 53.2302}},
+    {"id": "ride_4", "pickup": {"lon": 6.5650, "lat": 53.2188}, "dropoff": {"lon": 6.5333, "lat": 53.2011}},
+    {"id": "group_1", "pickup": {"lon": 6.5702, "lat": 53.2171}, "dropoff": {"lon": 6.5850, "lat": 53.2350}, "vehicle_type": "van"}
+  ],
+  "matching": {"strategy": "optimal", "max_pickup_time_s": 900},
+  "surge": {"config": {"resolution": 8, "smoothing_rings": 1, "max_multiplier": 2.5}},
+  "pricing": {
+    "base_fare": 2.5,
+    "per_km": 1.4,
+    "per_minute": 0.3,
+    "minimum_fare": 6.0,
+    "vehicle_type_factors": {"van": 1.5}
+  }
+}

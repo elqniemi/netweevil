@@ -75,7 +75,10 @@ pub(crate) fn simulate_validate(scenario_path: &Path) -> Result<()> {
 }
 
 pub(crate) fn simulate_run(paths: &WorkspacePaths, args: SimulateRunArgs) -> Result<()> {
-    let scenario = load_scenario(&args.scenario)?;
+    let mut scenario = load_scenario(&args.scenario)?;
+    scenario.resolve_cell_layers(&|layer_id, column| {
+        netweevil_h3::CellLayer::load(&paths.cell_layers_dir, layer_id)?.weighted(column)
+    })?;
     if args.profiles.is_empty() {
         anyhow::bail!(
             "pass at least one --profile covering the fleet profile_ids: {}",

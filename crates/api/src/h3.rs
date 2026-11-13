@@ -18,15 +18,15 @@ use crate::state::{ApiState, execute_on_routing_worker};
 /// Most cells one network summary returns.
 const NETWORK_CELL_LIMIT: usize = 250_000;
 
-fn bad_request(error: anyhow::Error) -> ApiError {
+pub(crate) fn bad_request(error: anyhow::Error) -> ApiError {
     ApiError::bad_request(format!("{error:#}"))
 }
 
-fn wants_geojson(format: Option<&str>) -> bool {
+pub(crate) fn wants_geojson(format: Option<&str>) -> bool {
     format.is_some_and(|value| value.eq_ignore_ascii_case("geojson"))
 }
 
-fn properties(value: &impl Serialize) -> Map<String, Value> {
+pub(crate) fn properties(value: &impl Serialize) -> Map<String, Value> {
     let mut properties = match serde_json::to_value(value) {
         Ok(Value::Object(properties)) => properties,
         _ => Map::new(),
@@ -147,6 +147,8 @@ pub(crate) async fn h3_aggregate_handler(
     })
     .into_response())
 }
+
+pub(crate) mod layers;
 
 #[cfg(test)]
 mod tests;

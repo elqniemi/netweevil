@@ -25,11 +25,13 @@ use crate::control::{
     SimulationHandle, SimulationStatus,
 };
 use crate::demand::{
-    AgentDraft, DispatchReport, DispatchedAgent, dispatch_fleet, plan_fleet, route_drafts,
+    AgentDraft, DispatchReport, DispatchedAgent, NO_VEHICLE_TYPE, NO_VIA, RidePlan, dispatch_fleet,
+    plan_fleet, route_drafts,
 };
 use crate::network::{SimNetwork, build_sim_network, haversine_m, network_bounds_bbox};
 use crate::output::{
-    AgentTrajectory, EdgeUsage, FleetSummary, SimulationResult, SimulationSummary,
+    AgentTrajectory, EdgeUsage, FleetSummary, RideHailingSummary, SimulationResult,
+    SimulationSummary, VehicleTypeSummary,
 };
 use crate::rng::{SimRng, SplitMix64};
 use crate::scenario::{CongestionModel, FleetConfig, SimulationScenario};
@@ -57,6 +59,12 @@ enum AgentStatus {
     Arrived,
     NeverDeparted,
 }
+
+/// Occupancy below which an edge holds no vehicle. Such an edge admits one
+/// vehicle of any size: a vehicle larger than the storage of a short edge
+/// (a truck, or any vehicle under a capacity cut) would otherwise never
+/// pass it.
+const VACANT_PCU: f32 = 0.01;
 
 struct Agent {
     fleet: u16,
@@ -86,6 +94,10 @@ struct Agent {
     distance_m: f32,
     traj_edges: Vec<u32>,
     traj_enter_s: Vec<f32>,
+    vehicle_type: u16,
+    /// Route position of the first edge after a ride pickup, or `NO_VIA`.
+    via_pos: u32,
+    request_s: f64,
 }
 
 impl Agent {
@@ -118,6 +130,9 @@ impl Agent {
             distance_m: 0.0,
             traj_edges: Vec::new(),
             traj_enter_s: Vec::new(),
+            vehicle_type: dispatch.vehicle_type,
+            via_pos: dispatch.via_pos,
+            request_s: dispatch.request_s,
         }
     }
 
@@ -152,7 +167,34 @@ impl Agent {
             distance_m: 0.0,
             traj_edges: Vec::new(),
             traj_enter_s: Vec::new(),
+            vehicle_type: NO_VEHICLE_TYPE,
+            via_pos: NO_VIA,
+            request_s: f64::NAN,
         }
+    }
+
+    /// End of the route section a reroute may replace: the pickup while
+    /// the agent drives to one, the route end otherwise.
+    fn section_end(&self) -> usize {
+        if self.via_pos != NO_VIA && self.route_pos < self.via_pos {
+            self.via_pos as usize
+        } else {
+            self.route.len()
+        }
+    }
+
+    /// Simulated pickup time of a ride; the trajectory holds the entry
+    /// time of the first edge after the pickup.
+    fn pickup_s(&self) -> Option<f64> {
+        if self.request_s.is_nan() {
+            return None;
+        }
+        if self.via_pos == NO_VIA {
+            return self.arrive_s.is_finite().then_some(self.arrive_s);
+        }
+        self.traj_enter_s
+            .get(self.via_pos as usize)
+            .map(|enter_s| f64::from(*enter_s))
     }
 
     fn current_edge(&self) -> u32 {
@@ -176,6 +218,7 @@ struct FleetRuntime {
     travel_time_sum: f64,
     distance_sum: f64,
     delay_sum: f64,
+    ride_plan: Option<RidePlan>,
 }
 
 /// Per-edge dynamic state. Dense arrays sized to the edge count; per-tick
@@ -383,8 +426,9 @@ impl SimulationRunner {
         // simulation starts immediately.
         let mut draft_queues: Vec<Vec<AgentDraft>> = Vec::with_capacity(self.fleets.len());
         let mut next_agent_id: u32 = 0;
-        for (fleet_index, fleet) in self.fleets.iter().enumerate() {
-            let mut drafts = plan_fleet(
+        for fleet_index in 0..self.fleets.len() {
+            let fleet = &self.fleets[fleet_index];
+            let (mut drafts, ride_plan) = plan_fleet(
                 &fleet.config,
                 fleet_index as u16,
                 &fleet.engine,
@@ -395,7 +439,9 @@ impl SimulationRunner {
                 0.0,
             )
             .with_context(|| format!("planning fleet '{}'", fleet.config.fleet_id))?;
-            next_agent_id = next_agent_id.saturating_add(drafts.len() as u32);
+            // Requests that the plan dropped keep their ids unused.
+            next_agent_id = next_agent_id.saturating_add(fleet.config.agent_count);
+            self.fleets[fleet_index].ride_plan = ride_plan;
             // Latest departures first so routed windows split off the back.
             drafts.sort_by(|a, b| {
                 b.depart_s
@@ -881,7 +927,7 @@ impl SimulationRunner {
             let storage =
                 self.network.edge_storage_pcu[first_edge] * dynamics.zone_capacity[first_edge];
             let load = dynamics.occupancy_pcu[first_edge] + dynamics.background_pcu[first_edge];
-            if load + agent.pcu > storage {
+            if load + agent.pcu > storage && dynamics.occupancy_pcu[first_edge] > VACANT_PCU {
                 spawn_retry.push(agent_index);
                 return;
             }
@@ -1008,7 +1054,7 @@ impl SimulationRunner {
             if agent.no_collision {
                 let storage = self.network.edge_storage_pcu[next] * dynamics.zone_capacity[next];
                 let load = dynamics.occupancy_pcu[next] + dynamics.background_pcu[next];
-                if load + agent.pcu > storage {
+                if load + agent.pcu > storage && dynamics.occupancy_pcu[next] > VACANT_PCU {
                     agent.pos_m = length;
                     agent.wait_s += dt as f32;
                     blocked = true;
@@ -1129,7 +1175,11 @@ impl SimulationRunner {
                 break;
             }
             let agent = &mut agents[agent_index as usize];
-            if agent.status != AgentStatus::Active || agent.on_last_edge() {
+            let goal = agent.route[agent.section_end() - 1];
+            if agent.status != AgentStatus::Active
+                || agent.on_last_edge()
+                || agent.current_edge() == goal
+            {
                 agent.force_reroute = false;
                 continue;
             }
@@ -1137,7 +1187,7 @@ impl SimulationRunner {
             jobs.push(RerouteJob {
                 agent_index,
                 current: agent.current_edge(),
-                goal: *agent.route.last().expect("route not empty"),
+                goal,
                 speed_table: fleet.speed_table,
                 mode_bit: fleet.mode_bit,
                 forced: agent.force_reroute,
@@ -1179,7 +1229,7 @@ impl SimulationRunner {
                     dynamics,
                     traffic,
                     job.speed_table,
-                    &agent.route[agent.route_pos as usize..],
+                    &agent.route[agent.route_pos as usize..agent.section_end()],
                 );
                 let new_cost =
                     remaining_route_cost(network, dynamics, traffic, job.speed_table, &new_path);
@@ -1188,10 +1238,20 @@ impl SimulationRunner {
                 }
             }
 
-            // new_path starts at the current edge.
-            let mut route = Vec::with_capacity(agent.route_pos as usize + new_path.len());
+            // new_path starts at the current edge and replaces the section
+            // up to the pickup or the route end; a trip after the pickup
+            // stays as it is.
+            let section_end = agent.section_end();
+            let to_pickup = section_end < agent.route.len();
+            let mut route = Vec::with_capacity(
+                agent.route_pos as usize + new_path.len() + agent.route.len() - section_end,
+            );
             route.extend_from_slice(&agent.route[..agent.route_pos as usize]);
             route.extend_from_slice(&new_path);
+            if to_pickup {
+                agent.via_pos = route.len() as u32;
+                route.extend_from_slice(&agent.route[section_end..]);
+            }
             agent.route_pos = agent.route_pos.min((route.len() - 1) as u32);
             agent.route = route;
             agent.reroutes += 1;
@@ -1279,8 +1339,65 @@ impl SimulationRunner {
         }
 
         let mut fleet_summaries = Vec::with_capacity(self.fleets.len());
-        for fleet in &self.fleets {
+        for (fleet_index, fleet) in self.fleets.iter().enumerate() {
             let arrived = fleet.arrived as f64;
+            let of_fleet = || {
+                agents.iter().filter(move |agent| {
+                    agent.fleet as usize == fleet_index
+                        && agent.status != AgentStatus::NeverDeparted
+                })
+            };
+            let vehicle_types = fleet
+                .config
+                .vehicle_types
+                .iter()
+                .enumerate()
+                .map(|(type_index, vehicle_type)| {
+                    let mut summary = VehicleTypeSummary {
+                        type_id: vehicle_type.type_id.clone(),
+                        dispatched: 0,
+                        arrived: 0,
+                        mean_travel_time_s: None,
+                        mean_distance_m: None,
+                    };
+                    let (mut time_sum, mut distance_sum) = (0.0, 0.0);
+                    for agent in of_fleet().filter(|a| a.vehicle_type as usize == type_index) {
+                        summary.dispatched += 1;
+                        if agent.status == AgentStatus::Arrived {
+                            summary.arrived += 1;
+                            time_sum += agent.arrive_s - agent.depart_s;
+                            distance_sum += f64::from(agent.distance_m);
+                        }
+                    }
+                    if summary.arrived > 0 {
+                        summary.mean_travel_time_s = Some(time_sum / f64::from(summary.arrived));
+                        summary.mean_distance_m = Some(distance_sum / f64::from(summary.arrived));
+                    }
+                    summary
+                })
+                .collect();
+            let ride_hailing = fleet.ride_plan.as_ref().map(|plan| {
+                let served = plan.requests - plan.unserved - plan.priced_out;
+                let waits = of_fleet()
+                    .filter_map(|agent| Some(agent.pickup_s()? - agent.request_s))
+                    .collect::<Vec<_>>();
+                let mean = |sum: f64, count: usize| (count > 0).then(|| sum / count as f64);
+                RideHailingSummary {
+                    requests: plan.requests,
+                    vehicles: plan.vehicles,
+                    served,
+                    unserved: plan.unserved,
+                    priced_out: plan.priced_out,
+                    picked_up: waits.len() as u32,
+                    completed: of_fleet()
+                        .filter(|agent| agent.status == AgentStatus::Arrived)
+                        .count() as u32,
+                    mean_planned_wait_s: mean(plan.planned_wait_sum_s, served as usize),
+                    mean_wait_s: mean(waits.iter().sum(), waits.len()),
+                    mean_surge_multiplier: mean(plan.surge_sum, served as usize),
+                    surge_periods: plan.surge_periods.clone(),
+                }
+            });
             fleet_summaries.push(FleetSummary {
                 fleet_id: fleet.config.fleet_id.clone(),
                 profile_id: fleet.config.profile_id.clone(),
@@ -1294,6 +1411,8 @@ impl SimulationRunner {
                 mean_travel_time_s: (arrived > 0.0).then(|| fleet.travel_time_sum / arrived),
                 mean_distance_m: (arrived > 0.0).then(|| fleet.distance_sum / arrived),
                 mean_delay_s: (arrived > 0.0).then(|| fleet.delay_sum / arrived),
+                vehicle_types,
+                ride_hailing,
             });
         }
 
@@ -1322,6 +1441,13 @@ impl SimulationRunner {
                     distance_m: agent.distance_m,
                     freeflow_time_s: agent.freeflow_time_s,
                     reroutes: agent.reroutes,
+                    vehicle_type: self.fleets[agent.fleet as usize]
+                        .config
+                        .vehicle_types
+                        .get(agent.vehicle_type as usize)
+                        .map(|vehicle_type| vehicle_type.type_id.clone()),
+                    request_s: (!agent.request_s.is_nan()).then_some(agent.request_s),
+                    pickup_s: agent.pickup_s(),
                 })
                 .collect()
         });
@@ -1397,6 +1523,7 @@ fn make_fleet_runtime(
         travel_time_sum: 0.0,
         distance_sum: 0.0,
         delay_sum: 0.0,
+        ride_plan: None,
     })
 }
 

@@ -14,6 +14,7 @@ mod avoid;
 mod batch;
 mod betweenness;
 mod diagnostics;
+mod dispatch;
 mod documents;
 mod edge_spatial_index;
 mod engine;
@@ -51,6 +52,7 @@ pub use betweenness::{
     WeightedPoint,
 };
 pub use diagnostics::*;
+pub use dispatch::*;
 pub use documents::*;
 pub use engine::*;
 pub use expansion::*;

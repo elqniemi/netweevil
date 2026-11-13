@@ -1,0 +1,95 @@
+# Ride-hailing fleet with vehicle types and surge, next to private cars of
+# three vehicle types. The cell weights are synthetic.
+#
+# Run with:
+#   netweevil simulate run examples/requests/simulation_ride_hailing.yml \
+#     --dataset groningen_2026_05 \
+#     --profile examples/profiles/car_research_v1.yml
+#
+# To take the demand from a stored cell layer, replace a `cells` block by
+#   kind: cell_layer
+#   layer_id: city
+#   column: riders
+
+scenario:
+  id: groningen_ride_hailing_demo
+  label: "Ride-hailing with surge and mixed traffic"
+  seed: 21
+
+time:
+  duration_s: 2400.0
+  tick_s: 1.0
+
+fleets:
+  - fleet_id: ride_hailing
+    profile_id: car_research_v1
+    agent_count: 300                 # ride requests
+    demand:
+      origins:                       # pickups
+        kind: cells
+        cells:
+          - { cell: 88196d8581fffff, weight: 150 }
+          - { cell: 88196d8583fffff, weight: 300 }
+          - { cell: 88196d8585fffff, weight: 150 }
+          - { cell: 88196d8587fffff, weight: 150 }
+          - { cell: 88196d8589fffff, weight: 300 }
+          - { cell: 88196d858bfffff, weight: 300 }
+          - { cell: 88196d858dfffff, weight: 40 }
+          - { cell: 88196d85c1fffff, weight: 40 }
+          - { cell: 88196d85c3fffff, weight: 300 }
+          - { cell: 88196d85c5fffff, weight: 150 }
+          - { cell: 88196d85c9fffff, weight: 300 }
+          - { cell: 88196d85cbfffff, weight: 40 }
+          - { cell: 88196d85e1fffff, weight: 20 }
+          - { cell: 88196d85e3fffff, weight: 150 }
+          - { cell: 88196d85e5fffff, weight: 80 }
+          - { cell: 88196d85e7fffff, weight: 40 }
+          - { cell: 88196d85e9fffff, weight: 20 }
+          - { cell: 88196d85ebfffff, weight: 300 }
+          - { cell: 88196d85edfffff, weight: 20 }
+      destinations:                  # dropoffs
+        kind: cells
+        cells:
+          - { cell: 87196d85effffff, weight: 3.0 }
+          - { cell: 87196d858ffffff, weight: 2.0 }
+          - { cell: 87196d85cffffff, weight: 1.0 }
+    departures:                      # request times
+      kind: uniform
+      start_s: 0.0
+      end_s: 1500.0
+    vehicle_types:
+      - { type_id: standard, share: 4.0, request_share: 5.0 }
+      - { type_id: van, share: 1.0, pcu: 1.5, request_share: 1.0 }
+    ride_hailing:
+      vehicle_count: 40
+      vehicles:
+        kind: random_bbox
+        bbox: [6.53, 53.20, 6.60, 53.24]
+      max_wait_s: 600.0
+      planning_speed_kph: 25.0
+      surge:
+        interval_s: 300.0
+        price_elasticity: 0.5        # some riders give up when the price rises
+        config:
+          resolution: 8
+          smoothing_rings: 1
+          max_multiplier: 2.5
+
+  - fleet_id: background_traffic
+    profile_id: car_research_v1
+    agent_count: 400
+    demand:
+      origins:
+        kind: random_bbox
+        bbox: [6.50, 53.18, 6.63, 53.26]
+      destinations:
+        kind: random_bbox
+        bbox: [6.53, 53.20, 6.60, 53.24]
+    departures:
+      kind: uniform
+      start_s: 0.0
+      end_s: 1200.0
+    vehicle_types:
+      - { type_id: compact, share: 5.0, pcu: 0.9 }
+      - { type_id: suv, share: 3.0, pcu: 1.2 }
+      - { type_id: delivery_van, share: 2.0, pcu: 1.6, max_speed_kph: 80.0, speed_factor: 0.9 }

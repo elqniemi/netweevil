@@ -1,6 +1,7 @@
 import { useSyncExternalStore } from "react";
 import type { Timing } from "../api/client";
-import type { FeedStop, GtfsScenario, LabeledPoint, ScenarioInfo, ServiceInfo, TerrainSourceInfo } from "../api/types";
+import type { CellPaintOp, FeedStop, GtfsScenario, LabeledPoint, ScenarioInfo, ServiceInfo, TerrainSourceInfo } from "../api/types";
+import type { CellLegend } from "../geo/cells";
 import type { FeatureCollection } from "../geo/features";
 import { hongKongTransitDefaults, TRANSIT_ANALYSIS_TOOLS } from "./transitDefaults";
 
@@ -26,7 +27,8 @@ export type ToolId =
   | "height"
   | "traffic"
   | "indoor_route"
-  | "door_to_door";
+  | "door_to_door"
+  | "cells";
 
 export type Basemap = "positron" | "dark" | "osm";
 export type ResponseFormat = "json" | "geojson";
@@ -176,6 +178,49 @@ export interface EditorState {
   selectedStop: string | null;
 }
 
+/** Cells tool: the shown H3 layer, the paint brush and the surge overlay. */
+export interface CellsState {
+  layerId: string | null;
+  /** Column that colours the map and receives paint. */
+  column: string;
+  paint: boolean;
+  paintMode: "brush" | "area";
+  resolution: number;
+  op: CellPaintOp;
+  value: number;
+  surge: boolean;
+  demandColumn: string;
+  supplyColumn: string;
+  /** Styled hexagons on the map (layer values or surge). */
+  features: FeatureCollection | null;
+  legend: CellLegend | null;
+  /** Paint requests in flight. */
+  pending: number;
+  /** Bumps after each paint so the layer queries refetch. */
+  revision: number;
+  fitRequest: number;
+  error: string | null;
+}
+
+export const DEFAULT_CELLS: CellsState = {
+  layerId: null,
+  column: "",
+  paint: false,
+  paintMode: "brush",
+  resolution: 8,
+  op: "set",
+  value: 1,
+  surge: false,
+  demandColumn: "",
+  supplyColumn: "",
+  features: null,
+  legend: null,
+  pending: 0,
+  revision: 0,
+  fitRequest: 0,
+  error: null,
+};
+
 export interface AppState {
   apiBase: string;
   tool: ToolId;
@@ -239,6 +284,7 @@ export interface AppState {
     agentFeatures: FeatureCollection | null;
     edgeFeatures: FeatureCollection | null;
   };
+  cells: CellsState;
 }
 
 let pointCounter = 0;
@@ -301,6 +347,7 @@ const initialState: AppState = {
     agentFeatures: null,
     edgeFeatures: null,
   },
+  cells: DEFAULT_CELLS,
 };
 
 // Declared before `state` because loadPersisted runs at module evaluation.
@@ -345,7 +392,7 @@ function schedulePersist() {
       const { apiBase, tool, profileId, feedId, format, basemap, live, mapStyle, compareProfiles, points, activeSlot, routes, activeRoute, activeEnd, form, raw, hudOpen, sidebarOpen, settingsOpen } = state;
       localStorage.setItem(
         PERSIST_KEY,
-        JSON.stringify({ apiBase, tool, profileId, feedId, format, basemap, live, mapStyle, compareProfiles, points, activeSlot, routes, activeRoute, activeEnd, form, raw, hudOpen, sidebarOpen, settingsOpen, editorScenarioId: state.editor.scenarioId }),
+        JSON.stringify({ apiBase, tool, profileId, feedId, format, basemap, live, mapStyle, compareProfiles, points, activeSlot, routes, activeRoute, activeEnd, form, raw, hudOpen, sidebarOpen, settingsOpen, editorScenarioId: state.editor.scenarioId, cells: persistedCells(state.cells) }),
       );
     } catch {
       // Storage may be unavailable; the console still works without it.
@@ -353,13 +400,19 @@ function schedulePersist() {
   }, 250);
 }
 
+/** The Cells settings kept across reloads; overlays and the paint toggle are not. */
+function persistedCells(cells: CellsState): Partial<CellsState> {
+  const { layerId, column, paintMode, resolution, op, value, demandColumn, supplyColumn } = cells;
+  return { layerId, column, paintMode, resolution, op, value, demandColumn, supplyColumn };
+}
+
 function loadPersisted(base: AppState): AppState {
   try {
     const stored = localStorage.getItem(PERSIST_KEY);
     if (stored) {
-      const parsed = JSON.parse(stored) as Partial<AppState> & { editorScenarioId?: string | null };
+      const parsed = JSON.parse(stored) as Omit<Partial<AppState>, "cells"> & { editorScenarioId?: string | null; cells?: Partial<CellsState> };
       const routes = Array.isArray(parsed.routes) && parsed.routes.length ? parsed.routes : base.routes;
-      const { editorScenarioId, ...rest } = parsed;
+      const { editorScenarioId, cells, ...rest } = parsed;
       return {
         ...base,
         ...rest,
@@ -368,6 +421,7 @@ function loadPersisted(base: AppState): AppState {
         activeRoute: Math.min(parsed.activeRoute ?? 0, routes.length - 1),
         mapStyle: { ...DEFAULT_MAP_STYLE, ...(parsed.mapStyle ?? {}) },
         compareProfiles: Array.isArray(parsed.compareProfiles) ? parsed.compareProfiles : [],
+        cells: { ...DEFAULT_CELLS, ...persistedCells({ ...DEFAULT_CELLS, ...(cells ?? {}) }) },
         flyRequest: null,
         service: null,
         result: null,
@@ -708,4 +762,10 @@ export function nextEditorStopId(): string {
     const id = `new_${editorStopCounter}`;
     if (!taken.has(id)) return id;
   }
+}
+
+// --- Cells tool ---
+
+export function setCells(patch: Partial<CellsState> | ((prev: CellsState) => Partial<CellsState>)) {
+  setState((prev) => ({ cells: { ...prev.cells, ...(typeof patch === "function" ? patch(prev.cells) : patch) } }));
 }

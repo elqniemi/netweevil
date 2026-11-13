@@ -93,6 +93,89 @@ pub struct FleetConfig {
     pub behavior: BehaviorConfig,
     #[serde(default)]
     pub speed: FleetSpeedConfig,
+    /// Vehicle classes of the fleet. Each agent gets one, drawn by `share`.
+    /// Empty keeps one class with the fleet's speed settings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vehicle_types: Vec<VehicleTypeConfig>,
+    /// Makes the fleet a ride-hailing service: `agent_count` ride requests
+    /// with pickups at `demand.origins`, dropoffs at `demand.destinations`
+    /// and request times from `departures`, served by a pool of vehicles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ride_hailing: Option<RideHailingConfig>,
+}
+
+/// One vehicle class of a fleet, such as a compact car, a van or a truck.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VehicleTypeConfig {
+    pub type_id: String,
+    /// Relative share of the fleet's vehicles.
+    #[serde(default = "default_weight")]
+    pub share: f64,
+    /// Passenger-car units of one vehicle; the fleet value when omitted.
+    #[serde(default)]
+    pub pcu: Option<f64>,
+    /// Hard speed cap; the fleet value when omitted.
+    #[serde(default)]
+    pub max_speed_kph: Option<f64>,
+    /// Multiplier on the agent's desired speed.
+    #[serde(default = "default_weight")]
+    pub speed_factor: f64,
+    /// Ride-hailing only: relative share of the requests that need this
+    /// type. When every share is zero, any vehicle serves any request.
+    #[serde(default)]
+    pub request_share: f64,
+}
+
+/// Vehicle pool and matching of a ride-hailing fleet.
+///
+/// The plan runs before the simulation: requests are served in time order
+/// by the vehicle with the earliest estimated arrival at the pickup. A
+/// vehicle drives to the pickup and then to the dropoff, and is free again
+/// at the estimated end of the trip. Estimates use `planning_speed_kph`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RideHailingConfig {
+    pub vehicle_count: u32,
+    /// Where the vehicles start.
+    #[serde(default)]
+    pub vehicles: EndpointDistribution,
+    /// A request without a vehicle within this estimated wait is not served.
+    #[serde(default = "default_max_wait_s")]
+    pub max_wait_s: f64,
+    /// Door-to-door speed for the estimates of pickup and trip times.
+    #[serde(default = "default_planning_speed_kph")]
+    pub planning_speed_kph: f64,
+    /// Surge multipliers from the balance of requests and free vehicles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surge: Option<RideSurgeConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RideSurgeConfig {
+    /// Length of one surge period in seconds.
+    #[serde(default = "default_surge_interval_s")]
+    pub interval_s: f64,
+    /// Share of riders that give up as the price rises: a request at
+    /// multiplier `m` is dropped with probability `1 - m^-elasticity`.
+    /// Zero keeps every request.
+    #[serde(default)]
+    pub price_elasticity: f64,
+    #[serde(default)]
+    pub config: netweevil_h3::SurgeConfig,
+}
+
+fn default_max_wait_s() -> f64 {
+    600.0
+}
+
+fn default_planning_speed_kph() -> f64 {
+    25.0
+}
+
+fn default_surge_interval_s() -> f64 {
+    300.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -134,6 +217,9 @@ pub enum EndpointDistribution {
     /// weights are a distribution over cells, such as population for
     /// origins or jobs for destinations. Resolutions may be mixed.
     Cells { cells: Vec<WeightedCell> },
+    /// One column of a stored cell layer as the cell weights. Resolved to
+    /// `cells` from the workspace before the run.
+    CellLayer { layer_id: String, column: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -578,6 +664,68 @@ impl SimulationScenario {
                     fleet.fleet_id
                 );
             }
+            let mut type_ids = std::collections::BTreeSet::new();
+            for vehicle_type in &fleet.vehicle_types {
+                let id = &vehicle_type.type_id;
+                if id.trim().is_empty() || !type_ids.insert(id.clone()) {
+                    bail!(
+                        "fleet '{}': vehicle type ids must be unique and not empty",
+                        fleet.fleet_id
+                    );
+                }
+                let valid = |value: f64, positive: bool| {
+                    value.is_finite() && if positive { value > 0.0 } else { value >= 0.0 }
+                };
+                if !valid(vehicle_type.share, false)
+                    || !valid(vehicle_type.request_share, false)
+                    || !valid(vehicle_type.speed_factor, true)
+                    || vehicle_type.pcu.is_some_and(|pcu| !valid(pcu, true))
+                    || vehicle_type
+                        .max_speed_kph
+                        .is_some_and(|kph| !valid(kph, true))
+                {
+                    bail!(
+                        "fleet '{}': vehicle type '{id}' has a value out of range",
+                        fleet.fleet_id
+                    );
+                }
+            }
+            if !fleet.vehicle_types.is_empty() && fleet.vehicle_types.iter().all(|t| t.share <= 0.0)
+            {
+                bail!(
+                    "fleet '{}': vehicle types need a positive share",
+                    fleet.fleet_id
+                );
+            }
+            if let Some(ride) = &fleet.ride_hailing {
+                if ride.vehicle_count == 0 {
+                    bail!("fleet '{}': ride_hailing needs vehicles", fleet.fleet_id);
+                }
+                if !(ride.max_wait_s > 0.0 && ride.planning_speed_kph > 0.0) {
+                    bail!(
+                        "fleet '{}': ride_hailing max_wait_s and planning_speed_kph must be positive",
+                        fleet.fleet_id
+                    );
+                }
+                if !fleet.demand.od_pairs.is_empty() {
+                    bail!(
+                        "fleet '{}': ride_hailing takes origins and destinations, not od_pairs",
+                        fleet.fleet_id
+                    );
+                }
+                if let Some(surge) = &ride.surge {
+                    if !(surge.interval_s > 0.0 && surge.price_elasticity >= 0.0) {
+                        bail!(
+                            "fleet '{}': surge interval_s must be positive and price_elasticity not negative",
+                            fleet.fleet_id
+                        );
+                    }
+                    surge
+                        .config
+                        .validate()
+                        .with_context(|| format!("fleet '{}' surge", fleet.fleet_id))?;
+                }
+            }
             for (side, distribution) in [
                 ("origins", &fleet.demand.origins),
                 ("destinations", &fleet.demand.destinations),
@@ -619,6 +767,58 @@ impl SimulationScenario {
             bail!("output.edge_stats_interval_s must be positive");
         }
         Ok(())
+    }
+}
+
+impl FleetConfig {
+    /// Replaces `cell_layer` distributions by the cells of the layer
+    /// column. `load` returns the weighted cells of `(layer_id, column)`.
+    pub fn resolve_cell_layers(
+        &mut self,
+        load: &dyn Fn(&str, &str) -> Result<Vec<WeightedCell>>,
+    ) -> Result<()> {
+        let fleet_id = &self.fleet_id;
+        for distribution in [&mut self.demand.origins, &mut self.demand.destinations]
+            .into_iter()
+            .chain(self.ride_hailing.as_mut().map(|ride| &mut ride.vehicles))
+        {
+            if let EndpointDistribution::CellLayer { layer_id, column } = distribution {
+                let cells = load(layer_id, column)
+                    .with_context(|| format!("fleet '{fleet_id}'"))?
+                    .into_iter()
+                    .filter(|cell| cell.weight.is_finite() && cell.weight > 0.0)
+                    .collect::<Vec<_>>();
+                if cells.is_empty() {
+                    bail!(
+                        "fleet '{fleet_id}': column '{column}' of layer '{layer_id}' has no positive value"
+                    );
+                }
+                *distribution = EndpointDistribution::Cells { cells };
+            }
+        }
+        Ok(())
+    }
+}
+
+impl SimulationScenario {
+    /// True when a fleet samples endpoints from a stored cell layer.
+    pub fn uses_cell_layers(&self) -> bool {
+        self.fleets.iter().any(|fleet| {
+            [&fleet.demand.origins, &fleet.demand.destinations]
+                .into_iter()
+                .chain(fleet.ride_hailing.as_ref().map(|ride| &ride.vehicles))
+                .any(|distribution| matches!(distribution, EndpointDistribution::CellLayer { .. }))
+        })
+    }
+
+    /// Resolves the `cell_layer` distributions of every fleet.
+    pub fn resolve_cell_layers(
+        &mut self,
+        load: &dyn Fn(&str, &str) -> Result<Vec<WeightedCell>>,
+    ) -> Result<()> {
+        self.fleets
+            .iter_mut()
+            .try_for_each(|fleet| fleet.resolve_cell_layers(load))
     }
 }
 

@@ -1,0 +1,6 @@
+{
+  "demand": {"layer_id": "city", "column": "riders"},
+  "supply": {"layer_id": "city", "column": "drivers"},
+  "config": {"resolution": 8, "smoothing_rings": 1, "max_multiplier": 2.5},
+  "rebalance_rings": 3
+}

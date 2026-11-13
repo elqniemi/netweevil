@@ -30,6 +30,8 @@ The crate `netweevil-persist` defines the layout. The type
     │   └── <scenario_id>.gtfs.zip     # Exported scenario
     ├── traffic/
     │   └── <traffic_id>.json          # Historical traffic manifest
+    ├── cell_layers/
+    │   └── <layer_id>.json            # H3 cell layer
     ├── indoor_sites/
     │   └── <site_id>.json             # Indoor site manifest
     ├── terrain/                       # Prepared DEM tiles that the API serves
@@ -97,6 +99,7 @@ flowchart LR
 | `bundles/metrics/` | `profile compile` | The per-edge metrics of a compiled profile. |
 | `transit_feeds/`, `bundles/transit/` | `transit import`, `transit transfers build` | Transit feed manifests, timetables and transfer tables. |
 | `traffic/`, `bundles/traffic/` | `traffic import` | Historical traffic speeds. |
+| `cell_layers/` | `h3 layer import`, `h3 layer paint`, the Cells tool | H3 cell layers: one JSON file for each layer with named columns and one value for each cell. |
 | `indoor_sites/`, `bundles/indoor/` | `indoor import` | Indoor site manifests (anchor, levels, entrances), engine inputs in local metres and compiled indoor graphs. |
 | `runs/` | `analyze`, `experiment`, `simulate` | Run manifests and result files. |
 | `reports/` | `report render` | Rendered reports. |
