@@ -1,5 +1,6 @@
 //! Minimal OSM PBF writer for import fixtures: uncompressed blobs, plain
-//! (non-dense) nodes, granularity 100 so decimicro coordinates round-trip.
+//! (non-dense) nodes, granularity 100 so decimicro coordinates round-trip,
+//! and `Sort.Type_then_ID` declared when the objects are sorted that way.
 
 use std::io::Write;
 use std::path::Path;
@@ -14,6 +15,15 @@ pub(crate) fn write_pbf(path: &Path, objects: &[OsmObj]) {
     let mut file = std::io::BufWriter::new(std::fs::File::create(path).expect("PBF file creates"));
     let mut header = Vec::new();
     bytes_field(&mut header, 4, b"OsmSchema-V0.6");
+    // Declared like osmium does for files sorted by type, then id.
+    let key = |object: &OsmObj| match object {
+        OsmObj::Node(node) => (0, node.id.0),
+        OsmObj::Way(way) => (1, way.id.0),
+        OsmObj::Relation(relation) => (2, relation.id.0),
+    };
+    if objects.windows(2).all(|pair| key(&pair[0]) < key(&pair[1])) {
+        bytes_field(&mut header, 5, b"Sort.Type_then_ID");
+    }
     write_blob(&mut file, "OSMHeader", &header);
 
     let mut start = 0;

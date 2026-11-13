@@ -41,6 +41,8 @@ fn passes_yield_each_kind_in_file_order() {
 
     let mut pbf = PbfFile::open(&path).expect("PBF indexes");
     assert!(pbf.blobs.len() > 3);
+    // The file is sorted by type, so every blob's kinds are known up front.
+    assert!(pbf.blobs.iter().all(|blob| blob.kinds.count_ones() == 1));
     for kind in [ObjectKind::Relation, ObjectKind::Way, ObjectKind::Node] {
         let expected = all
             .iter()
@@ -49,8 +51,34 @@ fn passes_yield_each_kind_in_file_order() {
             .collect::<Vec<_>>();
         assert_eq!(pass(&mut pbf, kind), expected, "{kind:?}");
     }
-    // The first pass learned what every blob holds.
+}
+
+#[test]
+fn unsorted_files_learn_blob_kinds_in_the_first_pass() {
+    let dir = TempDir::new("pbf-unsorted");
+    let path = dir.join("objects.osm.pbf");
+    let mut objects = many_objects();
+    // A relation first makes the file unsorted.
+    let relation = objects.pop().expect("a relation");
+    objects.insert(0, relation);
+    write_pbf(&path, &objects);
+
+    let mut pbf = PbfFile::open(&path).expect("PBF indexes");
+    assert!(pbf.blobs.iter().all(|blob| blob.kinds == ALL_KINDS));
+    let expected = |kind| {
+        objects
+            .iter()
+            .filter(|object| ObjectKind::of(object) == kind)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        pass(&mut pbf, ObjectKind::Relation),
+        expected(ObjectKind::Relation)
+    );
     assert!(pbf.blobs.iter().all(|blob| blob.kinds.count_ones() == 1));
+    assert_eq!(pass(&mut pbf, ObjectKind::Way), expected(ObjectKind::Way));
+    assert_eq!(pass(&mut pbf, ObjectKind::Node), expected(ObjectKind::Node));
 }
 
 #[test]

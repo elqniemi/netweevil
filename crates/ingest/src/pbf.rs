@@ -5,8 +5,11 @@
 //! requested object kind in file order, decodes and filters them on all
 //! cores, and hands the per-blob results to a sequential merge in file
 //! order, so a pass sees objects in exactly the order a single-threaded
-//! reader yields them. The first pass records which kinds every blob holds,
-//! so later passes skip blobs without the kind they read.
+//! reader yields them. Files whose header declares `Sort.Type_then_ID`
+//! (nodes, then ways, then relations) have the blob ranges of each kind
+//! located by binary search when opened; otherwise the first pass records
+//! which kinds every blob holds. Passes skip blobs without the kind they
+//! read.
 
 use std::fs::File;
 use std::hash::Hasher;
@@ -115,6 +118,7 @@ impl PbfFile {
         let mut layout = FxHasher::default();
         let mut offset = 0_u64;
         let mut header = Vec::new();
+        let mut sorted_by_type = false;
         while offset < size {
             let mut prefix = [0_u8; 4];
             reader
@@ -141,9 +145,20 @@ impl PbfFile {
             if offset + len > size {
                 bail!("{}: truncated blob at byte {offset}", path.display());
             }
-            reader
-                .seek_relative(body_len as i64)
-                .with_context(|| format!("skipping blob at byte {offset}"))?;
+            if kind == "OSMHeader" {
+                let mut body = vec![0_u8; body_len as usize];
+                reader
+                    .read_exact(&mut body)
+                    .with_context(|| format!("reading the PBF header at byte {offset}"))?;
+                sorted_by_type |= header_features(&body)
+                    .with_context(|| format!("{}: malformed PBF header", path.display()))?
+                    .iter()
+                    .any(|feature| feature == "Sort.Type_then_ID");
+            } else {
+                reader
+                    .seek_relative(body_len as i64)
+                    .with_context(|| format!("skipping blob at byte {offset}"))?;
+            }
             layout.write_u64(offset);
             layout.write(kind.as_bytes());
             layout.write_u64(body_len);
@@ -156,7 +171,7 @@ impl PbfFile {
             }
             offset += len;
         }
-        Ok(Self {
+        let mut pbf = Self {
             path: path.to_path_buf(),
             file: reader.into_inner(),
             blobs,
@@ -164,7 +179,94 @@ impl PbfFile {
                 size,
                 blob_layout_hash: layout.finish(),
             },
-        })
+        };
+        if sorted_by_type {
+            pbf.locate_kinds()?;
+        }
+        Ok(pbf)
+    }
+
+    /// Kinds of objects blob `index` holds.
+    fn decode_kinds(&mut self, index: usize) -> Result<u8> {
+        let bytes = self.read_blobs(&[index])?;
+        let block = decode_blob(&bytes[0]).with_context(|| {
+            format!(
+                "decoding {} blob at byte {}",
+                self.path.display(),
+                self.blobs[index].offset
+            )
+        })?;
+        Ok(block_kinds(&block))
+    }
+
+    /// Sets every blob's kinds in a file sorted by type, where the kinds
+    /// change monotonically: nodes, then ways, then relations, with mixed
+    /// blobs only at the transitions. Each boundary is found by binary
+    /// search. Leaves the kinds unknown when a probed blob is empty.
+    fn locate_kinds(&mut self) -> Result<()> {
+        let mut probed = rustc_hash::FxHashMap::<usize, u8>::default();
+        let mut kinds_of = |pbf: &mut Self, index: usize| -> Result<u8> {
+            if let Some(&kinds) = probed.get(&index) {
+                return Ok(kinds);
+            }
+            let kinds = pbf.decode_kinds(index)?;
+            probed.insert(index, kinds);
+            Ok(kinds)
+        };
+        // First blob for which `predicate(kinds)` holds; it holds for every
+        // later blob.
+        let mut first = |pbf: &mut Self, predicate: &dyn Fn(u8) -> bool| -> Result<Option<usize>> {
+            let (mut low, mut high) = (0, pbf.blobs.len());
+            while low < high {
+                let middle = low + (high - low) / 2;
+                let kinds = kinds_of(pbf, middle)?;
+                if kinds == 0 {
+                    return Ok(None);
+                }
+                if predicate(kinds) {
+                    high = middle;
+                } else {
+                    low = middle + 1;
+                }
+            }
+            Ok(Some(low))
+        };
+        let highest = |kinds: u8| 7 - kinds.leading_zeros() as u8;
+        let lowest = |kinds: u8| kinds.trailing_zeros() as u8;
+        let (way, relation) = (
+            highest(ObjectKind::Way.bit()),
+            highest(ObjectKind::Relation.bit()),
+        );
+        let (
+            Some(first_with_ways),
+            Some(first_with_relations),
+            Some(first_without_nodes),
+            Some(first_relations_only),
+        ) = (
+            first(self, &|kinds| highest(kinds) >= way)?,
+            first(self, &|kinds| highest(kinds) >= relation)?,
+            first(self, &|kinds| lowest(kinds) >= way)?,
+            first(self, &|kinds| lowest(kinds) >= relation)?,
+        )
+        else {
+            return Ok(());
+        };
+        for (index, blob) in self.blobs.iter_mut().enumerate() {
+            blob.kinds = if index < first_without_nodes {
+                ObjectKind::Node.bit()
+            } else {
+                0
+            } | if (first_with_ways..first_relations_only).contains(&index) {
+                ObjectKind::Way.bit()
+            } else {
+                0
+            } | if index >= first_with_relations {
+                ObjectKind::Relation.bit()
+            } else {
+                0
+            };
+        }
+        Ok(())
     }
 
     pub(crate) fn fingerprint(&self) -> &PbfFingerprint {
@@ -326,36 +428,78 @@ fn block_kinds(block: &PrimitiveBlock) -> u8 {
     })
 }
 
-/// The `type` and `datasize` fields of a `BlobHeader` message.
-fn parse_blob_header(bytes: &[u8]) -> Option<(String, u64)> {
-    let mut cursor = bytes;
-    let mut kind = None;
-    let mut body_len = None;
+/// The required and optional features of an `OSMHeader` blob.
+fn header_features(blob: &[u8]) -> Option<Vec<String>> {
+    let mut block = None;
+    for_each_field(blob, |field, value| match (field, value) {
+        (1, FieldValue::Bytes(raw)) => {
+            block = Some(raw.to_vec());
+            Some(())
+        }
+        (3, FieldValue::Bytes(zlib)) => {
+            let mut inflated = Vec::new();
+            flate2::read::ZlibDecoder::new(zlib)
+                .read_to_end(&mut inflated)
+                .ok()?;
+            block = Some(inflated);
+            Some(())
+        }
+        _ => Some(()),
+    })?;
+    let mut features = Vec::new();
+    for_each_field(&block?, |field, value| {
+        if let (4 | 5, FieldValue::Bytes(feature)) = (field, value) {
+            features.push(String::from_utf8(feature.to_vec()).ok()?);
+        }
+        Some(())
+    })?;
+    Some(features)
+}
+
+enum FieldValue<'a> {
+    Varint(u64),
+    Bytes(&'a [u8]),
+}
+
+/// Calls `visit` on every field of a protobuf message; `None` when the
+/// message is malformed or `visit` returns `None`.
+fn for_each_field<'a>(
+    mut cursor: &'a [u8],
+    mut visit: impl FnMut(u64, FieldValue<'a>) -> Option<()>,
+) -> Option<()> {
     while !cursor.is_empty() {
         let key = read_varint(&mut cursor)?;
-        match (key >> 3, key & 7) {
-            (field, 0) => {
-                let value = read_varint(&mut cursor)?;
-                if field == 3 {
-                    body_len = Some(value);
-                }
-            }
-            (field, 2) => {
+        match key & 7 {
+            0 => visit(key >> 3, FieldValue::Varint(read_varint(&mut cursor)?))?,
+            2 => {
                 let len = usize::try_from(read_varint(&mut cursor)?).ok()?;
                 if len > cursor.len() {
                     return None;
                 }
                 let (value, rest) = cursor.split_at(len);
-                if field == 1 {
-                    kind = Some(String::from_utf8(value.to_vec()).ok()?);
-                }
                 cursor = rest;
+                visit(key >> 3, FieldValue::Bytes(value))?;
             }
-            (_, 1) => cursor = cursor.get(8..)?,
-            (_, 5) => cursor = cursor.get(4..)?,
+            1 => cursor = cursor.get(8..)?,
+            5 => cursor = cursor.get(4..)?,
             _ => return None,
         }
     }
+    Some(())
+}
+
+/// The `type` and `datasize` fields of a `BlobHeader` message.
+fn parse_blob_header(bytes: &[u8]) -> Option<(String, u64)> {
+    let mut kind = None;
+    let mut body_len = None;
+    for_each_field(bytes, |field, value| {
+        match (field, value) {
+            (1, FieldValue::Bytes(value)) => kind = Some(String::from_utf8(value.to_vec()).ok()?),
+            (3, FieldValue::Varint(value)) => body_len = Some(value),
+            _ => {}
+        }
+        Some(())
+    })?;
     Some((kind?, body_len?))
 }
 
