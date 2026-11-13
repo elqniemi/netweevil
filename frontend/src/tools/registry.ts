@@ -67,7 +67,7 @@ export interface BuildContext {
 export interface ToolDef {
   id: ToolId;
   label: string;
-  group: "street" | "batch" | "transit" | "simulation";
+  group: "street" | "batch" | "transit" | "indoor" | "simulation";
   path: string;
   method: "POST" | "GET";
   description: string;
@@ -1734,6 +1734,147 @@ const transitEditorTool: ToolDef = {
   ready: () => "Use the editor panel.",
 };
 
+// --- Indoor sites ---
+
+export const INDOOR_PROFILE_OPTIONS: FieldOption[] = [
+  { value: "walk", label: "walk" },
+  { value: "wheelchair", label: "wheelchair" },
+  { value: "fastest", label: "fastest" },
+  { value: "bike", label: "bike" },
+  { value: "evacuation", label: "evacuation" },
+];
+
+export const INDOOR_MODE_OPTIONS: FieldOption[] = [
+  { value: "", label: "profile default" },
+  { value: "mixed", label: "mixed" },
+  { value: "edges_only", label: "edges only" },
+  { value: "surfaces_only", label: "surfaces only" },
+];
+
+/** Form keys the site panel writes: the shown site and level. */
+export const INDOOR_SITE_KEY = "site_id";
+export const INDOOR_LEVEL_KEY = "site_level";
+
+/** One indoor end: a POI or space name, else the placed point on its level. */
+function indoorEnd(ctx: BuildContext, end: "origin" | "destination", withSite: boolean): Record<string, unknown> | null {
+  const out: Record<string, unknown> = {};
+  if (withSite) out.site_id = str(ctx.form, INDOOR_SITE_KEY);
+  const poi = str(ctx.form, `${end}_poi`);
+  if (poi) return { ...out, poi };
+  const p = ctx.points(`indoor_${end}`)[0];
+  if (!p) return null;
+  const level = str(ctx.form, `${end}_level`) ?? str(ctx.form, INDOOR_LEVEL_KEY);
+  return { ...out, lon: round(p.lon), lat: round(p.lat), ...(level !== undefined ? { level } : {}) };
+}
+
+function indoorEndFields(end: "origin" | "destination", label: string): Field[] {
+  return [
+    { key: `${end}_poi`, label: `${label} POI or room`, type: "text", placeholder: "map point", group: label },
+    { key: `${end}_level`, label: `${label} level`, type: "text", placeholder: "shown level", group: label },
+  ];
+}
+
+const indoorProfileFields: Field[] = [
+  { key: "indoor_profile", label: "Indoor profile", type: "select", default: "walk", options: INDOOR_PROFILE_OPTIONS },
+  { key: "indoor_mode", label: "Indoor mode", type: "select", default: "", options: INDOOR_MODE_OPTIONS },
+];
+
+const indoorSlots: SlotDef[] = [
+  { id: "indoor_origin", label: "Origin", max: 1 },
+  { id: "indoor_destination", label: "Destination", max: 1 },
+];
+
+function needIndoorEnd(ctx: BuildContext, end: "origin" | "destination"): string | null {
+  return str(ctx.form, `${end}_poi`) || ctx.points(`indoor_${end}`).length ? null : `Place the ${end} on the map or name a POI`;
+}
+
+const indoorRouteTool: ToolDef = {
+  id: "indoor_route",
+  label: "Indoor route",
+  group: "indoor",
+  path: "/v1/indoor/route",
+  layers: ["line", "point", "polygon"],
+  method: "POST",
+  description: "Routes inside one indoor site between map points on a level, POIs or rooms.",
+  supportsGeojson: true,
+  usesProfile: false,
+  input: "slots",
+  live: true,
+  slots: indoorSlots,
+  fields: [
+    { key: "route_id", label: "Route id", type: "text", default: "console_indoor" },
+    ...indoorProfileFields,
+    ...indoorEndFields("origin", "Origin"),
+    ...indoorEndFields("destination", "Destination"),
+  ],
+  build: (ctx) => {
+    const body: Record<string, unknown> = {
+      route_id: str(ctx.form, "route_id") ?? "console_indoor",
+      site_id: str(ctx.form, INDOOR_SITE_KEY),
+      origin: indoorEnd(ctx, "origin", false),
+      destination: indoorEnd(ctx, "destination", false),
+      profile: str(ctx.form, "indoor_profile") ?? "walk",
+    };
+    const mode = str(ctx.form, "indoor_mode");
+    if (mode) body.mode = mode;
+    return body;
+  },
+  ready: (ctx) => (str(ctx.form, INDOOR_SITE_KEY) ? null : "Choose an indoor site") ?? needIndoorEnd(ctx, "origin") ?? needIndoorEnd(ctx, "destination"),
+};
+
+const doorToDoorTool: ToolDef = {
+  id: "door_to_door",
+  label: "Door to door",
+  group: "indoor",
+  path: "/v1/door-to-door/route",
+  layers: ["line", "point", "polygon"],
+  method: "POST",
+  description: "Routes from a street point or a point in a site to another, through the best pair of site entrances.",
+  supportsGeojson: true,
+  usesProfile: true,
+  input: "slots",
+  live: true,
+  slots: indoorSlots,
+  fields: [
+    { key: "route_id", label: "Route id", type: "text", default: "console_door_to_door" },
+    { key: "origin_indoor", label: "Origin in the site", type: "checkbox", default: true },
+    { key: "destination_indoor", label: "Destination in the site", type: "checkbox", default: false },
+    ...indoorProfileFields,
+    ...indoorEndFields("origin", "Origin").map((f) => ({ ...f, when: (form: Record<string, unknown>) => form.origin_indoor !== false })),
+    ...indoorEndFields("destination", "Destination").map((f) => ({ ...f, when: (form: Record<string, unknown>) => form.destination_indoor === true })),
+    { key: "entrance_snap_m", label: "Entrance snap (m)", type: "number", default: 50, min: 1, step: 10 },
+  ],
+  build: (ctx) => {
+    const end = (e: "origin" | "destination") => {
+      if (bool(ctx.form, `${e}_indoor`)) return indoorEnd(ctx, e, true);
+      const p = ctx.points(`indoor_${e}`)[0];
+      return p ? { lon: round(p.lon), lat: round(p.lat) } : null;
+    };
+    const indoor: Record<string, unknown> = {
+      profile: str(ctx.form, "indoor_profile") ?? "walk",
+      entrance_snap_m: num(ctx.form, "entrance_snap_m") ?? 50,
+    };
+    const mode = str(ctx.form, "indoor_mode");
+    if (mode) indoor.mode = mode;
+    return envelope(ctx, {
+      route_id: str(ctx.form, "route_id") ?? "console_door_to_door",
+      origin: end("origin"),
+      destination: end("destination"),
+      indoor,
+    }, false);
+  },
+  ready: (ctx) => {
+    const indoorEnds = (["origin", "destination"] as const).filter((e) => bool(ctx.form, `${e}_indoor`));
+    if (!indoorEnds.length) return "Put the origin or the destination in the site";
+    if (!str(ctx.form, INDOOR_SITE_KEY)) return "Choose an indoor site";
+    for (const e of ["origin", "destination"] as const) {
+      const missing = indoorEnds.includes(e) ? needIndoorEnd(ctx, e) : needPoints(ctx, `indoor_${e}`, 1, e);
+      if (missing) return missing;
+    }
+    return null;
+  },
+};
+
 export const TOOLS: ToolDef[] = [
   routeTool,
   directionsTool,
@@ -1754,6 +1895,8 @@ export const TOOLS: ToolDef[] = [
   transitDirectionsTool,
   transitServiceAreaTool,
   transitEditorTool,
+  indoorRouteTool,
+  doorToDoorTool,
   simulationTool,
 ];
 
@@ -1763,6 +1906,7 @@ export const GROUP_LABELS: Record<ToolDef["group"], string> = {
   street: "Street routing",
   batch: "Batch analysis",
   transit: "Transit",
+  indoor: "Indoor",
   simulation: "Simulation",
 };
 

@@ -34,6 +34,7 @@ import { SimulationPanel } from "./SimulationPanel";
 import { TrafficBadge, TrafficPanel } from "./TrafficPanel";
 import { formatClock, parseClock, stopLetter } from "../tools/clock";
 import { GtfsEditorPanel } from "./GtfsEditorPanel";
+import { IndoorSitePanel } from "./IndoorSitePanel";
 
 interface Props {
   service: ServiceInfo | null;
@@ -58,6 +59,7 @@ export function ToolPanel({ service }: Props) {
       </div>
       {open && tool.input !== "editor" && (
         <>
+          {tool.group === "indoor" && <IndoorSitePanel tool={tool.id} />}
           <ProfilePicker tool={tool} service={service} />
           {tool.fields.some((f) => f.key === "traffic") && <TrafficBadge />}
           {tool.input === "routes" && <RoutesEditor tool={tool} />}

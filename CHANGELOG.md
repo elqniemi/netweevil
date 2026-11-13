@@ -50,6 +50,8 @@ All notable changes to NetWeevil are in this file.
   with `summary.indoor_time_s`. `TransitStreetPath.indoor` carries the
   indoor part from the host estimator. The API takes `indoor.profile` next
   to `request`; `analyze transit-route` takes `--indoor-profile`.
+- Web console: **Indoor route** and **Door to door** tools with a site and
+  level picker that shows the site's level on the map.
 
 ## 0.4.0-alpha - 2026-10-28
 
