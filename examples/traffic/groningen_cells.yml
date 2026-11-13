@@ -1,0 +1,26 @@
+# Synthetic speeds by H3 cell for testing area-based traffic. Not observed data.
+#
+# Import with:
+#   netweevil traffic import examples/traffic/groningen_cells.yml --dataset groningen
+#
+# `traffic import` resolves the cells to the motorized features of the dataset.
+# The finest cell applies. In one cell, the first assignment that includes
+# the road class of an edge applies.
+traffic_id: groningen_cells
+timezone: Europe/Amsterdam
+bucket_minutes: 60
+patterns:
+  - id: city_arterials
+    speeds_kph: [48, 48, 48, 48, 48, 48, 46, 31, 31, 46, 48, 48, 48, 48, 48, 45, 33, 27, 41, 47, 48, 48, 48, 48]
+    weekend_speeds_kph: [48, 48, 48, 48, 48, 48, 47, 42, 42, 47, 48, 48, 48, 48, 48, 47, 43, 41, 46, 48, 48, 48, 48, 48]
+  - id: city_streets
+    speeds_kph: [28, 28, 28, 28, 28, 28, 27, 23, 23, 27, 28, 28, 28, 28, 28, 27, 23, 21, 26, 28, 28, 28, 28, 28]
+    weekend_speeds_kph: [28, 28, 28, 28, 28, 28, 28, 26, 26, 28, 28, 28, 28, 28, 28, 28, 26, 25, 27, 28, 28, 28, 28, 28]
+  - id: centre
+    speeds_kph: [18, 18, 18, 18, 18, 18, 17, 13, 13, 17, 18, 18, 18, 18, 18, 17, 14, 12, 16, 18, 18, 18, 18, 18]
+cell_assignments:
+  # Resolution 6: the city of Groningen and its surroundings.
+  - {cell: 86196d85fffffff, pattern: city_arterials, road_classes: [primary, secondary, tertiary]}
+  - {cell: 86196d85fffffff, pattern: city_streets, road_classes: [residential, service]}
+  # Resolution 8: the city centre, all road classes.
+  - {cell: 88196d85ebfffff, pattern: centre}

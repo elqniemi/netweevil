@@ -138,6 +138,12 @@ standing background traffic in an area of the ring road.
 | `random_polygon` | `polygon` | Uniform inside a WGS84 outer ring |
 | `points` | `points: [{lon, lat, weight?, label?}]` | Weighted choice from fixed points |
 | `zones` | `zone_ids` | Inside named `spawn` or `attract` zones, weighted |
+| `cells` | `cells: [{cell, weight?}]` | Weighted choice of an [H3 cell](h3-cells.md), then uniform inside the cell |
+
+With `cells`, the weights are a distribution, for example the population of
+each cell for origins and the number of jobs for destinations. The cells can
+have different resolutions. `netweevil h3 aggregate` with a `.json` output
+writes a list that you can use as `cells`.
 
 `demand.od_pairs` is a list of `{origin: [lon, lat], destination: [lon,
 lat]}`. Explicit pairs replace origins and destinations. The engine cycles
@@ -186,14 +192,15 @@ by `heterogeneity`.
 
 ### `zones[]`
 
-A zone is a WGS84 polygon with an effect. You can draw zones in QGIS or write
-them in the scenario file.
+A zone is a WGS84 polygon or a set of H3 cells, with an effect. You can draw
+polygon zones in QGIS or write zones in the scenario file.
 
 | Field | Meaning |
 | --- | --- |
 | `zone_id` | Zone id |
 | `label` | Text |
 | `polygon` | Outer ring as `[lon, lat]` pairs, open or closed |
+| `cells` | H3 cell ids, as an alternative to `polygon`. The resolutions can be different |
 | `effect` | See the effect kinds |
 
 | Effect `kind` | Fields | Meaning |

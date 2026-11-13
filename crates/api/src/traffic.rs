@@ -15,14 +15,15 @@ use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use netweevil_core::TopologyBundle;
+use netweevil_core::{AccessMask, RoadClass, TopologyBundle};
+use netweevil_h3::{CellSet, edge_midpoint};
 use netweevil_persist::{
     WorkspaceConfig, WorkspacePaths, read_traffic_bundle, read_traffic_manifest,
 };
 use netweevil_query::{
-    EffectiveEngineDescription, EngineMode, LiveSwapReport, LiveTrafficUpdate, OdPairsDocument,
-    PointSetDocument, RouteRequest, ServiceAreaRequest, TemporalRequestOptions, TrafficRouter,
-    TrafficSelection, TrafficService, TrafficStatus,
+    EffectiveEngineDescription, EngineMode, LiveSwapReport, LiveTrafficDirection,
+    LiveTrafficUpdate, OdPairsDocument, PointSetDocument, RouteRequest, ServiceAreaRequest,
+    TemporalRequestOptions, TrafficRouter, TrafficSelection, TrafficService, TrafficStatus,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -407,9 +408,85 @@ pub(crate) async fn traffic_status(
 pub(crate) struct LiveTrafficRequest {
     #[serde(default)]
     updates: Vec<LiveTrafficUpdate>,
+    /// Updates for the motorized features in H3 cells. They apply before
+    /// `updates`, so a feature update wins over a cell.
+    #[serde(default)]
+    cell_updates: Vec<LiveCellUpdate>,
     /// Replace every live entry instead of merging into them.
     #[serde(default)]
     replace: bool,
+}
+
+/// One live observation for every motorized feature in a set of H3 cells,
+/// such as a closed district or a slow zone.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LiveCellUpdate {
+    /// H3 cell ids of any resolution.
+    cells: Vec<String>,
+    /// Road classes the update covers; empty covers every class.
+    #[serde(default)]
+    road_classes: Vec<RoadClass>,
+    #[serde(default)]
+    speed_kph: Option<f64>,
+    #[serde(default)]
+    closed: bool,
+    #[serde(default)]
+    clear: bool,
+    #[serde(default)]
+    expires_at: Option<String>,
+    #[serde(default)]
+    ttl_s: Option<f64>,
+}
+
+/// Expands cell updates to one update per directed feature. A feature is
+/// in a cell when the midpoint of one of its edges is.
+fn expand_cell_updates(
+    topology: &TopologyBundle,
+    cell_updates: &[LiveCellUpdate],
+) -> Result<Vec<LiveTrafficUpdate>> {
+    let mut updates = Vec::new();
+    for update in cell_updates {
+        if update.cells.is_empty() {
+            bail!("a cell update needs at least one cell");
+        }
+        let cells = CellSet::parse(&update.cells)?;
+        let mut features = std::collections::BTreeSet::new();
+        for edge_index in 0..topology.edge_count() {
+            let profile = topology.edge_profile(edge_index);
+            if profile.access_mask.0 & AccessMask::MOTOR_VEHICLES == 0
+                || !(update.road_classes.is_empty()
+                    || update.road_classes.contains(&profile.road_class))
+            {
+                continue;
+            }
+            let (lon, lat) = edge_midpoint(topology, edge_index);
+            if cells.contains(lon, lat) {
+                features.insert((
+                    topology.edge_source_way_id(edge_index),
+                    topology.edge_source_direction(edge_index) < 0,
+                ));
+            }
+        }
+        updates.extend(
+            features
+                .into_iter()
+                .map(|(feature_id, backward)| LiveTrafficUpdate {
+                    feature_id,
+                    direction: if backward {
+                        LiveTrafficDirection::Backward
+                    } else {
+                        LiveTrafficDirection::Forward
+                    },
+                    speed_kph: update.speed_kph,
+                    closed: update.closed,
+                    clear: update.clear,
+                    expires_at: update.expires_at.clone(),
+                    ttl_s: update.ttl_s,
+                }),
+        );
+    }
+    Ok(updates)
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -433,12 +510,25 @@ pub(crate) async fn post_live_traffic(
     Json(payload): Json<LiveTrafficRequest>,
 ) -> Result<Response, ApiError> {
     let now = OffsetDateTime::now_utc();
-    for update in &payload.updates {
+    let mut updates = payload.updates;
+    if !payload.cell_updates.is_empty() {
+        let runtime = state.runtime()?;
+        let topology = runtime.topology.clone();
+        let cell_updates = payload.cell_updates;
+        let mut expanded =
+            tokio::task::spawn_blocking(move || expand_cell_updates(&topology, &cell_updates))
+                .await
+                .map_err(|error| ApiError::internal(format!("expanding cell updates: {error}")))?
+                .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+        expanded.append(&mut updates);
+        updates = expanded;
+    }
+    for update in &updates {
         update
             .validated_expiry(now)
             .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
     }
-    enqueue_live(&state, payload.updates, payload.replace, query.wait).await
+    enqueue_live(&state, updates, payload.replace, query.wait).await
 }
 
 /// `DELETE /v1/traffic/live`: drop every live entry.
@@ -489,4 +579,4 @@ async fn enqueue_live(
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

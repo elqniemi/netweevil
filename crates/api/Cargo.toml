@@ -19,6 +19,7 @@ mime_guess.workspace = true
 mvt.workspace = true
 netweevil-ingest = { path = "../ingest" }
 netweevil-core = { path = "../core" }
+netweevil-h3 = { path = "../h3" }
 netweevil-persist = { path = "../persist" }
 netweevil-profile = { path = "../profile" }
 netweevil-query = { path = "../query" }

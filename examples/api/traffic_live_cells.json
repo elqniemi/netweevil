@@ -1,0 +1,6 @@
+{
+  "cell_updates": [
+    {"cells": ["87196d85effffff"], "road_classes": ["residential", "service"], "speed_kph": 15, "ttl_s": 1800},
+    {"cells": ["88196d85ebfffff", "88196d85e9fffff"], "closed": true, "ttl_s": 3600}
+  ]
+}

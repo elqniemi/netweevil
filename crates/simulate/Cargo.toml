@@ -12,6 +12,7 @@ categories.workspace = true
 [dependencies]
 anyhow.workspace = true
 netweevil-core = { path = "../core" }
+netweevil-h3 = { path = "../h3" }
 netweevil-profile = { path = "../profile" }
 netweevil-query = { path = "../query" }
 rayon.workspace = true

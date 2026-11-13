@@ -9,6 +9,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use netweevil_core::TravelMode;
+use netweevil_h3::WeightedCell;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -129,6 +130,10 @@ pub enum EndpointDistribution {
     Points { points: Vec<WeightedPoint> },
     /// Sample inside named scenario zones (kind=spawn/attract), weighted.
     Zones { zone_ids: Vec<String> },
+    /// Weighted choice of an H3 cell, then uniform inside the cell. The
+    /// weights are a distribution over cells, such as population for
+    /// origins or jobs for destinations. Resolutions may be mixed.
+    Cells { cells: Vec<WeightedCell> },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,15 +317,48 @@ pub fn default_pcu_for_mode(mode: TravelMode) -> f64 {
     }
 }
 
-/// Polygon zones drawn in QGIS (or written in the scenario file).
+/// Zones drawn in QGIS (or written in the scenario file). A zone is either
+/// a polygon or a set of H3 cells.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZoneConfig {
     pub zone_id: String,
     #[serde(default)]
     pub label: String,
-    /// WGS84 outer ring, closed or open (closure handled internally).
+    /// WGS84 outer ring, closed or open (closure handled internally). Empty
+    /// for a zone of cells.
+    #[serde(default)]
     pub polygon: Vec<[f64; 2]>,
+    /// H3 cell ids of any resolution, instead of a polygon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cells: Vec<String>,
     pub effect: ZoneEffect,
+}
+
+impl ZoneConfig {
+    /// Checks that the zone has exactly one valid shape.
+    pub fn validate(&self) -> Result<()> {
+        if self.zone_id.trim().is_empty() {
+            bail!("zone_id must not be empty");
+        }
+        match (self.polygon.is_empty(), self.cells.is_empty()) {
+            (false, false) => bail!(
+                "zone '{}' has both a polygon and cells; use one",
+                self.zone_id
+            ),
+            (true, true) => bail!("zone '{}' needs a polygon or cells", self.zone_id),
+            (false, true) if self.polygon.len() < 3 => {
+                bail!("zone '{}' polygon needs at least 3 vertices", self.zone_id)
+            }
+            (false, true) => {}
+            (true, false) => {
+                for cell in &self.cells {
+                    netweevil_h3::parse_cell(cell)
+                        .with_context(|| format!("zone '{}'", self.zone_id))?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -540,17 +578,35 @@ impl SimulationScenario {
                     fleet.fleet_id
                 );
             }
+            for (side, distribution) in [
+                ("origins", &fleet.demand.origins),
+                ("destinations", &fleet.demand.destinations),
+            ] {
+                let EndpointDistribution::Cells { cells } = distribution else {
+                    continue;
+                };
+                if cells
+                    .iter()
+                    .any(|cell| !cell.weight.is_finite() || cell.weight < 0.0)
+                {
+                    bail!(
+                        "fleet '{}': {side} cell weights must be finite and not negative",
+                        fleet.fleet_id
+                    );
+                }
+                if !(cells.iter().map(|cell| cell.weight).sum::<f64>() > 0.0) {
+                    bail!(
+                        "fleet '{}': {side} cells need a positive total weight",
+                        fleet.fleet_id
+                    );
+                }
+            }
         }
         let mut zone_ids = std::collections::BTreeSet::new();
         for zone in &self.zones {
-            if zone.zone_id.trim().is_empty() {
-                bail!("zone_id must not be empty");
-            }
+            zone.validate()?;
             if !zone_ids.insert(zone.zone_id.clone()) {
                 bail!("duplicate zone_id '{}'", zone.zone_id);
-            }
-            if zone.polygon.len() < 3 {
-                bail!("zone '{}' polygon needs at least 3 vertices", zone.zone_id);
             }
         }
         if !(self.traffic.signal_green_share > 0.0 && self.traffic.signal_green_share <= 1.0) {

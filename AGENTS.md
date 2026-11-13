@@ -20,6 +20,7 @@ The main production surfaces are:
 - `crates/report`: run report rendering and local exports.
 - `crates/indoor`: indoor and surface routing: navmesh walks, edge networks, portals, verticals and POIs across levels.
 - `crates/site`: indoor sites placed on the globe: storage, cache, indoor routes in WGS84, site GeoJSON, door-to-door composition with street routing.
+- `crates/h3`: H3 cell layers: mixed-resolution cell sets, point aggregation, coverage, network summaries. Cells resolve at import or setup time only.
 - `crates/transit`: GTFS import and street-access (walk/bicycle/car) plus transit routing.
 - `crates/simulate`: agent-based traffic simulation.
 - `crates/api`: HTTP handlers, the router, and the OpenAPI document server (`docs/api/openapi.yaml` must match the router; a test checks it).

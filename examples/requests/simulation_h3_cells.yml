@@ -1,0 +1,78 @@
+# Simulation scenario with H3 cells: demand from a population layer and a
+# slow zone of cells. The weights are synthetic.
+#
+# Run with:
+#   netweevil simulate run examples/requests/simulation_h3_cells.yml \
+#     --dataset groningen_2026_05 \
+#     --profile examples/profiles/car_research_v1.yml
+
+scenario:
+  id: groningen_h3_cells_demo
+  label: "Commute from population cells to the centre"
+  seed: 7
+
+time:
+  duration_s: 1800.0
+  tick_s: 1.0
+
+fleets:
+  - fleet_id: commuters
+    profile_id: car_research_v1
+    agent_count: 400
+    demand:
+      origins:
+        kind: cells                  # weight = residents of the resolution 8 cell
+        cells:
+          - { cell: 88196d8427fffff, weight: 650 }
+          - { cell: 88196d8513fffff, weight: 1800 }
+          - { cell: 88196d8517fffff, weight: 1800 }
+          - { cell: 88196d851bfffff, weight: 650 }
+          - { cell: 88196d8531fffff, weight: 900 }
+          - { cell: 88196d8533fffff, weight: 1800 }
+          - { cell: 88196d853bfffff, weight: 1200 }
+          - { cell: 88196d8581fffff, weight: 2400 }
+          - { cell: 88196d8583fffff, weight: 1800 }
+          - { cell: 88196d8585fffff, weight: 400 }
+          - { cell: 88196d8587fffff, weight: 1800 }
+          - { cell: 88196d8589fffff, weight: 400 }
+          - { cell: 88196d858bfffff, weight: 3100 }
+          - { cell: 88196d858dfffff, weight: 1200 }
+          - { cell: 88196d85a1fffff, weight: 900 }
+          - { cell: 88196d85a9fffff, weight: 1800 }
+          - { cell: 88196d85abfffff, weight: 650 }
+          - { cell: 88196d85adfffff, weight: 650 }
+          - { cell: 88196d85c1fffff, weight: 2400 }
+          - { cell: 88196d85c3fffff, weight: 1200 }
+          - { cell: 88196d85c5fffff, weight: 1800 }
+          - { cell: 88196d85c7fffff, weight: 3100 }
+          - { cell: 88196d85c9fffff, weight: 1800 }
+          - { cell: 88196d85cbfffff, weight: 1200 }
+          - { cell: 88196d85cdfffff, weight: 1200 }
+          - { cell: 88196d85d5fffff, weight: 2400 }
+          - { cell: 88196d85d7fffff, weight: 3100 }
+          - { cell: 88196d85e1fffff, weight: 650 }
+          - { cell: 88196d85e3fffff, weight: 650 }
+          - { cell: 88196d85e5fffff, weight: 2400 }
+          - { cell: 88196d85e7fffff, weight: 650 }
+          - { cell: 88196d85e9fffff, weight: 3100 }
+          - { cell: 88196d85ebfffff, weight: 1800 }
+          - { cell: 88196d85edfffff, weight: 1200 }
+          - { cell: 88196d8edbfffff, weight: 2400 }
+      destinations:
+        kind: cells                  # mixed resolutions: a district and two blocks
+        cells:
+          - { cell: 87196d85effffff, weight: 1.0 }
+          - { cell: 89196d85ea7ffff, weight: 3.0 }
+          - { cell: 89196d858d7ffff, weight: 2.0 }
+    departures:
+      kind: peak
+      mean_s: 300.0
+      std_s: 180.0
+
+zones:
+  - zone_id: centre_slow_cells
+    label: "City centre 50% speed"
+    cells: [88196d85ebfffff, 88196d85e9fffff]
+    effect:
+      kind: speed_factor
+      factor: 0.5

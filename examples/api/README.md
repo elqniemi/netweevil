@@ -19,6 +19,7 @@ This folder contains request bodies for the NetWeevil HTTP API. The
 | `locate_constraints.json` | `POST /v1/locate` | North Netherlands | `car_north_nl_2026_05` |
 | `expansion_route.json` | `POST /v1/expansion` | Groningen | `car_research_v1` |
 | `traffic_live_updates.json` | `POST /v1/traffic/live` | Groningen | any |
+| `traffic_live_cells.json` | `POST /v1/traffic/live` | Groningen | any |
 | `height.json` | `POST /v1/height` | Hong Kong, imported with `--dem` | any |
 | `ile_de_france_route_car.json` | `POST /v1/route` | Île-de-France | default profile |
 | `ile_de_france_route_pedestrian.json` | `POST /v1/route` | Île-de-France | `pedestrian_research_v1` |
@@ -134,7 +135,8 @@ the cached engine. See [request profiles](../../docs/guides/request-profiles.md)
 
 `route_traffic.json` has a `departure_time` in the evening peak. The API uses
 the traffic bucket of that time. `traffic_live_updates.json` slows one road
-and closes another. See [traffic](../../docs/guides/traffic.md).
+and closes another. `traffic_live_cells.json` slows the minor roads in one H3 cell
+and closes the roads in two smaller cells. See [traffic](../../docs/guides/traffic.md).
 
 ### Heights
 

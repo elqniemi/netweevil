@@ -23,6 +23,7 @@ Commands:
   transit     Import GTFS feeds and prepare them for transit routing
   traffic     Import historical speeds and route with traffic
   indoor      Import, list, show and remove indoor sites
+  h3          Build and convert H3 cell layers: population, POIs, network density
   profile     Validate routing profiles and compile them for a dataset
   analyze     Run routing analyses and save each result as a run
   experiment  Run reproducible study files
@@ -508,6 +509,179 @@ Arguments:
 
 Options:
   -h, --help  Print help
+```
+
+### `netweevil h3` { #netweevil-h3 }
+
+```text
+Build and convert H3 cell layers: population, POIs, network density
+
+Usage: netweevil h3 <COMMAND>
+
+Commands:
+  aggregate  Count points per H3 cell on one or more resolutions
+  pois       Count tagged OSM nodes and ways per H3 cell
+  network    Summarize the nodes and edges of a dataset per H3 cell
+  cover      List the H3 cells whose centre is in a bounding box or polygon
+  points     Write the centres of H3 cells as a point set
+  resample   Move a weighted cell table to another resolution
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+#### `netweevil h3 aggregate` { #netweevil-h3-aggregate }
+
+```text
+Count points per H3 cell on one or more resolutions.
+
+The points are a CSV with longitude and latitude columns, such as population points, POIs or addresses.
+
+Usage: netweevil h3 aggregate [OPTIONS] --resolutions <RESOLUTIONS> --out <OUT> <POINTS>
+
+Arguments:
+  <POINTS>
+          Point CSV with a header row
+
+Options:
+      --resolutions <RESOLUTIONS>
+          H3 resolutions (0 to 15), separated by commas
+
+      --lon-column <LON_COLUMN>
+          Longitude column
+          
+          [default: lon]
+
+      --lat-column <LAT_COLUMN>
+          Latitude column
+          
+          [default: lat]
+
+      --weight-column <WEIGHT_COLUMN>
+          Column summed into `weight`; every point weighs 1 without it
+
+      --out <OUT>
+          Output file: `.csv`, `.geojson` or `.json`
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `netweevil h3 pois` { #netweevil-h3-pois }
+
+```text
+Count tagged OSM nodes and ways per H3 cell.
+
+Reads an OSM PBF file and keeps the objects with a tag key such as `amenity` or `shop`.
+
+Usage: netweevil h3 pois [OPTIONS] --resolutions <RESOLUTIONS> --out <OUT> <PBF>
+
+Arguments:
+  <PBF>
+          OSM extract (`.osm.pbf`)
+
+Options:
+      --key <KEY>
+          Tag key that marks a point of interest
+          
+          [default: amenity]
+
+      --values <VALUES>
+          Tag values to keep, separated by commas; every value without it
+
+      --resolutions <RESOLUTIONS>
+          H3 resolutions (0 to 15), separated by commas
+
+      --out <OUT>
+          Output file with the counts: `.csv`, `.geojson` or `.json`
+
+      --points-out <POINTS_OUT>
+          Also write the points as a point-set CSV (`id,lon,lat,value,name`)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `netweevil h3 network` { #netweevil-h3-network }
+
+```text
+Summarize the nodes and edges of a dataset per H3 cell
+
+Usage: netweevil h3 network --dataset <DATASET> --resolution <RESOLUTION> --out <OUT>
+
+Options:
+      --dataset <DATASET>        Id of an imported dataset
+      --resolution <RESOLUTION>  H3 resolution (0 to 15)
+      --out <OUT>                Output file: `.csv`, `.geojson` or `.json`
+  -h, --help                     Print help
+```
+
+#### `netweevil h3 cover` { #netweevil-h3-cover }
+
+```text
+List the H3 cells whose centre is in a bounding box or polygon
+
+Usage: netweevil h3 cover [OPTIONS] --resolution <RESOLUTION> --out <OUT>
+
+Options:
+      --bbox <BBOX>              Bounding box: `min_lon,min_lat,max_lon,max_lat`
+      --polygon <POLYGON>        GeoJSON file with a polygon; its outer ring is covered
+      --resolution <RESOLUTION>  H3 resolution (0 to 15)
+      --compact                  Replace complete groups of sibling cells by their parent
+      --out <OUT>                Output file: `.csv`, `.geojson` or `.json`
+  -h, --help                     Print help
+```
+
+#### `netweevil h3 points` { #netweevil-h3-points }
+
+```text
+Write the centres of H3 cells as a point set.
+
+The point ids are the cell ids, so the results of an analysis join back to the cells.
+
+Usage: netweevil h3 points [OPTIONS] --out <OUT> <CELLS>
+
+Arguments:
+  <CELLS>
+          Cell table: CSV with a `cell` column, or JSON list of `{cell, weight}`
+
+Options:
+      --weight-column <WEIGHT_COLUMN>
+          Weight column of a CSV table; `weight` when present without it
+
+      --out <OUT>
+          Output point-set CSV (`id,lon,lat,weight`)
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `netweevil h3 resample` { #netweevil-h3-resample }
+
+```text
+Move a weighted cell table to another resolution.
+
+Finer cells add up in their parent. Coarser cells spread their weight evenly over their children.
+
+Usage: netweevil h3 resample [OPTIONS] --resolution <RESOLUTION> --out <OUT> <CELLS>
+
+Arguments:
+  <CELLS>
+          Cell table: CSV with a `cell` column, or JSON list of `{cell, weight}`
+
+Options:
+      --resolution <RESOLUTION>
+          Target H3 resolution (0 to 15)
+
+      --weight-column <WEIGHT_COLUMN>
+          Weight column of a CSV table; `weight` when present without it
+
+      --out <OUT>
+          Output file: `.csv`, `.geojson` or `.json`
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 ### `netweevil profile` { #netweevil-profile }

@@ -57,6 +57,8 @@ patterns_csv: patterns.csv              # pattern_id,speeds_kph (space separated
 | `patterns_csv` | CSV with `pattern_id,speeds_kph`, relative to the document |
 | `assignments[]` | `{feature_id, direction, pattern}` |
 | `assignments_csv` | CSV with `feature_id,direction` and `pattern_id` or `speeds_kph`, relative to the document |
+| `cell_assignments[]` | `{cell, pattern, road_classes?}`. See [Assign patterns by H3 cell](#assign-patterns-by-h3-cell) |
+| `cell_assignments_csv` | CSV with `cell,pattern_id` and an optional `road_classes` column, relative to the document |
 
 `direction` is `forward`, `backward` or `both`, relative to the source
 geometry. An assignment CSV can have a `speeds_kph` column instead of
@@ -66,6 +68,41 @@ once.
 !!! note
     Assignments and live updates use `feature_id`. There is no `way_id`
     alias.
+
+### Assign patterns by H3 cell
+
+When you have speeds for areas and not for roads, assign a pattern to
+[H3 cells](h3-cells.md). A cell assignment applies to the features of the
+dataset that motor vehicles can use and that are in the cell.
+
+```yaml
+cell_assignments:
+  # Main roads of a region (resolution 6).
+  - {cell: 86196d85fffffff, pattern: arterial_peak, road_classes: [primary, secondary]}
+  # All other roads of the same region.
+  - {cell: 86196d85fffffff, pattern: region_peak}
+  # One neighbourhood (resolution 8) is slower.
+  - {cell: 88196d85ebfffff, pattern: centre_peak}
+cell_assignments_csv: cells.csv   # cell,pattern_id[,road_classes]
+```
+
+| Rule | Behavior |
+| --- | --- |
+| Cells of different resolutions overlap | The finest cell applies |
+| A cell has more than one assignment | The first assignment that includes the road class of the edge applies. Put an assignment without `road_classes` last |
+| A feature is in more than one cell | The feature gets the pattern that covers most of its length |
+| A feature has an entry in `assignments` | The feature assignment applies, not the cell |
+
+`road_classes` takes `motorway`, `trunk`, `primary`, `secondary`,
+`tertiary`, `residential`, `service` and `track`. In the CSV, separate the
+classes with spaces.
+
+`traffic import` resolves the cells to feature assignments for the dataset.
+The bundle contains only feature assignments. Thus cells do not change the
+speed of requests. Import the source again after you import a new version of
+the dataset.
+
+`examples/traffic/groningen_cells.yml` is a source that uses cells only.
 
 ## Import traffic
 
@@ -244,6 +281,14 @@ milliseconds.
     curl http://127.0.0.1:8080/v1/traffic
     ```
 
+=== "HTTP, by H3 cell"
+
+    ```bash
+    curl -X POST 'http://127.0.0.1:8080/v1/traffic/live?wait=true' \
+      -H 'content-type: application/json' \
+      -d @examples/api/traffic_live_cells.json
+    ```
+
 === "CLI"
 
     `netweevil traffic route` runs one traffic-aware route. `--live` applies
@@ -282,6 +327,37 @@ feature. The API rejects an invalid batch with HTTP 400 before it queues the
 batch. `DELETE /v1/traffic/live` removes all live entries.
 
 `examples/api/traffic_live_updates.json` slows one way and closes another.
+
+### Live updates by H3 cell
+
+A batch can contain `cell_updates`. Each entry applies one update to all
+features in a set of [H3 cells](h3-cells.md) that motor vehicles can use.
+Use it for an area closure, a flood, an event or a slow zone.
+
+```json
+{
+  "cell_updates": [
+    {"cells": ["87196d85effffff"], "road_classes": ["residential", "service"], "speed_kph": 15},
+    {"cells": ["88196d85ebfffff", "88196d85e9fffff"], "closed": true, "ttl_s": 3600}
+  ]
+}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `cells` | required | H3 cell ids. The resolutions can be different |
+| `road_classes` | all | Road classes that the update covers |
+| `speed_kph`, `closed`, `clear`, `expires_at`, `ttl_s` | | Same as for a feature update |
+
+A feature is in a cell when the midpoint of one of its edges is in the cell.
+The service changes the cell updates into feature updates when it receives
+the batch. It applies them in the order of the list, thus a later entry wins
+for a feature that is in two entries. Put the entry for the larger area
+first. The service applies `updates` last, thus an entry in `updates` for
+the same feature wins. `GET /v1/traffic` counts the features, not the cells.
+
+`examples/api/traffic_live_cells.json` slows the minor roads of a district
+and closes two cells in it.
 
 ### Publication
 
