@@ -763,8 +763,8 @@ fn engines_over_one_topology_share_identical_structures() {
     );
     assert!(fast_cch.ranked.shares_topology(&slow_cch.ranked));
     assert_ne!(
-        fast_cch.ranked.slot_weights(&fast_cch.source),
-        slow_cch.ranked.slot_weights(&slow_cch.source)
+        fast_cch.ranked.weight_vectors(),
+        slow_cch.ranked.weight_vectors()
     );
 
     let request = a_to_c("shared");
@@ -797,8 +797,8 @@ fn bucket_engines_share_the_ranked_hierarchy() {
     let (_, slower) = build_test_cch(&topology, &metrics(&[10.0, 40.0, 100.0]));
     let mut stored = slower.clone();
     let header = stored.acceleration.as_mut().expect("fixture header");
-    header.upward_weight.clear();
-    header.downward_weight.clear();
+    header.upward_weight = Default::default();
+    header.downward_weight = Default::default();
     let stored = Arc::new(stored);
     let engine = PreparedRoutingEngine::new(
         Arc::new(topology.clone()),
@@ -819,16 +819,13 @@ fn bucket_engines_share_the_ranked_hierarchy() {
     let (base, bucket_graph, fresh_graph) = (ranked(&engine), ranked(&bucket), ranked(&fresh));
     assert!(bucket_graph.ranked.shares_topology(&base.ranked));
     let reference = slower.acceleration.expect("reference weights");
-    let weights = (reference.upward_weight, reference.downward_weight);
-    assert_eq!(
-        bucket_graph.ranked.slot_weights(&bucket_graph.source),
-        weights
+    let weights = (
+        reference.upward_weight.into_vec(),
+        reference.downward_weight.into_vec(),
     );
-    assert_eq!(
-        fresh_graph.ranked.slot_weights(&fresh_graph.source),
-        weights
-    );
-    assert_ne!(base.ranked.slot_weights(&base.source), weights);
+    assert_eq!(bucket_graph.ranked.weight_vectors(), weights);
+    assert_eq!(fresh_graph.ranked.weight_vectors(), weights);
+    assert_ne!(base.ranked.weight_vectors(), weights);
 
     let request = a_to_c("bucket");
     let from_bucket = bucket.execute_route(&request).expect("bucket route");
@@ -856,7 +853,7 @@ fn engine_customizes_stored_metrics_like_the_reference_cch() {
         &mut header.distance_upward_weight,
         &mut header.distance_downward_weight,
     ] {
-        weights.clear();
+        *weights = Default::default();
     }
     let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(stored), Some(bundle))
         .expect("engine prepares");
@@ -869,10 +866,10 @@ fn engine_customizes_stored_metrics_like_the_reference_cch() {
     let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
     let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
     assert_eq!(
-        acceleration.ranked.slot_weights(&acceleration.source),
+        acceleration.ranked.weight_vectors(),
         (
-            reference.upward_weight.clone(),
-            reference.downward_weight.clone()
+            reference.upward_weight.to_vec(),
+            reference.downward_weight.to_vec()
         )
     );
     let time = ServiceAreaMetricKind::TravelTimeS;
@@ -888,6 +885,46 @@ fn engine_customizes_stored_metrics_like_the_reference_cch() {
         .expect("distance weights");
     assert_eq!(upward, reference.distance_upward_weight.as_slice());
     assert_eq!(downward, reference.distance_downward_weight.as_slice());
+}
+
+/// Stored generalized-cost weights load as they are when their hierarchy
+/// key matches; a bundle keyed to another hierarchy is customized again and
+/// ends with the same weights.
+#[test]
+fn engine_loads_stored_weights_only_for_their_hierarchy() {
+    let topology = Arc::new(test_topology());
+    let (bundle, reference) = build_test_cch(&topology, &test_metrics());
+    let expected = {
+        let compiled = reference.acceleration.as_ref().expect("reference weights");
+        (
+            compiled.upward_weight.to_vec(),
+            compiled.downward_weight.to_vec(),
+        )
+    };
+    assert!(crate::engine::has_weights_for(&reference, &bundle));
+    assert!(
+        crate::engine::customize_loaded_metrics(&topology, &reference, Some(&bundle)).is_none()
+    );
+
+    let mut foreign = reference.clone();
+    let header = foreign.acceleration.as_mut().expect("fixture header");
+    header.source_hierarchy_key = bundle.hierarchy_key ^ 1;
+    header
+        .upward_weight
+        .make_mut()
+        .iter_mut()
+        .for_each(|weight| *weight = 1);
+    assert!(!crate::engine::has_weights_for(&foreign, &bundle));
+    assert!(crate::engine::customize_loaded_metrics(&topology, &foreign, Some(&bundle)).is_some());
+
+    for metrics in [reference, foreign] {
+        let engine =
+            PreparedRoutingEngine::new(topology.clone(), Arc::new(metrics), Some(bundle.clone()))
+                .expect("engine prepares");
+        let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
+        let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
+        assert_eq!(acceleration.ranked.weight_vectors(), expected);
+    }
 }
 
 #[test]
@@ -1415,22 +1452,21 @@ fn single_route_restricted_fallback_matches_the_exact_engine() {
 }
 
 #[test]
-fn engines_with_restriction_sequences_customize_lower_bounds_in_the_background() {
+fn engines_customize_lower_bounds_on_the_first_restricted_fallback() {
     let topology = multi_edge_restricted_topology();
-    let (bundle, compiled) = build_test_cch(&topology, &restricted_metrics());
+    let mut metrics = restricted_metrics();
+    set_edge_cost(&mut metrics, 3, Some(25.0));
+    let (bundle, compiled) = build_test_cch(&topology, &metrics);
     let engine = PreparedRoutingEngine::new(Arc::new(topology), Arc::new(compiled), Some(bundle))
         .expect("accelerated engine builds");
     let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
     let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    while acceleration.lower_bounds.get().is_none() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "lower bounds were not customized in the background"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    }
-    assert!(crate::lower_bound_weights(graph).is_some());
+    assert!(graph.has_restriction_sequences());
+    assert!(acceleration.lower_bounds.get().is_none());
+    engine
+        .execute_route(&restricted_a_to_d("lower-bounds"))
+        .expect("restricted route succeeds");
+    assert!(acceleration.lower_bounds.get().is_some_and(Option::is_some));
 }
 
 /// Each reverse transition `previous -> edge` costs exactly what the forward

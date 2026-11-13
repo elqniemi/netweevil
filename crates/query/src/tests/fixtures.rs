@@ -741,8 +741,8 @@ pub(crate) fn build_test_cch(
     CompiledProfileBundle,
 ) {
     use netweevil_core::{
-        ACCELERATION_BUNDLE_SCHEMA_VERSION, CCH_ALGORITHM, CCH_WEIGHT_INFINITY,
-        DatasetAccelerationBundle, add_cch_weights, encode_cch_weight,
+        CCH_ALGORITHM, CCH_WEIGHT_INFINITY, DatasetAccelerationBundle, add_cch_weights,
+        encode_cch_weight,
     };
     use std::collections::BTreeMap;
 
@@ -855,55 +855,48 @@ pub(crate) fn build_test_cch(
         topology.routing_edge(to_edge).length_m as f64
     });
 
-    let mut upward_first_out = vec![0_u32; edge_count + 1];
-    let mut upward_head = Vec::new();
-    let mut upward_weight = Vec::new();
-    let mut downward_first_out = vec![0_u32; edge_count + 1];
-    let mut downward_head = Vec::new();
-    let mut downward_weight = Vec::new();
-    let mut time_upward_weight = Vec::new();
-    let mut time_downward_weight = Vec::new();
-    let mut distance_upward_weight = Vec::new();
-    let mut distance_downward_weight = Vec::new();
-    let metric_weight = |arcs: &BTreeMap<(u32, u32), (u32, u32)>, tail: u32, head: u32| {
-        arcs.get(&(tail, head))
-            .map(|&(weight, _)| weight)
-            .unwrap_or(CCH_WEIGHT_INFINITY)
+    let (upward_arcs, downward_arcs): (Vec<_>, Vec<_>) =
+        arcs.keys().copied().partition(|&(tail, head)| tail < head);
+    let bundle = DatasetAccelerationBundle::from_arcs(
+        metrics.source_topology_bundle_id.clone(),
+        Default::default(),
+        (0..edge_count as u32).collect(),
+        &upward_arcs,
+        &downward_arcs,
+    )
+    .expect("fixture hierarchy is valid");
+    // Weights at the bundle's arc positions; identity order, so ranks are
+    // edge indexes.
+    let metric_weights = |arcs: &BTreeMap<(u32, u32), (u32, u32)>| {
+        let weight = |tail: u32, head: u32| {
+            arcs.get(&(tail, head))
+                .map(|&(weight, _)| weight)
+                .unwrap_or(CCH_WEIGHT_INFINITY)
+        };
+        let upward = (0..edge_count)
+            .flat_map(|tail| {
+                bundle.upward_head[bundle.upward_range(tail)]
+                    .iter()
+                    .map(move |&head| (tail as u32, head))
+            })
+            .map(|(tail, head)| weight(tail, head))
+            .collect::<Vec<_>>();
+        let downward = (0..edge_count)
+            .flat_map(|head| {
+                bundle.downward_tail[bundle.downward_range(head)]
+                    .iter()
+                    .map(move |&tail| (tail, head as u32))
+            })
+            .map(|(tail, head)| weight(tail, head))
+            .collect::<Vec<_>>();
+        (upward.into(), downward.into())
     };
-    for (&(tail, head), &(weight, _)) in &arcs {
-        if tail < head {
-            upward_first_out[tail as usize + 1] += 1;
-            upward_head.push(head);
-            upward_weight.push(weight);
-            time_upward_weight.push(metric_weight(&time_arcs, tail, head));
-            distance_upward_weight.push(metric_weight(&distance_arcs, tail, head));
-        } else {
-            downward_first_out[tail as usize + 1] += 1;
-            downward_head.push(head);
-            downward_weight.push(weight);
-            time_downward_weight.push(metric_weight(&time_arcs, tail, head));
-            distance_downward_weight.push(metric_weight(&distance_arcs, tail, head));
-        }
-    }
-    for edge_index in 0..edge_count {
-        upward_first_out[edge_index + 1] += upward_first_out[edge_index];
-        downward_first_out[edge_index + 1] += downward_first_out[edge_index];
-    }
-
-    let bundle = std::sync::Arc::new(DatasetAccelerationBundle {
-        schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
-        source_topology_bundle_id: metrics.source_topology_bundle_id.clone(),
-        algorithm: CCH_ALGORITHM.to_string(),
-        stats: Default::default(),
-        edge_order: (0..edge_count as u32).collect(),
-        edge_rank: (0..edge_count as u32).collect(),
-        upward_first_out,
-        upward_head,
-        downward_first_out,
-        downward_head,
-    });
+    let (upward_weight, downward_weight) = metric_weights(&arcs);
+    let (time_upward_weight, time_downward_weight) = metric_weights(&time_arcs);
+    let (distance_upward_weight, distance_downward_weight) = metric_weights(&distance_arcs);
     let mut metrics = metrics.clone();
     metrics.acceleration = Some(CompiledAcceleration {
+        source_hierarchy_key: bundle.hierarchy_key,
         schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
         source_acceleration_bundle_id: CacheBundleId::new("test-cch"),
         algorithm: CCH_ALGORITHM.to_string(),
@@ -914,5 +907,5 @@ pub(crate) fn build_test_cch(
         distance_upward_weight,
         distance_downward_weight,
     });
-    (bundle, metrics)
+    (std::sync::Arc::new(bundle), metrics)
 }

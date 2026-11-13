@@ -2,15 +2,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{CacheBundleId, TemporalRuleSet, TravelMode, VehicleParams};
+use crate::{CacheBundleId, Column, TemporalRuleSet, TravelMode, VehicleParams};
 
 /// Schema version of [`CompiledProfileBundle`]. Readers accept this value
 /// only, so bumping it also makes cached bundles recompile; bump it when
 /// compilation semantics change.
-pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 11;
+pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 13;
 
 /// Schema version of [`CompiledAcceleration`] customization data.
-pub const COMPILED_ACCELERATION_SCHEMA_VERSION: u32 = 4;
+pub const COMPILED_ACCELERATION_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct CompiledTurnCostConfig {
@@ -200,27 +200,32 @@ pub fn add_cch_weights(left: u32, right: u32) -> u32 {
     }
 }
 
-/// Three fixed-point metrics per arc, occupying 12 bytes. Path unpacking
+/// Up to three fixed-point metrics per arc, aligned with the arc positions
+/// of [`crate::DatasetAccelerationBundle`] (upward weights with
+/// `upward_head`, downward weights with `downward_tail`). Path unpacking
 /// finds a matching lower triangle in the shared topology.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompiledAcceleration {
     pub schema_version: u32,
     pub source_acceleration_bundle_id: CacheBundleId,
+    /// [`crate::DatasetAccelerationBundle::hierarchy_key`] of the hierarchy
+    /// the weights were customized on.
+    pub source_hierarchy_key: u64,
     pub algorithm: String,
-    pub upward_weight: Vec<u32>,
-    pub downward_weight: Vec<u32>,
+    pub upward_weight: Column<u32>,
+    pub downward_weight: Column<u32>,
     /// Travel-time weight sets (seconds, time-based turn penalties) over the
     /// same arcs, used for fixed-point one-to-all sweeps on time-limited
     /// isochrones. Empty when the compiled profile carries no such weights,
     /// in which case time-limited searches run plain Dijkstra.
-    pub time_upward_weight: Vec<u32>,
-    pub time_downward_weight: Vec<u32>,
+    pub time_upward_weight: Column<u32>,
+    pub time_downward_weight: Column<u32>,
     /// Distance weight sets (metres, no turn costs) over the same arcs, for
     /// distance-limited isochrones. Empty when the compiled profile carries
     /// no such weights, in which case distance-limited searches run plain
     /// Dijkstra.
-    pub distance_upward_weight: Vec<u32>,
-    pub distance_downward_weight: Vec<u32>,
+    pub distance_upward_weight: Column<u32>,
+    pub distance_downward_weight: Column<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -8,6 +8,7 @@
 
 pub mod acceleration;
 pub mod attributes;
+pub mod column;
 pub mod dataset;
 pub mod elevation;
 pub mod geo;
@@ -29,6 +30,7 @@ pub use attributes::{
     FeatureAttributeTable, FeatureAttributeType, FeatureAttributeValueRef, NO_FEATURE_ROW,
     normalize_attribute_name,
 };
+pub use column::Column;
 pub use dataset::{BuildStage, CacheBundleId, DatasetId, SourceFormat, TravelMode};
 pub use elevation::{
     DemFormat, DemImportSummary, DemSourceInfo, ELEVATION_RASTER_SCHEMA_VERSION,

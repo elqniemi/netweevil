@@ -338,7 +338,6 @@ fn backward_phast(
         .metric_weights(metric_kind, topology)
         .expect("backward PHAST requires per-metric weights");
     let source = acceleration.source.as_ref();
-    let downward_slots = acceleration.downward_slots();
     let edge_count = routing_graph.edge_costs.len();
     let full_cost = |edge_index: usize| {
         service_area_edge_cost(topology, metrics, edge_index, metric_kind).unwrap_or(f64::INFINITY)
@@ -380,7 +379,7 @@ fn backward_phast(
             for position in acceleration.ranked.downward_range(rank) {
                 let (tail_rank, _) = acceleration.ranked.downward_arc(position);
                 let tail = source.edge_order[tail_rank as usize] as usize;
-                let arc = downward_slots[position] as usize;
+                let arc = position;
                 let next_cost = cost + netweevil_core::decode_cch_weight(downward_weight[arc]);
                 if dist.lower(tail, next_cost) {
                     heap.push(State {
@@ -395,14 +394,11 @@ fn backward_phast(
 
         // Pull sweep in descending rank: every upward arc u -> v leads to a
         // higher-ranked v whose distance is already final.
-        for &edge in source.edge_order.iter().rev() {
-            let edge = edge as usize;
+        for rank in (0..source.state_count()).rev() {
+            let edge = source.edge_order[rank] as usize;
             let mut best = dist.get(edge);
-            #[allow(clippy::needless_range_loop)]
-            for slot in
-                source.upward_first_out[edge] as usize..source.upward_first_out[edge + 1] as usize
-            {
-                let head = source.upward_head[slot] as usize;
+            for slot in source.upward_range(rank) {
+                let head = source.edge_order[source.upward_head[slot] as usize] as usize;
                 let head_cost = dist.get(head);
                 if !head_cost.is_finite() || head_cost > max_cost {
                     continue;

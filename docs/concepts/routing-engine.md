@@ -5,8 +5,9 @@ calculate routes quickly. The work has three phases:
 
 1.  **Dataset build.** The import calculates the hierarchy. The hierarchy
     depends only on the legal transitions of the street network.
-2.  **Customization.** The engine calculates the arc weights for one
-    profile. It does not build the hierarchy again.
+2.  **Customization.** `profile compile` calculates the arc weights for
+    one profile and stores them in the compiled profile bundle. It does not
+    build the hierarchy again.
 3.  **Query.** A bidirectional search finds the best path. Then
     reconstruction expands the shortcuts into road edges.
 
@@ -16,9 +17,9 @@ flowchart TB
         direction LR
         t[Edge-transition graph] --> nd[Nested dissection order]
         nd --> elim[Elimination game:<br/>insert shortcuts]
-        elim --> bundle[(Acceleration bundle:<br/>edge order, up and down CSR)]
+        elim --> bundle[(Acceleration bundle:<br/>arcs in rank order)]
     end
-    subgraph custom [Customization: engine load]
+    subgraph custom [Customization: profile compile]
         direction LR
         met[(Per-edge metrics of<br/>the compiled profile)] --> base[Base arc weights:<br/>head edge cost + turn cost]
         base --> tri[Lower-triangle relaxation<br/>in rank order]
@@ -64,12 +65,22 @@ The import builds the hierarchy one time for each dataset.
 The build keeps every necessary shortcut. Thus the hierarchy keeps all
 shortest paths for every nonnegative profile metric that NetWeevil supports.
 
-The acceleration bundle contains:
+The acceleration bundle stores the hierarchy in the layout that the
+searches walk. States are numbered by rank:
 
-- The edge order. The rank is the inverse of the order. The loader
-  calculates the rank again at load.
-- The upward and the downward CSR adjacency, sorted by head id. Each row
-  stores its heads as gaps.
+- The edge order (the edge of each rank) and the rank of each edge.
+- The upward arcs, grouped by tail rank. Each row lists the head ranks in
+  ascending order.
+- The downward arcs, grouped by head rank. Each row lists the tail ranks in
+  ascending order.
+- The downward arcs again, grouped by tail rank. Reconstruction uses these
+  rows to find the middle states of lower triangles.
+
+An arc is identified by its position in the upward or the downward rows.
+The customized weights use the same positions. All arrays are raw bundle
+sections: the engine reads them in place from the memory-mapped file.
+Offsets are 64-bit, so the number of arcs has no 32-bit limit. State ids
+are 32-bit.
 
 The bundle does not contain expanded shortcut paths.
 
@@ -108,10 +119,12 @@ pass.
 Each arc has up to three `u32` weights: generalized cost, travel time and
 distance.
 
-- Compiled profile bundles store only the per-edge metrics. Customization
-  is a pure function of these metrics, the topology and the dataset
-  hierarchy. Thus the engine customizes the generalized-cost weights when it
-  loads a profile.
+- Compiled profile bundles store the per-edge metrics and the
+  generalized-cost weights, with the fingerprint of the hierarchy they were
+  customized on. The engine loads these weights. It customizes at load only
+  when the fingerprint does not match the dataset hierarchy, and for
+  metrics derived in memory (traffic buckets, avoid sets, request
+  vehicles, request profiles).
 - Only PHAST service areas read the travel-time and distance weights. The
   engine customizes them at the first service-area request. The routing
   graphs of the engine share them. An engine that only calculates routes
@@ -141,16 +154,15 @@ be different for edges whose cost is within that bound of the limit.
 
 ## Query
 
-The engine keeps one copy of the customized hierarchy, renumbered by rank:
+The engine searches the mapped hierarchy directly, with the weights of the
+compiled profile bundle, also mapped. It keeps no other copy of the
+hierarchy. Metrics derived in memory (traffic buckets, avoid sets) share
+the hierarchy and add only their own weights.
 
-- Upward arcs, grouped by tail, each with its weight.
-- Downward arcs, grouped by head, each with its weight.
-
-This copy contains the only cost weights. The arcs keep their slots in the
-dataset bundle. Reconstruction finds the slot from the endpoints. Upward
-rows keep the row order of the bundle. Downward rows list the tails by edge
-id. Thus each search relaxes the arcs in the same order as on the bundle
-arrays.
+- The forward search reads the upward rows of the states it settles.
+- The backward search reads the downward rows of the states it settles.
+- Reconstruction finds an arc position from its two end ranks with a
+  binary search in one row.
 
 1.  Snapping converts the origin and the destination to seeds. An endpoint
     inside an edge becomes a partial-edge seed.
@@ -174,7 +186,9 @@ arrays.
 
 The middle rank decreases at each step. Thus reconstruction always stops,
 also for zero-cost transitions. The bundles do not contain middle-state
-arrays or full shortcut expansions.
+arrays or full shortcut expansions. The engine remembers the middle state of
+each arc that it unpacks, 4 bytes per arc, in memory that is committed only
+for the arcs that routes use.
 
 ### Turn restrictions and the exact engine
 
@@ -184,6 +198,10 @@ arrays or full shortcut expansions.
   candidate path against multi-edge turn restrictions.
 - If the candidate violates a restriction, the engine uses an exact
   automaton search. A legal candidate needs no exact search.
+- Without failure modes, the exact automaton search is an A* search. Its
+  potentials come from a lower-bound customization of the hierarchy. The engine calculates it at
+  the first request that needs it, so an engine that never meets an illegal
+  candidate does not keep it.
 - Matrix searches share complete CCH search spaces. They validate each
   reconstructed path. When a candidate is illegal, they resume the
   restriction-aware Dijkstra frontier of the current origin.
@@ -198,7 +216,8 @@ calculated the result, for example
   dataset bundle causes an error with a re-import instruction.
 - The engine validates each compiled profile against the acceleration
   bundle id of the dataset. A stale compiled profile compiles again.
-- Customization at load runs only when these items of the profile agree
-  with the dataset hierarchy: the acceleration header, the topology bundle
-  id, the algorithm and the schema. If they do not agree, engine
-  preparation reports the difference.
+- The stored weights are used only when their hierarchy fingerprint matches
+  the dataset hierarchy. Customization at load runs only when these items of
+  the profile agree with the dataset hierarchy: the acceleration header, the
+  topology bundle id, the algorithm and the schema. If they do not agree,
+  engine preparation reports the difference.

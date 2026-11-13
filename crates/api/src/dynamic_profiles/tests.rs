@@ -55,10 +55,10 @@ fn fixture() -> Arc<ServiceRuntime> {
             .collect(),
         edge_layers: TopologyEdgeLayers::from_directed_edges(&edges),
         edge_based_topology: EdgeBasedTopology {
-            node_first_out: vec![0, 2, 3, 3],
-            node_edge_order: vec![0, 2, 1],
-            edge_transition_first_out: vec![0, 1, 1, 1],
-            edge_transition_edges: vec![1],
+            node_first_out: vec![0, 2, 3, 3].into(),
+            node_edge_order: vec![0, 2, 1].into(),
+            edge_transition_first_out: vec![0, 1, 1, 1].into(),
+            edge_transition_edges: vec![1].into(),
         },
         turn_restrictions: vec![],
         names: vec![],
@@ -78,18 +78,16 @@ fn fixture() -> Arc<ServiceRuntime> {
     let mut service = test_service(topology, document);
     let state = Arc::get_mut(&mut service).unwrap();
     state.dynamic_profiles = DynamicProfileCache::new(1);
-    let acceleration = Arc::new(DatasetAccelerationBundle {
-        schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
-        source_topology_bundle_id: CacheBundleId::new("test-topology"),
-        algorithm: CCH_ALGORITHM.into(),
-        stats: Default::default(),
-        edge_order: vec![0, 1, 2],
-        edge_rank: vec![0, 1, 2],
-        upward_first_out: vec![0, 1, 1, 1],
-        upward_head: vec![1],
-        downward_first_out: vec![0, 0, 0, 0],
-        downward_head: vec![],
-    });
+    let acceleration = Arc::new(
+        DatasetAccelerationBundle::from_arcs(
+            CacheBundleId::new("test-topology"),
+            Default::default(),
+            vec![0, 1, 2],
+            &[(0, 1)],
+            &[],
+        )
+        .unwrap(),
+    );
     state.dataset_manifest.acceleration_bundle = Some(netweevil_persist::manifest::BundleRef {
         bundle_id: CacheBundleId::new("test-cch"),
         path: "unused".into(),

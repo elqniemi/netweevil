@@ -3,28 +3,37 @@
 //! Small and enum-heavy fields live in bincode sections; numeric columns use
 //! the lossless encodings in [`crate::codec`] (constant, identity, delta and
 //! varint, fixed-point coordinates, interned records). Structures that can be
-//! rebuilt from other columns (edge-transition CSR, spatial grid, edge
-//! components, CCH ranks) are recomputed at load whenever the writer verified
-//! that the rebuild reproduces them exactly; otherwise they are stored.
+//! rebuilt from other columns (spatial grid, edge components) are recomputed
+//! at load whenever the writer verified that the rebuild reproduces them
+//! exactly; otherwise they are stored.
+//!
+//! Large fixed-width arrays that queries read directly (the CCH hierarchy,
+//! customized weights, the edge-transition CSR) are raw sections instead:
+//! little-endian values, uncompressed and 64-byte aligned within the file, so
+//! a reader hands them out as [`Column`]s borrowing the memory-mapped file.
 //!
 //! Layout: the 8-byte magic [`CURRENT_MAGIC`] followed by length-prefixed
-//! sections (`u64` little-endian byte length + payload). The section order is
-//! fixed per bundle type.
+//! sections (`u64` little-endian byte length + payload). The two high bits
+//! of the length mark a deflated or a raw section; a raw section's payload
+//! starts at the next 64-byte file offset after its length, and the bytes
+//! between are zero. The section order is fixed per bundle type.
 
 #[cfg(target_endian = "big")]
 compile_error!("the sectioned bundle format stores raw little-endian arrays");
 
+use std::any::Any;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 use netweevil_core::{
     ACCELERATION_BUNDLE_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId,
-    CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
+    Column, CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
     CompiledTemporalProfile, CompiledTemporalRules, CompiledTurnCostConfig,
     CompiledVehicleExclusions, DatasetAccelerationBundle, EDGE_NAME_BUNDLE_SCHEMA_VERSION,
     ELEVATION_RASTER_SCHEMA_VERSION, EdgeBasedTopology, EdgeGuidance, EdgeNameBundle,
@@ -40,7 +49,7 @@ use crate::codec;
 
 /// The magic every bundle carries. Files that do not start with it are
 /// rejected; there is no second format to fall back to.
-const CURRENT_MAGIC: &[u8; 8] = b"NWSECB07";
+const CURRENT_MAGIC: &[u8; 8] = b"NWSECB08";
 const MAGIC_LEN: usize = CURRENT_MAGIC.len();
 
 /// Error for a file that is not a current sectioned bundle.
@@ -54,6 +63,14 @@ pub(crate) fn unsupported_format_error(path: &Path) -> anyhow::Error {
 /// Section length flag marking a deflate-compressed payload: a `u64`
 /// little-endian inflated length followed by a raw deflate stream.
 const DEFLATED: u64 = 1 << 63;
+/// Section length flag marking a raw section, whose payload starts at the
+/// next [`RAW_ALIGNMENT`]-byte file offset.
+const RAW: u64 = 1 << 62;
+/// File-offset alignment of raw section payloads: a cache line, which also
+/// aligns every primitive type. Memory maps start on a page boundary, so
+/// mapped payloads keep this alignment.
+const RAW_ALIGNMENT: usize = 64;
+const LENGTH_MASK: u64 = !(DEFLATED | RAW);
 /// Sections smaller than this are never compressed.
 const DEFLATE_MIN_BYTES: usize = 64 * 1024;
 /// Deflated sections are split into independently compressed chunks of
@@ -135,6 +152,8 @@ fn inflate_chunked(payload: &[u8]) -> Result<Vec<u8>> {
 /// of their size. Only the section being written is held in memory.
 pub(crate) struct SectionWriter {
     sink: SectionSink,
+    /// Bytes written so far, the file offset of the next byte.
+    position: usize,
 }
 
 enum SectionSink {
@@ -159,6 +178,7 @@ impl SectionWriter {
     pub(crate) fn create(path: &Path) -> Result<Self> {
         let mut writer = Self {
             sink: SectionSink::File(crate::AtomicFile::create(path)?),
+            position: 0,
         };
         writer.write_magic()?;
         Ok(writer)
@@ -168,13 +188,19 @@ impl SectionWriter {
     pub(crate) fn in_memory() -> Self {
         Self {
             sink: SectionSink::Memory(CURRENT_MAGIC.to_vec()),
+            position: MAGIC_LEN,
         }
     }
 
     fn write_magic(&mut self) -> Result<()> {
-        self.sink
-            .write_all(CURRENT_MAGIC)
+        self.write_bytes(CURRENT_MAGIC)
             .context("writing bundle magic")
+    }
+
+    fn write_bytes(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.sink.write_all(bytes)?;
+        self.position += bytes.len();
+        Ok(())
     }
 
     fn write_section(&mut self, section: Vec<u8>) -> Result<()> {
@@ -188,10 +214,21 @@ impl SectionWriter {
         } else {
             (section.len() as u64, section)
         };
-        self.sink
-            .write_all(&header.to_le_bytes())
+        self.write_bytes(&header.to_le_bytes())
             .context("writing section length")?;
-        self.sink.write_all(&payload).context("writing section")
+        self.write_bytes(&payload).context("writing section")
+    }
+
+    /// Writes `values` as a raw section that readers map without copying
+    /// (see [`SectionReader::read_raw`]).
+    pub(crate) fn write_raw<T: bytemuck::Pod>(&mut self, values: &[T]) -> Result<()> {
+        let bytes = bytemuck::cast_slice::<T, u8>(values);
+        self.write_bytes(&(bytes.len() as u64 | RAW).to_le_bytes())
+            .context("writing section length")?;
+        let padding = self.position.next_multiple_of(RAW_ALIGNMENT) - self.position;
+        self.write_bytes(&[0_u8; RAW_ALIGNMENT][..padding])
+            .context("writing section padding")?;
+        self.write_bytes(bytes).context("writing raw section")
     }
 
     pub(crate) fn write_bincode<T: Serialize>(&mut self, value: &T) -> Result<()> {
@@ -264,15 +301,51 @@ impl SectionWriter {
     }
 }
 
-/// Reads sections in order. Deflated sections are all inflated up front,
-/// in parallel, and each buffer is released once its section is consumed.
-pub(crate) struct SectionReader<'a> {
-    sections: std::vec::IntoIter<Cow<'a, [u8]>>,
+/// The bytes of a bundle, shared so raw sections can be handed out as
+/// [`Column`]s that keep them alive: a memory-mapped file, or a buffer.
+pub(crate) trait SharedBytes: Any + Send + Sync {
+    fn bytes(&self) -> &[u8];
 }
 
-/// Splits a bundle into `(deflated, payload)` sections without inflating
-/// them.
-fn frame_sections<'a>(bytes: &'a [u8], path: &Path) -> Result<Vec<(bool, &'a [u8])>> {
+impl SharedBytes for Mmap {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+impl SharedBytes for Vec<u8> {
+    fn bytes(&self) -> &[u8] {
+        self
+    }
+}
+
+pub(crate) type BundleBytes = Arc<dyn SharedBytes>;
+
+/// One framed section.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SectionKind {
+    Plain,
+    Deflated,
+    Raw,
+}
+
+enum Section<'a> {
+    Bytes(Cow<'a, [u8]>),
+    Raw(&'a [u8]),
+}
+
+/// Reads sections in order. Deflated sections are all inflated up front,
+/// in parallel, and each buffer is released once its section is consumed.
+/// Raw sections borrow the bundle bytes.
+pub(crate) struct SectionReader<'a> {
+    sections: std::vec::IntoIter<Section<'a>>,
+    /// Owner of the bytes, which raw sections keep alive; without one they
+    /// are copied.
+    owner: Option<BundleBytes>,
+}
+
+/// Splits a bundle into sections without inflating them.
+fn frame_sections<'a>(bytes: &'a [u8], path: &Path) -> Result<Vec<(SectionKind, &'a [u8])>> {
     if bytes.len() < MAGIC_LEN || &bytes[..MAGIC_LEN] != CURRENT_MAGIC {
         return Err(unsupported_format_error(path));
     }
@@ -284,52 +357,104 @@ fn frame_sections<'a>(bytes: &'a [u8], path: &Path) -> Result<Vec<(bool, &'a [u8
             bail!("truncated bundle: missing section length");
         }
         let header = u64::from_le_bytes(bytes[offset..header_end].try_into().unwrap());
-        let end = usize::try_from(header & !DEFLATED)
+        let kind = match (header & DEFLATED != 0, header & RAW != 0) {
+            (false, false) => SectionKind::Plain,
+            (true, false) => SectionKind::Deflated,
+            (false, true) => SectionKind::Raw,
+            (true, true) => bail!("bundle section is marked both deflated and raw"),
+        };
+        let start = if kind == SectionKind::Raw {
+            header_end.next_multiple_of(RAW_ALIGNMENT)
+        } else {
+            header_end
+        };
+        let end = usize::try_from(header & LENGTH_MASK)
             .ok()
-            .and_then(|len| header_end.checked_add(len))
+            .and_then(|len| start.checked_add(len))
             .filter(|end| *end <= bytes.len());
         let Some(end) = end else {
             bail!("truncated bundle: section extends past end of file");
         };
-        framed.push((header & DEFLATED != 0, &bytes[header_end..end]));
+        framed.push((kind, &bytes[start..end]));
         offset = end;
     }
     Ok(framed)
 }
 
 impl<'a> SectionReader<'a> {
+    /// A reader over borrowed bytes; raw sections are copied out.
     pub(crate) fn new(bytes: &'a [u8], path: &Path) -> Result<Self> {
         let framed = frame_sections(bytes, path)?;
         let sections = framed
             .into_par_iter()
-            .map(|(deflated, payload)| {
-                if !deflated {
-                    return Ok(Cow::Borrowed(payload));
-                }
-                let inflated = inflate_chunked(payload)?;
-                Ok(Cow::Owned(inflated))
+            .map(|(kind, payload)| {
+                Ok(match kind {
+                    SectionKind::Plain => Section::Bytes(Cow::Borrowed(payload)),
+                    SectionKind::Raw => Section::Raw(payload),
+                    SectionKind::Deflated => Section::Bytes(Cow::Owned(inflate_chunked(payload)?)),
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             sections: sections.into_iter(),
+            owner: None,
         })
+    }
+
+    /// A reader over shared bundle bytes; raw sections borrow them.
+    pub(crate) fn shared(bytes: &'a BundleBytes, path: &Path) -> Result<Self> {
+        let mut reader = Self::new(bytes.bytes(), path)?;
+        reader.owner = Some(bytes.clone());
+        Ok(reader)
     }
 
     /// Moves the next `count` sections into their own reader, so they can
     /// be decoded on another thread.
     fn take(&mut self, count: usize) -> Result<SectionReader<'a>> {
         let sections = (0..count)
-            .map(|_| self.next_section())
+            .map(|_| {
+                self.sections
+                    .next()
+                    .context("truncated bundle: missing section")
+            })
             .collect::<Result<Vec<_>>>()?;
         Ok(SectionReader {
             sections: sections.into_iter(),
+            owner: self.owner.clone(),
         })
     }
 
     fn next_section(&mut self) -> Result<Cow<'a, [u8]>> {
-        self.sections
+        match self
+            .sections
             .next()
-            .context("truncated bundle: missing section")
+            .context("truncated bundle: missing section")?
+        {
+            Section::Bytes(bytes) => Ok(bytes),
+            Section::Raw(_) => bail!("bundle has a raw section where an encoded one belongs"),
+        }
+    }
+
+    /// The next section, a raw array written by [`SectionWriter::write_raw`],
+    /// as a column borrowing the bundle bytes (or a copy of them when the
+    /// reader has no shared owner or the bytes are misaligned).
+    pub(crate) fn read_raw<T: bytemuck::Pod>(&mut self) -> Result<Column<T>> {
+        let Some(Section::Raw(bytes)) = self.sections.next() else {
+            bail!("bundle is missing a raw array section");
+        };
+        if bytes.len() % size_of::<T>() != 0 {
+            bail!("raw bundle section is not a whole number of values");
+        }
+        if let Some(owner) = &self.owner {
+            let owner: Arc<dyn Any + Send + Sync> = owner.clone();
+            // SAFETY: `bytes` lies in the bundle bytes `owner` holds: a
+            // read-only map of a file that writers replace by rename and
+            // never modify in place, or a buffer nothing mutates.
+            if let Some(column) = unsafe { Column::from_shared(owner, bytes) } {
+                return Ok(column);
+            }
+        }
+        Ok(Column::from(bytemuck::pod_collect_to_vec::<u8, T>(bytes)))
     }
 
     pub(crate) fn read_bincode<T: DeserializeOwned>(&mut self) -> Result<T> {
@@ -376,7 +501,15 @@ pub(crate) fn has_current_magic(path: &Path) -> bool {
 
 pub(crate) fn map_file(path: &Path) -> Result<Mmap> {
     let file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    // SAFETY: bundle writers replace files by renaming a complete temporary
+    // file into place and never write to or truncate a published file, so
+    // the mapped bytes do not change while mapped.
     unsafe { Mmap::map(&file) }.with_context(|| format!("memory-mapping {}", path.display()))
+}
+
+/// [`map_file`] as shared bundle bytes for [`SectionReader::shared`].
+pub(crate) fn map_shared(path: &Path) -> Result<BundleBytes> {
+    Ok(Arc::new(map_file(path)?))
 }
 
 /// `Option<u32>` as `i64` with `-1` for `None`, which the varint codecs
@@ -417,20 +550,7 @@ struct AccelerationHeader {
     source_topology_bundle_id: CacheBundleId,
     algorithm: String,
     stats: netweevil_core::AccelerationBundleStats,
-}
-
-/// Inverse permutation of `order`, or `None` when `order` is not a
-/// permutation of `0..order.len()`.
-fn invert_permutation(order: &[u32]) -> Option<Vec<u32>> {
-    let mut rank = vec![u32::MAX; order.len()];
-    for (position, &item) in order.iter().enumerate() {
-        let slot = rank.get_mut(item as usize)?;
-        if *slot != u32::MAX {
-            return None;
-        }
-        *slot = position as u32;
-    }
-    Some(rank)
+    hierarchy_key: u64,
 }
 
 pub(crate) fn write_acceleration_sectioned(
@@ -452,31 +572,35 @@ fn encode_acceleration(
         source_topology_bundle_id: bundle.source_topology_bundle_id.clone(),
         algorithm: bundle.algorithm.clone(),
         stats: bundle.stats.clone(),
+        hierarchy_key: bundle.hierarchy_key,
     })?;
-    writer.write_u32s(&bundle.edge_order)?;
-    if invert_permutation(&bundle.edge_order).as_ref() == Some(&bundle.edge_rank) {
-        writer.write_bincode(&Stored::<()>::Derived)?;
-    } else {
-        writer.write_bincode(&Stored::Explicit(()))?;
-        writer.write_u32s(&bundle.edge_rank)?;
+    writer.write_raw::<u32>(&bundle.edge_order)?;
+    writer.write_raw::<u32>(&bundle.edge_rank)?;
+    writer.write_raw::<u64>(&bundle.upward_first_out)?;
+    writer.write_raw::<u32>(&bundle.upward_head)?;
+    writer.write_raw::<u64>(&bundle.downward_first_in)?;
+    writer.write_raw::<u32>(&bundle.downward_tail)?;
+    writer.write_raw::<u64>(&bundle.downward_first_out)?;
+    writer.write_raw::<u32>(&bundle.downward_head)
+}
+
+/// Checks that `first_out` is a CSR offset array over `rows` rows whose
+/// last offset addresses all of `items`.
+fn ensure_csr(name: &str, first_out: &[u32], rows: usize, items: usize) -> Result<()> {
+    ensure_len(name, first_out.len(), rows + 1)?;
+    if first_out.first().is_some_and(|first| *first != 0)
+        || first_out.last().map(|last| *last as usize) != Some(items)
+    {
+        bail!("bundle CSR '{name}' does not address its {items} entries");
     }
-    writer.write_u32s(&bundle.upward_first_out)?;
-    writer.write_section(codec::encode_sorted_rows(
-        &bundle.upward_first_out,
-        &bundle.upward_head,
-    ))?;
-    writer.write_u32s(&bundle.downward_first_out)?;
-    writer.write_section(codec::encode_sorted_rows(
-        &bundle.downward_first_out,
-        &bundle.downward_head,
-    ))
+    Ok(())
 }
 
 pub(crate) fn read_acceleration_sectioned(
-    bytes: &[u8],
+    bytes: &BundleBytes,
     path: &Path,
 ) -> Result<DatasetAccelerationBundle> {
-    let mut reader = SectionReader::new(bytes, path)?;
+    let mut reader = SectionReader::shared(bytes, path)?;
     let tag: String = reader.read_bincode()?;
     if tag != "acceleration" {
         bail!("expected an acceleration bundle, found '{tag}'");
@@ -485,45 +609,23 @@ pub(crate) fn read_acceleration_sectioned(
     if header.schema_version != ACCELERATION_BUNDLE_SCHEMA_VERSION {
         return Err(unsupported_format_error(path));
     }
-    let order_section = reader.next_section()?;
-    let rank_section = match reader.read_bincode::<Stored<()>>()? {
-        Stored::Derived => None,
-        Stored::Explicit(()) => Some(reader.next_section()?),
-    };
-    let upward = (reader.next_section()?, reader.next_section()?);
-    let downward = (reader.next_section()?, reader.next_section()?);
-    let csr = |(first_out, heads): (Cow<'_, [u8]>, Cow<'_, [u8]>)| -> Result<_> {
-        let first_out = codec::decode_u32s(&first_out)?;
-        let heads = codec::decode_sorted_rows(&first_out, &heads)?;
-        Ok((first_out, heads))
-    };
-    let (order, (upward, downward)) = rayon::join(
-        || -> Result<_> {
-            let edge_order = codec::decode_u32s(&order_section)?;
-            let edge_rank = match rank_section {
-                None => invert_permutation(&edge_order)
-                    .context("CCH edge order is not a permutation")?,
-                Some(section) => codec::decode_u32s(&section)?,
-            };
-            Ok((edge_order, edge_rank))
-        },
-        || rayon::join(|| csr(upward), || csr(downward)),
-    );
-    let (edge_order, edge_rank) = order?;
-    let (upward_first_out, upward_head) = upward?;
-    let (downward_first_out, downward_head) = downward?;
-    Ok(DatasetAccelerationBundle {
+    let bundle = DatasetAccelerationBundle {
         schema_version: header.schema_version,
         source_topology_bundle_id: header.source_topology_bundle_id,
         algorithm: header.algorithm,
         stats: header.stats,
-        edge_order,
-        edge_rank,
-        upward_first_out,
-        upward_head,
-        downward_first_out,
-        downward_head,
-    })
+        hierarchy_key: header.hierarchy_key,
+        edge_order: reader.read_raw()?,
+        edge_rank: reader.read_raw()?,
+        upward_first_out: reader.read_raw()?,
+        upward_head: reader.read_raw()?,
+        downward_first_in: reader.read_raw()?,
+        downward_tail: reader.read_raw()?,
+        downward_first_out: reader.read_raw()?,
+        downward_head: reader.read_raw()?,
+    };
+    bundle.validate().map_err(anyhow::Error::msg)?;
+    Ok(bundle)
 }
 
 // --- Edge-name bundle ----------------------------------------------------
@@ -625,11 +727,8 @@ pub(crate) fn read_edge_names_sectioned(bytes: &[u8], path: &Path) -> Result<Edg
 
 // --- Compiled profile bundle ----------------------------------------------
 //
-// Only per-edge metrics are persisted. Customized CCH weights are a pure
-// function of these metrics, the topology and the dataset hierarchy, and are
-// rebuilt when an engine loads the profile (see
-// `netweevil_profile::customize_acceleration`); the reader returns the
-// acceleration header with empty weight arrays.
+// Per-edge metrics plus the customized CCH weight sets the compile produced
+// (empty sets stay empty), keyed by the hierarchy they were customized on.
 
 #[derive(Serialize, Deserialize)]
 struct CompiledProfileHeader {
@@ -647,6 +746,7 @@ struct CompiledProfileHeader {
 struct CompiledAccelerationHeader {
     schema_version: u32,
     source_acceleration_bundle_id: CacheBundleId,
+    source_hierarchy_key: u64,
     algorithm: String,
 }
 
@@ -685,6 +785,7 @@ fn encode_compiled_profile(
             .map(|acceleration| CompiledAccelerationHeader {
                 schema_version: acceleration.schema_version,
                 source_acceleration_bundle_id: acceleration.source_acceleration_bundle_id.clone(),
+                source_hierarchy_key: acceleration.source_hierarchy_key,
                 algorithm: acceleration.algorithm.clone(),
             }),
         temporal: CompiledTemporalProfile {
@@ -728,7 +829,20 @@ fn encode_compiled_profile(
         .vehicle
         .validate(bundle.edge_metrics.len(), bundle.components.len())
         .map_err(anyhow::Error::msg)?;
-    writer.write_bincode(&bundle.vehicle)
+    writer.write_bincode(&bundle.vehicle)?;
+    if let Some(acceleration) = &bundle.acceleration {
+        for weights in [
+            &acceleration.upward_weight,
+            &acceleration.downward_weight,
+            &acceleration.time_upward_weight,
+            &acceleration.time_downward_weight,
+            &acceleration.distance_upward_weight,
+            &acceleration.distance_downward_weight,
+        ] {
+            writer.write_raw::<u32>(weights)?;
+        }
+    }
+    Ok(())
 }
 
 /// `values` as a shared component column: a live column with the same bits
@@ -752,10 +866,10 @@ fn shared_component_column(values: Vec<f32>) -> std::sync::Arc<[f32]> {
 }
 
 pub(crate) fn read_compiled_profile_sectioned(
-    bytes: &[u8],
+    bytes: &BundleBytes,
     path: &Path,
 ) -> Result<CompiledProfileBundle> {
-    let mut reader = SectionReader::new(bytes, path)?;
+    let mut reader = SectionReader::shared(bytes, path)?;
     let tag: String = reader.read_bincode()?;
     if tag != "compiled_profile" {
         bail!("expected a compiled profile bundle, found '{tag}'");
@@ -801,6 +915,24 @@ pub(crate) fn read_compiled_profile_sectioned(
         .validate(edge_metrics.len(), components.len())
         .map_err(anyhow::Error::msg)?;
 
+    let acceleration = header
+        .acceleration
+        .map(|acceleration| -> Result<_> {
+            Ok(CompiledAcceleration {
+                schema_version: acceleration.schema_version,
+                source_acceleration_bundle_id: acceleration.source_acceleration_bundle_id,
+                source_hierarchy_key: acceleration.source_hierarchy_key,
+                algorithm: acceleration.algorithm,
+                upward_weight: reader.read_raw()?,
+                downward_weight: reader.read_raw()?,
+                time_upward_weight: reader.read_raw()?,
+                time_downward_weight: reader.read_raw()?,
+                distance_upward_weight: reader.read_raw()?,
+                distance_downward_weight: reader.read_raw()?,
+            })
+        })
+        .transpose()?;
+
     Ok(CompiledProfileBundle {
         schema_version: header.schema_version,
         profile_id: header.profile_id,
@@ -810,19 +942,7 @@ pub(crate) fn read_compiled_profile_sectioned(
         components,
         temporal,
         source_topology_bundle_id: header.source_topology_bundle_id,
-        acceleration: header
-            .acceleration
-            .map(|acceleration| CompiledAcceleration {
-                schema_version: acceleration.schema_version,
-                source_acceleration_bundle_id: acceleration.source_acceleration_bundle_id,
-                algorithm: acceleration.algorithm,
-                upward_weight: Vec::new(),
-                downward_weight: Vec::new(),
-                time_upward_weight: Vec::new(),
-                time_downward_weight: Vec::new(),
-                distance_upward_weight: Vec::new(),
-                distance_downward_weight: Vec::new(),
-            }),
+        acceleration,
         edge_metrics,
         vehicle,
     })
@@ -1184,18 +1304,28 @@ fn read_feature_attributes(reader: &mut SectionReader<'_>) -> Result<FeatureAttr
     })
 }
 
-fn derived_edge_based_topology(
+/// Checks the edge-based adjacency of a topology: both CSRs, or none at
+/// all for a topology built without one.
+fn ensure_edge_based_topology(
+    topology: &EdgeBasedTopology,
     node_count: usize,
-    routing: &[RoutingEdge],
-) -> Option<EdgeBasedTopology> {
-    routing
-        .iter()
-        .all(|edge| (edge.from.0 as usize) < node_count && (edge.to.0 as usize) < node_count)
-        .then(|| {
-            EdgeBasedTopology::build(node_count, routing.len(), |edge_index| {
-                (routing[edge_index].from.0, routing[edge_index].to.0)
-            })
-        })
+    edge_count: usize,
+) -> Result<()> {
+    if *topology == EdgeBasedTopology::default() {
+        return Ok(());
+    }
+    ensure_csr(
+        "node out-edges",
+        &topology.node_first_out,
+        node_count,
+        topology.node_edge_order.len(),
+    )?;
+    ensure_csr(
+        "edge transitions",
+        &topology.edge_transition_first_out,
+        edge_count,
+        topology.edge_transition_edges.len(),
+    )
 }
 
 fn derived_edge_component_ids(
@@ -1283,17 +1413,14 @@ fn encode_topology(writer: &mut SectionWriter, bundle: &TopologyBundle) -> Resul
     writer.write_u32s(&vehicle_restrictions.edge_restrictions)?;
 
     let ebt = &bundle.edge_based_topology;
-    if derived_edge_based_topology(bundle.nodes.len(), routing).as_ref() == Some(ebt) {
-        writer.write_bincode(&Stored::<()>::Derived)?;
-    } else {
-        writer.write_bincode(&Stored::Explicit(()))?;
-        writer.write_u32s(&ebt.node_first_out)?;
-        writer.write_u32s(&ebt.node_edge_order)?;
-        writer.write_u32s(&ebt.edge_transition_first_out)?;
-        writer.write_section(codec::encode_sorted_rows(
-            &ebt.edge_transition_first_out,
-            &ebt.edge_transition_edges,
-        ))?;
+    ensure_edge_based_topology(ebt, bundle.nodes.len(), edge_count)?;
+    for column in [
+        &ebt.node_first_out,
+        &ebt.node_edge_order,
+        &ebt.edge_transition_first_out,
+        &ebt.edge_transition_edges,
+    ] {
+        writer.write_raw::<u32>(column)?;
     }
     writer.write_u32s(&bundle.node_component_ids)?;
     if derived_edge_component_ids(&bundle.node_component_ids, routing).as_ref()
@@ -1349,8 +1476,8 @@ fn encode_topology(writer: &mut SectionWriter, bundle: &TopologyBundle) -> Resul
     writer.write_u32s(&widen(&elevation.edge_max_downhill_permille))
 }
 
-pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<TopologyBundle> {
-    let mut reader = SectionReader::new(bytes, path)?;
+pub(crate) fn read_topology_sectioned(bytes: &BundleBytes, path: &Path) -> Result<TopologyBundle> {
+    let mut reader = SectionReader::shared(bytes, path)?;
     let tag: String = reader.read_bincode()?;
     if tag != "topology" {
         bail!("expected a topology bundle, found '{tag}'");
@@ -1483,71 +1610,50 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
     edge_layers.validate().map_err(anyhow::Error::msg)?;
     let routing = &edge_layers.routing;
 
-    let explicit_transitions = match reader.read_bincode::<Stored<()>>()? {
-        Stored::Derived => None,
-        Stored::Explicit(()) => Some(reader.take(4)?),
+    let edge_based_topology = EdgeBasedTopology {
+        node_first_out: reader.read_raw()?,
+        node_edge_order: reader.read_raw()?,
+        edge_transition_first_out: reader.read_raw()?,
+        edge_transition_edges: reader.read_raw()?,
     };
-    let (edge_based_topology, rest) = rayon::join(
-        || -> Result<_> {
-            Ok(match explicit_transitions {
-                None => derived_edge_based_topology(node_count, routing)
-                    .context("edge endpoints reference missing nodes")?,
-                Some(mut reader) => {
-                    let node_first_out = reader.read_u32s()?;
-                    let node_edge_order = reader.read_u32s()?;
-                    let edge_transition_first_out = reader.read_u32s()?;
-                    let edge_transition_edges = codec::decode_sorted_rows(
-                        &edge_transition_first_out,
-                        &reader.next_section()?,
-                    )?;
-                    EdgeBasedTopology {
-                        node_first_out,
-                        node_edge_order,
-                        edge_transition_first_out,
-                        edge_transition_edges,
-                    }
-                }
-            })
-        },
-        || -> Result<_> {
-            let node_component_ids = reader.read_u32s()?;
-            let edge_component_ids = match reader.read_bincode::<Stored<()>>()? {
-                Stored::Derived => derived_edge_component_ids(&node_component_ids, routing)
-                    .context("edge components reference missing nodes")?,
-                Stored::Explicit(()) => reader.read_u32s()?,
-            };
-            let feature_attributes = read_feature_attributes(&mut reader)?;
-            let temporal_rule_sets = reader.read_bincode()?;
-            let node_admin_area = reader.read_u32s()?;
-            let node_timezone = reader.read_u32s()?;
-            let narrow = |values: Vec<u32>| -> Result<Vec<u16>> {
-                values
-                    .into_iter()
-                    .map(|value| u16::try_from(value).context("edge grade out of range"))
-                    .collect()
-            };
-            let uphill = narrow(reader.read_u32s()?)?;
-            let downhill = narrow(reader.read_u32s()?)?;
-            for (name, len, expected) in [
-                ("node admin areas", node_admin_area.len(), node_count),
-                ("node timezones", node_timezone.len(), node_count),
-                ("edge uphill grades", uphill.len(), edge_count),
-                ("edge downhill grades", downhill.len(), edge_count),
-            ] {
-                if len != 0 {
-                    ensure_len(name, len, expected)?;
-                }
+    ensure_edge_based_topology(&edge_based_topology, node_count, edge_count)?;
+    let rest = (|| -> Result<_> {
+        let node_component_ids = reader.read_u32s()?;
+        let edge_component_ids = match reader.read_bincode::<Stored<()>>()? {
+            Stored::Derived => derived_edge_component_ids(&node_component_ids, routing)
+                .context("edge components reference missing nodes")?,
+            Stored::Explicit(()) => reader.read_u32s()?,
+        };
+        let feature_attributes = read_feature_attributes(&mut reader)?;
+        let temporal_rule_sets = reader.read_bincode()?;
+        let node_admin_area = reader.read_u32s()?;
+        let node_timezone = reader.read_u32s()?;
+        let narrow = |values: Vec<u32>| -> Result<Vec<u16>> {
+            values
+                .into_iter()
+                .map(|value| u16::try_from(value).context("edge grade out of range"))
+                .collect()
+        };
+        let uphill = narrow(reader.read_u32s()?)?;
+        let downhill = narrow(reader.read_u32s()?)?;
+        for (name, len, expected) in [
+            ("node admin areas", node_admin_area.len(), node_count),
+            ("node timezones", node_timezone.len(), node_count),
+            ("edge uphill grades", uphill.len(), edge_count),
+            ("edge downhill grades", downhill.len(), edge_count),
+        ] {
+            if len != 0 {
+                ensure_len(name, len, expected)?;
             }
-            Ok((
-                node_component_ids,
-                edge_component_ids,
-                feature_attributes,
-                temporal_rule_sets,
-                (node_admin_area, node_timezone, uphill, downhill),
-            ))
-        },
-    );
-    let edge_based_topology = edge_based_topology?;
+        }
+        Ok((
+            node_component_ids,
+            edge_component_ids,
+            feature_attributes,
+            temporal_rule_sets,
+            (node_admin_area, node_timezone, uphill, downhill),
+        ))
+    })();
     let (
         node_component_ids,
         edge_component_ids,
@@ -1630,12 +1736,14 @@ impl ElevationRasterReader {
                 .next()
                 .with_context(|| format!("elevation raster is missing its {what}"))
         };
-        let (deflated, tag) = next("tag")?;
-        if deflated || bincode::deserialize::<String>(tag).ok().as_deref() != Some("elevation") {
+        let (kind, tag) = next("tag")?;
+        if kind != SectionKind::Plain
+            || bincode::deserialize::<String>(tag).ok().as_deref() != Some("elevation")
+        {
             bail!("{} is not an elevation raster bundle", path.display());
         }
-        let (deflated, header) = next("header")?;
-        if deflated {
+        let (kind, header) = next("header")?;
+        if kind != SectionKind::Plain {
             bail!("elevation raster header must not be compressed");
         }
         let header: ElevationRasterHeader =
@@ -1644,9 +1752,9 @@ impl ElevationRasterReader {
             return Err(unsupported_format_error(path));
         }
         let tiles = sections
-            .map(|(deflated, payload)| {
+            .map(|(kind, payload)| {
                 let start = payload.as_ptr() as usize - base;
-                (deflated, start..start + payload.len())
+                (kind == SectionKind::Deflated, start..start + payload.len())
             })
             .collect::<Vec<_>>();
         if tiles.len() != header.tile_count() {

@@ -431,23 +431,19 @@ fn compiles_acceleration_weights_from_dataset_bundle() {
     ]);
     topology.nodes = nodes(&[(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (2.0, 0.0, 0.0)]);
     topology.edge_based_topology = EdgeBasedTopology {
-        node_first_out: vec![0, 1, 2, 2],
-        node_edge_order: vec![0, 1],
-        edge_transition_first_out: vec![0, 1, 1],
-        edge_transition_edges: vec![1],
+        node_first_out: vec![0, 1, 2, 2].into(),
+        node_edge_order: vec![0, 1].into(),
+        edge_transition_first_out: vec![0, 1, 1].into(),
+        edge_transition_edges: vec![1].into(),
     };
-    let acceleration = DatasetAccelerationBundle {
-        schema_version: netweevil_core::ACCELERATION_BUNDLE_SCHEMA_VERSION,
-        source_topology_bundle_id: CacheBundleId::new("topology-test"),
-        algorithm: netweevil_core::CCH_ALGORITHM.to_string(),
-        stats: Default::default(),
-        edge_order: vec![0, 1],
-        edge_rank: vec![0, 1],
-        upward_first_out: vec![0, 1, 1],
-        upward_head: vec![1],
-        downward_first_out: vec![0, 0, 0],
-        downward_head: vec![],
-    };
+    let acceleration = DatasetAccelerationBundle::from_arcs(
+        CacheBundleId::new("topology-test"),
+        Default::default(),
+        vec![0, 1],
+        &[(0, 1)],
+        &[],
+    )
+    .expect("valid hierarchy");
     let compile_with_acceleration = |topology: &TopologyBundle| {
         compile_profile_bundle_with_acceleration(
             &profile,
@@ -475,8 +471,8 @@ fn compiles_acceleration_weights_from_dataset_bundle() {
     assert!(compiled.time_downward_weight.is_empty());
     assert!(compiled.distance_downward_weight.is_empty());
 
-    // Storage compiles skip customization; load-time customization of the
-    // stored metrics reproduces the compile-time weights exactly.
+    // Storage compiles customize generalized cost only, keyed to the
+    // hierarchy; customizing the stored metrics again reproduces them.
     let stored = super::compile_profile_metrics_with_progress(
         &profile,
         &topology,
@@ -486,7 +482,9 @@ fn compiles_acceleration_weights_from_dataset_bundle() {
     )
     .expect("metric compile succeeds");
     let header = stored.acceleration.as_ref().expect("acceleration header");
-    assert!(header.upward_weight.is_empty() && header.time_upward_weight.is_empty());
+    assert_eq!(header.upward_weight, compiled.upward_weight);
+    assert_eq!(header.source_hierarchy_key, acceleration.hierarchy_key);
+    assert!(header.time_upward_weight.is_empty() && header.distance_upward_weight.is_empty());
     let customized = super::customize_acceleration(
         &topology,
         &stored,

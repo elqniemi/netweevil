@@ -240,7 +240,7 @@ impl SharedArcSummaries {
 struct ArcSummaryCache<'a> {
     shared: &'a SharedArcSummaries,
     local: FxHashMap<u64, ArcSummary>,
-    stack: Vec<(HierarchyArc, Option<(u32, u32)>)>,
+    stack: Vec<(HierarchyArc, Option<u32>)>,
 }
 
 impl<'a> ArcSummaryCache<'a> {
@@ -252,8 +252,8 @@ impl<'a> ArcSummaryCache<'a> {
         }
     }
 
-    fn key(is_upward: bool, slot: u32) -> u64 {
-        (u64::from(slot) << 1) | u64::from(is_upward)
+    fn key(arc: HierarchyArc) -> u64 {
+        ((arc.position as u64) << 1) | u64::from(arc.is_upward())
     }
 
     fn lookup(&mut self, key: u64) -> Option<&ArcSummary> {
@@ -271,7 +271,7 @@ impl<'a> ArcSummaryCache<'a> {
     }
 
     fn summary(&mut self, context: &SummaryContext<'_>, arc: HierarchyArc) -> &ArcSummary {
-        let root = Self::key(arc.is_upward, arc.slot);
+        let root = Self::key(arc);
         if self.lookup(root).is_none() {
             self.compute(context, arc);
         }
@@ -284,15 +284,16 @@ impl<'a> ArcSummaryCache<'a> {
         self.stack
             .push((arc, unpack_witness(context.acceleration, arc)));
         while let Some(&(arc, witness)) = self.stack.last() {
-            let key = Self::key(arc.is_upward, arc.slot);
+            let key = Self::key(arc);
             if self.lookup(key).is_some() {
                 self.stack.pop();
                 continue;
             }
             let summary = match witness {
                 None => {
-                    let tail = arc.tail as usize;
-                    let head = arc.head(context.acceleration) as usize;
+                    let source = context.acceleration.source.as_ref();
+                    let tail = arc.tail_edge(source) as usize;
+                    let head = arc.head_edge(source) as usize;
                     let turn_s = context.routing_graph.turn_seconds_between(
                         context.topology,
                         context.metrics,
@@ -323,9 +324,9 @@ impl<'a> ArcSummaryCache<'a> {
                     }
                 }
                 Some(witness) => {
-                    let (left, right) = arc.children(context.acceleration, witness);
-                    let left_key = Self::key(false, left.slot);
-                    let right_key = Self::key(true, right.slot);
+                    let (left, right) = arc.children(&context.acceleration.source, witness);
+                    let left_key = Self::key(left);
+                    let right_key = Self::key(right);
                     let left_known = self.lookup(left_key).is_some();
                     let right_known = self.lookup(right_key).is_some();
                     if !left_known || !right_known {
@@ -408,20 +409,21 @@ fn summarize_space_path(
     let acceleration = context.acceleration;
     arcs.clear();
     let mut position = forward.position(meeting_edge)?;
-    while let Some(arc) = forward.arc(position, true) {
+    let source = acceleration.source.as_ref();
+    while let Some(arc) = forward.arc(source, position, true) {
         arcs.push(arc);
         position = forward.entries[position].parent as usize;
     }
     let first_edge = forward.entries[position].edge_index;
     arcs.reverse();
     let mut position = backward.position(meeting_edge)?;
-    while let Some(arc) = backward.arc(position, false) {
+    while let Some(arc) = backward.arc(source, position, false) {
         arcs.push(arc);
         position = backward.entries[position].parent as usize;
     }
     let last_edge = backward.entries[position].edge_index;
     let &last_arc = arcs.last()?;
-    debug_assert_eq!(last_arc.head(acceleration), last_edge);
+    debug_assert_eq!(last_arc.head_edge(source), last_edge);
 
     let metrics = context.metrics;
     let first = first_edge as usize;

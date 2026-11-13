@@ -138,8 +138,17 @@ result again.
 ## Bundle format
 
 All bundles use one sectioned binary format with the magic number
-`NWSECB07`. Large arrays load with one memory copy from the mapped file.
-Sections use lossless column encodings and deflate compression.
+`NWSECB08`. Most sections use lossless column encodings and deflate
+compression. The arrays that searches read directly (the CCH hierarchy, the
+customized weights and the edge-transition lists) are raw sections:
+uncompressed, aligned, and read in place from the memory-mapped file. These
+pages are file-backed. Processes that load the same bundle share them, and
+the operating system can drop them under memory pressure.
+
+!!! note
+    A running process keeps its mapped bundles open. Imports and compiles
+    write a new file and rename it into place, so they never change a file
+    that a process reads.
 
 !!! warning
     NetWeevil reads only the current bundle format. A bundle in a different

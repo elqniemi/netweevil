@@ -29,9 +29,11 @@ pub(crate) struct LowerBoundWeights {
     downward: Vec<u32>,
 }
 
-/// Lower-bound weights for `routing_graph`, customized on first use. `None`
-/// when the graph has no hierarchy or a transition has no hierarchy arc, in
-/// which case callers keep the Dijkstra fallback.
+/// Lower-bound weights for `routing_graph`, customized on first use (the
+/// first restricted fallback of the graph; concurrent callers wait for the
+/// same customization), so engines that never need them never hold them.
+/// `None` when the graph has no hierarchy or a transition has no hierarchy
+/// arc, in which case callers keep the Dijkstra fallback.
 pub(crate) fn lower_bound_weights(routing_graph: &RoutingGraph) -> Option<&LowerBoundWeights> {
     let acceleration = routing_graph.acceleration.as_ref()?;
     acceleration
@@ -40,32 +42,13 @@ pub(crate) fn lower_bound_weights(routing_graph: &RoutingGraph) -> Option<&Lower
         .as_ref()
 }
 
-/// Customizes the lower-bound weights of a graph with multi-edge
-/// restrictions on a background thread, so the first restricted fallback
-/// does not pay for them. A search that needs them sooner waits for the
-/// same customization rather than starting its own.
-pub(crate) fn prepare_lower_bounds_in_background(routing_graph: &RoutingGraph) {
-    if routing_graph.acceleration.is_none() || !routing_graph.has_restriction_sequences() {
-        return;
-    }
-    let graph = routing_graph.clone();
-    let spawned = std::thread::Builder::new()
-        .name("netweevil-lower-bounds".into())
-        .spawn(move || {
-            lower_bound_weights(&graph);
-        });
-    if let Err(error) = spawned {
-        tracing::warn!(%error, "lower-bound customization runs on first use instead");
-    }
-}
-
 fn build_lower_bound_weights(
     routing_graph: &RoutingGraph,
     acceleration: &AccelerationGraph,
 ) -> Option<LowerBoundWeights> {
     let source = acceleration.source.as_ref();
     let mut upward = vec![CCH_WEIGHT_INFINITY; source.upward_head.len()];
-    let mut downward = vec![CCH_WEIGHT_INFINITY; source.downward_head.len()];
+    let mut downward = vec![CCH_WEIGHT_INFINITY; source.downward_tail.len()];
     for edge in 0..routing_graph.edge_costs.len() {
         for transition in routing_graph.transition_range(edge) {
             let next = routing_graph.transition_edges[transition] as usize;
@@ -77,10 +60,12 @@ fn build_lower_bound_weights(
             if scaled >= f64::from(CCH_WEIGHT_OVERFLOW) {
                 return None;
             }
-            let weight = if source.edge_rank[edge] < source.edge_rank[next] {
-                &mut upward[acceleration.upward_arc_slot(edge, next as u32)?]
+            let arc =
+                HierarchyArc::between(source, source.edge_rank[edge], source.edge_rank[next])?;
+            let weight = if arc.is_upward() {
+                &mut upward[arc.position]
             } else {
-                &mut downward[acceleration.downward_arc_slot(edge, next as u32)?]
+                &mut downward[arc.position]
             };
             *weight = (*weight).min(scaled as u32);
         }
@@ -145,10 +130,9 @@ impl AStarScratch {
                 continue;
             }
             let source = acceleration.source.as_ref();
-            let downward_slots = acceleration.downward_slots();
             let rank = source.edge_rank[edge_index] as usize;
-            for position in acceleration.ranked.downward_range(rank) {
-                let weight = weights.downward[downward_slots[position] as usize];
+            for position in source.downward_range(rank) {
+                let weight = weights.downward[position];
                 if weight == CCH_WEIGHT_INFINITY {
                     continue;
                 }
@@ -186,11 +170,11 @@ impl AStarScratch {
                 self.potential_stack.pop();
                 continue;
             }
-            let arcs = source.upward_first_out[state as usize] as usize
-                ..source.upward_first_out[state as usize + 1] as usize;
+            let arcs = source.upward_range(source.edge_rank[state as usize] as usize);
+            let head_edge = |slot: usize| source.edge_order[source.upward_head[slot] as usize];
             let mut pending = false;
             for slot in arcs.clone() {
-                let head = source.upward_head[slot];
+                let head = head_edge(slot);
                 if weights.upward[slot] != CCH_WEIGHT_INFINITY
                     && !self.potential.contains_key(&head)
                 {
@@ -207,8 +191,7 @@ impl AStarScratch {
                 if weight == CCH_WEIGHT_INFINITY {
                     continue;
                 }
-                best =
-                    best.min(decode_cch_weight(weight) + self.potential[&source.upward_head[slot]]);
+                best = best.min(decode_cch_weight(weight) + self.potential[&head_edge(slot)]);
             }
             self.potential.insert(state, best);
             self.potential_stack.pop();

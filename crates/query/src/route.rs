@@ -271,8 +271,8 @@ pub(crate) fn cached_failure_mode_bundle(
     {
         // The ranked hierarchy keeps the only copy of the cost weights.
         failure_weights = Some((
-            std::mem::take(&mut customized.upward_weight),
-            std::mem::take(&mut customized.downward_weight),
+            std::mem::take(&mut customized.upward_weight).into_vec(),
+            std::mem::take(&mut customized.downward_weight).into_vec(),
         ));
         degraded_metrics.acceleration = Some(customized);
     }
@@ -282,7 +282,7 @@ pub(crate) fn cached_failure_mode_bundle(
     {
         routing_graph.acceleration = build_acceleration_graph(
             degraded_metrics.clone(),
-            failure_weights.map(CchWeights::Slots),
+            failure_weights.map(CchWeights::Arcs),
             Some(base_acceleration.source.clone()),
             degraded_topology.edge_count(),
         )?

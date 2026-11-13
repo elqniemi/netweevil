@@ -1407,11 +1407,9 @@ fn phast_service_area_expansion(
             if cost > max_cost {
                 continue;
             }
-            #[allow(clippy::needless_range_loop)]
-            for slot in acceleration.source.upward_first_out[edge_index] as usize
-                ..acceleration.source.upward_first_out[edge_index + 1] as usize
-            {
-                let next_edge = acceleration.source.upward_head[slot] as usize;
+            let source = acceleration.source.as_ref();
+            for slot in source.upward_range(source.edge_rank[edge_index] as usize) {
+                let next_edge = source.edge_order[source.upward_head[slot] as usize] as usize;
                 let next_cost = cost + netweevil_core::decode_cch_weight(upward_weight[slot]);
                 if dist.lower(next_edge, next_cost) {
                     heap.push(State {
@@ -1424,21 +1422,19 @@ fn phast_service_area_expansion(
             }
         }
 
-        // Downward sweep in descending rank order: each state's distance is
-        // final before any of its downward arcs are relaxed.
-        for &state in acceleration.source.edge_order.iter().rev() {
-            let state = state as usize;
-            let cost = dist.get(state);
-            if !cost.is_finite() || cost > max_cost {
-                continue;
-            }
-            #[allow(clippy::needless_range_loop)]
-            for slot in acceleration.source.downward_first_out[state] as usize
-                ..acceleration.source.downward_first_out[state + 1] as usize
-            {
-                let head = acceleration.source.downward_head[slot] as usize;
+        // Downward sweep in descending rank order: every downward arc into a
+        // state comes from a higher-ranked state whose distance is final.
+        let source = acceleration.source.as_ref();
+        for rank in (0..source.state_count()).rev() {
+            let state = source.edge_order[rank] as usize;
+            for slot in source.downward_range(rank) {
+                let tail = source.edge_order[source.downward_tail[slot] as usize] as usize;
+                let cost = dist.get(tail);
+                if !cost.is_finite() || cost > max_cost {
+                    continue;
+                }
                 let next_cost = cost + netweevil_core::decode_cch_weight(downward_weight[slot]);
-                if dist.lower(head, next_cost) {}
+                dist.lower(state, next_cost);
             }
         }
 

@@ -209,8 +209,8 @@ pub fn build_sim_network(
     let ebt = &topology.edge_based_topology;
     let (trans_first, trans_edges) = if ebt.edge_transition_first_out.len() == edge_count + 1 {
         (
-            ebt.edge_transition_first_out.clone(),
-            ebt.edge_transition_edges.clone(),
+            ebt.edge_transition_first_out.to_vec(),
+            ebt.edge_transition_edges.to_vec(),
         )
     } else {
         // Fallback: every outgoing edge at the target node, skipping the

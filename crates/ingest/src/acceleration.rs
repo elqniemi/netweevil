@@ -1,7 +1,6 @@
 use anyhow::Result;
 use netweevil_core::{
-    ACCELERATION_BUNDLE_SCHEMA_VERSION, AccelerationBundleStats, CCH_ALGORITHM, CacheBundleId,
-    DatasetAccelerationBundle, TopologyBundle,
+    AccelerationBundleStats, CacheBundleId, DatasetAccelerationBundle, TopologyBundle,
 };
 use rayon::prelude::*;
 
@@ -330,27 +329,14 @@ pub(crate) fn build_with_order(
         total_arc_count,
     };
 
-    // Rows sorted by head id enable binary-search arc lookup during
-    // customization and unpacking.
-    upward.par_sort_unstable();
-    downward.par_sort_unstable();
-
-    let (upward_first_out, upward_head) = arcs_to_csr(&upward, edge_count, "upward CCH arcs")?;
-    let (downward_first_out, downward_head) =
-        arcs_to_csr(&downward, edge_count, "downward CCH arcs")?;
-
-    Ok(DatasetAccelerationBundle {
-        schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
+    DatasetAccelerationBundle::from_arcs(
         source_topology_bundle_id,
-        algorithm: CCH_ALGORITHM.to_string(),
         stats,
         edge_order,
-        edge_rank,
-        upward_first_out,
-        upward_head,
-        downward_first_out,
-        downward_head,
-    })
+        &upward,
+        &downward,
+    )
+    .map_err(anyhow::Error::msg)
 }
 
 /// CSR offsets and heads of arcs sorted by tail. `what` names the arcs in

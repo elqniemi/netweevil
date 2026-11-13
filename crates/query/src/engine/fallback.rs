@@ -506,15 +506,13 @@ pub(crate) fn customize_failure_mode_acceleration(
     }
     let source = base_acceleration.source.as_ref();
     let edge_count = degraded_graph.edge_costs.len();
-    if source.upward_first_out.len() != edge_count + 1
-        || source.downward_first_out.len() != edge_count + 1
-    {
+    if source.state_count() != edge_count {
         return None;
     }
     let base_compiled = base_acceleration.metrics.acceleration.as_ref()?;
 
     let upward_len = source.upward_head.len();
-    let downward_len = source.downward_head.len();
+    let downward_len = source.downward_tail.len();
     let mut upward_weight = vec![CCH_WEIGHT_INFINITY; upward_len];
     let mut downward_weight = vec![CCH_WEIGHT_INFINITY; downward_len];
 
@@ -542,15 +540,17 @@ pub(crate) fn customize_failure_mode_acceleration(
             if !weight.is_finite() {
                 continue;
             }
-            if source.edge_rank[edge_index] < source.edge_rank[next_edge] {
-                if let Some(slot) = base_acceleration.upward_arc_slot(edge_index, next_edge as u32)
-                {
-                    upward_weight[slot] = upward_weight[slot].min(encode_cch_weight(weight));
-                }
-            } else if let Some(slot) =
-                base_acceleration.downward_arc_slot(edge_index, next_edge as u32)
-            {
-                downward_weight[slot] = downward_weight[slot].min(encode_cch_weight(weight));
+            if let Some(arc) = HierarchyArc::between(
+                source,
+                source.edge_rank[edge_index],
+                source.edge_rank[next_edge],
+            ) {
+                let weights = if arc.is_upward() {
+                    &mut upward_weight
+                } else {
+                    &mut downward_weight
+                };
+                weights[arc.position] = weights[arc.position].min(encode_cch_weight(weight));
             }
         }
     }
@@ -567,13 +567,14 @@ pub(crate) fn customize_failure_mode_acceleration(
     Some(netweevil_core::CompiledAcceleration {
         schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
         source_acceleration_bundle_id: base_compiled.source_acceleration_bundle_id.clone(),
+        source_hierarchy_key: source.hierarchy_key,
         algorithm: source.algorithm.clone(),
-        upward_weight,
-        downward_weight,
-        time_upward_weight: Vec::new(),
-        time_downward_weight: Vec::new(),
-        distance_upward_weight: Vec::new(),
-        distance_downward_weight: Vec::new(),
+        upward_weight: upward_weight.into(),
+        downward_weight: downward_weight.into(),
+        time_upward_weight: Default::default(),
+        time_downward_weight: Default::default(),
+        distance_upward_weight: Default::default(),
+        distance_downward_weight: Default::default(),
     })
 }
 
@@ -587,22 +588,17 @@ pub(crate) fn relax_lower_triangles(
     downward_weight: &mut [u32],
 ) {
     let source = acceleration.source.as_ref();
-    let downward_slots = acceleration.downward_slots();
-    for (middle_rank, &middle) in source.edge_order.iter().enumerate() {
-        let middle_index = middle as usize;
-        let outgoing_range = source.upward_first_out[middle_index] as usize
-            ..source.upward_first_out[middle_index + 1] as usize;
-        for position in acceleration.ranked.downward_range(middle_rank) {
-            let incoming_arc = downward_slots[position] as usize;
+    for middle in 0..source.state_count() {
+        let outgoing_range = source.upward_range(middle);
+        for incoming_arc in source.downward_range(middle) {
             let incoming_weight = downward_weight[incoming_arc];
             if incoming_weight == CCH_WEIGHT_INFINITY {
                 continue;
             }
-            let (tail_rank, _) = acceleration.ranked.downward_arc(position);
-            let tail = source.edge_order[tail_rank as usize] as usize;
+            let tail = source.downward_tail[incoming_arc];
             for outgoing_arc in outgoing_range.clone() {
                 let head = source.upward_head[outgoing_arc];
-                if head as usize == tail {
+                if head == tail {
                     continue;
                 }
                 let outgoing_weight = upward_weight[outgoing_arc];
@@ -610,16 +606,16 @@ pub(crate) fn relax_lower_triangles(
                     continue;
                 }
                 let candidate = add_cch_weights(incoming_weight, outgoing_weight);
-                if source.edge_rank[tail] < source.edge_rank[head as usize] {
-                    if let Some(slot) = acceleration.upward_arc_slot(tail, head)
-                        && candidate < upward_weight[slot]
-                    {
-                        upward_weight[slot] = candidate;
-                    }
-                } else if let Some(slot) = acceleration.downward_arc_slot(tail, head)
-                    && candidate < downward_weight[slot]
-                {
-                    downward_weight[slot] = candidate;
+                let Some(arc) = HierarchyArc::between(source, tail, head) else {
+                    continue;
+                };
+                let weights = if arc.is_upward() {
+                    &mut *upward_weight
+                } else {
+                    &mut *downward_weight
+                };
+                if candidate < weights[arc.position] {
+                    weights[arc.position] = candidate;
                 }
             }
         }
