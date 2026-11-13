@@ -28,9 +28,11 @@ fn engine(
     let mut metrics = metrics(&[]);
     metrics.edge_metrics = edges
         .iter()
-        .map(|edge| CompiledEdgeMetric {
-            travel_time_s: Some(f64::from(edge.length_m) / 10.0),
-            generalized_cost: Some(f64::from(edge.length_m)),
+        .map(|edge| {
+            CompiledEdgeMetric::new(
+                Some(f64::from(edge.length_m) / 10.0),
+                Some(f64::from(edge.length_m)),
+            )
         })
         .collect();
     exact_engine(topology, metrics)

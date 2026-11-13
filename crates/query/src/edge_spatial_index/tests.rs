@@ -21,10 +21,10 @@ fn edges_in_bbox_matches_brute_force() {
                     &topology.nodes[edge.from.0 as usize],
                     &topology.nodes[edge.to.0 as usize],
                 );
-                from.lon.min(to.lon) <= bbox[2]
-                    && from.lon.max(to.lon) >= bbox[0]
-                    && from.lat.min(to.lat) <= bbox[3]
-                    && from.lat.max(to.lat) >= bbox[1]
+                from.lon().min(to.lon()) <= bbox[2]
+                    && from.lon().max(to.lon()) >= bbox[0]
+                    && from.lat().min(to.lat()) <= bbox[3]
+                    && from.lat().max(to.lat()) >= bbox[1]
             })
             .collect::<Vec<_>>();
         assert_eq!(

@@ -1,17 +1,12 @@
 use super::*;
 use netweevil_core::{
     FeatureAttributeColumn, FeatureAttributeColumnData, FeatureAttributeDefinition,
-    FeatureAttributeType, NodeId,
+    FeatureAttributeType,
 };
 use std::collections::BTreeMap;
 
 fn node(z: f64) -> TopologyNode {
-    TopologyNode {
-        node_id: NodeId(0),
-        lon: 114.16,
-        lat: 22.28,
-        z,
-    }
+    TopologyNode::new(114.16, 22.28, z)
 }
 
 #[test]

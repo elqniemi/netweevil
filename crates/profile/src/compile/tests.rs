@@ -5,8 +5,7 @@ use netweevil_core::{
     AccessMask, CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW, CacheBundleId, CompiledProfileBundle,
     DatasetAccelerationBundle, DirectedEdge, EdgeBasedTopology, FeatureAttributeColumn,
     FeatureAttributeColumnData, FeatureAttributeDefinition, FeatureAttributeTable,
-    FeatureAttributeType, NodeId, RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle,
-    TopologyNode,
+    FeatureAttributeType, RoadClass, SmoothnessClass, SurfaceClass, TopologyBundle, TopologyNode,
 };
 use std::collections::BTreeMap;
 
@@ -18,13 +17,7 @@ fn compile(profile: &ProfileDocument, topology: &TopologyBundle) -> CompiledProf
 fn nodes(coordinates: &[(f64, f64, f64)]) -> Vec<TopologyNode> {
     coordinates
         .iter()
-        .enumerate()
-        .map(|(index, &(lon, lat, z))| TopologyNode {
-            node_id: NodeId(index as u32),
-            lon,
-            lat,
-            z,
-        })
+        .map(|&(lon, lat, z)| TopologyNode::new(lon, lat, z))
         .collect()
 }
 
@@ -60,27 +53,33 @@ fn sub_metre_edges_keep_physical_cost_without_penalizing_coincident_connectors()
     let physical_length =
         netweevil_core::geo::distance_3d_meters(114.18, 22.28, 0.0, 114.180003, 22.28, 0.0);
     assert!(physical_length > 0.0 && physical_length < 0.5);
-    let metric = |topology: &TopologyBundle| compile(&profile, topology).edge_metrics[0].clone();
+    let metric = |topology: &TopologyBundle| compile(&profile, topology).edge_metrics[0];
 
     let cost = metric(&topology);
     let expected_time = physical_length / (5.0 / 3.6);
-    assert!((cost.travel_time_s.unwrap() - expected_time).abs() < 1e-9);
-    assert!((cost.generalized_cost.unwrap() - expected_time - 2.0 * physical_length).abs() < 1e-9);
-    assert!(netweevil_core::encode_cch_weight(cost.generalized_cost.unwrap()) > 0);
-
-    topology.nodes[1].lon = topology.nodes[0].lon;
-    topology.nodes[1].z = 0.25;
-    topology.edge_layers.routing[0].ascent_m = 0.25;
+    assert!((cost.travel_time_s().unwrap() - expected_time).abs() < 1e-9);
     assert!(
-        metric(&topology).travel_time_s.unwrap() > 0.0,
+        (cost.generalized_cost().unwrap() - expected_time - 2.0 * physical_length).abs() < 1e-9
+    );
+    assert!(netweevil_core::encode_cch_weight(cost.generalized_cost().unwrap()) > 0);
+
+    topology.nodes[1] = netweevil_core::TopologyNode::new(
+        topology.nodes[0].lon(),
+        topology.nodes[1].lat(),
+        topology.nodes[1].z(),
+    );
+    topology.nodes[1].set_z(0.25);
+    topology.edge_layers.ascent_m[0] = 0.25;
+    assert!(
+        metric(&topology).travel_time_s().unwrap() > 0.0,
         "vertical sub-metre edges must cost time"
     );
 
-    topology.nodes[1].z = 0.0;
-    topology.edge_layers.routing[0].ascent_m = 0.0;
+    topology.nodes[1].set_z(0.0);
+    topology.edge_layers.ascent_m[0] = 0.0;
     let coincident = metric(&topology);
-    assert_eq!(coincident.travel_time_s, Some(0.0));
-    assert_eq!(coincident.generalized_cost, Some(0.0));
+    assert_eq!(coincident.travel_time_s(), Some(0.0));
+    assert_eq!(coincident.generalized_cost(), Some(0.0));
 }
 
 #[test]
@@ -99,7 +98,7 @@ fn compiles_edge_metrics_from_topology() {
 
     // 1 km at 40 km/h halved by the smoothness factor.
     assert_eq!(compiled.edge_metrics.len(), 1);
-    let travel_time = compiled.edge_metrics[0].travel_time_s.unwrap();
+    let travel_time = compiled.edge_metrics[0].travel_time_s().unwrap();
     assert!((170.0..190.0).contains(&travel_time));
     assert_eq!(compiled.source_topology_bundle_id.0, "topology-test");
 }
@@ -168,7 +167,7 @@ temporal:
     };
 
     let compiled = compile(&profile, &topology);
-    let travel_time = compiled.edge_metrics[0].travel_time_s.unwrap();
+    let travel_time = compiled.edge_metrics[0].travel_time_s().unwrap();
     assert!(travel_time >= 40.0, "stairs must respect vertical speed");
     let components = compiled
         .components
@@ -227,7 +226,7 @@ fn country_and_state_keys_select_regional_speeds_and_exclusions() {
     let compiled = compile(&profile, &topology);
     let time = |compiled: &CompiledProfileBundle, edge: usize| {
         compiled.edge_metrics[edge]
-            .travel_time_s
+            .travel_time_s()
             .map(|time| (time * 1e6).round() / 1e6)
     };
     // Edge 0 starts in Groningen (excluded); edge 1 in Drenthe (60 km/h);
@@ -242,7 +241,7 @@ fn country_and_state_keys_select_regional_speeds_and_exclusions() {
         &crate::test_support::topology(&[edge(0, RoadClass::Primary, AccessMask::CAR)]),
     );
     assert_eq!(
-        compiled.edge_metrics[0].travel_time_s,
+        compiled.edge_metrics[0].travel_time_s(),
         Some(1_000.0 / (70.0 / 3.6))
     );
 }
@@ -258,14 +257,14 @@ fn border_crossings_add_time_and_penalty_or_are_avoided() {
     ));
     for edge in [0, 2] {
         assert_eq!(
-            penalized[edge].generalized_cost,
-            base.edge_metrics[edge].generalized_cost
+            penalized[edge].generalized_cost(),
+            base.edge_metrics[edge].generalized_cost()
         );
     }
-    let base_time = base.edge_metrics[1].travel_time_s.unwrap();
-    assert_eq!(penalized[1].travel_time_s, Some(base_time + 600.0));
-    let base_cost = base.edge_metrics[1].generalized_cost.unwrap();
-    let cost = penalized[1].generalized_cost.unwrap();
+    let base_time = base.edge_metrics[1].travel_time_s().unwrap();
+    assert_eq!(penalized[1].travel_time_s(), Some(base_time + 600.0));
+    let base_cost = base.edge_metrics[1].generalized_cost().unwrap();
+    let cost = penalized[1].generalized_cost().unwrap();
     assert!(
         cost > base_cost + 600.0 + 900.0 - 1e-6,
         "{cost} vs {base_cost}"
@@ -275,8 +274,8 @@ fn border_crossings_add_time_and_penalty_or_are_avoided() {
         "car",
         "preferences: {avoid_border_crossings: true}",
     ));
-    assert_eq!(avoided[1].travel_time_s, None);
-    assert!(avoided[0].travel_time_s.is_some() && avoided[2].travel_time_s.is_some());
+    assert_eq!(avoided[1].travel_time_s(), None);
+    assert!(avoided[0].travel_time_s().is_some() && avoided[2].travel_time_s().is_some());
 
     let error = crate::test_support::profile("car", "preferences: {border_crossing_time_s: -1}")
         .validate()
@@ -309,7 +308,7 @@ fn routable_under(max_grade: &str, topology: &TopologyBundle) -> Vec<bool> {
     compile(&profile, topology)
         .edge_metrics
         .iter()
-        .map(|metric| metric.generalized_cost.is_some())
+        .map(|metric| metric.generalized_cost().is_some())
         .collect()
 }
 
@@ -372,9 +371,9 @@ fn excludes_matching_edges_from_compiled_metrics() {
 
     let compiled = compile(&profile, &topology);
 
-    assert_eq!(compiled.edge_metrics[0].travel_time_s, None);
-    assert_eq!(compiled.edge_metrics[0].generalized_cost, None);
-    assert!(compiled.edge_metrics[1].travel_time_s.is_some());
+    assert_eq!(compiled.edge_metrics[0].travel_time_s(), None);
+    assert_eq!(compiled.edge_metrics[0].generalized_cost(), None);
+    assert!(compiled.edge_metrics[1].travel_time_s().is_some());
 }
 
 #[test]
@@ -383,8 +382,8 @@ fn uses_tagged_ferry_duration_when_available() {
 
     // 900 s tagged crossing + 300 s boarding.
     assert_eq!(compiled.edge_metrics.len(), 1);
-    assert_eq!(compiled.edge_metrics[0].travel_time_s, Some(1_200.0));
-    assert_eq!(compiled.edge_metrics[0].generalized_cost, Some(1_560.0));
+    assert_eq!(compiled.edge_metrics[0].travel_time_s(), Some(1_200.0));
+    assert_eq!(compiled.edge_metrics[0].generalized_cost(), Some(1_560.0));
 }
 
 #[test]
@@ -392,8 +391,8 @@ fn rejects_ferry_without_duration_when_inference_is_disabled() {
     let compiled = compile(&ferry_profile(false), &ferry_topology(None));
 
     assert_eq!(compiled.edge_metrics.len(), 1);
-    assert_eq!(compiled.edge_metrics[0].travel_time_s, None);
-    assert_eq!(compiled.edge_metrics[0].generalized_cost, None);
+    assert_eq!(compiled.edge_metrics[0].travel_time_s(), None);
+    assert_eq!(compiled.edge_metrics[0].generalized_cost(), None);
 }
 
 #[test]
@@ -519,7 +518,7 @@ fn compiles_acceleration_weights_from_dataset_bundle() {
     topology.edge_layers.routing[1].flags =
         netweevil_core::EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION;
     let compiled = compile_with_acceleration(&topology);
-    assert!(compiled.edge_metrics[1].generalized_cost.is_some());
+    assert!(compiled.edge_metrics[1].generalized_cost().is_some());
     let compiled = compiled.acceleration.expect("acceleration compiled");
     assert_eq!(compiled.upward_weight[0], CCH_WEIGHT_INFINITY);
     assert_eq!(compiled.time_upward_weight[0], CCH_WEIGHT_INFINITY);
@@ -527,10 +526,14 @@ fn compiles_acceleration_weights_from_dataset_bundle() {
 
     // So is an edge the mode may use only under a time condition.
     topology.edge_layers.routing[1].flags = 0;
-    topology.edge_layers.profile[1].access_mask = AccessMask::new(AccessMask::FOOT);
-    topology.edge_layers.profile[1].conditional_access = AccessMask::new(AccessMask::CAR);
+    topology.edge_layers.update_profile(1, |profile| {
+        profile.access_mask = AccessMask::new(AccessMask::FOOT)
+    });
+    topology.edge_layers.update_profile(1, |profile| {
+        profile.conditional_access = AccessMask::new(AccessMask::CAR)
+    });
     let compiled = compile_with_acceleration(&topology);
-    assert!(compiled.edge_metrics[1].generalized_cost.is_some());
+    assert!(compiled.edge_metrics[1].generalized_cost().is_some());
     assert_eq!(
         compiled.acceleration.expect("acceleration").upward_weight[0],
         CCH_WEIGHT_INFINITY
@@ -538,10 +541,16 @@ fn compiles_acceleration_weights_from_dataset_bundle() {
 
     // Entering a destination-only edge from an ordinary one costs the
     // profile's penalty on top of the transition.
-    topology.edge_layers.profile[1].access_mask = AccessMask::new(AccessMask::CAR);
-    topology.edge_layers.profile[1].conditional_access = AccessMask::default();
+    topology.edge_layers.update_profile(1, |profile| {
+        profile.access_mask = AccessMask::new(AccessMask::CAR)
+    });
+    topology.edge_layers.update_profile(1, |profile| {
+        profile.conditional_access = AccessMask::default()
+    });
     let open = compile_with_acceleration(&topology);
-    topology.edge_layers.profile[1].destination_only = AccessMask::new(AccessMask::CAR);
+    topology.edge_layers.update_profile(1, |profile| {
+        profile.destination_only = AccessMask::new(AccessMask::CAR)
+    });
     let destination_only = compile_with_acceleration(&topology);
     let weight = |bundle: &CompiledProfileBundle| {
         netweevil_core::decode_cch_weight(bundle.acceleration.as_ref().unwrap().upward_weight[0])
@@ -550,8 +559,8 @@ fn compiles_acceleration_weights_from_dataset_bundle() {
     assert!((penalty - 600.0).abs() < 1e-2, "penalty {penalty}");
     // Edge metrics themselves are unchanged.
     assert_eq!(
-        open.edge_metrics[1].generalized_cost,
-        destination_only.edge_metrics[1].generalized_cost
+        open.edge_metrics[1].generalized_cost(),
+        destination_only.edge_metrics[1].generalized_cost()
     );
 }
 
@@ -599,7 +608,7 @@ fn excludes_edges_whose_restrictions_the_profile_vehicle_violates() {
         let traversable = compiled
             .edge_metrics
             .iter()
-            .map(|metric| metric.travel_time_s.is_some())
+            .map(|metric| metric.travel_time_s().is_some())
             .collect::<Vec<_>>();
         assert_eq!(traversable, expected, "{mode} {vehicle}");
     }
@@ -638,11 +647,11 @@ fn records_the_metrics_and_components_of_vehicle_excluded_edges() {
     assert_eq!(exclusions.edges, vec![1]);
     assert_eq!(
         Some(exclusions.travel_time_s[0]),
-        open.edge_metrics[1].travel_time_s
+        open.edge_metrics[1].travel_time_s()
     );
     assert_eq!(
         Some(exclusions.generalized_cost[0]),
-        open.edge_metrics[1].generalized_cost
+        open.edge_metrics[1].generalized_cost()
     );
     assert_eq!(
         exclusions.component_values,
@@ -650,11 +659,11 @@ fn records_the_metrics_and_components_of_vehicle_excluded_edges() {
     );
     assert!(open.components[0].edge_values[1] > 0.0);
     // The excluded edge itself looks like any untraversable edge.
-    assert!(truck.edge_metrics[1].generalized_cost.is_none());
+    assert!(truck.edge_metrics[1].generalized_cost().is_none());
     assert_eq!(truck.components[0].edge_values[1], 0.0);
     assert_eq!(
-        truck.edge_metrics[0].generalized_cost,
-        open.edge_metrics[0].generalized_cost
+        truck.edge_metrics[0].generalized_cost(),
+        open.edge_metrics[0].generalized_cost()
     );
 }
 

@@ -20,7 +20,7 @@ fn hilly_border_topology() -> TopologyBundle {
         ],
     );
     for (node, z) in topology.nodes.iter_mut().zip([10.0, 12.0, 11.0, 15.0]) {
-        node.z = z;
+        node.set_z(z);
     }
     topology.regions.admin_areas = vec![
         AdminArea {
@@ -118,7 +118,7 @@ fn routes_report_an_elevation_profile_with_grades() {
 fn datasets_without_heights_report_unknown_elevations_and_no_areas() {
     let mut topology = hilly_border_topology();
     for node in &mut topology.nodes {
-        node.z = 0.0;
+        node.set_z(0.0);
     }
     topology.regions = Default::default();
     let route = annotated_route(topology);
@@ -195,7 +195,7 @@ fn alternative_routes_report_their_own_areas_and_elevation() {
     let mut nodes = base
         .nodes
         .iter()
-        .map(|node| (node.lon, node.lat))
+        .map(|node| (node.lon(), node.lat()))
         .collect::<Vec<_>>();
     nodes.push((6.0015, 53.0005));
     let mut detoured = topology("annotations-detour", &nodes, &edges);
@@ -204,7 +204,7 @@ fn alternative_routes_report_their_own_areas_and_elevation() {
         .iter_mut()
         .zip([10.0, 12.0, 11.0, 15.0, 13.0])
     {
-        node.z = z;
+        node.set_z(z);
     }
     detoured.regions = base.regions;
     detoured.regions.node_admin_area.push(1);

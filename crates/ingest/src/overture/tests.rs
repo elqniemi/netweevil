@@ -410,10 +410,10 @@ fn imports_with_a_dem_and_admin_boundaries() {
         bundle
             .nodes
             .iter()
-            .position(|node| (node.lon - lon).abs() < 1e-9)
+            .position(|node| (node.lon() - lon).abs() < 1e-9)
             .unwrap()
     };
-    let z = |lon: f64| bundle.nodes[node_at(lon)].z;
+    let z = |lon: f64| bundle.nodes[node_at(lon)].z();
     assert_eq!((z(6.562), z(6.566)), (11.5, 15.5));
     // The bridge's middle vertex spans the river instead of dipping into it.
     assert_eq!(z(6.564), 13.5);
@@ -430,7 +430,7 @@ fn imports_with_a_dem_and_admin_boundaries() {
             routing.from.0 as usize == node_at(6.560) && routing.to.0 as usize == node_at(6.562)
         })
         .unwrap();
-    assert_eq!(bundle.routing_edge(uphill_edge).ascent_m, 2.0);
+    assert_eq!(bundle.edge_ascent_m(uphill_edge), 2.0);
     assert!(bundle.elevation.edge_max_grades(uphill_edge).unwrap().0 > 0.0);
 
     let west = bundle.regions.node_admin_area(node_at(6.564)).unwrap();

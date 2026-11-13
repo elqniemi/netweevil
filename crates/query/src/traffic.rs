@@ -96,9 +96,11 @@ impl HistoricalTraffic {
         let edge_patterns = (0..topology.edge_count())
             .into_par_iter()
             .map(|edge_index| {
-                let edge = topology.routing_edge(edge_index);
                 bundle
-                    .lookup(edge.source_way_id, edge.source_direction)
+                    .lookup(
+                        topology.edge_source_way_id(edge_index),
+                        topology.edge_source_direction(edge_index),
+                    )
                     .unwrap_or(NO_PATTERN)
             })
             .collect::<Vec<_>>();
@@ -382,12 +384,7 @@ struct FeatureEdgeIndex {
 impl FeatureEdgeIndex {
     fn build(topology: &TopologyBundle) -> Self {
         let mut pairs = (0..topology.edge_count())
-            .map(|edge_index| {
-                (
-                    topology.routing_edge(edge_index).source_way_id,
-                    edge_index as u32,
-                )
-            })
+            .map(|edge_index| (topology.edge_source_way_id(edge_index), edge_index as u32))
             .collect::<Vec<_>>();
         pairs.par_sort_unstable();
         Self { pairs }
@@ -405,7 +402,7 @@ impl FeatureEdgeIndex {
             .take_while(move |(id, _)| *id == feature_id)
             .map(|(_, edge)| *edge)
             .filter(move |edge| {
-                let source_direction = topology.routing_edge(*edge as usize).source_direction;
+                let source_direction = topology.edge_source_direction(*edge as usize);
                 (source_direction < 0) == (direction < 0)
             })
     }
@@ -639,7 +636,7 @@ fn speed_ratio(
     policy: TrafficSpeedPolicy,
 ) -> f64 {
     let length_m = f64::from(topology.routing_edge(edge_index).length_m);
-    let Some(profile_time_s) = metric.travel_time_s else {
+    let Some(profile_time_s) = metric.travel_time_s() else {
         return 1.0;
     };
     if length_m <= 0.0
@@ -684,7 +681,8 @@ fn bucket_edge_metrics(
         .par_iter_mut()
         .enumerate()
         .for_each(|(edge_index, metric)| {
-            let (Some(time_s), Some(cost)) = (metric.travel_time_s, metric.generalized_cost) else {
+            let (Some(time_s), Some(cost)) = (metric.travel_time_s(), metric.generalized_cost())
+            else {
                 return;
             };
             let speed = historical
@@ -693,8 +691,10 @@ fn bucket_edge_metrics(
             if let Some(speed) = speed {
                 let phi = speed_ratio(topology, metric, edge_index, speed, policy);
                 let traffic_time = time_s / phi;
-                metric.travel_time_s = Some(traffic_time);
-                metric.generalized_cost = Some(traffic_cost(cost, time_s, traffic_time, weight));
+                *metric = netweevil_core::CompiledEdgeMetric::new(
+                    Some(traffic_time),
+                    Some(traffic_cost(cost, time_s, traffic_time, weight)),
+                );
             }
         });
     // `active` is sorted; live entries override the historical speed.
@@ -706,18 +706,20 @@ fn bucket_edge_metrics(
         let edge_index = edge as usize;
         let base_metric = &base.edge_metrics[edge_index];
         let metric = &mut metrics[edge_index];
-        let (Some(time_s), Some(cost)) = (base_metric.travel_time_s, base_metric.generalized_cost)
+        let (Some(time_s), Some(cost)) =
+            (base_metric.travel_time_s(), base_metric.generalized_cost())
         else {
             continue;
         };
         if entry.closed {
-            metric.travel_time_s = None;
-            metric.generalized_cost = None;
+            *metric = netweevil_core::CompiledEdgeMetric::ABSENT;
         } else if let Some(speed) = entry.speed_kph {
             let phi = speed_ratio(topology, base_metric, edge_index, speed, policy);
             let traffic_time = time_s / phi;
-            metric.travel_time_s = Some(traffic_time);
-            metric.generalized_cost = Some(traffic_cost(cost, time_s, traffic_time, weight));
+            *metric = netweevil_core::CompiledEdgeMetric::new(
+                Some(traffic_time),
+                Some(traffic_cost(cost, time_s, traffic_time, weight)),
+            );
         }
     }
     metrics

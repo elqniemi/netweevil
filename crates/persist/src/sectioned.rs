@@ -27,8 +27,8 @@ use netweevil_core::{
     CompiledAcceleration, CompiledCostComponent, CompiledEdgeMetric, CompiledProfileBundle,
     CompiledTemporalProfile, CompiledTemporalRules, CompiledTurnCostConfig,
     CompiledVehicleExclusions, DatasetAccelerationBundle, EDGE_NAME_BUNDLE_SCHEMA_VERSION,
-    ELEVATION_RASTER_SCHEMA_VERSION, EdgeBasedTopology, EdgeGuidance, EdgeId, EdgeNameBundle,
-    EdgePresentation, EdgeProfileAttributes, ElevationRasterHeader, FeatureAttributeColumn,
+    ELEVATION_RASTER_SCHEMA_VERSION, EdgeBasedTopology, EdgeGuidance, EdgeNameBundle,
+    EdgeProfileAttributes, ElevationRasterHeader, FeatureAttributeColumn,
     FeatureAttributeColumnData, FeatureAttributeDefinition, FeatureAttributeTable, NodeId,
     NodeSpatialIndex, RoutingEdge, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TopologyBundle,
     TopologyEdgeLayers, TopologyNode, TravelMode, VehicleRestrictionTable,
@@ -40,7 +40,7 @@ use crate::codec;
 
 /// The magic every bundle carries. Files that do not start with it are
 /// rejected; there is no second format to fall back to.
-const CURRENT_MAGIC: &[u8; 8] = b"NWSECB06";
+const CURRENT_MAGIC: &[u8; 8] = b"NWSECB07";
 const MAGIC_LEN: usize = CURRENT_MAGIC.len();
 
 /// Error for a file that is not a current sectioned bundle.
@@ -676,13 +676,7 @@ fn encode_compiled_profile(
     writer.write_u32s(&(0..bundle.edge_metrics.len() as u32).collect::<Vec<_>>())?;
     // Travel times and costs derive from a few speed classes and integer
     // lengths, so (time, cost) pairs repeat heavily.
-    writer.write_interned(
-        &bundle
-            .edge_metrics
-            .iter()
-            .map(|metric| (metric.travel_time_s, metric.generalized_cost))
-            .collect::<Vec<_>>(),
-    )?;
+    writer.write_interned(&bundle.edge_metrics)?;
     for component in &bundle.components {
         ensure_len(
             "compiled profile component",
@@ -740,15 +734,8 @@ pub(crate) fn read_compiled_profile_sectioned(
     }
 
     let edge_count = reader.read_u32s()?.len();
-    let metrics: Vec<(Option<f64>, Option<f64>)> = reader.read_interned()?;
-    ensure_len("compiled edge metrics", metrics.len(), edge_count)?;
-    let edge_metrics: Vec<CompiledEdgeMetric> = metrics
-        .into_iter()
-        .map(|(travel_time_s, generalized_cost)| CompiledEdgeMetric {
-            travel_time_s,
-            generalized_cost,
-        })
-        .collect();
+    let edge_metrics: Vec<CompiledEdgeMetric> = reader.read_interned()?;
+    ensure_len("compiled edge metrics", edge_metrics.len(), edge_count)?;
 
     let mut components = Vec::with_capacity(header.components.len());
     for component in header.components {
@@ -1198,12 +1185,7 @@ pub(crate) fn write_topology_sectioned(path: &Path, bundle: &TopologyBundle) -> 
 fn encode_topology(writer: &mut SectionWriter, bundle: &TopologyBundle) -> Result<()> {
     let layers = &bundle.edge_layers;
     let edge_count = layers.routing.len();
-    ensure_len("edge profile layer", layers.profile.len(), edge_count)?;
-    ensure_len(
-        "edge presentation layer",
-        layers.presentation.len(),
-        edge_count,
-    )?;
+    layers.validate().map_err(anyhow::Error::msg)?;
     writer.write_bincode(&"topology")?;
     writer.write_bincode(&TopologyHeader {
         schema_version: bundle.schema_version,
@@ -1218,19 +1200,12 @@ fn encode_topology(writer: &mut SectionWriter, bundle: &TopologyBundle) -> Resul
         dem: bundle.elevation.dem.clone(),
     })?;
 
-    // Nodes: ids are normally their index, coordinates OSM decimicro
-    // degrees, elevation absent; the codecs collapse all three.
+    // Nodes: coordinates are usually OSM decimicro degrees and elevation
+    // absent; the codecs collapse both.
     let column = |f: fn(&TopologyNode) -> f64| bundle.nodes.iter().map(f).collect::<Vec<_>>();
-    writer.write_u32s(
-        &bundle
-            .nodes
-            .iter()
-            .map(|node| node.node_id.0)
-            .collect::<Vec<_>>(),
-    )?;
-    writer.write_f64s(&column(|node| node.lon))?;
-    writer.write_f64s(&column(|node| node.lat))?;
-    writer.write_f64s(&column(|node| node.z))?;
+    writer.write_f64s(&column(TopologyNode::lon))?;
+    writer.write_f64s(&column(TopologyNode::lat))?;
+    writer.write_f64s(&column(TopologyNode::z))?;
     let spatial_index = match &bundle.spatial_index {
         None => Some(None),
         Some(index) if NodeSpatialIndex::build(&bundle.nodes).as_ref() == Some(index) => None,
@@ -1241,49 +1216,30 @@ fn encode_topology(writer: &mut SectionWriter, bundle: &TopologyBundle) -> Resul
         Some(index) => writer.write_bincode(&Stored::Explicit(index))?,
     }
 
-    // Routing layer.
+    // Routing records, then the cold per-edge columns.
     let routing = &layers.routing;
     let u32s = |f: fn(&RoutingEdge) -> u32| routing.iter().map(f).collect::<Vec<_>>();
-    let i64s = |f: fn(&RoutingEdge) -> i64| routing.iter().map(f).collect::<Vec<_>>();
-    writer.write_u32s(&u32s(|edge| edge.edge_id.0))?;
     writer.write_u32s(&u32s(|edge| edge.from.0))?;
     writer.write_u32s(&u32s(|edge| edge.to.0))?;
-    writer.write_i64s(&i64s(|edge| edge.source_way_id))?;
     writer.write_u32s(&u32s(|edge| edge.length_m))?;
-    writer.write_f32s(&routing.iter().map(|edge| edge.ascent_m).collect::<Vec<_>>())?;
-    writer.write_f32s(
-        &routing
-            .iter()
-            .map(|edge| edge.descent_m)
-            .collect::<Vec<_>>(),
-    )?;
+    writer.write_u32s(&u32s(RoutingEdge::temporal_rule_raw))?;
     writer.write_u32s(&u32s(|edge| edge.flags))?;
-    writer.write_u32s(&u32s(|edge| edge.feature_row))?;
-    writer.write_i64s(&i64s(|edge| i64::from(edge.source_direction)))?;
-    writer.write_i64s(&i64s(|edge| option_u32_to_i64(edge.temporal_rule_id)))?;
+    writer.write_i64s(&layers.source_way_ids)?;
+    writer.write_f32s(&layers.ascent_m)?;
+    writer.write_f32s(&layers.descent_m)?;
+    writer.write_u32s(&layers.feature_rows)?;
+    writer.write_i64s(
+        &layers
+            .source_directions
+            .iter()
+            .map(|direction| i64::from(*direction))
+            .collect::<Vec<_>>(),
+    )?;
 
-    // Profile attributes repeat along ways and across classes: intern them.
-    writer.write_interned(&layers.profile)?;
-    // Presentation layer.
-    let presentation = &layers.presentation;
-    writer.write_i64s(
-        &presentation
-            .iter()
-            .map(|edge| option_u32_to_i64(edge.name_index))
-            .collect::<Vec<_>>(),
-    )?;
-    writer.write_i64s(
-        &presentation
-            .iter()
-            .map(|edge| edge.geometry_offset as i64)
-            .collect::<Vec<_>>(),
-    )?;
-    writer.write_u32s(
-        &presentation
-            .iter()
-            .map(|edge| edge.geometry_len)
-            .collect::<Vec<_>>(),
-    )?;
+    // Profile attribute rows are interned; names are a sentinel column.
+    writer.write_bincode(&layers.profile_rows())?;
+    writer.write_u32s(layers.profile_row_index())?;
+    writer.write_u32s(&layers.name_indexes)?;
     // Physical vehicle restrictions are sparse: a small record table plus
     // edge-sorted rows, which delta-encode to about a byte each.
     let vehicle_restrictions = &layers.vehicle_restrictions;
@@ -1374,35 +1330,31 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
     let node_count = usize::try_from(header.node_count).context("node count overflow")?;
     let edge_count = usize::try_from(header.edge_count).context("edge count overflow")?;
 
-    // Nodes, routing columns and the profile/presentation layers are
-    // independent: decode the three groups concurrently.
-    let mut node_reader = reader.take(5)?;
-    let mut routing_reader = reader.take(11)?;
-    let mut layer_reader = reader.take(8)?;
+    // Nodes, routing columns and the profile/name columns are
+    // independent: decode the three groups concurrently. Each column is
+    // decoded straight into its final array.
+    let mut node_reader = reader.take(4)?;
+    let mut routing_reader = reader.take(10)?;
+    let mut layer_reader = reader.take(6)?;
     let (nodes, (routing, layers)) = rayon::join(
         move || -> Result<_> {
             let reader = &mut node_reader;
-            let node_ids = reader.read_u32s()?;
             let lons = reader.read_f64s()?;
-            let lats = reader.read_f64s()?;
-            let elevations = reader.read_f64s()?;
-            for (name, len) in [
-                ("node ids", node_ids.len()),
-                ("longitudes", lons.len()),
-                ("latitudes", lats.len()),
-                ("elevations", elevations.len()),
-            ] {
-                ensure_len(name, len, node_count)?;
-            }
-            let nodes: Vec<TopologyNode> = (0..node_count)
-                .map(|index| TopologyNode {
-                    node_id: NodeId(node_ids[index]),
-                    lon: lons[index],
-                    lat: lats[index],
-                    z: elevations[index],
-                })
+            ensure_len("longitudes", lons.len(), node_count)?;
+            let mut nodes: Vec<TopologyNode> = lons
+                .into_iter()
+                .map(|lon| TopologyNode::new(lon, 0.0, f64::NAN))
                 .collect();
-            drop((node_ids, lons, lats, elevations));
+            let lats = reader.read_f64s()?;
+            ensure_len("latitudes", lats.len(), node_count)?;
+            for (node, lat) in nodes.iter_mut().zip(lats) {
+                node.set_lat(lat);
+            }
+            let elevations = reader.read_f64s()?;
+            ensure_len("elevations", elevations.len(), node_count)?;
+            for (node, z) in nodes.iter_mut().zip(elevations) {
+                node.set_z(z);
+            }
             let spatial_index = match reader.read_bincode::<Stored<Option<NodeSpatialIndex>>>()? {
                 Stored::Derived => Some(
                     NodeSpatialIndex::build(&nodes).context("derived spatial index needs nodes")?,
@@ -1416,72 +1368,54 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
             rayon::join(
                 move || -> Result<_> {
                     let reader = &mut routing_reader;
-                    let edge_ids = reader.read_u32s()?;
-                    let froms = reader.read_u32s()?;
-                    let tos = reader.read_u32s()?;
-                    let way_ids = reader.read_i64s()?;
-                    let lengths = reader.read_u32s()?;
-                    let ascents = reader.read_f32s()?;
-                    let descents = reader.read_f32s()?;
-                    let flags = reader.read_u32s()?;
+                    let mut routing = vec![RoutingEdge::default(); edge_count];
+                    let mut fill = |name: &str, set: fn(&mut RoutingEdge, u32)| -> Result<()> {
+                        let values = reader.read_u32s()?;
+                        ensure_len(name, values.len(), edge_count)?;
+                        for (edge, value) in routing.iter_mut().zip(values) {
+                            set(edge, value);
+                        }
+                        Ok(())
+                    };
+                    fill("edge tails", |edge, value| edge.from = NodeId(value))?;
+                    fill("edge heads", |edge, value| edge.to = NodeId(value))?;
+                    fill("lengths", |edge, value| edge.length_m = value)?;
+                    fill("temporal rule ids", RoutingEdge::set_temporal_rule_raw)?;
+                    fill("flags", |edge, value| edge.flags = value)?;
+                    let source_way_ids = reader.read_i64s()?;
+                    let ascent_m = reader.read_f32s()?;
+                    let descent_m = reader.read_f32s()?;
                     let feature_rows = reader.read_u32s()?;
-                    let source_directions = reader.read_i64s()?;
-                    let temporal_rule_ids = reader.read_i64s()?;
+                    let source_directions =
+                        codec::decode_i64s_as(&reader.next_section()?, |value| {
+                            i8::try_from(value).context("source direction out of range")
+                        })?;
                     for (name, len) in [
-                        ("edge ids", edge_ids.len()),
-                        ("edge tails", froms.len()),
-                        ("edge heads", tos.len()),
-                        ("way ids", way_ids.len()),
-                        ("lengths", lengths.len()),
-                        ("ascents", ascents.len()),
-                        ("descents", descents.len()),
-                        ("flags", flags.len()),
+                        ("way ids", source_way_ids.len()),
+                        ("ascents", ascent_m.len()),
+                        ("descents", descent_m.len()),
                         ("feature rows", feature_rows.len()),
                         ("source directions", source_directions.len()),
-                        ("temporal rule ids", temporal_rule_ids.len()),
                     ] {
                         ensure_len(name, len, edge_count)?;
                     }
-                    let routing = (0..edge_count)
-                        .map(|index| {
-                            Ok(RoutingEdge {
-                                edge_id: EdgeId(edge_ids[index]),
-                                from: NodeId(froms[index]),
-                                to: NodeId(tos[index]),
-                                source_way_id: way_ids[index],
-                                length_m: lengths[index],
-                                ascent_m: ascents[index],
-                                descent_m: descents[index],
-                                feature_row: feature_rows[index],
-                                source_direction: i8::try_from(source_directions[index])
-                                    .context("source direction out of range")?,
-                                temporal_rule_id: i64_to_option_u32(temporal_rule_ids[index])?,
-                                flags: flags[index],
-                            })
-                        })
-                        .collect::<Result<Vec<_>>>()?;
 
-                    Ok(routing)
+                    Ok((
+                        routing,
+                        source_way_ids,
+                        ascent_m,
+                        descent_m,
+                        feature_rows,
+                        source_directions,
+                    ))
                 },
                 move || -> Result<_> {
                     let reader = &mut layer_reader;
-                    let profile: Vec<EdgeProfileAttributes> = reader.read_interned()?;
-                    ensure_len("edge profile layer", profile.len(), edge_count)?;
-                    let name_indexes = reader.read_i64s()?;
-                    let geometry_offsets = reader.read_i64s()?;
-                    let geometry_lens = reader.read_u32s()?;
+                    let profile_rows: Vec<EdgeProfileAttributes> = reader.read_bincode()?;
+                    let profile_row_index = reader.read_u32s()?;
+                    let name_indexes = reader.read_u32s()?;
+                    ensure_len("edge profile rows", profile_row_index.len(), edge_count)?;
                     ensure_len("edge names", name_indexes.len(), edge_count)?;
-                    ensure_len("geometry offsets", geometry_offsets.len(), edge_count)?;
-                    ensure_len("geometry lengths", geometry_lens.len(), edge_count)?;
-                    let presentation = (0..edge_count)
-                        .map(|index| {
-                            Ok(EdgePresentation {
-                                name_index: i64_to_option_u32(name_indexes[index])?,
-                                geometry_offset: geometry_offsets[index] as u64,
-                                geometry_len: geometry_lens[index],
-                            })
-                        })
-                        .collect::<Result<Vec<_>>>()?;
                     let vehicle_restrictions = VehicleRestrictionTable {
                         restrictions: reader.read_bincode()?,
                         edges: reader.read_u32s()?,
@@ -1491,14 +1425,31 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
                         .validate(edge_count)
                         .map_err(anyhow::Error::msg)?;
 
-                    Ok((profile, presentation, vehicle_restrictions))
+                    Ok((
+                        profile_rows,
+                        profile_row_index,
+                        name_indexes,
+                        vehicle_restrictions,
+                    ))
                 },
             )
         },
     );
     let (nodes, spatial_index) = nodes?;
-    let routing = routing?;
-    let (profile, presentation, vehicle_restrictions) = layers?;
+    let (routing, source_way_ids, ascent_m, descent_m, feature_rows, source_directions) = routing?;
+    let (profile_rows, profile_row_index, name_indexes, vehicle_restrictions) = layers?;
+    let mut edge_layers = TopologyEdgeLayers::default();
+    edge_layers.routing = routing;
+    edge_layers.source_way_ids = source_way_ids;
+    edge_layers.ascent_m = ascent_m;
+    edge_layers.descent_m = descent_m;
+    edge_layers.feature_rows = feature_rows;
+    edge_layers.source_directions = source_directions;
+    edge_layers.set_profile_columns(profile_rows, profile_row_index);
+    edge_layers.name_indexes = name_indexes;
+    edge_layers.vehicle_restrictions = vehicle_restrictions;
+    edge_layers.validate().map_err(anyhow::Error::msg)?;
+    let routing = &edge_layers.routing;
 
     let explicit_transitions = match reader.read_bincode::<Stored<()>>()? {
         Stored::Derived => None,
@@ -1507,7 +1458,7 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
     let (edge_based_topology, rest) = rayon::join(
         || -> Result<_> {
             Ok(match explicit_transitions {
-                None => derived_edge_based_topology(node_count, &routing)
+                None => derived_edge_based_topology(node_count, routing)
                     .context("edge endpoints reference missing nodes")?,
                 Some(mut reader) => {
                     let node_first_out = reader.read_u32s()?;
@@ -1529,7 +1480,7 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
         || -> Result<_> {
             let node_component_ids = reader.read_u32s()?;
             let edge_component_ids = match reader.read_bincode::<Stored<()>>()? {
-                Stored::Derived => derived_edge_component_ids(&node_component_ids, &routing)
+                Stored::Derived => derived_edge_component_ids(&node_component_ids, routing)
                     .context("edge components reference missing nodes")?,
                 Stored::Explicit(()) => reader.read_u32s()?,
             };
@@ -1577,12 +1528,7 @@ pub(crate) fn read_topology_sectioned(bytes: &[u8], path: &Path) -> Result<Topol
         schema_version: header.schema_version,
         source_path: header.source_path,
         nodes,
-        edge_layers: TopologyEdgeLayers {
-            routing,
-            profile,
-            presentation,
-            vehicle_restrictions,
-        },
+        edge_layers,
         turn_restrictions: header.turn_restrictions,
         names: header.names,
         edge_based_topology,

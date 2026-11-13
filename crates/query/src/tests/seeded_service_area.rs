@@ -6,12 +6,13 @@ fn node_seed(
     node: usize,
     initial_time_s: f64,
 ) -> ServiceAreaSeed {
+    let node_index = node;
     let node = &topology.nodes[node];
     ServiceAreaSeed {
         initial_time_s,
         point: serde_json::from_value(serde_json::json!({
-            "point_id": "seed", "requested_lon": node.lon, "requested_lat": node.lat,
-            "snapped_node_id": node.node_id.0, "snapped_lon": node.lon, "snapped_lat": node.lat,
+            "point_id": "seed", "requested_lon": node.lon(), "requested_lat": node.lat(),
+            "snapped_node_id": node_index, "snapped_lon": node.lon(), "snapped_lat": node.lat(),
             "snap_distance_m": 0
         }))
         .unwrap(),
@@ -130,10 +131,10 @@ fn seeded_isochrone_obeys_multi_edge_turn_restrictions_in_both_directions() {
         let to = &topology.nodes[edge.to.0 as usize];
         for line in network(&features).as_array().unwrap() {
             assert!(
-                !(line[0][0] == from.lon
-                    && line[0][1] == from.lat
-                    && line[1][0] == to.lon
-                    && line[1][1] == to.lat)
+                !(line[0][0] == from.lon()
+                    && line[0][1] == from.lat()
+                    && line[1][0] == to.lon()
+                    && line[1][1] == to.lat())
             );
         }
     }

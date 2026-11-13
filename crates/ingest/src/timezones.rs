@@ -14,7 +14,7 @@ pub(crate) fn assign_timezones(nodes: &[TopologyNode]) -> (Vec<String>, Vec<u32>
     let finder = DefaultFinder::new();
     let names = nodes
         .par_iter()
-        .map(|node| finder.get_tz_name(node.lon, node.lat))
+        .map(|node| finder.get_tz_name(node.lon(), node.lat()))
         .collect::<Vec<_>>();
     let mut zones = Vec::new();
     let mut lookup = BTreeMap::new();

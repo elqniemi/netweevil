@@ -73,8 +73,6 @@ fn round_trips_topology_bundle_binary() {
         max_speed_kph: None,
         lanes: None,
         name_index: Some(0),
-        geometry_offset: 0,
-        geometry_len: 0,
         flags: 0,
     };
     let reverse = DirectedEdge {
@@ -111,21 +109,12 @@ fn round_trips_topology_bundle_binary() {
         schema_version: TOPOLOGY_BUNDLE_SCHEMA_VERSION,
         source_path: "dataset.osm.pbf".to_string(),
         nodes: vec![
-            TopologyNode {
-                node_id: NodeId(0),
-                lon: 6.5,
-                lat: 53.2,
-                z: 12.5,
-            },
-            TopologyNode {
-                node_id: NodeId(1),
-                lon: 6.6,
-                lat: 53.3,
-                z: 18.0,
-            },
+            TopologyNode::new(6.5, 53.2, 12.5),
+            TopologyNode::new(6.6, 53.3, 18.0),
         ],
-        edge_layers: TopologyEdgeLayers {
-            vehicle_restrictions: VehicleRestrictionTable {
+        edge_layers: {
+            let mut layers = TopologyEdgeLayers::from_directed_edges(&[forward, reverse]);
+            layers.vehicle_restrictions = VehicleRestrictionTable {
                 restrictions: vec![
                     VehicleRestriction {
                         modes: AccessMask::new(AccessMask::VEHICLES),
@@ -138,8 +127,8 @@ fn round_trips_topology_bundle_binary() {
                 ],
                 edges: vec![0, 0, 1],
                 edge_restrictions: vec![0, 1, 0],
-            },
-            ..TopologyEdgeLayers::from_directed_edges(&[forward, reverse])
+            };
+            layers
         },
         turn_restrictions: vec![TurnRestriction {
             relation_id: 300,
@@ -254,14 +243,13 @@ fn round_trips_topology_bundle_binary() {
     assert_eq!(read.schema_version, bundle.schema_version);
     assert_eq!(read.source_path, bundle.source_path);
     assert_eq!(read.nodes.len(), 2);
-    assert_eq!(read.nodes[0].z, 12.5);
+    assert_eq!(read.nodes[0].z(), 12.5);
     assert_eq!(read.edge_count(), 2);
-    let (forward, reverse) = (read.routing_edge(0), read.routing_edge(1));
-    assert_eq!(forward.ascent_m, 5.5);
-    assert_eq!(reverse.descent_m, 5.5);
-    assert_eq!(forward.feature_row, 0);
-    assert_eq!(forward.source_direction, 1);
-    assert_eq!(forward.temporal_rule_id, Some(0));
+    assert_eq!(read.edge_ascent_m(0), 5.5);
+    assert_eq!(read.edge_descent_m(1), 5.5);
+    assert_eq!(read.edge_feature_row(0), 0);
+    assert_eq!(read.edge_source_direction(0), 1);
+    assert_eq!(read.routing_edge(0).temporal_rule_id(), Some(0));
     assert_eq!(read.edge_profile(0).duration_s, None);
     assert_eq!(read.edge_profile(1).duration_s, Some(45.0));
     assert!(read.edge_profile(1).is_toll);
@@ -416,13 +404,7 @@ fn compiled_profile_reads_share_equal_component_columns() {
         temporal: CompiledTemporalProfile::default(),
         source_topology_bundle_id: CacheBundleId::new("topology-test"),
         acceleration: None,
-        edge_metrics: vec![
-            CompiledEdgeMetric {
-                travel_time_s: Some(1.0),
-                generalized_cost: Some(1.0),
-            };
-            3
-        ],
+        edge_metrics: vec![CompiledEdgeMetric::new(Some(1.0), Some(1.0)); 3],
     };
     let first = TempFile::new("columns-first");
     let second = TempFile::new("columns-second");
@@ -498,14 +480,8 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
         source_topology_bundle_id: CacheBundleId::new("topology-test"),
         acceleration: None,
         edge_metrics: vec![
-            CompiledEdgeMetric {
-                travel_time_s: Some(12.0),
-                generalized_cost: Some(18.0),
-            },
-            CompiledEdgeMetric {
-                travel_time_s: None,
-                generalized_cost: None,
-            },
+            CompiledEdgeMetric::new(Some(12.0), Some(18.0)),
+            CompiledEdgeMetric::ABSENT,
         ],
         // Edge 1 is too low for the profile's 4 m vehicle.
         vehicle: netweevil_core::CompiledVehicleExclusions {
@@ -562,8 +538,8 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
     ] {
         assert!(actual.is_empty());
     }
-    assert_eq!(read.edge_metrics[0].travel_time_s, Some(12.0));
-    assert_eq!(read.edge_metrics[0].generalized_cost, Some(18.0));
+    assert_eq!(read.edge_metrics[0].travel_time_s(), Some(12.0));
+    assert_eq!(read.edge_metrics[0].generalized_cost(), Some(18.0));
 }
 
 #[test]
@@ -578,7 +554,7 @@ fn prune_keeps_the_newest_compile_and_referenced_bundles() {
     let paths = super::WorkspacePaths::discover(&root).expect("workspace");
     let bundle = |dir: &Path, name: &str| {
         let path = dir.join(name);
-        std::fs::write(&path, b"NWSECB06").expect("bundle written");
+        std::fs::write(&path, b"NWSECB07").expect("bundle written");
         BundleRef {
             bundle_id: CacheBundleId::new(name),
             path: path.display().to_string(),

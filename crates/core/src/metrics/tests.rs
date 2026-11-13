@@ -36,3 +36,16 @@ fn overflow_stays_distinct_from_inaccessible_and_never_wraps() {
     let largest = CCH_WEIGHT_OVERFLOW - 1;
     assert_eq!(encode_cch_weight(decode_cch_weight(largest)), largest);
 }
+
+#[test]
+fn edge_metrics_are_two_f64_with_absent_sentinels() {
+    assert_eq!(size_of::<CompiledEdgeMetric>(), 16);
+    assert_eq!(CompiledEdgeMetric::ABSENT.travel_time_s(), None);
+    assert_eq!(CompiledEdgeMetric::ABSENT.generalized_cost(), None);
+    let metric = CompiledEdgeMetric::new(Some(12.5), None);
+    assert_eq!(metric.travel_time_s(), Some(12.5));
+    assert_eq!(metric.generalized_cost(), None);
+    let metric = CompiledEdgeMetric::new(Some(1_000.0 / (70.0 / 3.6)), Some(f64::INFINITY));
+    assert_eq!(metric.travel_time_s(), Some(1_000.0 / (70.0 / 3.6)));
+    assert_eq!(metric.generalized_cost(), Some(f64::INFINITY));
+}

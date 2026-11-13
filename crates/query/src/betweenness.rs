@@ -365,8 +365,8 @@ pub(crate) fn execute_betweenness_with_graph(
             let from = &topology.nodes[edge.from.0 as usize];
             let to = &topology.nodes[edge.to.0 as usize];
             BetweennessEdgeScore {
-                edge_id: edge.edge_id.0,
-                source_way_id: edge.source_way_id,
+                edge_id: edge_index as u32,
+                source_way_id: topology.edge_source_way_id(edge_index),
                 from_node_id: edge.from.0,
                 to_node_id: edge.to.0,
                 score: scores[edge_index],
@@ -377,8 +377,8 @@ pub(crate) fn execute_betweenness_with_graph(
                 },
                 routed_pair_count: routed_counts[edge_index],
                 geometry: vec![
-                    [from.lon, from.lat, finite_z(from.z)],
-                    [to.lon, to.lat, finite_z(to.z)],
+                    [from.lon(), from.lat(), finite_z(from.z())],
+                    [to.lon(), to.lat(), finite_z(to.z())],
                 ],
             }
         })

@@ -18,13 +18,8 @@ use crate::{
 
 // Topology building blocks.
 
-pub(crate) fn node(id: u32, lon: f64, lat: f64) -> TopologyNode {
-    TopologyNode {
-        node_id: NodeId(id),
-        lon,
-        lat,
-        z: 0.0,
-    }
+pub(crate) fn node(_id: u32, lon: f64, lat: f64) -> TopologyNode {
+    TopologyNode::new(lon, lat, 0.0)
 }
 
 /// A car-accessible residential asphalt edge without geometry, name or flags.
@@ -49,8 +44,6 @@ pub(crate) fn edge(id: u32, from: u32, to: u32, source_way_id: i64, length_m: u3
         max_speed_kph: None,
         lanes: None,
         name_index: None,
-        geometry_offset: 0,
-        geometry_len: 0,
         flags: 0,
     }
 }
@@ -358,10 +351,7 @@ pub(crate) fn metrics(costs: &[f64]) -> CompiledProfileBundle {
         acceleration: None,
         edge_metrics: costs
             .iter()
-            .map(|&cost| CompiledEdgeMetric {
-                travel_time_s: Some(cost),
-                generalized_cost: Some(cost),
-            })
+            .map(|&cost| CompiledEdgeMetric::new(Some(cost), Some(cost)))
             .collect(),
         vehicle: Default::default(),
     }
@@ -380,8 +370,8 @@ pub(crate) fn uniform_metrics(edge_count: usize, travel_time_s: f64) -> Compiled
 
 /// Sets both travel time and generalized cost; `None` prunes the edge.
 pub(crate) fn set_edge_cost(metrics: &mut CompiledProfileBundle, edge: usize, cost: Option<f64>) {
-    metrics.edge_metrics[edge].travel_time_s = cost;
-    metrics.edge_metrics[edge].generalized_cost = cost;
+    metrics.edge_metrics[edge].set_travel_time_s(cost);
+    metrics.edge_metrics[edge].set_generalized_cost(cost);
 }
 
 /// A zero-weight accounting component without a temporal overlay.
@@ -853,7 +843,7 @@ pub(crate) fn build_test_cch(
         if !routing_transition_weight(from_edge, to_edge).is_finite() {
             return f64::INFINITY;
         }
-        let Some(travel_time_s) = metrics.edge_metrics[to_edge].travel_time_s else {
+        let Some(travel_time_s) = metrics.edge_metrics[to_edge].travel_time_s() else {
             return f64::INFINITY;
         };
         travel_time_s + crate::turn_penalty_seconds(topology, metrics, from_edge, to_edge)

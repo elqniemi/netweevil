@@ -16,11 +16,12 @@ pub fn destination_only_entry_cost(
     if turns.destination_only_penalty_s == 0.0 {
         return 0.0;
     }
-    let profiles = &topology.edge_layers.profile;
-    let entering = profiles[next_edge_index]
+    let entering = topology
+        .edge_profile(next_edge_index)
         .destination_only
         .contains(mode_bit)
-        && !profiles[previous_edge_index]
+        && !topology
+            .edge_profile(previous_edge_index)
             .destination_only
             .contains(mode_bit);
     if entering {
@@ -82,7 +83,9 @@ fn transition_turn_penalty_seconds(
         return penalty_s + uturn_penalty_s;
     }
 
-    if previous.source_way_id == next.source_way_id {
+    if topology.edge_source_way_id(previous_edge_index)
+        == topology.edge_source_way_id(next_edge_index)
+    {
         return penalty_s;
     }
 
@@ -117,10 +120,10 @@ fn classify_turn(
     let via = &topology.nodes[previous.to.0 as usize];
     let to = &topology.nodes[next.to.0 as usize];
 
-    let in_x = projected_delta_x(from.lon, via.lat, via.lon);
-    let in_y = projected_delta_y(from.lat, via.lat);
-    let out_x = projected_delta_x(via.lon, via.lat, to.lon);
-    let out_y = projected_delta_y(via.lat, to.lat);
+    let in_x = projected_delta_x(from.lon(), via.lat(), via.lon());
+    let in_y = projected_delta_y(from.lat(), via.lat());
+    let out_x = projected_delta_x(via.lon(), via.lat(), to.lon());
+    let out_y = projected_delta_y(via.lat(), to.lat());
 
     let in_norm = (in_x * in_x + in_y * in_y).sqrt();
     let out_norm = (out_x * out_x + out_y * out_y).sqrt();

@@ -435,8 +435,9 @@ impl MiniStation {
     fn edge_index(&self, feature_id: i64, direction: i8) -> usize {
         (0..self.topology.edge_count())
             .find(|&index| {
-                let edge = self.topology.routing_edge(index);
-                edge.source_way_id == feature_id && edge.source_direction == direction
+                let _edge = self.topology.routing_edge(index);
+                self.topology.edge_source_way_id(index) == feature_id
+                    && self.topology.edge_source_direction(index) == direction
             })
             .expect("station edge exists")
     }
@@ -445,10 +446,8 @@ impl MiniStation {
         self.topology
             .nodes
             .iter()
-            .find(|node| node.lon == lon && node.lat == lat && node.z == z)
-            .expect("station node exists")
-            .node_id
-            .0
+            .position(|node| *node == netweevil_core::TopologyNode::new(lon, lat, z))
+            .expect("station node exists") as u32
     }
 
     fn feature_ids(&self, edge_path: &[u32]) -> Vec<i64> {
@@ -456,9 +455,9 @@ impl MiniStation {
             .iter()
             .map(|&edge_id| {
                 let index = (0..self.topology.edge_count())
-                    .find(|&index| self.topology.routing_edge(index).edge_id.0 == edge_id)
+                    .find(|&index| index as u32 == edge_id)
                     .expect("path edge belongs to station topology");
-                self.topology.routing_edge(index).source_way_id
+                self.topology.edge_source_way_id(index)
             })
             .collect()
     }
@@ -542,25 +541,26 @@ fn mini_station_welds_levels_and_costs_vertical_facilities() {
     let station = MiniStation::build();
     let topology = &station.topology;
     assert_eq!(topology.nodes.len(), 5);
-    assert!(topology.nodes.iter().any(|node| node.z == 0.0));
-    assert!(topology.nodes.iter().any(|node| node.z == 6.0));
+    assert!(topology.nodes.iter().any(|node| node.z() == 0.0));
+    assert!(topology.nodes.iter().any(|node| node.z() == 6.0));
 
     let forward_escalator = station.edge_index(ESCALATOR, 1);
-    let reverse_escalator = topology.routing_edge(station.edge_index(ESCALATOR, -1));
-    assert_eq!(topology.routing_edge(forward_escalator).ascent_m, 6.0);
-    assert_eq!(reverse_escalator.descent_m, 6.0);
+    let reverse_escalator_index = station.edge_index(ESCALATOR, -1);
+    let reverse_escalator = topology.routing_edge(reverse_escalator_index);
+    assert_eq!(topology.edge_ascent_m(forward_escalator), 6.0);
+    assert_eq!(topology.edge_descent_m(reverse_escalator_index), 6.0);
     assert_eq!(
         reverse_escalator.flags & EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION,
         EDGE_FLAG_TEMPORAL_MATERIALIZED_DIRECTION
     );
-    let paid_gate = topology.routing_edge(station.edge_index(PAID_AREA, 1));
+    let paid_gate = station.edge_index(PAID_AREA, 1);
     assert!(topology.feature_attributes.value_matches(
-        paid_gate.feature_row,
+        topology.edge_feature_row(paid_gate),
         "indoor_location",
         "paid_area"
     ));
 
-    let time = |edge: usize| station.metrics.edge_metrics[edge].travel_time_s.unwrap();
+    let time = |edge: usize| station.metrics.edge_metrics[edge].travel_time_s().unwrap();
     let lift = station.edge_index(LIFT, 1);
     assert!(time(forward_escalator) < time(lift));
     assert!(time(lift) < time(station.edge_index(STAIRS, 1)));
@@ -616,9 +616,9 @@ fn mini_station_paid_area_exclusion_disconnects_the_platform() {
     let public_only_metrics = compile(&public_only, &station.topology);
     assert!(
         (0..station.topology.edge_count())
-            .filter(|&index| station.topology.routing_edge(index).source_way_id == PAID_AREA)
+            .filter(|&index| station.topology.edge_source_way_id(index) == PAID_AREA)
             .all(|index| public_only_metrics.edge_metrics[index]
-                .travel_time_s
+                .travel_time_s()
                 .is_none())
     );
     assert!(
@@ -789,7 +789,7 @@ impl netweevil_transit::StreetTimeEstimator for StationTransferEstimator<'_> {
                 return None;
             };
             let node = self.topology.nodes.get(*node_id as usize)?;
-            Some([node.lon, node.lat, node.z])
+            Some([node.lon(), node.lat(), node.z()])
         };
         let route = netweevil_query::execute_route(
             self.topology,

@@ -151,12 +151,12 @@ pub fn build_sim_network(
     let mut max_lon = f64::NEG_INFINITY;
     let mut max_lat = f64::NEG_INFINITY;
     for node in &topology.nodes {
-        node_lon.push(node.lon);
-        node_lat.push(node.lat);
-        min_lon = min_lon.min(node.lon);
-        min_lat = min_lat.min(node.lat);
-        max_lon = max_lon.max(node.lon);
-        max_lat = max_lat.max(node.lat);
+        node_lon.push(node.lon());
+        node_lat.push(node.lat());
+        min_lon = min_lon.min(node.lon());
+        min_lat = min_lat.min(node.lat());
+        max_lon = max_lon.max(node.lon());
+        max_lat = max_lat.max(node.lat());
     }
 
     let mut edge_from = Vec::with_capacity(edge_count);
@@ -259,7 +259,7 @@ pub fn build_sim_network(
             // Edges open to the fleet only under a time condition stay closed
             // in the simulation, which routes on the static network.
             let usable = netweevil_profile::is_statically_usable(topology, edge, mode_bit);
-            let speed = match metric.travel_time_s {
+            let speed = match metric.travel_time_s() {
                 Some(time) if time > 0.0 && usable => {
                     let speed = edge_length_m[edge] as f64 / time;
                     max_speed = max_speed.max(speed);

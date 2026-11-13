@@ -87,12 +87,7 @@ async fn the_endpoint_samples_the_dataset_raster() {
     let topology = netweevil_core::TopologyBundle {
         schema_version: netweevil_core::TOPOLOGY_BUNDLE_SCHEMA_VERSION,
         source_path: "empty".into(),
-        nodes: vec![netweevil_core::TopologyNode {
-            node_id: netweevil_core::NodeId(0),
-            lon: 6.0,
-            lat: 53.0,
-            z: 0.0,
-        }],
+        nodes: vec![netweevil_core::TopologyNode::new(6.0, 53.0, 0.0)],
         edge_layers: Default::default(),
         turn_restrictions: Vec::new(),
         names: Vec::new(),

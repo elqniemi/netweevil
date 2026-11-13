@@ -1,53 +1,38 @@
 use super::*;
 
+fn edge_layers() -> TopologyEdgeLayers {
+    let mut layers = TopologyEdgeLayers::with_capacity(2);
+    for (from, to, temporal_rule_id, source_direction, name_index) in
+        [(0, 1, None, 0, 0), (1, 0, Some(3), -1, u32::MAX)]
+    {
+        layers.routing.push(RoutingEdge::new(
+            NodeId(from),
+            NodeId(to),
+            100,
+            temporal_rule_id,
+            0,
+        ));
+        layers.source_way_ids.push(42);
+        layers.ascent_m.push(0.0);
+        layers.descent_m.push(0.0);
+        layers.feature_rows.push(netweevil_core::NO_FEATURE_ROW);
+        layers.source_directions.push(source_direction);
+        let row = layers.intern_profile(EdgeProfileAttributes::default());
+        layers.push_profile_row_index(row);
+        layers.name_indexes.push(name_index);
+    }
+    layers
+}
+
 fn topology() -> TopologyBundle {
     let mut bundle = TopologyBundle {
         schema_version: TOPOLOGY_BUNDLE_SCHEMA_VERSION,
         source_path: "city.osm.pbf".to_string(),
         nodes: vec![
-            TopologyNode {
-                node_id: NodeId(0),
-                lon: 1_141_000_000_f64 * 1e-7,
-                lat: 223_000_000_f64 * 1e-7,
-                z: f64::NAN,
-            },
-            TopologyNode {
-                node_id: NodeId(1),
-                lon: 114.2,
-                lat: 22.4,
-                z: f64::NAN,
-            },
+            TopologyNode::new(1_141_000_000_f64 * 1e-7, 223_000_000_f64 * 1e-7, f64::NAN),
+            TopologyNode::new(114.2, 22.4, f64::NAN),
         ],
-        edge_layers: TopologyEdgeLayers {
-            routing: vec![
-                RoutingEdge {
-                    from: NodeId(0),
-                    to: NodeId(1),
-                    source_way_id: 42,
-                    length_m: 100,
-                    ..RoutingEdge::default()
-                },
-                RoutingEdge {
-                    edge_id: EdgeId(1),
-                    from: NodeId(1),
-                    to: NodeId(0),
-                    source_way_id: 42,
-                    length_m: 100,
-                    temporal_rule_id: Some(3),
-                    source_direction: -1,
-                    ..RoutingEdge::default()
-                },
-            ],
-            profile: vec![EdgeProfileAttributes::default(); 2],
-            presentation: vec![
-                EdgePresentation {
-                    name_index: Some(0),
-                    ..EdgePresentation::default()
-                },
-                EdgePresentation::default(),
-            ],
-            vehicle_restrictions: VehicleRestrictionTable::default(),
-        },
+        edge_layers: edge_layers(),
         turn_restrictions: Vec::new(),
         names: Vec::new(),
         edge_based_topology: EdgeBasedTopology::default(),
@@ -82,12 +67,22 @@ fn derived_and_explicit_structures_round_trip() {
         .expect("current topology reads");
     assert_eq!(read.edge_based_topology, bundle.edge_based_topology);
     assert_eq!(read.spatial_index, bundle.spatial_index);
-    assert_eq!(read.nodes[0].lon.to_bits(), bundle.nodes[0].lon.to_bits());
-    assert_eq!(read.nodes[1].lat.to_bits(), bundle.nodes[1].lat.to_bits());
-    assert!(read.nodes[1].z.is_nan());
-    assert_eq!(read.routing_edge(1).temporal_rule_id, Some(3));
-    assert_eq!(read.routing_edge(1).source_direction, -1);
-    assert_eq!(read.edge_presentation(0).name_index, Some(0));
+    assert_eq!(
+        read.nodes[0].lon().to_bits(),
+        bundle.nodes[0].lon().to_bits()
+    );
+    assert_eq!(
+        read.nodes[1].lat().to_bits(),
+        bundle.nodes[1].lat().to_bits()
+    );
+    assert!(read.nodes[1].z().is_nan());
+    assert_eq!(read.routing_edge(1).temporal_rule_id(), Some(3));
+    assert_eq!(read.routing_edge(0).temporal_rule_id(), None);
+    assert_eq!(read.edge_source_direction(1), -1);
+    assert_eq!(read.edge_name_index(0), Some(0));
+    assert_eq!(read.edge_name_index(1), None);
+    assert_eq!(read.edge_source_way_id(1), 42);
+    assert_eq!(read.edge_layers.profile_rows().len(), 1);
 
     // Structures that do not match their rebuild are stored verbatim.
     let mut edited = bundle.clone();

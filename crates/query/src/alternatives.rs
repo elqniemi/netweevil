@@ -284,7 +284,7 @@ fn materialize_route_alternative(
         edge_path: if include_detailed_paths {
             path.edge_indexes
                 .iter()
-                .map(|&edge_index| topology.routing_edge(edge_index).edge_id.0)
+                .map(|&edge_index| edge_index as u32)
                 .collect()
         } else {
             Vec::new()
@@ -344,8 +344,8 @@ fn route_segments_for_path(
                 to_node_id: edge.to.0,
                 source_way_id: edge.source_way_id,
                 length_m: (edge.length_m as f64 * factor).round() as u32,
-                travel_time_s: metric.travel_time_s.unwrap_or_default() * factor,
-                generalized_cost: metric.generalized_cost.unwrap_or_default() * factor,
+                travel_time_s: metric.travel_time_s().unwrap_or_default() * factor,
+                generalized_cost: metric.generalized_cost().unwrap_or_default() * factor,
                 components: static_edge_components(metrics, edge_index, factor),
                 waiting_time_s: 0.0,
                 entry_time: None,

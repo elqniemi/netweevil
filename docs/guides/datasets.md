@@ -78,7 +78,7 @@ OSM imports also keep vehicle restrictions (see
 
 ### Bundle format
 
-Imports write `.bin` bundles in the compact sectioned format (`NWSECB06`:
+Imports write `.bin` bundles in the compact sectioned format (`NWSECB07`:
 lossless column encodings plus deflate). The reader rejects a bundle in
 another format with a message to re-import.
 

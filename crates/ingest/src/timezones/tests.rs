@@ -1,13 +1,7 @@
 use super::*;
-use netweevil_core::NodeId;
 
-fn node(id: u32, lon: f64, lat: f64) -> TopologyNode {
-    TopologyNode {
-        node_id: NodeId(id),
-        lon,
-        lat,
-        z: 0.0,
-    }
+fn node(_id: u32, lon: f64, lat: f64) -> TopologyNode {
+    TopologyNode::new(lon, lat, 0.0)
 }
 
 #[test]

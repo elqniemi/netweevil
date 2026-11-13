@@ -436,7 +436,7 @@ fn updates_resample_the_dem_the_dataset_was_imported_with() {
     assert_same_topology(&dir, &updated, &full);
     let rebuilt = topology(&updated);
     assert!(rebuilt.elevation.dem.is_some());
-    assert!(rebuilt.nodes.iter().any(|node| node.z > 10.0));
+    assert!(rebuilt.nodes.iter().any(|node| node.z() > 10.0));
     // The runtime raster is rewritten next to the new build.
     let raster = updated.elevation_bundle.as_ref().expect("elevation raster");
     assert!(Path::new(&raster.path).exists());
@@ -501,7 +501,8 @@ fn previous_ranks_follow_edge_identity_through_way_splits() {
             .edge_layers
             .routing
             .iter()
-            .map(|edge| (edge.from.0, edge.to.0, edge.source_way_id))
+            .zip(&before.edge_layers.source_way_ids)
+            .map(|(edge, &source_way_id)| (edge.from.0, edge.to.0, source_way_id))
             .collect(),
         // Rank = previous edge index makes the mapping visible.
         edge_rank: (0..before.edge_count() as u32).collect(),
@@ -512,7 +513,7 @@ fn previous_ranks_follow_edge_identity_through_way_splits() {
     let osm_edge = |topology: &TopologyBundle, ids: &[i64], index: usize| {
         let edge = topology.routing_edge(index);
         (
-            edge.source_way_id,
+            topology.edge_source_way_id(index),
             ids[edge.from.0 as usize],
             ids[edge.to.0 as usize],
         )

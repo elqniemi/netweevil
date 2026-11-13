@@ -201,8 +201,8 @@ fn network_tile(
         let from = &topology.nodes[routing.from.0 as usize];
         let to = &topology.nodes[routing.to.0 as usize];
         let Some((start, end)) = clip_segment(
-            tile_id.project(from.lon, from.lat),
-            tile_id.project(to.lon, to.lat),
+            tile_id.project(from.lon(), from.lat()),
+            tile_id.project(to.lon(), to.lat()),
             -TILE_BUFFER,
             f64::from(TILE_EXTENT) + TILE_BUFFER,
         ) else {
@@ -221,7 +221,7 @@ fn network_tile(
             .point(end.0, end.1)?
             .encode()?;
         let mut feature = layer.into_feature(geometry);
-        feature.set_id(u64::from(routing.edge_id.0));
+        feature.set_id(u64::from(edge_index as u32));
         add_edge_tags(
             &mut feature,
             topology,
@@ -250,8 +250,8 @@ fn add_edge_tags(
     let attributes = topology.edge_profile(edge_index);
     let length_m = f64::from(routing.length_m);
     let label = |value: serde_json::Value| value.as_str().map(str::to_owned);
-    feature.add_tag_uint("edge_id", u64::from(routing.edge_id.0));
-    feature.add_tag_int("way_id", routing.source_way_id);
+    feature.add_tag_uint("edge_id", u64::from(edge_index as u32));
+    feature.add_tag_int("way_id", topology.edge_source_way_id(edge_index));
     if let Some(class) = label(enum_label(&attributes.road_class)) {
         feature.add_tag_string("road_class", &class);
     }
@@ -290,17 +290,13 @@ fn add_edge_tags(
             topology.edge_profile(reverse).access_mask,
             mode,
         );
-        feature.add_tag_uint(
-            "reverse_edge_id",
-            u64::from(topology.routing_edge(reverse).edge_id.0),
-        );
+        feature.add_tag_uint("reverse_edge_id", u64::from(reverse as u32));
         if let Some(speed) = reverse_values.speed_kph {
             feature.add_tag_double("reverse_speed_kph", speed);
         }
     }
     if let Some(name) = topology
-        .edge_presentation(edge_index)
-        .name_index
+        .edge_name_index(edge_index)
         .and_then(|index| names.get(index as usize))
     {
         feature.add_tag_string("name", name);

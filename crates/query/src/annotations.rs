@@ -184,7 +184,7 @@ fn has_heights(topology: &TopologyBundle) -> bool {
         || topology
             .nodes
             .iter()
-            .any(|node| node.z.is_finite() && node.z != 0.0)
+            .any(|node| node.z().is_finite() && node.z() != 0.0)
 }
 
 /// Height at a snapped position: its node's, or interpolated along its edge.
@@ -220,7 +220,7 @@ fn elevation_profile(
             break;
         }
         let node = &topology.nodes[topology.routing_edge(edge).to.0 as usize];
-        vertices.push((node.lon, node.lat, height_of(node.elevation_m())));
+        vertices.push((node.lon(), node.lat(), height_of(node.elevation_m())));
     }
     let end = (
         destination.snapped_lon,
@@ -255,9 +255,8 @@ fn elevation_profile(
     let mut ascent = 0.0;
     let mut descent = 0.0;
     for (&edge, &factor) in edges.iter().zip(factors) {
-        let routing = topology.routing_edge(edge);
-        ascent += f64::from(routing.ascent_m) * factor;
-        descent += f64::from(routing.descent_m) * factor;
+        ascent += f64::from(topology.edge_ascent_m(edge)) * factor;
+        descent += f64::from(topology.edge_descent_m(edge)) * factor;
         if let Some((up, down)) = elevation.edge_max_grades(edge)
             && factor > 0.0
         {

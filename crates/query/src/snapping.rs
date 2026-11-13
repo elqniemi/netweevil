@@ -284,10 +284,11 @@ fn collect_snap_candidates(
         topology
             .nodes
             .iter()
-            .map(|node| {
+            .enumerate()
+            .map(|(node_index, node)| {
                 (
-                    node.node_id.0,
-                    haversine_meters(point.lon, point.lat, node.lon, node.lat),
+                    node_index as u32,
+                    haversine_meters(point.lon, point.lat, node.lon(), node.lat()),
                 )
             })
             .filter(|(_, distance_m)| *distance_m <= radius_m)
@@ -316,9 +317,9 @@ fn collect_snap_candidates(
                 requested_lon: point.lon,
                 requested_lat: point.lat,
                 snapped_node_id: node_id,
-                snapped_lon: topology.nodes[node_id as usize].lon,
-                snapped_lat: topology.nodes[node_id as usize].lat,
-                snapped_z: finite_elevation(topology.nodes[node_id as usize].z),
+                snapped_lon: topology.nodes[node_id as usize].lon(),
+                snapped_lat: topology.nodes[node_id as usize].lat(),
+                snapped_z: finite_elevation(topology.nodes[node_id as usize].z()),
                 snap_distance_m: distance_m,
                 snapped_edge_id: None,
                 snapped_edge_fraction: None,
@@ -353,7 +354,7 @@ fn collect_snap_candidates(
         } else if projection.fraction == 1.0 {
             to.elevation_m()
         } else {
-            (from.z.is_finite() && to.z.is_finite()).then_some(projection.z)
+            (from.z().is_finite() && to.z().is_finite()).then_some(projection.z)
         };
         if projection.distance_m > radius_m
             || !edge_matches_filters(topology, edge_index as usize, &options.attribute_filters)
@@ -453,7 +454,7 @@ pub(crate) fn nearest_segments(
             } else if projection.fraction == 1.0 {
                 to.elevation_m()
             } else {
-                (from.z.is_finite() && to.z.is_finite()).then_some(projection.z)
+                (from.z().is_finite() && to.z().is_finite()).then_some(projection.z)
             };
             if projection.distance_m > radius_m
                 || !edge_matches_filters(topology, edge_index as usize, &options.attribute_filters)
@@ -526,8 +527,8 @@ fn edge_matches_point_constraint(
 ) -> bool {
     // Use the same local road tangent as projection, including its latitude
     // scale. Cross-product sign is positive on the left of travel.
-    let dx = projected_delta_x(from.lon, from.lat, to.lon);
-    let dy = projected_delta_y(from.lat, to.lat);
+    let dx = projected_delta_x(from.lon(), from.lat(), to.lon());
+    let dy = projected_delta_y(from.lat(), to.lat());
     let length = dx.hypot(dy);
     if length <= f64::EPSILON {
         return constraint.bearing.is_none() && constraint.approach == SnapApproach::Unrestricted;
@@ -542,8 +543,8 @@ fn edge_matches_point_constraint(
     if constraint.approach == SnapApproach::Unrestricted {
         return true;
     }
-    let px = projected_delta_x(from.lon, from.lat, point.lon);
-    let py = projected_delta_y(from.lat, point.lat);
+    let px = projected_delta_x(from.lon(), from.lat(), point.lon);
+    let py = projected_delta_y(from.lat(), point.lat);
     let side_distance = (dx * py - dy * px) / length;
     if side_distance.abs() <= constraint.street_side_tolerance_m {
         return true;
@@ -631,10 +632,10 @@ fn project_point_onto_segment(
 ) -> SegmentProjection {
     let origin_x = 0.0;
     let origin_y = 0.0;
-    let point_x = projected_delta_x(from.lon, from.lat, lon);
-    let point_y = projected_delta_y(from.lat, lat);
-    let segment_x = projected_delta_x(from.lon, from.lat, to.lon);
-    let segment_y = projected_delta_y(from.lat, to.lat);
+    let point_x = projected_delta_x(from.lon(), from.lat(), lon);
+    let point_y = projected_delta_y(from.lat(), lat);
+    let segment_x = projected_delta_x(from.lon(), from.lat(), to.lon());
+    let segment_y = projected_delta_y(from.lat(), to.lat());
     let segment_len_sq = segment_x * segment_x + segment_y * segment_y;
     let fraction = if segment_len_sq <= f64::EPSILON {
         0.0
@@ -646,14 +647,14 @@ fn project_point_onto_segment(
     let distance_m = ((point_x - snapped_x).powi(2) + (point_y - snapped_y).powi(2)).sqrt();
     SegmentProjection {
         fraction,
-        lon: from.lon + (to.lon - from.lon) * fraction,
-        lat: from.lat + (to.lat - from.lat) * fraction,
+        lon: from.lon() + (to.lon() - from.lon()) * fraction,
+        lat: from.lat() + (to.lat() - from.lat()) * fraction,
         z: if fraction == 0.0 {
-            finite_elevation(from.z)
+            finite_elevation(from.z())
         } else if fraction == 1.0 {
-            finite_elevation(to.z)
-        } else if from.z.is_finite() && to.z.is_finite() {
-            from.z + (to.z - from.z) * fraction
+            finite_elevation(to.z())
+        } else if from.z().is_finite() && to.z().is_finite() {
+            from.z() + (to.z() - from.z()) * fraction
         } else {
             0.0
         },
@@ -722,10 +723,10 @@ fn spatial_snap_nodes(
             let end = start + cell.node_len as usize;
             for &node_id in &spatial_index.node_ids[start..end] {
                 let node = &topology.nodes[node_id as usize];
-                if !window.may_contain(node.lon, node.lat) {
+                if !window.may_contain(node.lon(), node.lat()) {
                     continue;
                 }
-                let distance_m = haversine_meters(point.lon, point.lat, node.lon, node.lat);
+                let distance_m = haversine_meters(point.lon, point.lat, node.lon(), node.lat());
                 if distance_m <= max_distance_m {
                     let insert_index =
                         candidates.partition_point(|(_, existing)| *existing <= distance_m);

@@ -225,10 +225,9 @@ impl ResolvedAvoid {
         for &(edge, factor) in &self.edges {
             let metric = &mut metrics.edge_metrics[edge as usize];
             if factor.is_infinite() {
-                metric.generalized_cost = None;
-                metric.travel_time_s = None;
-            } else if let Some(cost) = metric.generalized_cost.as_mut() {
-                *cost *= factor;
+                *metric = netweevil_core::CompiledEdgeMetric::ABSENT;
+            } else if let Some(cost) = metric.generalized_cost() {
+                metric.set_generalized_cost(Some(cost * factor));
             }
         }
         metrics.metric_key = format!("{}+avoid-{:016x}", metrics.metric_key, self.fingerprint());
@@ -299,7 +298,11 @@ pub(crate) fn resolve_avoid(
         let center = ((min_lon + max_lon) / 2.0, (min_lat + max_lat) / 2.0);
         for edge in index.candidates(center.0, center.1, radius_m) {
             let (from, to) = segment(edge);
-            if segment_touches_polygon([from.lon, from.lat], [to.lon, to.lat], &polygon.rings) {
+            if segment_touches_polygon(
+                [from.lon(), from.lat()],
+                [to.lon(), to.lat()],
+                &polygon.rings,
+            ) {
                 mark(edge, factor);
             }
         }
@@ -311,8 +314,8 @@ pub(crate) fn resolve_avoid(
             .copied()
             .collect::<HashSet<_>>();
         for edge in 0..topology.edge_count() {
-            if metrics.edge_metrics[edge].generalized_cost.is_some()
-                && features.contains(&topology.routing_edge(edge).source_way_id)
+            if metrics.edge_metrics[edge].generalized_cost().is_some()
+                && features.contains(&topology.edge_source_way_id(edge))
             {
                 mark(edge as u32, f64::INFINITY);
             }
@@ -331,10 +334,10 @@ pub(crate) fn point_segment_distance_m(
     from: &TopologyNode,
     to: &TopologyNode,
 ) -> f64 {
-    let px = projected_delta_x(from.lon, from.lat, lon);
-    let py = projected_delta_y(from.lat, lat);
-    let sx = projected_delta_x(from.lon, from.lat, to.lon);
-    let sy = projected_delta_y(from.lat, to.lat);
+    let px = projected_delta_x(from.lon(), from.lat(), lon);
+    let py = projected_delta_y(from.lat(), lat);
+    let sx = projected_delta_x(from.lon(), from.lat(), to.lon());
+    let sy = projected_delta_y(from.lat(), to.lat());
     let length_sq = sx * sx + sy * sy;
     let fraction = if length_sq <= f64::EPSILON {
         0.0

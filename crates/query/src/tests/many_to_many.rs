@@ -93,11 +93,12 @@ fn restricted_astar_matches_restricted_dijkstra_on_random_graphs() {
     for _ in 0..16 {
         let mut topology = test_topology();
         topology.nodes = (0..8)
-            .map(|index| netweevil_core::TopologyNode {
-                node_id: netweevil_core::NodeId(index),
-                lon: 6.0 + f64::from(index) * 0.001,
-                lat: 53.0 + f64::from(index % 3) * 0.001,
-                z: 0.0,
+            .map(|index| {
+                netweevil_core::TopologyNode::new(
+                    6.0 + f64::from(index) * 0.001,
+                    53.0 + f64::from(index % 3) * 0.001,
+                    0.0,
+                )
             })
             .collect();
         let mut edges = Vec::new();
@@ -110,10 +111,9 @@ fn restricted_astar_matches_restricted_dijkstra_on_random_graphs() {
             edge.to = netweevil_core::NodeId((edge.from.0 + 1 + (next() % 7) as u32) % 8);
             edges.push(edge);
             let cost = (next() % 30) as f64;
-            metrics.edge_metrics.push(CompiledEdgeMetric {
-                travel_time_s: Some(cost),
-                generalized_cost: Some(cost),
-            });
+            metrics
+                .edge_metrics
+                .push(CompiledEdgeMetric::new(Some(cost), Some(cost)));
         }
         // Forbid a few consecutive three-edge sequences.
         let mut restrictions = Vec::new();

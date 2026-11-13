@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Result, bail};
-use netweevil_core::{CompiledEdgeMetric, CompiledProfileBundle, DirectedEdge, TopologyBundle};
+use netweevil_core::{CompiledProfileBundle, DirectedEdge, TopologyBundle};
 use netweevil_profile::ReturnConfig;
 
 use crate::*;
@@ -319,19 +319,23 @@ fn build_failure_mode_bundle(
                 degraded_metrics
                     .edge_metrics
                     .get(edge_index)
-                    .and_then(|metric| metric.generalized_cost)
+                    .and_then(|metric| metric.generalized_cost())
                     .is_some()
             })
             .map(|edge_index| {
                 let edge = degraded_topology.routing_edge(edge_index);
-                (edge.from.0, edge.to.0, edge.source_way_id)
+                (
+                    edge.from.0,
+                    edge.to.0,
+                    degraded_topology.edge_source_way_id(edge_index),
+                )
             })
             .collect::<std::collections::BTreeSet<_>>();
         let original_edge_count = degraded_topology.edge_count();
         for edge_index in 0..original_edge_count {
             let edge = degraded_topology.edge(edge_index);
             let metric = &degraded_metrics.edge_metrics[edge_index];
-            if metric.generalized_cost.is_none() || metric.travel_time_s.is_none() {
+            if metric.generalized_cost().is_none() || metric.travel_time_s().is_none() {
                 continue;
             }
             if existing_edges.contains(&(edge.to.0, edge.from.0, edge.source_way_id)) {
@@ -357,14 +361,9 @@ fn build_failure_mode_bundle(
                 max_speed_kph: edge.max_speed_kph,
                 lanes: edge.lanes,
                 name_index: edge.name_index,
-                geometry_offset: edge.geometry_offset,
-                geometry_len: edge.geometry_len,
                 flags: 0,
             });
-            degraded_metrics.edge_metrics.push(CompiledEdgeMetric {
-                travel_time_s: metric.travel_time_s,
-                generalized_cost: metric.generalized_cost,
-            });
+            degraded_metrics.edge_metrics.push(*metric);
             degraded_topology.edge_component_ids.push(
                 topology
                     .edge_component_id(edge_index as u32)
@@ -612,8 +611,8 @@ pub(crate) fn execute_route_with_candidates(
                         to_node_id: edge.to.0,
                         source_way_id: edge.source_way_id,
                         length_m: (edge.length_m as f64 * factor).round() as u32,
-                        travel_time_s: metric.travel_time_s.unwrap_or_default() * factor,
-                        generalized_cost: metric.generalized_cost.unwrap_or_default() * factor,
+                        travel_time_s: metric.travel_time_s().unwrap_or_default() * factor,
+                        generalized_cost: metric.generalized_cost().unwrap_or_default() * factor,
                         components: static_edge_components(metrics, edge_index, factor),
                         waiting_time_s: 0.0,
                         entry_time: None,
@@ -667,7 +666,7 @@ pub(crate) fn execute_route_with_candidates(
         edge_path: if include_detailed_paths {
             path.edge_indexes
                 .iter()
-                .map(|&edge_index| topology.routing_edge(edge_index).edge_id.0)
+                .map(|&edge_index| edge_index as u32)
                 .collect()
         } else {
             Vec::new()
@@ -878,8 +877,8 @@ pub(crate) fn analyze_route_path(
             destination,
         );
         network_distance_m += (edge.length_m as f64 * factor).round() as u64;
-        network_travel_time_s += metric.travel_time_s.unwrap_or_default() * factor;
-        network_generalized_cost += metric.generalized_cost.unwrap_or_default() * factor;
+        network_travel_time_s += metric.travel_time_s().unwrap_or_default() * factor;
+        network_generalized_cost += metric.generalized_cost().unwrap_or_default() * factor;
         for component in &metrics.components {
             let overlay_multiplier =
                 if component.overlay_name.is_some() && !component.invert_overlay {
@@ -908,7 +907,7 @@ pub(crate) fn analyze_route_path(
             penalty_cost += edge_penalty_cost;
             violations.push(RouteViolation {
                 violation_type: route_violation_type,
-                edge_id: Some(topology.routing_edge(original_edge_index).edge_id.0),
+                edge_id: Some(original_edge_index as u32),
                 from_edge_id: None,
                 to_edge_id: None,
                 distance_m: Some(edge.length_m as f64 * factor),
@@ -971,8 +970,8 @@ pub(crate) fn analyze_route_path(
                 violations.push(RouteViolation {
                     violation_type,
                     edge_id: None,
-                    from_edge_id: Some(topology.routing_edge(previous_edge_index).edge_id.0),
-                    to_edge_id: Some(topology.routing_edge(edge_index).edge_id.0),
+                    from_edge_id: Some(previous_edge_index as u32),
+                    to_edge_id: Some(edge_index as u32),
                     distance_m: None,
                     penalty_s: local_penalty_s,
                     penalty_generalized_cost: local_penalty_cost,

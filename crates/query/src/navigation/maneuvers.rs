@@ -326,7 +326,7 @@ impl ManeuverBuilder<'_> {
 
     fn node(&self, node: NodeId) -> [f64; 2] {
         let node = &self.topology.nodes[node.0 as usize];
-        [node.lon, node.lat]
+        [node.lon(), node.lat()]
     }
 
     fn highway(&self, edge: usize) -> HighwayClass {
@@ -369,7 +369,7 @@ impl ManeuverBuilder<'_> {
     }
 
     fn facility(&self, edge: usize, column: Option<usize>) -> Option<Facility> {
-        let row = self.topology.routing_edge(edge).feature_row;
+        let row = self.topology.edge_feature_row(edge);
         let table = &self.topology.feature_attributes;
         let from_attribute = column.and_then(|column| {
             [
@@ -704,8 +704,7 @@ impl ManeuverBuilder<'_> {
                 None
             } else if let Some(facility) = facilities[position]
                 && (facilities[position - 1] != Some(facility)
-                    || self.topology.routing_edge(prev).feature_row
-                        != self.topology.routing_edge(edge).feature_row)
+                    || self.topology.edge_feature_row(prev) != self.topology.edge_feature_row(edge))
             {
                 Some((facility.kind(), None))
             } else if self.ferry(prev) != self.ferry(edge) {

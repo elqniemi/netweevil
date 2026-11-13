@@ -35,8 +35,6 @@ pub(crate) fn edge(index: u32, road_class: RoadClass, access: u16) -> DirectedEd
         max_speed_kph: None,
         lanes: None,
         name_index: None,
-        geometry_offset: 0,
-        geometry_len: 0,
         flags: 0,
     }
 }

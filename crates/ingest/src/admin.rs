@@ -501,7 +501,7 @@ impl AdminIndex {
     pub(crate) fn assign(&self, nodes: &[TopologyNode]) -> (Vec<AdminArea>, Vec<u32>) {
         let areas = nodes
             .par_iter()
-            .map(|node| self.lookup(node.lon, node.lat))
+            .map(|node| self.lookup(node.lon(), node.lat()))
             .collect::<Vec<_>>();
         let mut table = Vec::new();
         let mut lookup = BTreeMap::new();

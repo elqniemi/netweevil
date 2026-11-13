@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// Schema version of [`TopologyBundle`]. Readers accept this value only.
-pub const TOPOLOGY_BUNDLE_SCHEMA_VERSION: u32 = 16;
+pub const TOPOLOGY_BUNDLE_SCHEMA_VERSION: u32 = 17;
 
 pub const EDGE_FLAG_ROUNDABOUT: u32 = 1 << 0;
 pub const EDGE_FLAG_TARGET_TRAFFIC_SIGNAL: u32 = 1 << 1;
@@ -212,46 +212,77 @@ pub struct DirectedEdge {
     /// one (OSM `lanes`, Overture `lanes` where present).
     pub lanes: Option<u8>,
     pub name_index: Option<u32>,
-    pub geometry_offset: u64,
-    pub geometry_len: u32,
     pub flags: u32,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// Sentinel of an absent [`RoutingEdge::temporal_rule_id`].
+const NO_TEMPORAL_RULE: u32 = u32::MAX;
+/// Sentinel of an absent edge name index.
+const NO_NAME: u32 = u32::MAX;
+
+/// The per-edge fields searches read. Fields the searches do not read live
+/// in parallel columns of [`TopologyEdgeLayers`]; the edge id is the
+/// position.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutingEdge {
-    pub edge_id: EdgeId,
     pub from: NodeId,
     pub to: NodeId,
-    pub source_way_id: i64,
     /// Three-dimensional segment length in metres, rounded to the nearest
     /// whole metre. When either endpoint has unknown elevation this is the
     /// horizontal great-circle length.
     pub length_m: u32,
-    /// Positive elevation gain in this travel direction.
-    pub ascent_m: f32,
-    /// Positive elevation loss in this travel direction.
-    pub descent_m: f32,
-    pub feature_row: u32,
-    pub source_direction: i8,
-    pub temporal_rule_id: Option<u32>,
+    temporal_rule: u32,
     pub flags: u32,
 }
 
 impl Default for RoutingEdge {
     fn default() -> Self {
         Self {
-            edge_id: EdgeId::default(),
             from: NodeId::default(),
             to: NodeId::default(),
-            source_way_id: 0,
             length_m: 0,
-            ascent_m: 0.0,
-            descent_m: 0.0,
-            feature_row: NO_FEATURE_ROW,
-            source_direction: 0,
-            temporal_rule_id: None,
+            temporal_rule: NO_TEMPORAL_RULE,
             flags: 0,
         }
+    }
+}
+
+impl RoutingEdge {
+    pub fn new(
+        from: NodeId,
+        to: NodeId,
+        length_m: u32,
+        temporal_rule_id: Option<u32>,
+        flags: u32,
+    ) -> Self {
+        let mut edge = Self {
+            from,
+            to,
+            length_m,
+            temporal_rule: NO_TEMPORAL_RULE,
+            flags,
+        };
+        edge.set_temporal_rule_id(temporal_rule_id);
+        edge
+    }
+
+    /// Optional edge schedule imported from the mapped source feature.
+    pub fn temporal_rule_id(&self) -> Option<u32> {
+        (self.temporal_rule != NO_TEMPORAL_RULE).then_some(self.temporal_rule)
+    }
+
+    pub fn set_temporal_rule_id(&mut self, temporal_rule_id: Option<u32>) {
+        debug_assert_ne!(temporal_rule_id, Some(NO_TEMPORAL_RULE));
+        self.temporal_rule = temporal_rule_id.unwrap_or(NO_TEMPORAL_RULE);
+    }
+
+    /// The raw column value: the rule id, or `u32::MAX` when absent.
+    pub fn temporal_rule_raw(&self) -> u32 {
+        self.temporal_rule
+    }
+
+    pub fn set_temporal_rule_raw(&mut self, raw: u32) {
+        self.temporal_rule = raw;
     }
 }
 
@@ -278,58 +309,141 @@ pub struct EdgeProfileAttributes {
     pub lanes: Option<u8>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
-pub struct EdgePresentation {
-    pub name_index: Option<u32>,
-    pub geometry_offset: u64,
-    pub geometry_len: u32,
+/// Bitwise identity of an [`EdgeProfileAttributes`] row, for interning.
+type ProfileRowKey = (
+    Option<u64>,
+    [u8; 4],
+    [u16; 3],
+    bool,
+    Option<u32>,
+    Option<u8>,
+);
+
+impl EdgeProfileAttributes {
+    fn row_key(&self) -> ProfileRowKey {
+        (
+            self.duration_s.map(f64::to_bits),
+            [
+                self.road_class as u8,
+                self.highway as u8,
+                self.surface as u8,
+                self.smoothness as u8,
+            ],
+            [
+                self.access_mask.0,
+                self.destination_only.0,
+                self.conditional_access.0,
+            ],
+            self.is_toll,
+            self.max_speed_kph.map(f32::to_bits),
+            self.lanes,
+        )
+    }
 }
 
-/// The three parallel per-edge columns of a [`TopologyBundle`]: routing
-/// geometry and flags, profile attributes, and presentation metadata. All
-/// three are indexed by the same edge index.
+/// The per-edge columns of a [`TopologyBundle`], all indexed by edge
+/// index: the hot [`RoutingEdge`] records, cold source and elevation
+/// columns, interned profile attribute rows, and name indexes.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TopologyEdgeLayers {
     pub routing: Vec<RoutingEdge>,
-    pub profile: Vec<EdgeProfileAttributes>,
-    pub presentation: Vec<EdgePresentation>,
+    pub source_way_ids: Vec<i64>,
+    /// Positive elevation gain in each edge's travel direction.
+    pub ascent_m: Vec<f32>,
+    /// Positive elevation loss in each edge's travel direction.
+    pub descent_m: Vec<f32>,
+    /// Row in the source feature attribute table shared by every segment
+    /// derived from the same source feature.
+    pub feature_rows: Vec<u32>,
+    /// `1` follows source geometry, `-1` traverses it backwards, and `0`
+    /// means the orientation is unknown.
+    pub source_directions: Vec<i8>,
+    /// Profile attribute rows, distinct unless rows were rewritten in
+    /// place.
+    profile_rows: Vec<EdgeProfileAttributes>,
+    /// Per edge, its row in `profile_rows`.
+    profile_row_index: Vec<u32>,
+    /// Per edge, its index into [`TopologyBundle::names`], or `u32::MAX`.
+    pub name_indexes: Vec<u32>,
     /// Sparse physical restrictions (height, weight, hazmat, ...) indexed
     /// by edge.
     #[serde(default)]
     pub vehicle_restrictions: VehicleRestrictionTable,
+    /// Row of each interned key, covering `profile_rows[..profile_lookup_len]`.
+    #[serde(skip)]
+    profile_lookup: std::collections::HashMap<ProfileRowKey, u32>,
+    #[serde(skip)]
+    profile_lookup_len: usize,
 }
 
 impl TopologyEdgeLayers {
-    /// Splits `edges` into the three parallel layers.
+    /// Splits `edges` into the per-edge columns.
     pub fn from_directed_edges(edges: &[DirectedEdge]) -> Self {
-        let mut layers = Self {
-            routing: Vec::with_capacity(edges.len()),
-            profile: Vec::with_capacity(edges.len()),
-            presentation: Vec::with_capacity(edges.len()),
-            vehicle_restrictions: VehicleRestrictionTable::default(),
-        };
+        let mut layers = Self::with_capacity(edges.len());
         for edge in edges {
             layers.push_directed_edge(edge);
         }
         layers
     }
 
-    /// Appends one edge to each layer.
+    /// Columns for `routing` with default cold values: no source way,
+    /// elevation change, feature row, orientation or name, and default
+    /// profile attributes.
+    pub fn from_routing(routing: Vec<RoutingEdge>) -> Self {
+        let edge_count = routing.len();
+        let mut layers = Self::with_capacity(0);
+        let row = layers.intern_profile(EdgeProfileAttributes::default());
+        layers.routing = routing;
+        layers.source_way_ids = vec![0; edge_count];
+        layers.ascent_m = vec![0.0; edge_count];
+        layers.descent_m = vec![0.0; edge_count];
+        layers.feature_rows = vec![NO_FEATURE_ROW; edge_count];
+        layers.source_directions = vec![0; edge_count];
+        layers.profile_row_index = vec![row; edge_count];
+        layers.name_indexes = vec![NO_NAME; edge_count];
+        layers
+    }
+
+    pub fn with_capacity(edge_count: usize) -> Self {
+        Self {
+            routing: Vec::with_capacity(edge_count),
+            source_way_ids: Vec::with_capacity(edge_count),
+            ascent_m: Vec::with_capacity(edge_count),
+            descent_m: Vec::with_capacity(edge_count),
+            feature_rows: Vec::with_capacity(edge_count),
+            source_directions: Vec::with_capacity(edge_count),
+            profile_rows: Vec::new(),
+            profile_row_index: Vec::with_capacity(edge_count),
+            name_indexes: Vec::with_capacity(edge_count),
+            vehicle_restrictions: VehicleRestrictionTable::default(),
+            profile_lookup: std::collections::HashMap::new(),
+            profile_lookup_len: 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.routing.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.routing.is_empty()
+    }
+
+    /// Appends one edge to each column.
     pub fn push_directed_edge(&mut self, edge: &DirectedEdge) {
-        self.routing.push(RoutingEdge {
-            edge_id: edge.edge_id,
-            from: edge.from,
-            to: edge.to,
-            source_way_id: edge.source_way_id,
-            length_m: edge.length_m,
-            ascent_m: edge.ascent_m,
-            descent_m: edge.descent_m,
-            feature_row: edge.feature_row,
-            source_direction: edge.source_direction,
-            temporal_rule_id: edge.temporal_rule_id,
-            flags: edge.flags,
-        });
-        self.profile.push(EdgeProfileAttributes {
+        self.routing.push(RoutingEdge::new(
+            edge.from,
+            edge.to,
+            edge.length_m,
+            edge.temporal_rule_id,
+            edge.flags,
+        ));
+        self.source_way_ids.push(edge.source_way_id);
+        self.ascent_m.push(edge.ascent_m);
+        self.descent_m.push(edge.descent_m);
+        self.feature_rows.push(edge.feature_row);
+        self.source_directions.push(edge.source_direction);
+        let row = self.intern_profile(EdgeProfileAttributes {
             duration_s: edge.duration_s,
             road_class: edge.road_class,
             highway: HighwayClass::from_road_class(edge.road_class),
@@ -342,11 +456,117 @@ impl TopologyEdgeLayers {
             max_speed_kph: edge.max_speed_kph,
             lanes: edge.lanes,
         });
-        self.presentation.push(EdgePresentation {
-            name_index: edge.name_index,
-            geometry_offset: edge.geometry_offset,
-            geometry_len: edge.geometry_len,
-        });
+        self.profile_row_index.push(row);
+        self.name_indexes.push(edge.name_index.unwrap_or(NO_NAME));
+    }
+
+    /// The row of `profile` in the profile row table, appending it when
+    /// new. Edges refer to rows through [`Self::profile_row_index`].
+    pub fn intern_profile(&mut self, profile: EdgeProfileAttributes) -> u32 {
+        for (row, attributes) in self
+            .profile_rows
+            .iter()
+            .enumerate()
+            .skip(self.profile_lookup_len)
+        {
+            self.profile_lookup
+                .entry(attributes.row_key())
+                .or_insert(row as u32);
+        }
+        let next = u32::try_from(self.profile_rows.len()).expect("profile rows fit in u32");
+        let row = *self.profile_lookup.entry(profile.row_key()).or_insert(next);
+        if row == next {
+            self.profile_rows.push(profile);
+        }
+        self.profile_lookup_len = self.profile_rows.len();
+        row
+    }
+
+    /// The profile attribute rows edges refer to.
+    pub fn profile_rows(&self) -> &[EdgeProfileAttributes] {
+        &self.profile_rows
+    }
+
+    /// Per edge, its row in [`Self::profile_rows`].
+    pub fn profile_row_index(&self) -> &[u32] {
+        &self.profile_row_index
+    }
+
+    /// Replaces the profile row table and the per-edge row column.
+    pub fn set_profile_columns(&mut self, rows: Vec<EdgeProfileAttributes>, row_index: Vec<u32>) {
+        self.profile_rows = rows;
+        self.profile_row_index = row_index;
+        self.profile_lookup.clear();
+        self.profile_lookup_len = 0;
+    }
+
+    /// Applies `update` to every profile row, and so to every edge.
+    pub fn update_profile_rows(&mut self, update: impl FnMut(&mut EdgeProfileAttributes)) {
+        self.profile_rows.iter_mut().for_each(update);
+        self.profile_lookup.clear();
+        self.profile_lookup_len = 0;
+    }
+
+    /// Appends the profile row column entry of a new edge.
+    pub fn push_profile_row_index(&mut self, row: u32) {
+        self.profile_row_index.push(row);
+    }
+
+    /// Profile attributes of the edge at `edge_index`.
+    pub fn profile(&self, edge_index: usize) -> EdgeProfileAttributes {
+        self.profile_rows[self.profile_row_index[edge_index] as usize]
+    }
+
+    /// Replaces the profile attributes of the edge at `edge_index`.
+    pub fn set_profile(&mut self, edge_index: usize, profile: EdgeProfileAttributes) {
+        let row = self.intern_profile(profile);
+        self.profile_row_index[edge_index] = row;
+    }
+
+    /// Applies `update` to the profile attributes of the edge at
+    /// `edge_index`.
+    pub fn update_profile(
+        &mut self,
+        edge_index: usize,
+        update: impl FnOnce(&mut EdgeProfileAttributes),
+    ) {
+        let mut profile = self.profile(edge_index);
+        update(&mut profile);
+        self.set_profile(edge_index, profile);
+    }
+
+    pub fn name_index(&self, edge_index: usize) -> Option<u32> {
+        let raw = self.name_indexes[edge_index];
+        (raw != NO_NAME).then_some(raw)
+    }
+
+    /// Checks that every column has one entry per routing edge and that
+    /// profile rows exist.
+    pub fn validate(&self) -> Result<(), String> {
+        let edge_count = self.routing.len();
+        for (name, len) in [
+            ("source way ids", self.source_way_ids.len()),
+            ("ascents", self.ascent_m.len()),
+            ("descents", self.descent_m.len()),
+            ("feature rows", self.feature_rows.len()),
+            ("source directions", self.source_directions.len()),
+            ("profile row indexes", self.profile_row_index.len()),
+            ("name indexes", self.name_indexes.len()),
+        ] {
+            if len != edge_count {
+                return Err(format!(
+                    "edge column {name} has {len} entries, expected {edge_count}"
+                ));
+            }
+        }
+        if self
+            .profile_row_index
+            .iter()
+            .any(|row| *row as usize >= self.profile_rows.len())
+        {
+            return Err("edge profile row index out of range".to_string());
+        }
+        Ok(())
     }
 }
 
@@ -392,7 +612,6 @@ impl TurnRestriction {
 pub struct TopologyBundleMeta {
     pub node_count: u64,
     pub edge_count: u64,
-    pub geometry_bytes: u64,
     pub turn_count: u64,
     pub connected_components: Option<ConnectedComponentsMeta>,
     pub source_node_count: u64,
@@ -425,20 +644,53 @@ pub struct TopologyBounds {
     pub max_lat: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// One node; its id is its position. Coordinates keep full `f64`
+/// precision: GeoPackage sources resolve vertices finer than OSM's 1e-7
+/// degrees, and sub-metre edges take their cost from node coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TopologyNode {
-    pub node_id: NodeId,
-    pub lon: f64,
-    pub lat: f64,
+    lon: f64,
+    lat: f64,
     /// Elevation in the source dataset's vertical datum, in metres.
     /// `NaN` means that the elevation is unknown.
-    pub z: f64,
+    z: f64,
 }
 
 impl TopologyNode {
+    /// A node at `lon`/`lat` degrees with elevation `z` metres (`NaN` when
+    /// unknown).
+    pub const fn new(lon: f64, lat: f64, z: f64) -> Self {
+        Self { lon, lat, z }
+    }
+
+    pub const fn lon(&self) -> f64 {
+        self.lon
+    }
+
+    pub const fn lat(&self) -> f64 {
+        self.lat
+    }
+
+    /// Elevation in metres; `NaN` when unknown.
+    pub const fn z(&self) -> f64 {
+        self.z
+    }
+
     /// Returns the elevation when the source supplied a finite value.
     pub fn elevation_m(&self) -> Option<f64> {
         self.z.is_finite().then_some(self.z)
+    }
+
+    pub fn set_lon(&mut self, lon: f64) {
+        self.lon = lon;
+    }
+
+    pub fn set_lat(&mut self, lat: f64) {
+        self.lat = lat;
+    }
+
+    pub fn set_z(&mut self, z: f64) {
+        self.z = z;
     }
 }
 
@@ -532,16 +784,16 @@ impl NodeSpatialIndex {
 
         let first = nodes.first()?;
         let mut bounds = TopologyBounds {
-            min_lon: first.lon,
-            min_lat: first.lat,
-            max_lon: first.lon,
-            max_lat: first.lat,
+            min_lon: first.lon(),
+            min_lat: first.lat(),
+            max_lon: first.lon(),
+            max_lat: first.lat(),
         };
         for node in nodes.iter().skip(1) {
-            bounds.min_lon = bounds.min_lon.min(node.lon);
-            bounds.min_lat = bounds.min_lat.min(node.lat);
-            bounds.max_lon = bounds.max_lon.max(node.lon);
-            bounds.max_lat = bounds.max_lat.max(node.lat);
+            bounds.min_lon = bounds.min_lon.min(node.lon());
+            bounds.min_lat = bounds.min_lat.min(node.lat());
+            bounds.max_lon = bounds.max_lon.max(node.lon());
+            bounds.max_lat = bounds.max_lat.max(node.lat());
         }
 
         let mid_lat = ((bounds.min_lat + bounds.max_lat) / 2.0).to_radians();
@@ -555,9 +807,9 @@ impl NodeSpatialIndex {
             .saturating_add(1);
         let cell_count = columns as usize * rows as usize;
         let cell_of = |node: &TopologyNode| {
-            let column = (((node.lon - bounds.min_lon) / cell_width_deg).floor() as i64)
+            let column = (((node.lon() - bounds.min_lon) / cell_width_deg).floor() as i64)
                 .clamp(0, columns.saturating_sub(1) as i64) as usize;
-            let row = (((node.lat - bounds.min_lat) / cell_height_deg).floor() as i64)
+            let row = (((node.lat() - bounds.min_lat) / cell_height_deg).floor() as i64)
                 .clamp(0, rows.saturating_sub(1) as i64) as usize;
             row * columns as usize + column
         };
@@ -578,9 +830,9 @@ impl NodeSpatialIndex {
             .map(|cell| cell.node_start as usize)
             .collect::<Vec<_>>();
         let mut node_ids = vec![0_u32; nodes.len()];
-        for node in nodes {
+        for (node_index, node) in nodes.iter().enumerate() {
             let cell_index = cell_of(node);
-            node_ids[write_positions[cell_index]] = node.node_id.0;
+            node_ids[write_positions[cell_index]] = node_index as u32;
             write_positions[cell_index] += 1;
         }
 
@@ -630,29 +882,50 @@ impl TopologyBundle {
     }
 
     pub fn edge_profile(&self, edge_index: usize) -> EdgeProfileAttributes {
-        self.edge_layers.profile[edge_index]
+        self.edge_layers.profile(edge_index)
     }
 
-    pub fn edge_presentation(&self, edge_index: usize) -> EdgePresentation {
-        self.edge_layers.presentation[edge_index]
+    pub fn edge_name_index(&self, edge_index: usize) -> Option<u32> {
+        self.edge_layers.name_index(edge_index)
     }
 
-    /// Gathers the three edge layers at `edge_index` into one value.
+    pub fn edge_source_way_id(&self, edge_index: usize) -> i64 {
+        self.edge_layers.source_way_ids[edge_index]
+    }
+
+    /// Positive elevation gain in the edge's travel direction.
+    pub fn edge_ascent_m(&self, edge_index: usize) -> f32 {
+        self.edge_layers.ascent_m[edge_index]
+    }
+
+    /// Positive elevation loss in the edge's travel direction.
+    pub fn edge_descent_m(&self, edge_index: usize) -> f32 {
+        self.edge_layers.descent_m[edge_index]
+    }
+
+    pub fn edge_feature_row(&self, edge_index: usize) -> u32 {
+        self.edge_layers.feature_rows[edge_index]
+    }
+
+    pub fn edge_source_direction(&self, edge_index: usize) -> i8 {
+        self.edge_layers.source_directions[edge_index]
+    }
+
+    /// Gathers every edge column at `edge_index` into one value.
     pub fn edge(&self, edge_index: usize) -> DirectedEdge {
         let routing = self.routing_edge(edge_index);
         let profile = self.edge_profile(edge_index);
-        let presentation = self.edge_presentation(edge_index);
         DirectedEdge {
-            edge_id: routing.edge_id,
+            edge_id: EdgeId(edge_index as u32),
             from: routing.from,
             to: routing.to,
-            source_way_id: routing.source_way_id,
+            source_way_id: self.edge_source_way_id(edge_index),
             length_m: routing.length_m,
-            ascent_m: routing.ascent_m,
-            descent_m: routing.descent_m,
-            feature_row: routing.feature_row,
-            source_direction: routing.source_direction,
-            temporal_rule_id: routing.temporal_rule_id,
+            ascent_m: self.edge_ascent_m(edge_index),
+            descent_m: self.edge_descent_m(edge_index),
+            feature_row: self.edge_feature_row(edge_index),
+            source_direction: self.edge_source_direction(edge_index),
+            temporal_rule_id: routing.temporal_rule_id(),
             duration_s: profile.duration_s,
             road_class: profile.road_class,
             surface: profile.surface,
@@ -661,26 +934,24 @@ impl TopologyBundle {
             is_toll: profile.is_toll,
             max_speed_kph: profile.max_speed_kph,
             lanes: profile.lanes,
-            name_index: presentation.name_index,
-            geometry_offset: presentation.geometry_offset,
-            geometry_len: presentation.geometry_len,
+            name_index: self.edge_name_index(edge_index),
             flags: routing.flags,
         }
     }
 
-    /// Appends `edge` to each edge layer.
+    /// Appends `edge` to each edge column.
     pub fn push_edge(&mut self, edge: DirectedEdge) {
         self.edge_layers.push_directed_edge(&edge);
     }
 
     pub fn set_edge_name_index(&mut self, edge_index: usize, name_index: Option<u32>) {
-        if let Some(edge) = self.edge_layers.presentation.get_mut(edge_index) {
-            edge.name_index = name_index;
+        if let Some(slot) = self.edge_layers.name_indexes.get_mut(edge_index) {
+            *slot = name_index.unwrap_or(NO_NAME);
         }
     }
 
     pub fn edge_attribute_matches(&self, edge_index: usize, name: &str, expected: &str) -> bool {
-        let row = self.routing_edge(edge_index).feature_row;
+        let row = self.edge_feature_row(edge_index);
         row != NO_FEATURE_ROW && self.feature_attributes.value_matches(row, name, expected)
     }
 
@@ -730,3 +1001,6 @@ impl TopologyBundle {
             .and_then(AdminArea::driving_side)
     }
 }
+
+#[cfg(test)]
+mod tests;

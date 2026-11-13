@@ -178,6 +178,9 @@ where
         let edge = topology.edge(edge_index);
         let length_m = traversal_length_m(topology, &edge);
         let routing_edge = topology.routing_edge(edge_index);
+        let feature_row = topology.edge_feature_row(edge_index);
+        let ascent_m = topology.edge_ascent_m(edge_index);
+        let descent_m = topology.edge_descent_m(edge_index);
         let edge_profile = topology.edge_profile(edge_index);
         let attribute_matches = |name: &str, expected: &str| {
             if topology.regions.has_admin_areas()
@@ -190,13 +193,13 @@ where
                 };
                 return value.is_some_and(|value| value.eq_ignore_ascii_case(expected));
             }
-            if routing_edge.feature_row == NO_FEATURE_ROW {
+            if feature_row == NO_FEATURE_ROW {
                 return false;
             }
             attribute_match_cache
                 .get(name)
                 .and_then(|values| values.get(expected))
-                .and_then(|matches| matches.get(routing_edge.feature_row as usize))
+                .and_then(|matches| matches.get(feature_row as usize))
                 .copied()
                 .unwrap_or_else(|| topology.edge_attribute_matches(edge_index, name, expected))
         };
@@ -221,17 +224,14 @@ where
             for component in &mut components {
                 component.edge_values.push(0.0);
             }
-            CompiledEdgeMetric {
-                travel_time_s: None,
-                generalized_cost: None,
-            }
+            CompiledEdgeMetric::ABSENT
         } else if let Some(traversal) = edge_traversal_cost(
             profile,
             &edge,
             length_m,
             edge_profile.highway,
-            routing_edge.ascent_m,
-            routing_edge.descent_m,
+            ascent_m,
+            descent_m,
             facility,
             &attribute_matches,
         ) {
@@ -246,8 +246,8 @@ where
                         parsed.edge_value(
                             traversal.travel_time_s,
                             length_m,
-                            f64::from(routing_edge.ascent_m),
-                            f64::from(routing_edge.descent_m),
+                            f64::from(ascent_m),
+                            f64::from(descent_m),
                             &attribute_matches,
                         )
                     })
@@ -290,7 +290,7 @@ where
                 cost += component.compiled.weight * value * overlay_multiplier;
             }
             if let Some(rule_set) = routing_edge
-                .temporal_rule_id
+                .temporal_rule_id()
                 .and_then(|id| topology.temporal_rule_sets.get(id as usize))
             {
                 temporal_rules.resolve(edge_index, rule_set, mode_bit, |max_speed_kph| {
@@ -305,34 +305,27 @@ where
                         &limited,
                         length_m,
                         edge_profile.highway,
-                        routing_edge.ascent_m,
-                        routing_edge.descent_m,
+                        ascent_m,
+                        descent_m,
                         facility,
                         &attribute_matches,
                     )
                     .map(|limited| traversal.travel_time_s / limited.travel_time_s)
                 });
             }
-            CompiledEdgeMetric {
-                travel_time_s: Some(traversal.travel_time_s),
-                generalized_cost: Some(cost),
-            }
+            CompiledEdgeMetric::new(Some(traversal.travel_time_s), Some(cost))
         } else {
             for component in &mut components {
                 component.edge_values.push(0.0);
             }
-            CompiledEdgeMetric {
-                travel_time_s: None,
-                generalized_cost: None,
-            }
+            CompiledEdgeMetric::ABSENT
         };
         if vehicle_excluded
             && let (Some(travel_time_s), Some(generalized_cost)) =
-                (metric.travel_time_s, metric.generalized_cost)
+                (metric.travel_time_s(), metric.generalized_cost())
         {
             vehicle_exclusions.push(edge_index, travel_time_s, generalized_cost, &mut components);
-            metric.travel_time_s = None;
-            metric.generalized_cost = None;
+            metric = CompiledEdgeMetric::ABSENT;
         }
 
         edge_metrics.push(metric);
@@ -748,7 +741,7 @@ impl<'a> CostBaseArcs<'a> {
 
     fn usable(&self, edge_index: usize) -> bool {
         self.metrics.edge_metrics[edge_index]
-            .generalized_cost
+            .generalized_cost()
             .is_some()
             && is_statically_usable(self.topology, edge_index, self.mode_bit)
     }
@@ -878,7 +871,7 @@ fn cost_base_weight<'a>(
 ) -> impl Fn(usize, usize) -> f64 + Sync + 'a {
     move |edge_index, next_index| {
         edge_metrics[next_index]
-            .generalized_cost
+            .generalized_cost()
             .map_or(f64::INFINITY, |cost| {
                 cost + turn_penalty(
                     topology,
@@ -898,7 +891,7 @@ fn time_base_weight<'a>(
 ) -> impl Fn(usize, usize) -> f64 + Sync + 'a {
     move |edge_index, next_index| {
         edge_metrics[next_index]
-            .travel_time_s
+            .travel_time_s()
             .map_or(f64::INFINITY, |time| {
                 time + turn_penalty(topology, turns, edge_index, next_index, 1.0)
             })
@@ -974,7 +967,7 @@ fn transition_arcs(
     let transitions = &topology.edge_based_topology;
     let pairwise_forbidden_turns = build_pairwise_forbidden_turn_table(topology, mode_bit);
     let usable = |edge_index: usize| {
-        edge_metrics[edge_index].generalized_cost.is_some()
+        edge_metrics[edge_index].generalized_cost().is_some()
             && is_statically_usable(topology, edge_index, mode_bit)
     };
     // Base arcs mirror the exact engine's transition construction: both
@@ -1449,7 +1442,14 @@ fn traversal_length_m(topology: &TopologyBundle, edge: &netweevil_core::Directed
     else {
         return 0.0;
     };
-    netweevil_core::geo::distance_3d_meters(from.lon, from.lat, from.z, to.lon, to.lat, to.z)
+    netweevil_core::geo::distance_3d_meters(
+        from.lon(),
+        from.lat(),
+        from.z(),
+        to.lon(),
+        to.lat(),
+        to.z(),
+    )
 }
 
 fn build_pairwise_forbidden_turn_table(topology: &TopologyBundle, mode_bit: u16) -> Vec<Vec<u32>> {

@@ -210,26 +210,37 @@ pub(crate) fn encode_i64s(values: &[i64]) -> Vec<u8> {
 }
 
 pub(crate) fn decode_i64s(bytes: &[u8]) -> Result<Vec<i64>> {
+    decode_i64s_as(bytes, Ok)
+}
+
+/// Decodes an [`encode_i64s`] column straight into `T` values.
+pub(crate) fn decode_i64s_as<T: Clone>(
+    bytes: &[u8],
+    convert: impl Fn(i64) -> Result<T>,
+) -> Result<Vec<T>> {
     let mut cursor = Cursor::new(bytes);
     let tag = cursor.byte()?;
     let count = cursor.count()?;
     let values = match tag {
-        TAG_RAW => read_raw::<i64>(&mut cursor, count)?,
-        TAG_CONSTANT => vec![unzigzag(cursor.varint()?); count],
-        TAG_IDENTITY => (0..count as i64).collect(),
+        TAG_RAW => read_raw::<i64>(&mut cursor, count)?
+            .into_iter()
+            .map(&convert)
+            .collect::<Result<Vec<_>>>()?,
+        TAG_CONSTANT => vec![convert(unzigzag(cursor.varint()?))?; count],
+        TAG_IDENTITY => (0..count as i64).map(&convert).collect::<Result<_>>()?,
         TAG_DELTA_VARINT => {
             let mut values = Vec::with_capacity(count);
             let mut previous = 0_i64;
             for _ in 0..count {
                 previous = previous.wrapping_add(unzigzag(cursor.varint()?));
-                values.push(previous);
+                values.push(convert(previous)?);
             }
             values
         }
         TAG_VARINT => {
             let mut values = Vec::with_capacity(count);
             for _ in 0..count {
-                values.push(unzigzag(cursor.varint()?));
+                values.push(convert(unzigzag(cursor.varint()?))?);
             }
             values
         }

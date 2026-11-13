@@ -325,12 +325,7 @@ fn publish_street_dataset(paths: &WorkspacePaths, id: &str) {
     use netweevil_persist::manifest::{BundleRef, DatasetManifest};
 
     let nodes = (0..4)
-        .map(|node| TopologyNode {
-            node_id: NodeId(node),
-            lon: 6.5 + f64::from(node) * 0.0015,
-            lat: 53.2,
-            z: 0.0,
-        })
+        .map(|node| TopologyNode::new(6.5 + f64::from(node) * 0.0015, 53.2, 0.0))
         .collect::<Vec<_>>();
     let edges = (0..3)
         .flat_map(|node| [(node, node + 1), (node + 1, node)])
@@ -355,8 +350,6 @@ fn publish_street_dataset(paths: &WorkspacePaths, id: &str) {
             max_speed_kph: None,
             lanes: None,
             name_index: Some(0),
-            geometry_offset: 0,
-            geometry_len: 0,
             flags: 0,
         })
         .collect::<Vec<_>>();

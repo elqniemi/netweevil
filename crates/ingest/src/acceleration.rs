@@ -468,7 +468,7 @@ fn build_edge_cell(topology: &TopologyBundle) -> Cell {
     let mean_lat = if topology.nodes.is_empty() {
         0.0
     } else {
-        topology.nodes.iter().map(|node| node.lat).sum::<f64>() / topology.nodes.len() as f64
+        topology.nodes.iter().map(|node| node.lat()).sum::<f64>() / topology.nodes.len() as f64
     };
     let longitude_scale = mean_lat.to_radians().cos().abs().max(0.05);
     let mut x = Vec::with_capacity(edge_count);
@@ -477,8 +477,8 @@ fn build_edge_cell(topology: &TopologyBundle) -> Cell {
         let edge = topology.routing_edge(index);
         let from = &topology.nodes[edge.from.0 as usize];
         let to = &topology.nodes[edge.to.0 as usize];
-        x.push(((from.lon + to.lon) * 0.5 * longitude_scale) as f32);
-        y.push(((from.lat + to.lat) * 0.5) as f32);
+        x.push(((from.lon() + to.lon()) * 0.5 * longitude_scale) as f32);
+        y.push(((from.lat() + to.lat()) * 0.5) as f32);
     }
     Cell {
         ids: (0..edge_count as u32).collect(),

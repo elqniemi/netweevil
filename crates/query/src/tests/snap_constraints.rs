@@ -34,7 +34,7 @@ fn engine_in(one_way: bool, country: Option<&str>) -> PreparedRoutingEngine {
     .collect::<Vec<_>>();
     let mut topology = topology("test", &nodes, &edges);
     for node in &mut topology.nodes[3..] {
-        node.z = 20.0;
+        node.set_z(20.0);
     }
     topology.spatial_index = None;
     if let Some(country) = country {
@@ -204,8 +204,8 @@ fn curb_opposite_and_driving_side_filter_direction_without_inventing_one_way_edg
 fn snap_constraint_angles_validate_and_wrap_at_true_north() {
     let mut topology = test_topology();
     for (index, node) in topology.nodes.iter_mut().enumerate() {
-        node.lon = 6.0;
-        node.lat = 53.0 + index as f64 * 0.001;
+        node.set_lon(6.0);
+        node.set_lat(53.0 + index as f64 * 0.001);
     }
     topology.spatial_index = None;
     let engine = exact_engine(topology, test_metrics());
@@ -505,10 +505,10 @@ fn widening_snap_radius_matches_a_full_radius_scan() {
     let (min_lon, min_lat) = (6.0, 53.0);
     let cell_deg = STEP_DEG * f64::from(SIDE) / 5.0;
     let mut cells = vec![Vec::new(); 25];
-    for node in &topology.nodes {
-        let col = (((node.lon - min_lon) / cell_deg).floor() as usize).min(4);
-        let row = (((node.lat - min_lat) / cell_deg).floor() as usize).min(4);
-        cells[row * 5 + col].push(node.node_id.0);
+    for (node_index, node) in topology.nodes.iter().enumerate() {
+        let col = (((node.lon() - min_lon) / cell_deg).floor() as usize).min(4);
+        let row = (((node.lat() - min_lat) / cell_deg).floor() as usize).min(4);
+        cells[row * 5 + col].push(node_index as u32);
     }
     let mut node_ids = Vec::new();
     let cells = cells

@@ -7,7 +7,7 @@ use crate::{CacheBundleId, TemporalRuleSet, TravelMode, VehicleParams};
 /// Schema version of [`CompiledProfileBundle`]. Readers accept this value
 /// only, so bumping it also makes cached bundles recompile; bump it when
 /// compilation semantics change.
-pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 10;
+pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 11;
 
 /// Schema version of [`CompiledAcceleration`] customization data.
 pub const COMPILED_ACCELERATION_SCHEMA_VERSION: u32 = 4;
@@ -26,11 +26,52 @@ pub struct CompiledTurnCostConfig {
 }
 
 /// Metrics of one edge, at the edge's index in
-/// [`CompiledProfileBundle::edge_metrics`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// [`CompiledProfileBundle::edge_metrics`]: travel time in seconds and
+/// generalized cost, with `NaN` marking an absent value. Both keep full
+/// `f64` precision because searches, reports and CCH customization sum
+/// them exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CompiledEdgeMetric {
-    pub travel_time_s: Option<f64>,
-    pub generalized_cost: Option<f64>,
+    travel_time_s: f64,
+    generalized_cost: f64,
+}
+
+impl Default for CompiledEdgeMetric {
+    fn default() -> Self {
+        Self::ABSENT
+    }
+}
+
+impl CompiledEdgeMetric {
+    /// An edge without travel time or cost.
+    pub const ABSENT: Self = Self {
+        travel_time_s: f64::NAN,
+        generalized_cost: f64::NAN,
+    };
+
+    /// A `NaN` value reads back as absent.
+    pub fn new(travel_time_s: Option<f64>, generalized_cost: Option<f64>) -> Self {
+        Self {
+            travel_time_s: travel_time_s.unwrap_or(f64::NAN),
+            generalized_cost: generalized_cost.unwrap_or(f64::NAN),
+        }
+    }
+
+    pub fn travel_time_s(&self) -> Option<f64> {
+        (!self.travel_time_s.is_nan()).then_some(self.travel_time_s)
+    }
+
+    pub fn generalized_cost(&self) -> Option<f64> {
+        (!self.generalized_cost.is_nan()).then_some(self.generalized_cost)
+    }
+
+    pub fn set_travel_time_s(&mut self, travel_time_s: Option<f64>) {
+        self.travel_time_s = travel_time_s.unwrap_or(f64::NAN);
+    }
+
+    pub fn set_generalized_cost(&mut self, generalized_cost: Option<f64>) {
+        self.generalized_cost = generalized_cost.unwrap_or(f64::NAN);
+    }
 }
 
 /// One named, edge-aligned accounting column emitted by profile

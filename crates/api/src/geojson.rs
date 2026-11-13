@@ -46,9 +46,9 @@ pub(crate) fn route_result_geojson(
             .filter_map(|node_id| service.topology.nodes.get(*node_id as usize))
             .map(|node| {
                 [
-                    node.lon,
-                    node.lat,
-                    if node.z.is_finite() { node.z } else { 0.0 },
+                    node.lon(),
+                    node.lat(),
+                    if node.z().is_finite() { node.z() } else { 0.0 },
                 ]
             })
             .collect()

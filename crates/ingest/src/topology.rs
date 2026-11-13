@@ -375,8 +375,6 @@ pub(crate) fn build_topology(
                     max_speed_kph: way.forward_max_speed_kph,
                     lanes: way.forward_lanes,
                     name_index,
-                    geometry_offset: 0,
-                    geometry_len: 0,
                     flags: forward_flags | way.forward_extra_flags,
                 });
                 edge_highways.push(way.highway);
@@ -412,8 +410,6 @@ pub(crate) fn build_topology(
                     max_speed_kph: way.reverse_max_speed_kph,
                     lanes: way.reverse_lanes,
                     name_index,
-                    geometry_offset: 0,
-                    geometry_len: 0,
                     flags: reverse_flags | way.reverse_extra_flags,
                 });
                 edge_highways.push(way.highway);
@@ -475,15 +471,14 @@ pub(crate) fn build_topology(
     let components = label_weak_components(nodes.len(), &edges);
 
     let mut edge_layers = netweevil_core::TopologyEdgeLayers::from_directed_edges(&edges);
-    for ((profile, highway), (destination_only, conditional_access)) in edge_layers
-        .profile
-        .iter_mut()
-        .zip(edge_highways)
-        .zip(edge_masks)
+    for (edge_index, (highway, (destination_only, conditional_access))) in
+        edge_highways.into_iter().zip(edge_masks).enumerate()
     {
-        profile.highway = highway;
-        profile.destination_only = destination_only;
-        profile.conditional_access = conditional_access;
+        edge_layers.update_profile(edge_index, |profile| {
+            profile.highway = highway;
+            profile.destination_only = destination_only;
+            profile.conditional_access = conditional_access;
+        });
     }
     edge_layers.vehicle_restrictions = vehicle_restrictions.finish();
     let bundle = TopologyBundle {
@@ -524,7 +519,6 @@ pub(crate) fn build_topology(
     let meta = TopologyBundleMeta {
         node_count: bundle.nodes.len() as u64,
         edge_count: bundle.edge_count() as u64,
-        geometry_bytes: 0,
         turn_count: bundle.turn_restrictions.len() as u64,
         connected_components: Some(ConnectedComponentsMeta {
             kind: ConnectedComponentKind::Weak,
@@ -686,12 +680,7 @@ fn build_nodes(
             continue;
         };
         let node_id = NodeId(nodes.len() as u32);
-        nodes.push(TopologyNode {
-            node_id,
-            lon,
-            lat,
-            z,
-        });
+        nodes.push(TopologyNode::new(lon, lat, z));
         lookup.insert(osm_node_id, (node_id, lon, lat, z));
     }
 

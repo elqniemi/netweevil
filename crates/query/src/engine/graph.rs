@@ -549,7 +549,7 @@ pub(crate) fn build_routing_graph_with_weights(
         {
             continue;
         }
-        if let (Some(cost), Some(_)) = (metric.generalized_cost, metric.travel_time_s) {
+        if let (Some(cost), Some(_)) = (metric.generalized_cost(), metric.travel_time_s()) {
             edge_costs[edge_index] = cost;
             in_degree[edge.to.0 as usize] += 1;
         }
@@ -855,8 +855,8 @@ impl RoutingGraph {
             // direction and no access that holds only under a time condition.
             let traversable =
                 netweevil_profile::is_statically_usable(topology, edge_index, mode_bit)
-                    && metric.travel_time_s.is_some();
-            let cost = metric.generalized_cost.filter(|_| traversable);
+                    && metric.travel_time_s().is_some();
+            let cost = metric.generalized_cost().filter(|_| traversable);
             if cost.is_some() != self.edge_costs[edge_index].is_finite() {
                 return None;
             }
@@ -966,8 +966,8 @@ impl RoutingGraph {
         for (edge_index, metric) in metrics.edge_metrics.iter().enumerate() {
             let traversable =
                 netweevil_profile::is_statically_usable(topology, edge_index, mode_bit)
-                    && metric.travel_time_s.is_some();
-            if let Some(cost) = metric.generalized_cost.filter(|_| traversable) {
+                    && metric.travel_time_s().is_some();
+            if let Some(cost) = metric.generalized_cost().filter(|_| traversable) {
                 if !self.edge_costs[edge_index].is_finite() {
                     return None;
                 }
