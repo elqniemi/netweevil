@@ -318,6 +318,7 @@ fn edge_name_bundle_rejects_out_of_range_guidance_indexes() {
 #[test]
 fn round_trips_acceleration_bundle_binary() {
     let bundle = DatasetAccelerationBundle {
+        hierarchy_key: 0,
         schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
         source_topology_bundle_id: CacheBundleId::new("topology-test"),
         algorithm: CCH_ALGORITHM.to_string(),
@@ -506,12 +507,13 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
     assert_eq!(read.vehicle, bundle.vehicle);
     assert_eq!(read.edge_metrics.len(), 2);
 
-    // Fixed-point weights, including both sentinels, are dropped from every
-    // per-metric weight set while the acceleration header is kept.
+    // Fixed-point weights, including both sentinels, round-trip in every
+    // per-metric weight set with the hierarchy key they belong to.
     let weights = vec![0, 12345, CCH_WEIGHT_OVERFLOW, CCH_WEIGHT_INFINITY];
     bundle.acceleration = Some(CompiledAcceleration {
         schema_version: COMPILED_ACCELERATION_SCHEMA_VERSION,
         source_acceleration_bundle_id: CacheBundleId::new("acceleration-test"),
+        source_hierarchy_key: 0x1234_5678_9abc_def0,
         algorithm: CCH_ALGORITHM.into(),
         upward_weight: weights.clone(),
         downward_weight: weights.clone(),
@@ -522,12 +524,12 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
     });
     write_compiled_profile_bundle(file.path(), &bundle).expect("fixed-point bundle serializes");
     let read = read_compiled_profile_bundle(file.path()).expect("fixed-point bundle reads");
-    // Customized weights are rebuilt at engine load, never persisted.
     let acceleration = read.acceleration.expect("acceleration retained");
     assert_eq!(
         acceleration.source_acceleration_bundle_id.0,
         "acceleration-test"
     );
+    assert_eq!(acceleration.source_hierarchy_key, 0x1234_5678_9abc_def0);
     for actual in [
         &acceleration.upward_weight,
         &acceleration.downward_weight,
@@ -536,7 +538,7 @@ fn round_trips_compiled_profile_bundle_with_turn_costs() {
         &acceleration.distance_upward_weight,
         &acceleration.distance_downward_weight,
     ] {
-        assert!(actual.is_empty());
+        assert_eq!(actual, &weights);
     }
     assert_eq!(read.edge_metrics[0].travel_time_s(), Some(12.0));
     assert_eq!(read.edge_metrics[0].generalized_cost(), Some(18.0));

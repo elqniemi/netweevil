@@ -339,18 +339,21 @@ pub(crate) fn build_with_order(
     let (downward_first_out, downward_head) =
         arcs_to_csr(&downward, edge_count, "downward CCH arcs")?;
 
-    Ok(DatasetAccelerationBundle {
+    let mut bundle = DatasetAccelerationBundle {
         schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
         source_topology_bundle_id,
         algorithm: CCH_ALGORITHM.to_string(),
         stats,
+        hierarchy_key: 0,
         edge_order,
         edge_rank,
         upward_first_out,
         upward_head,
         downward_first_out,
         downward_head,
-    })
+    };
+    bundle.hierarchy_key = bundle.compute_hierarchy_key();
+    Ok(bundle)
 }
 
 /// CSR offsets and heads of arcs sorted by tail. `what` names the arcs in

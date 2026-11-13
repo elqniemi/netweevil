@@ -79,6 +79,7 @@ fn fixture() -> Arc<ServiceRuntime> {
     let state = Arc::get_mut(&mut service).unwrap();
     state.dynamic_profiles = DynamicProfileCache::new(1);
     let acceleration = Arc::new(DatasetAccelerationBundle {
+        hierarchy_key: 0,
         schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
         source_topology_bundle_id: CacheBundleId::new("test-topology"),
         algorithm: CCH_ALGORITHM.into(),

@@ -417,6 +417,7 @@ struct AccelerationHeader {
     source_topology_bundle_id: CacheBundleId,
     algorithm: String,
     stats: netweevil_core::AccelerationBundleStats,
+    hierarchy_key: u64,
 }
 
 /// Inverse permutation of `order`, or `None` when `order` is not a
@@ -452,6 +453,7 @@ fn encode_acceleration(
         source_topology_bundle_id: bundle.source_topology_bundle_id.clone(),
         algorithm: bundle.algorithm.clone(),
         stats: bundle.stats.clone(),
+        hierarchy_key: bundle.hierarchy_key,
     })?;
     writer.write_u32s(&bundle.edge_order)?;
     if invert_permutation(&bundle.edge_order).as_ref() == Some(&bundle.edge_rank) {
@@ -517,6 +519,7 @@ pub(crate) fn read_acceleration_sectioned(
         source_topology_bundle_id: header.source_topology_bundle_id,
         algorithm: header.algorithm,
         stats: header.stats,
+        hierarchy_key: header.hierarchy_key,
         edge_order,
         edge_rank,
         upward_first_out,
@@ -625,11 +628,8 @@ pub(crate) fn read_edge_names_sectioned(bytes: &[u8], path: &Path) -> Result<Edg
 
 // --- Compiled profile bundle ----------------------------------------------
 //
-// Only per-edge metrics are persisted. Customized CCH weights are a pure
-// function of these metrics, the topology and the dataset hierarchy, and are
-// rebuilt when an engine loads the profile (see
-// `netweevil_profile::customize_acceleration`); the reader returns the
-// acceleration header with empty weight arrays.
+// Per-edge metrics plus the customized CCH weight sets the compile produced
+// (empty sets stay empty), keyed by the hierarchy they were customized on.
 
 #[derive(Serialize, Deserialize)]
 struct CompiledProfileHeader {
@@ -647,6 +647,7 @@ struct CompiledProfileHeader {
 struct CompiledAccelerationHeader {
     schema_version: u32,
     source_acceleration_bundle_id: CacheBundleId,
+    source_hierarchy_key: u64,
     algorithm: String,
 }
 
@@ -685,6 +686,7 @@ fn encode_compiled_profile(
             .map(|acceleration| CompiledAccelerationHeader {
                 schema_version: acceleration.schema_version,
                 source_acceleration_bundle_id: acceleration.source_acceleration_bundle_id.clone(),
+                source_hierarchy_key: acceleration.source_hierarchy_key,
                 algorithm: acceleration.algorithm.clone(),
             }),
         temporal: CompiledTemporalProfile {
@@ -728,7 +730,20 @@ fn encode_compiled_profile(
         .vehicle
         .validate(bundle.edge_metrics.len(), bundle.components.len())
         .map_err(anyhow::Error::msg)?;
-    writer.write_bincode(&bundle.vehicle)
+    writer.write_bincode(&bundle.vehicle)?;
+    if let Some(acceleration) = &bundle.acceleration {
+        for weights in [
+            &acceleration.upward_weight,
+            &acceleration.downward_weight,
+            &acceleration.time_upward_weight,
+            &acceleration.time_downward_weight,
+            &acceleration.distance_upward_weight,
+            &acceleration.distance_downward_weight,
+        ] {
+            writer.write_u32s(weights)?;
+        }
+    }
+    Ok(())
 }
 
 /// `values` as a shared component column: a live column with the same bits
@@ -801,6 +816,24 @@ pub(crate) fn read_compiled_profile_sectioned(
         .validate(edge_metrics.len(), components.len())
         .map_err(anyhow::Error::msg)?;
 
+    let acceleration = header
+        .acceleration
+        .map(|acceleration| -> Result<_> {
+            Ok(CompiledAcceleration {
+                schema_version: acceleration.schema_version,
+                source_acceleration_bundle_id: acceleration.source_acceleration_bundle_id,
+                source_hierarchy_key: acceleration.source_hierarchy_key,
+                algorithm: acceleration.algorithm,
+                upward_weight: reader.read_u32s()?,
+                downward_weight: reader.read_u32s()?,
+                time_upward_weight: reader.read_u32s()?,
+                time_downward_weight: reader.read_u32s()?,
+                distance_upward_weight: reader.read_u32s()?,
+                distance_downward_weight: reader.read_u32s()?,
+            })
+        })
+        .transpose()?;
+
     Ok(CompiledProfileBundle {
         schema_version: header.schema_version,
         profile_id: header.profile_id,
@@ -810,19 +843,7 @@ pub(crate) fn read_compiled_profile_sectioned(
         components,
         temporal,
         source_topology_bundle_id: header.source_topology_bundle_id,
-        acceleration: header
-            .acceleration
-            .map(|acceleration| CompiledAcceleration {
-                schema_version: acceleration.schema_version,
-                source_acceleration_bundle_id: acceleration.source_acceleration_bundle_id,
-                algorithm: acceleration.algorithm,
-                upward_weight: Vec::new(),
-                downward_weight: Vec::new(),
-                time_upward_weight: Vec::new(),
-                time_downward_weight: Vec::new(),
-                distance_upward_weight: Vec::new(),
-                distance_downward_weight: Vec::new(),
-            }),
+        acceleration,
         edge_metrics,
         vehicle,
     })

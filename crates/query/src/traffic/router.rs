@@ -534,6 +534,7 @@ impl TrafficRouter {
                     source_acceleration_bundle_id: acceleration
                         .source_acceleration_bundle_id
                         .clone(),
+                    source_hierarchy_key: acceleration.source_hierarchy_key,
                     algorithm: acceleration.algorithm.clone(),
                     upward_weight: Vec::new(),
                     downward_weight: Vec::new(),

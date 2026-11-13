@@ -77,17 +77,22 @@ impl PreparedRoutingEngine {
     /// them; otherwise they are customized here.
     fn build(
         topology: Arc<TopologyBundle>,
-        metrics: Arc<CompiledProfileBundle>,
+        mut metrics: Arc<CompiledProfileBundle>,
         acceleration: Option<Arc<DatasetAccelerationBundle>>,
         with_ignore_mode_graph: bool,
         customized: Option<CchWeights>,
     ) -> Result<Self> {
         validate_execution_inputs(topology.as_ref(), metrics.as_ref())?;
         register_topology(&topology);
-        let weights = customized.or_else(|| {
-            customize_loaded_metrics(topology.as_ref(), metrics.as_ref(), acceleration.as_deref())
-        });
-        let customized_at_load = weights.is_some();
+        let weights = customized
+            .or_else(|| {
+                customize_loaded_metrics(
+                    topology.as_ref(),
+                    metrics.as_ref(),
+                    acceleration.as_deref(),
+                )
+            })
+            .or_else(|| take_persisted_weights(&mut metrics, acceleration.as_deref()));
         let default_routing_graph = build_routing_graph_with_weights(
             topology.as_ref(),
             metrics.clone(),
@@ -99,25 +104,22 @@ impl PreparedRoutingEngine {
             topology,
             metrics,
             default_routing_graph,
-            customized_at_load,
             with_ignore_mode_graph,
         ))
     }
 
-    /// An engine around a built default graph. `customized_at_load` defers
-    /// the service-area weight sets to first use.
+    /// An engine around a built default graph. Service-area weight sets the
+    /// bundle does not carry are customized on first use.
     fn assemble(
         topology: Arc<TopologyBundle>,
         metrics: Arc<CompiledProfileBundle>,
         mut default_routing_graph: RoutingGraph,
-        customized_at_load: bool,
         with_ignore_mode_graph: bool,
     ) -> Self {
-        if customized_at_load
-            && let Some(acceleration) = default_routing_graph
-                .acceleration
-                .as_mut()
-                .and_then(Arc::get_mut)
+        if let Some(acceleration) = default_routing_graph
+            .acceleration
+            .as_mut()
+            .and_then(Arc::get_mut)
         {
             acceleration.deferred_metric_weights = Some(Arc::default());
         }
@@ -164,7 +166,6 @@ impl PreparedRoutingEngine {
             metrics.as_ref(),
             acceleration.as_deref(),
         );
-        let customized_at_load = weights.is_some();
         // Speed-only changes keep the adjacency: share it with this engine.
         let shared = self.default_routing_graph.with_metrics(
             self.topology.as_ref(),
@@ -182,11 +183,10 @@ impl PreparedRoutingEngine {
                 RoutingGraphBuildOptions::default(),
             )?,
         };
-        if customized_at_load
-            && let Some(acceleration) = default_routing_graph
-                .acceleration
-                .as_mut()
-                .and_then(Arc::get_mut)
+        if let Some(acceleration) = default_routing_graph
+            .acceleration
+            .as_mut()
+            .and_then(Arc::get_mut)
         {
             acceleration.deferred_metric_weights = Some(Arc::default());
         }

@@ -1105,10 +1105,11 @@ impl AccelerationGraph {
         let compiled = metrics.acceleration.as_ref()?;
         let (upward_weight, downward_weight) = match weights {
             Some((upward, downward)) => (upward.as_slice(), downward.as_slice()),
-            None => (
+            None if has_weights_for(&metrics, &self.source) => (
                 compiled.upward_weight.as_slice(),
                 compiled.downward_weight.as_slice(),
             ),
+            None => return None,
         };
         if upward_weight.len() != self.source.upward_head.len()
             || downward_weight.len() != self.source.downward_head.len()
@@ -1158,14 +1159,45 @@ impl CchWeights {
     }
 }
 
-/// Compiled profile bundles persist per-edge metrics only. When `metrics`
-/// carries an acceleration header for `dataset_acceleration` but no arc
-/// weights yet, customize the generalized-cost weights now and return them
-/// for [`build_routing_graph_with_weights`]; the bundle itself stays
-/// weightless, so the ranked hierarchy holds the only copy. Service-area
-/// weights are then deferred (see [`DeferredMetricWeights`]). Returns `None`
-/// for bundles that carry weights already and for bundles that do not belong
-/// together, which [`build_acceleration_graph`] reports.
+/// Whether `metrics` carries generalized-cost weights customized on
+/// `source`: arrays of the hierarchy's lengths recorded for its key.
+pub(crate) fn has_weights_for(
+    metrics: &CompiledProfileBundle,
+    source: &DatasetAccelerationBundle,
+) -> bool {
+    metrics.acceleration.as_ref().is_some_and(|compiled| {
+        compiled.source_hierarchy_key == source.hierarchy_key
+            && compiled.upward_weight.len() == source.upward_head.len()
+            && compiled.downward_weight.len() == source.downward_head.len()
+    })
+}
+
+/// Moves the generalized-cost weights `metrics` carries for `source` out of
+/// the bundle when the caller holds its only reference, so the ranked
+/// hierarchy keeps the only copy. `None` when the bundle carries no weights
+/// for `source` or is shared; the graph then reads them from the bundle.
+pub(crate) fn take_persisted_weights(
+    metrics: &mut Arc<CompiledProfileBundle>,
+    source: Option<&DatasetAccelerationBundle>,
+) -> Option<CchWeights> {
+    if !has_weights_for(metrics, source?) {
+        return None;
+    }
+    let compiled = Arc::get_mut(metrics)?.acceleration.as_mut()?;
+    Some(CchWeights::Slots((
+        std::mem::take(&mut compiled.upward_weight),
+        std::mem::take(&mut compiled.downward_weight),
+    )))
+}
+
+/// When `metrics` carries an acceleration header for `dataset_acceleration`
+/// but no arc weights customized on it (metrics derived in memory, or a
+/// bundle compiled against another hierarchy), customize the
+/// generalized-cost weights now and return them for
+/// [`build_routing_graph_with_weights`]; the bundle itself is left as it
+/// is. Returns `None` for bundles that carry weights for this hierarchy and
+/// for bundles that do not belong together, which
+/// [`build_acceleration_graph`] reports.
 pub(crate) fn customize_loaded_metrics(
     topology: &TopologyBundle,
     metrics: &CompiledProfileBundle,
@@ -1175,9 +1207,7 @@ pub(crate) fn customize_loaded_metrics(
     else {
         return None;
     };
-    let customized = compiled.upward_weight.len() == source.upward_head.len()
-        && compiled.downward_weight.len() == source.downward_head.len();
-    if customized
+    if has_weights_for(metrics, source)
         || source.source_topology_bundle_id != metrics.source_topology_bundle_id
         || !source.is_current_format()
         || compiled.algorithm != netweevil_core::CCH_ALGORITHM
@@ -1185,6 +1215,13 @@ pub(crate) fn customize_loaded_metrics(
         || metrics.edge_metrics.len() != topology.edge_count()
     {
         return None;
+    }
+    if !compiled.upward_weight.is_empty() {
+        tracing::warn!(
+            profile = %metrics.profile_id,
+            "compiled profile weights belong to another CCH hierarchy; customizing at load. \
+             Recompile the profile to load its weights directly"
+        );
     }
     let weights = netweevil_profile::customize_acceleration(
         topology,
@@ -1258,6 +1295,11 @@ pub(crate) fn build_acceleration_graph(
     {
         bail!(
             "compiled profile acceleration uses an outdated format; recompile the profile against the current dataset"
+        );
+    }
+    if weights.is_none() && acceleration.source_hierarchy_key != topology_source.hierarchy_key {
+        bail!(
+            "compiled profile weights belong to another CCH hierarchy; recompile the profile against the current dataset"
         );
     }
     if topology_source.edge_order.len() != edge_count

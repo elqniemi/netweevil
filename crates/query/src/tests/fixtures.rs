@@ -891,6 +891,7 @@ pub(crate) fn build_test_cch(
     }
 
     let bundle = std::sync::Arc::new(DatasetAccelerationBundle {
+        hierarchy_key: 0,
         schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
         source_topology_bundle_id: metrics.source_topology_bundle_id.clone(),
         algorithm: CCH_ALGORITHM.to_string(),
@@ -904,6 +905,7 @@ pub(crate) fn build_test_cch(
     });
     let mut metrics = metrics.clone();
     metrics.acceleration = Some(CompiledAcceleration {
+        source_hierarchy_key: 0,
         schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
         source_acceleration_bundle_id: CacheBundleId::new("test-cch"),
         algorithm: CCH_ALGORITHM.to_string(),

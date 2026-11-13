@@ -7,10 +7,10 @@ use crate::{CacheBundleId, TemporalRuleSet, TravelMode, VehicleParams};
 /// Schema version of [`CompiledProfileBundle`]. Readers accept this value
 /// only, so bumping it also makes cached bundles recompile; bump it when
 /// compilation semantics change.
-pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 11;
+pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 12;
 
 /// Schema version of [`CompiledAcceleration`] customization data.
-pub const COMPILED_ACCELERATION_SCHEMA_VERSION: u32 = 4;
+pub const COMPILED_ACCELERATION_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct CompiledTurnCostConfig {
@@ -206,6 +206,9 @@ pub fn add_cch_weights(left: u32, right: u32) -> u32 {
 pub struct CompiledAcceleration {
     pub schema_version: u32,
     pub source_acceleration_bundle_id: CacheBundleId,
+    /// [`crate::DatasetAccelerationBundle::hierarchy_key`] of the hierarchy
+    /// the weights were customized on.
+    pub source_hierarchy_key: u64,
     pub algorithm: String,
     pub upward_weight: Vec<u32>,
     pub downward_weight: Vec<u32>,

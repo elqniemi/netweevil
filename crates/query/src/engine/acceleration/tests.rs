@@ -9,6 +9,7 @@ use std::sync::Arc;
 /// 1 -> 2, downward arc 1 -> 0.
 fn hierarchy(upward_head_0: u32) -> Arc<DatasetAccelerationBundle> {
     Arc::new(DatasetAccelerationBundle {
+        hierarchy_key: 0,
         schema_version: netweevil_core::ACCELERATION_BUNDLE_SCHEMA_VERSION,
         source_topology_bundle_id: CacheBundleId::new("witness-test"),
         algorithm: netweevil_core::CCH_ALGORITHM.into(),
@@ -37,6 +38,7 @@ fn graph(source: Arc<DatasetAccelerationBundle>, direct_weight: u32) -> Accelera
         edge_metrics: vec![],
         vehicle: Default::default(),
         acceleration: Some(CompiledAcceleration {
+            source_hierarchy_key: 0,
             schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
             source_acceleration_bundle_id: CacheBundleId::new("witness-test"),
             algorithm: netweevil_core::CCH_ALGORITHM.into(),

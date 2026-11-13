@@ -71,10 +71,11 @@ where
     )
 }
 
-/// Compiles the per-edge metrics that a profile bundle persists. With an
-/// acceleration bundle the result carries its acceleration header but no
-/// arc weights: engines customize those when they load the bundle (see
-/// [`customize_acceleration`]), so compiling for storage skips that work.
+/// Compiles what a profile bundle persists: the per-edge metrics and, with
+/// an acceleration bundle, the hierarchy customized for generalized cost, so
+/// engines load the weights instead of customizing. The travel-time and
+/// distance weight sets that only service areas use are left empty and
+/// customized on first use (see [`customize_service_area_metric`]).
 pub fn compile_profile_metrics_with_progress<F>(
     profile: &ProfileDocument,
     topology: &TopologyBundle,
@@ -100,7 +101,7 @@ fn compile_profile<F>(
     topology: &TopologyBundle,
     source_topology_bundle_id: CacheBundleId,
     acceleration: Option<(&DatasetAccelerationBundle, CacheBundleId)>,
-    customize: bool,
+    service_area_metrics: bool,
     mut progress: F,
 ) -> Result<CompiledProfileBundle>
 where
@@ -366,30 +367,16 @@ where
         destination_only_penalty_s: profile.preferences.destination_only_penalty_s,
     };
     let compiled_acceleration = acceleration.map(|(bundle, bundle_id)| {
-        if customize {
-            compile_acceleration_with_progress(
-                bundle,
-                bundle_id,
-                topology,
-                &edge_metrics,
-                &turn_costs,
-                mode_bit,
-                true,
-                &mut progress,
-            )
-        } else {
-            CompiledAcceleration {
-                schema_version: COMPILED_ACCELERATION_SCHEMA_VERSION,
-                source_acceleration_bundle_id: bundle_id,
-                algorithm: bundle.algorithm.clone(),
-                upward_weight: Vec::new(),
-                downward_weight: Vec::new(),
-                time_upward_weight: Vec::new(),
-                time_downward_weight: Vec::new(),
-                distance_upward_weight: Vec::new(),
-                distance_downward_weight: Vec::new(),
-            }
-        }
+        compile_acceleration_with_progress(
+            bundle,
+            bundle_id,
+            topology,
+            &edge_metrics,
+            &turn_costs,
+            mode_bit,
+            service_area_metrics,
+            &mut progress,
+        )
     });
 
     emit_compile_progress(
@@ -681,8 +668,8 @@ fn build_attribute_match_cache(
 /// Customizes the dataset CCH for an already compiled profile's
 /// generalized cost: the weights every accelerated route search needs.
 ///
-/// Compiled profile bundles persist only per-edge metrics, so engines call
-/// this when they load one. The travel-time and distance weight sets that
+/// Engines call this for metrics whose bundle carries no weights for their
+/// hierarchy (derived metrics, bundles of another hierarchy). The travel-time and distance weight sets that
 /// only service areas use are left empty; build them on demand with
 /// [`customize_service_area_metric`]. Returns weights of the wrong length
 /// (which engine preparation rejects) when the bundles do not belong
@@ -1353,6 +1340,7 @@ fn compile_acceleration_with_progress(
     let result = |upward_weight: Vec<u32>, downward_weight: Vec<u32>| CompiledAcceleration {
         schema_version: COMPILED_ACCELERATION_SCHEMA_VERSION,
         source_acceleration_bundle_id: source_acceleration_bundle_id.clone(),
+        source_hierarchy_key: bundle.hierarchy_key,
         algorithm: bundle.algorithm.clone(),
         upward_weight,
         downward_weight,

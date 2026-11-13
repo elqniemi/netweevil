@@ -171,7 +171,6 @@ impl PreparedRoutingEngine {
                         self.topology.clone(),
                         metrics,
                         graph?,
-                        true,
                         with_ignore_mode_graph,
                     )
                 }

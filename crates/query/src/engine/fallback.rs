@@ -567,6 +567,7 @@ pub(crate) fn customize_failure_mode_acceleration(
     Some(netweevil_core::CompiledAcceleration {
         schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
         source_acceleration_bundle_id: base_compiled.source_acceleration_bundle_id.clone(),
+        source_hierarchy_key: source.hierarchy_key,
         algorithm: source.algorithm.clone(),
         upward_weight,
         downward_weight,

@@ -5,8 +5,9 @@ calculate routes quickly. The work has three phases:
 
 1.  **Dataset build.** The import calculates the hierarchy. The hierarchy
     depends only on the legal transitions of the street network.
-2.  **Customization.** The engine calculates the arc weights for one
-    profile. It does not build the hierarchy again.
+2.  **Customization.** `profile compile` calculates the arc weights for
+    one profile and stores them in the compiled profile bundle. It does not
+    build the hierarchy again.
 3.  **Query.** A bidirectional search finds the best path. Then
     reconstruction expands the shortcuts into road edges.
 
@@ -18,7 +19,7 @@ flowchart TB
         nd --> elim[Elimination game:<br/>insert shortcuts]
         elim --> bundle[(Acceleration bundle:<br/>edge order, up and down CSR)]
     end
-    subgraph custom [Customization: engine load]
+    subgraph custom [Customization: profile compile]
         direction LR
         met[(Per-edge metrics of<br/>the compiled profile)] --> base[Base arc weights:<br/>head edge cost + turn cost]
         base --> tri[Lower-triangle relaxation<br/>in rank order]
@@ -108,10 +109,12 @@ pass.
 Each arc has up to three `u32` weights: generalized cost, travel time and
 distance.
 
-- Compiled profile bundles store only the per-edge metrics. Customization
-  is a pure function of these metrics, the topology and the dataset
-  hierarchy. Thus the engine customizes the generalized-cost weights when it
-  loads a profile.
+- Compiled profile bundles store the per-edge metrics and the
+  generalized-cost weights, with the fingerprint of the hierarchy they were
+  customized on. The engine loads these weights. It customizes at load only
+  when the fingerprint does not match the dataset hierarchy, and for
+  metrics derived in memory (traffic buckets, avoid sets, request
+  vehicles, request profiles).
 - Only PHAST service areas read the travel-time and distance weights. The
   engine customizes them at the first service-area request. The routing
   graphs of the engine share them. An engine that only calculates routes
@@ -198,7 +201,8 @@ calculated the result, for example
   dataset bundle causes an error with a re-import instruction.
 - The engine validates each compiled profile against the acceleration
   bundle id of the dataset. A stale compiled profile compiles again.
-- Customization at load runs only when these items of the profile agree
-  with the dataset hierarchy: the acceleration header, the topology bundle
-  id, the algorithm and the schema. If they do not agree, engine
-  preparation reports the difference.
+- The stored weights are used only when their hierarchy fingerprint matches
+  the dataset hierarchy. Customization at load runs only when these items of
+  the profile agree with the dataset hierarchy: the acceleration header, the
+  topology bundle id, the algorithm and the schema. If they do not agree,
+  engine preparation reports the difference.

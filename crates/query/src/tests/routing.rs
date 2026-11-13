@@ -890,6 +890,48 @@ fn engine_customizes_stored_metrics_like_the_reference_cch() {
     assert_eq!(downward, reference.distance_downward_weight.as_slice());
 }
 
+/// Stored generalized-cost weights load as they are when their hierarchy
+/// key matches; a bundle keyed to another hierarchy is customized again and
+/// ends with the same weights.
+#[test]
+fn engine_loads_stored_weights_only_for_their_hierarchy() {
+    let topology = Arc::new(test_topology());
+    let (bundle, reference) = build_test_cch(&topology, &test_metrics());
+    let expected = {
+        let compiled = reference.acceleration.as_ref().expect("reference weights");
+        (
+            compiled.upward_weight.clone(),
+            compiled.downward_weight.clone(),
+        )
+    };
+    assert!(crate::engine::has_weights_for(&reference, &bundle));
+    assert!(
+        crate::engine::customize_loaded_metrics(&topology, &reference, Some(&bundle)).is_none()
+    );
+
+    let mut foreign = reference.clone();
+    let header = foreign.acceleration.as_mut().expect("fixture header");
+    header.source_hierarchy_key = bundle.hierarchy_key ^ 1;
+    header
+        .upward_weight
+        .iter_mut()
+        .for_each(|weight| *weight = 1);
+    assert!(!crate::engine::has_weights_for(&foreign, &bundle));
+    assert!(crate::engine::customize_loaded_metrics(&topology, &foreign, Some(&bundle)).is_some());
+
+    for metrics in [reference, foreign] {
+        let engine =
+            PreparedRoutingEngine::new(topology.clone(), Arc::new(metrics), Some(bundle.clone()))
+                .expect("engine prepares");
+        let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
+        let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
+        assert_eq!(
+            acceleration.ranked.slot_weights(&acceleration.source),
+            expected
+        );
+    }
+}
+
 #[test]
 fn pure_summary_routes_omit_path_payloads() {
     let route = execute_route(&test_topology(), &test_metrics(), &a_to_c("summary-route"))
