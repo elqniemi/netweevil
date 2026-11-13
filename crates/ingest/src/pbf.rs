@@ -436,6 +436,10 @@ impl IdIndex {
         self.ids.len()
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
     pub(crate) fn ids(&self) -> &[i64] {
         &self.ids
     }
