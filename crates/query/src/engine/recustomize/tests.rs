@@ -70,7 +70,7 @@ fn recustomized_weights_equal_a_full_customization() {
     let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
     let base = graph.acceleration.as_ref().expect("accelerated graph");
     assert_eq!(
-        base.ranked.slot_weights(&base.source),
+        base.ranked.weight_vectors(),
         customized(&topology, &metrics, &base.source)
     );
 
@@ -97,7 +97,7 @@ fn recustomized_weights_equal_a_full_customization() {
         let ranked = recustomize_changed_edges(&topology, &changed_metrics, graph, &changed)
             .expect("accelerated base");
         assert_eq!(
-            ranked.slot_weights(&base.source),
+            ranked.weight_vectors(),
             customized(&topology, &changed_metrics, &base.source),
             "change {change:?}"
         );
@@ -221,7 +221,7 @@ fn closing_edges_filters_the_base_graph_like_a_fresh_build() {
     assert_eq!(turns(&filtered), turns(fresh));
     let weights = |graph: &RoutingGraph| {
         let acceleration = graph.acceleration.as_ref().expect("accelerated");
-        acceleration.ranked.slot_weights(&acceleration.source)
+        acceleration.ranked.weight_vectors()
     };
     assert_eq!(weights(&filtered), weights(fresh));
 

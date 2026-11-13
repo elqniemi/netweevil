@@ -763,8 +763,8 @@ fn engines_over_one_topology_share_identical_structures() {
     );
     assert!(fast_cch.ranked.shares_topology(&slow_cch.ranked));
     assert_ne!(
-        fast_cch.ranked.slot_weights(&fast_cch.source),
-        slow_cch.ranked.slot_weights(&slow_cch.source)
+        fast_cch.ranked.weight_vectors(),
+        slow_cch.ranked.weight_vectors()
     );
 
     let request = a_to_c("shared");
@@ -823,15 +823,9 @@ fn bucket_engines_share_the_ranked_hierarchy() {
         reference.upward_weight.into_vec(),
         reference.downward_weight.into_vec(),
     );
-    assert_eq!(
-        bucket_graph.ranked.slot_weights(&bucket_graph.source),
-        weights
-    );
-    assert_eq!(
-        fresh_graph.ranked.slot_weights(&fresh_graph.source),
-        weights
-    );
-    assert_ne!(base.ranked.slot_weights(&base.source), weights);
+    assert_eq!(bucket_graph.ranked.weight_vectors(), weights);
+    assert_eq!(fresh_graph.ranked.weight_vectors(), weights);
+    assert_ne!(base.ranked.weight_vectors(), weights);
 
     let request = a_to_c("bucket");
     let from_bucket = bucket.execute_route(&request).expect("bucket route");
@@ -872,7 +866,7 @@ fn engine_customizes_stored_metrics_like_the_reference_cch() {
     let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
     let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
     assert_eq!(
-        acceleration.ranked.slot_weights(&acceleration.source),
+        acceleration.ranked.weight_vectors(),
         (
             reference.upward_weight.to_vec(),
             reference.downward_weight.to_vec()
@@ -929,10 +923,7 @@ fn engine_loads_stored_weights_only_for_their_hierarchy() {
                 .expect("engine prepares");
         let (graph, _) = engine.routing_graph_for_mode(EngineMode::Auto);
         let acceleration = graph.acceleration.as_ref().expect("accelerated graph");
-        assert_eq!(
-            acceleration.ranked.slot_weights(&acceleration.source),
-            expected
-        );
+        assert_eq!(acceleration.ranked.weight_vectors(), expected);
     }
 }
 

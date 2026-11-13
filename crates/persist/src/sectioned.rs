@@ -574,17 +574,14 @@ fn encode_acceleration(
         stats: bundle.stats.clone(),
         hierarchy_key: bundle.hierarchy_key,
     })?;
-    for column in [
-        &bundle.edge_order,
-        &bundle.edge_rank,
-        &bundle.upward_first_out,
-        &bundle.upward_head,
-        &bundle.downward_first_out,
-        &bundle.downward_head,
-    ] {
-        writer.write_raw::<u32>(column)?;
-    }
-    Ok(())
+    writer.write_raw::<u32>(&bundle.edge_order)?;
+    writer.write_raw::<u32>(&bundle.edge_rank)?;
+    writer.write_raw::<u64>(&bundle.upward_first_out)?;
+    writer.write_raw::<u32>(&bundle.upward_head)?;
+    writer.write_raw::<u64>(&bundle.downward_first_in)?;
+    writer.write_raw::<u32>(&bundle.downward_tail)?;
+    writer.write_raw::<u64>(&bundle.downward_first_out)?;
+    writer.write_raw::<u32>(&bundle.downward_head)
 }
 
 /// Checks that `first_out` is a CSR offset array over `rows` rows whose
@@ -612,39 +609,23 @@ pub(crate) fn read_acceleration_sectioned(
     if header.schema_version != ACCELERATION_BUNDLE_SCHEMA_VERSION {
         return Err(unsupported_format_error(path));
     }
-    let edge_order = reader.read_raw()?;
-    let edge_rank = reader.read_raw()?;
-    let upward_first_out = reader.read_raw()?;
-    let upward_head = reader.read_raw()?;
-    let downward_first_out = reader.read_raw()?;
-    let downward_head = reader.read_raw()?;
-    let states = edge_order.len();
-    ensure_len("CCH edge ranks", edge_rank.len(), states)?;
-    ensure_csr(
-        "upward CCH arcs",
-        &upward_first_out,
-        states,
-        upward_head.len(),
-    )?;
-    ensure_csr(
-        "downward CCH arcs",
-        &downward_first_out,
-        states,
-        downward_head.len(),
-    )?;
-    Ok(DatasetAccelerationBundle {
+    let bundle = DatasetAccelerationBundle {
         schema_version: header.schema_version,
         source_topology_bundle_id: header.source_topology_bundle_id,
         algorithm: header.algorithm,
         stats: header.stats,
         hierarchy_key: header.hierarchy_key,
-        edge_order,
-        edge_rank,
-        upward_first_out,
-        upward_head,
-        downward_first_out,
-        downward_head,
-    })
+        edge_order: reader.read_raw()?,
+        edge_rank: reader.read_raw()?,
+        upward_first_out: reader.read_raw()?,
+        upward_head: reader.read_raw()?,
+        downward_first_in: reader.read_raw()?,
+        downward_tail: reader.read_raw()?,
+        downward_first_out: reader.read_raw()?,
+        downward_head: reader.read_raw()?,
+    };
+    bundle.validate().map_err(anyhow::Error::msg)?;
+    Ok(bundle)
 }
 
 // --- Edge-name bundle ----------------------------------------------------

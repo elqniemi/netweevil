@@ -65,7 +65,7 @@ fn build_lower_bound_weights(
 ) -> Option<LowerBoundWeights> {
     let source = acceleration.source.as_ref();
     let mut upward = vec![CCH_WEIGHT_INFINITY; source.upward_head.len()];
-    let mut downward = vec![CCH_WEIGHT_INFINITY; source.downward_head.len()];
+    let mut downward = vec![CCH_WEIGHT_INFINITY; source.downward_tail.len()];
     for edge in 0..routing_graph.edge_costs.len() {
         for transition in routing_graph.transition_range(edge) {
             let next = routing_graph.transition_edges[transition] as usize;
@@ -77,10 +77,12 @@ fn build_lower_bound_weights(
             if scaled >= f64::from(CCH_WEIGHT_OVERFLOW) {
                 return None;
             }
-            let weight = if source.edge_rank[edge] < source.edge_rank[next] {
-                &mut upward[acceleration.upward_arc_slot(edge, next as u32)?]
+            let arc =
+                HierarchyArc::between(source, source.edge_rank[edge], source.edge_rank[next])?;
+            let weight = if arc.is_upward() {
+                &mut upward[arc.position]
             } else {
-                &mut downward[acceleration.downward_arc_slot(edge, next as u32)?]
+                &mut downward[arc.position]
             };
             *weight = (*weight).min(scaled as u32);
         }
@@ -145,10 +147,9 @@ impl AStarScratch {
                 continue;
             }
             let source = acceleration.source.as_ref();
-            let downward_slots = acceleration.downward_slots();
             let rank = source.edge_rank[edge_index] as usize;
-            for position in acceleration.ranked.downward_range(rank) {
-                let weight = weights.downward[downward_slots[position] as usize];
+            for position in source.downward_range(rank) {
+                let weight = weights.downward[position];
                 if weight == CCH_WEIGHT_INFINITY {
                     continue;
                 }
@@ -186,11 +187,11 @@ impl AStarScratch {
                 self.potential_stack.pop();
                 continue;
             }
-            let arcs = source.upward_first_out[state as usize] as usize
-                ..source.upward_first_out[state as usize + 1] as usize;
+            let arcs = source.upward_range(source.edge_rank[state as usize] as usize);
+            let head_edge = |slot: usize| source.edge_order[source.upward_head[slot] as usize];
             let mut pending = false;
             for slot in arcs.clone() {
-                let head = source.upward_head[slot];
+                let head = head_edge(slot);
                 if weights.upward[slot] != CCH_WEIGHT_INFINITY
                     && !self.potential.contains_key(&head)
                 {
@@ -207,8 +208,7 @@ impl AStarScratch {
                 if weight == CCH_WEIGHT_INFINITY {
                     continue;
                 }
-                best =
-                    best.min(decode_cch_weight(weight) + self.potential[&source.upward_head[slot]]);
+                best = best.min(decode_cch_weight(weight) + self.potential[&head_edge(slot)]);
             }
             self.potential.insert(state, best);
             self.potential_stack.pop();

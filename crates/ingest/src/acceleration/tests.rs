@@ -17,14 +17,25 @@ fn build(topology: &TopologyBundle) -> DatasetAccelerationBundle {
     .expect("CCH builds")
 }
 
-fn upward(bundle: &DatasetAccelerationBundle, edge: usize) -> &[u32] {
-    &bundle.upward_head
-        [bundle.upward_first_out[edge] as usize..bundle.upward_first_out[edge + 1] as usize]
+/// Head edges of the upward arcs leaving `edge`, ascending.
+fn upward(bundle: &DatasetAccelerationBundle, edge: usize) -> Vec<u32> {
+    let rank = bundle.edge_rank[edge] as usize;
+    let mut heads = bundle.upward_head[bundle.upward_range(rank)]
+        .iter()
+        .map(|&head| bundle.edge_order[head as usize])
+        .collect::<Vec<_>>();
+    heads.sort_unstable();
+    heads
 }
 
-fn downward(bundle: &DatasetAccelerationBundle, edge: usize) -> &[u32] {
-    &bundle.downward_head
-        [bundle.downward_first_out[edge] as usize..bundle.downward_first_out[edge + 1] as usize]
+/// Head edges of the downward arcs leaving `edge`, in the bundle's row
+/// order (ascending edge index).
+fn downward(bundle: &DatasetAccelerationBundle, edge: usize) -> Vec<u32> {
+    let rank = bundle.edge_rank[edge] as usize;
+    bundle.downward_head[bundle.downward_out_range(rank)]
+        .iter()
+        .map(|&head| bundle.edge_order[head as usize])
+        .collect()
 }
 
 fn has_arc(bundle: &DatasetAccelerationBundle, from: usize, to: u32) -> bool {
@@ -124,7 +135,9 @@ fn builds_complete_cch_bundle_for_line_topology() {
     assert_eq!(bundle.edge_order.len(), 3);
     assert_eq!(bundle.edge_rank.len(), 3);
     assert_eq!(bundle.upward_first_out.len(), 4);
+    assert_eq!(bundle.downward_first_in.len(), 4);
     assert_eq!(bundle.downward_first_out.len(), 4);
+    bundle.validate().expect("consistent hierarchy");
     assert_eq!(
         bundle.upward_head.len() + bundle.downward_head.len(),
         bundle.stats.total_arc_count as usize
@@ -146,7 +159,7 @@ fn edge_order_is_a_valid_elimination_order() {
         assert_eq!(bundle.edge_rank[edge_index as usize], rank as u32);
     }
     // Arcs respect the order in both directions, and each row is sorted
-    // by head so queries can binary-search it.
+    // so queries can binary-search it.
     for edge_index in 0..edge_count {
         let rank = bundle.edge_rank[edge_index];
         let up = upward(&bundle, edge_index);
@@ -161,6 +174,9 @@ fn edge_order_is_a_valid_elimination_order() {
         );
         assert!(up.is_sorted_by(|a, b| a < b));
         assert!(down.is_sorted_by(|a, b| a < b));
+        let rank = rank as usize;
+        assert!(bundle.upward_head[bundle.upward_range(rank)].is_sorted_by(|a, b| a < b));
+        assert!(bundle.downward_tail[bundle.downward_range(rank)].is_sorted_by(|a, b| a < b));
     }
 }
 
@@ -234,13 +250,13 @@ fn assert_contraction_complete(bundle: &DatasetAccelerationBundle) {
     // Reverse index of downward arcs: incoming higher-ranked tails per state.
     let mut incoming_from_higher: Vec<Vec<u32>> = vec![Vec::new(); edge_count];
     for tail in 0..edge_count {
-        for &head in downward(bundle, tail) {
+        for head in downward(bundle, tail) {
             incoming_from_higher[head as usize].push(tail as u32);
         }
     }
     for (v, incoming) in incoming_from_higher.iter().enumerate() {
         for &x in incoming {
-            for &y in upward(bundle, v) {
+            for y in upward(bundle, v) {
                 assert!(
                     x == y || has_arc(bundle, x as usize, y),
                     "missing closure arc {x} -> {y} for contracted state {v}"

@@ -27,15 +27,3 @@ fn dropped_arrays_are_not_reused() {
     assert_eq!(Arc::strong_count(&second), 1);
     assert_eq!(interner.entries.lock().unwrap().len(), 1);
 }
-
-#[test]
-fn derived_values_follow_their_key() {
-    let cache = DerivedCache::<u32, String>::new();
-    let key = Arc::new(1);
-    let other = Arc::new(1);
-    let first = cache.get_or_build(&key, || "a".to_string());
-    let again = cache.get_or_build(&key, || unreachable!("cached"));
-    let for_other = cache.get_or_build(&other, || "b".to_string());
-    assert!(Arc::ptr_eq(&first, &again));
-    assert_eq!(*for_other, "b");
-}

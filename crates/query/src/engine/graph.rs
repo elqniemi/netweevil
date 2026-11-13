@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
-use netweevil_core::{CompiledProfileBundle, DatasetAccelerationBundle, TopologyBundle};
+use netweevil_core::{Column, CompiledProfileBundle, DatasetAccelerationBundle, TopologyBundle};
 
 use crate::*;
 
@@ -234,7 +234,7 @@ pub(crate) struct AccelerationGraph {
     /// The customized profile. Its generalized-cost arc weights may be
     /// absent: [`Self::ranked`] holds them.
     pub(crate) metrics: Arc<CompiledProfileBundle>,
-    /// The hierarchy renumbered by rank, with the cost weights.
+    /// The hierarchy with the cost weights.
     pub(crate) ranked: RankedCch,
     /// Service-area weight sets customized on first use when the compiled
     /// profile was loaded without them. `None` for graphs whose weights
@@ -259,15 +259,6 @@ pub(crate) struct DeferredMetricWeights {
 }
 
 impl AccelerationGraph {
-    /// Bundle slot of each arc of the ranked downward rows, for searches
-    /// that pair them with other slot-ordered weight sets; built on first
-    /// use and shared by every metric on the hierarchy.
-    /// `downward_slots()[p]` is the slot of the arc at position `p` of
-    /// [`RankedCch::downward_range`].
-    pub(crate) fn downward_slots(&self) -> &[u32] {
-        self.ranked.downward_slots(&self.source)
-    }
-
     fn compiled_metric_weights(
         &self,
         metric_kind: crate::service_area::ServiceAreaMetricKind,
@@ -282,8 +273,9 @@ impl AccelerationGraph {
                 &compiled.distance_downward_weight,
             ),
         };
-        (upward.len() == self.source.upward_head.len()
-            && downward.len() == self.source.downward_head.len())
+        (compiled.source_hierarchy_key == self.source.hierarchy_key
+            && upward.len() == self.source.upward_head.len()
+            && downward.len() == self.source.downward_tail.len())
         .then_some((upward.as_slice(), downward.as_slice()))
     }
 
@@ -343,25 +335,6 @@ impl AccelerationGraph {
             || self
                 .deferred_cell(metric_kind)
                 .is_some_and(|(cell, _)| cell.get().is_none_or(Option::is_some))
-    }
-
-    /// Binary-searches the head-sorted CSR row of `tail` for an arc to `head`.
-    pub(crate) fn upward_arc_slot(&self, tail: usize, head: u32) -> Option<usize> {
-        let start = self.source.upward_first_out[tail] as usize;
-        let end = self.source.upward_first_out[tail + 1] as usize;
-        self.source.upward_head[start..end]
-            .binary_search(&head)
-            .ok()
-            .map(|offset| start + offset)
-    }
-
-    pub(crate) fn downward_arc_slot(&self, tail: usize, head: u32) -> Option<usize> {
-        let start = self.source.downward_first_out[tail] as usize;
-        let end = self.source.downward_first_out[tail + 1] as usize;
-        self.source.downward_head[start..end]
-            .binary_search(&head)
-            .ok()
-            .map(|offset| start + offset)
     }
 }
 
@@ -1094,35 +1067,33 @@ impl RoutingGraph {
 impl AccelerationGraph {
     /// The same hierarchy with the customized weights of `metrics`, taken
     /// from `weights` when given and from the bundle otherwise. Shares the
-    /// ranked topology; only the weights are new. `None` when the weights do
-    /// not fit the hierarchy or overflow, in which case a fresh build falls
-    /// back to exact search.
+    /// hierarchy; only the weights are new. `None` when the weights do not
+    /// fit the hierarchy or overflow, in which case a fresh build falls back
+    /// to exact search.
     fn with_metrics(
         &self,
         metrics: Arc<CompiledProfileBundle>,
         weights: Option<&CchArcWeights>,
     ) -> Option<Self> {
         let compiled = metrics.acceleration.as_ref()?;
-        let (upward_weight, downward_weight) = match weights {
-            Some((upward, downward)) => (upward.as_slice(), downward.as_slice()),
+        let (upward_weight, downward_weight): (Column<u32>, Column<u32>) = match weights {
+            Some((upward, downward)) => (upward.clone().into(), downward.clone().into()),
             None if has_weights_for(&metrics, &self.source) => (
-                compiled.upward_weight.as_slice(),
-                compiled.downward_weight.as_slice(),
+                compiled.upward_weight.clone(),
+                compiled.downward_weight.clone(),
             ),
             None => return None,
         };
         if upward_weight.len() != self.source.upward_head.len()
-            || downward_weight.len() != self.source.downward_head.len()
+            || downward_weight.len() != self.source.downward_tail.len()
             || upward_weight
                 .iter()
-                .chain(downward_weight)
+                .chain(downward_weight.iter())
                 .any(|weight| *weight == netweevil_core::CCH_WEIGHT_OVERFLOW)
         {
             return None;
         }
-        let ranked = self
-            .ranked
-            .with_weights(&self.source, upward_weight, downward_weight);
+        let ranked = self.ranked.with_weights(upward_weight, downward_weight);
         Some(Self {
             source: self.source.clone(),
             metrics,
@@ -1130,30 +1101,30 @@ impl AccelerationGraph {
             deferred_metric_weights: None,
             unpack: UnpackTable::new(
                 self.source.upward_head.len(),
-                self.source.downward_head.len(),
+                self.source.downward_tail.len(),
             ),
             lower_bounds: std::sync::OnceLock::new(),
         })
     }
 }
 
-/// Slot-ordered `(upward, downward)` generalized-cost weights of a
-/// hierarchy, as customization emits them.
+/// `(upward, downward)` generalized-cost weights of a hierarchy, aligned
+/// with its arc positions, as customization emits them.
 pub(crate) type CchArcWeights = (Vec<u32>, Vec<u32>);
 
 /// Generalized-cost weights for a new acceleration graph.
 pub(crate) enum CchWeights {
-    /// Slot-ordered weights from customization.
-    Slots(CchArcWeights),
+    /// Weights from customization.
+    Arcs(CchArcWeights),
     /// A ranked hierarchy already carrying the weights (re-customized from
     /// another graph over the same dataset hierarchy).
     Ranked(RankedCch),
 }
 
 impl CchWeights {
-    pub(crate) fn as_slots(&self) -> Option<&CchArcWeights> {
+    pub(crate) fn as_arcs(&self) -> Option<&CchArcWeights> {
         match self {
-            Self::Slots(weights) => Some(weights),
+            Self::Arcs(weights) => Some(weights),
             Self::Ranked(_) => None,
         }
     }
@@ -1168,7 +1139,7 @@ pub(crate) fn has_weights_for(
     metrics.acceleration.as_ref().is_some_and(|compiled| {
         compiled.source_hierarchy_key == source.hierarchy_key
             && compiled.upward_weight.len() == source.upward_head.len()
-            && compiled.downward_weight.len() == source.downward_head.len()
+            && compiled.downward_weight.len() == source.downward_tail.len()
     })
 }
 
@@ -1211,7 +1182,7 @@ pub(crate) fn customize_loaded_metrics(
         source,
         compiled.source_acceleration_bundle_id.clone(),
     );
-    Some(CchWeights::Slots((
+    Some(CchWeights::Arcs((
         weights.upward_weight.into_vec(),
         weights.downward_weight.into_vec(),
     )))
@@ -1219,7 +1190,8 @@ pub(crate) fn customize_loaded_metrics(
 
 /// The ranked hierarchy of `metrics` over `dataset_acceleration`. The cost
 /// weights come from `weights` when given (customized at load) and from the
-/// bundle's acceleration otherwise.
+/// bundle's acceleration otherwise, where a mapped bundle's weights are
+/// read in place.
 pub(crate) fn build_acceleration_graph(
     metrics: Arc<CompiledProfileBundle>,
     weights: Option<CchWeights>,
@@ -1237,18 +1209,20 @@ pub(crate) fn build_acceleration_graph(
         }
         return Ok(None);
     };
-    let (upward_weight, downward_weight) = match &weights {
-        Some(CchWeights::Slots((upward, downward))) => (upward.as_slice(), downward.as_slice()),
-        Some(CchWeights::Ranked(ranked)) => ranked.ranked_weights(),
-        None => (
-            acceleration.upward_weight.as_slice(),
-            acceleration.downward_weight.as_slice(),
-        ),
-    };
-    if upward_weight.contains(&netweevil_core::CCH_WEIGHT_OVERFLOW)
-        || downward_weight.contains(&netweevil_core::CCH_WEIGHT_OVERFLOW)
     {
-        return Ok(None);
+        let (upward_weight, downward_weight) = match &weights {
+            Some(CchWeights::Arcs((upward, downward))) => (upward.as_slice(), downward.as_slice()),
+            Some(CchWeights::Ranked(ranked)) => ranked.weights(),
+            None => (
+                acceleration.upward_weight.as_slice(),
+                acceleration.downward_weight.as_slice(),
+            ),
+        };
+        if upward_weight.contains(&netweevil_core::CCH_WEIGHT_OVERFLOW)
+            || downward_weight.contains(&netweevil_core::CCH_WEIGHT_OVERFLOW)
+        {
+            return Ok(None);
+        }
     }
     let Some(topology_source) = dataset_acceleration else {
         // Profiles compiled without a dataset CCH bundle in reach run on the
@@ -1284,36 +1258,13 @@ pub(crate) fn build_acceleration_graph(
             "compiled profile weights belong to another CCH hierarchy; recompile the profile against the current dataset"
         );
     }
-    if topology_source.edge_order.len() != edge_count
-        || topology_source.edge_rank.len() != edge_count
-        || topology_source.upward_first_out.len() != edge_count + 1
-        || topology_source.downward_first_out.len() != edge_count + 1
-    {
+    if topology_source.state_count() != edge_count || topology_source.validate().is_err() {
         bail!(
             "acceleration topology does not match topology edge count; re-import the dataset and recompile the profile"
         );
     }
-    let upward_len = topology_source
-        .upward_first_out
-        .last()
-        .copied()
-        .unwrap_or_default() as usize;
-    let downward_len = topology_source
-        .downward_first_out
-        .last()
-        .copied()
-        .unwrap_or_default() as usize;
-    if topology_source.upward_head.len() != upward_len || upward_weight.len() != upward_len {
-        bail!(
-            "acceleration upward arrays are inconsistent; re-import the dataset and recompile the profile"
-        );
-    }
-    if topology_source.downward_head.len() != downward_len || downward_weight.len() != downward_len
-    {
-        bail!(
-            "acceleration downward arrays are inconsistent; re-import the dataset and recompile the profile"
-        );
-    }
+    let upward_len = topology_source.upward_head.len();
+    let downward_len = topology_source.downward_tail.len();
     for (upward, downward) in [
         (
             &acceleration.time_upward_weight,
@@ -1332,8 +1283,21 @@ pub(crate) fn build_acceleration_graph(
 
     let ranked = match weights {
         Some(CchWeights::Ranked(ranked)) => ranked,
-        _ => RankedCch::build(&topology_source, upward_weight, downward_weight),
+        Some(CchWeights::Arcs((upward, downward))) => {
+            RankedCch::new(topology_source.clone(), upward.into(), downward.into())
+        }
+        None => RankedCch::new(
+            topology_source.clone(),
+            acceleration.upward_weight.clone(),
+            acceleration.downward_weight.clone(),
+        ),
     };
+    let (upward_weight, downward_weight) = ranked.weights();
+    if upward_weight.len() != upward_len || downward_weight.len() != downward_len {
+        bail!(
+            "acceleration arc weights do not match the hierarchy; re-import the dataset and recompile the profile"
+        );
+    }
     Ok(Some(AccelerationGraph {
         source: topology_source,
         metrics,

@@ -436,19 +436,14 @@ fn compiles_acceleration_weights_from_dataset_bundle() {
         edge_transition_first_out: vec![0, 1, 1].into(),
         edge_transition_edges: vec![1].into(),
     };
-    let acceleration = DatasetAccelerationBundle {
-        hierarchy_key: 0,
-        schema_version: netweevil_core::ACCELERATION_BUNDLE_SCHEMA_VERSION,
-        source_topology_bundle_id: CacheBundleId::new("topology-test"),
-        algorithm: netweevil_core::CCH_ALGORITHM.to_string(),
-        stats: Default::default(),
-        edge_order: vec![0, 1].into(),
-        edge_rank: vec![0, 1].into(),
-        upward_first_out: vec![0, 1, 1].into(),
-        upward_head: vec![1].into(),
-        downward_first_out: vec![0, 0, 0].into(),
-        downward_head: vec![].into(),
-    };
+    let acceleration = DatasetAccelerationBundle::from_arcs(
+        CacheBundleId::new("topology-test"),
+        Default::default(),
+        vec![0, 1],
+        &[(0, 1)],
+        &[],
+    )
+    .expect("valid hierarchy");
     let compile_with_acceleration = |topology: &TopologyBundle| {
         compile_profile_bundle_with_acceleration(
             &profile,

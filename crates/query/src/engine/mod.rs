@@ -165,7 +165,7 @@ impl PreparedRoutingEngine {
             self.topology.as_ref(),
             self.metrics.as_ref(),
             metrics.clone(),
-            weights.as_ref().and_then(CchWeights::as_slots),
+            weights.as_ref().and_then(CchWeights::as_arcs),
         );
         let mut default_routing_graph = match shared {
             Some(graph) => graph,

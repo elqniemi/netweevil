@@ -78,19 +78,16 @@ fn fixture() -> Arc<ServiceRuntime> {
     let mut service = test_service(topology, document);
     let state = Arc::get_mut(&mut service).unwrap();
     state.dynamic_profiles = DynamicProfileCache::new(1);
-    let acceleration = Arc::new(DatasetAccelerationBundle {
-        hierarchy_key: 0,
-        schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
-        source_topology_bundle_id: CacheBundleId::new("test-topology"),
-        algorithm: CCH_ALGORITHM.into(),
-        stats: Default::default(),
-        edge_order: vec![0, 1, 2].into(),
-        edge_rank: vec![0, 1, 2].into(),
-        upward_first_out: vec![0, 1, 1, 1].into(),
-        upward_head: vec![1].into(),
-        downward_first_out: vec![0, 0, 0, 0].into(),
-        downward_head: vec![].into(),
-    });
+    let acceleration = Arc::new(
+        DatasetAccelerationBundle::from_arcs(
+            CacheBundleId::new("test-topology"),
+            Default::default(),
+            vec![0, 1, 2],
+            &[(0, 1)],
+            &[],
+        )
+        .unwrap(),
+    );
     state.dataset_manifest.acceleration_bundle = Some(netweevil_persist::manifest::BundleRef {
         bundle_id: CacheBundleId::new("test-cch"),
         path: "unused".into(),

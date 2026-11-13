@@ -1,8 +1,8 @@
 //! Reuse of identical, immutable structures between engines.
 //!
 //! Profiles on one dataset often agree on which edges are traversable, so
-//! their routing graphs have bit-identical adjacency arrays, the same
-//! snapping index and the same ranked hierarchy topology. Engines intern
+//! their routing graphs have bit-identical adjacency arrays and the same
+//! snapping index. Engines intern
 //! those structures here: a new array is replaced by an equal live one, and
 //! entries are weak, so nothing outlives the engines that use it. Interning
 //! compares full contents (bitwise for floats), so sharing never changes a
@@ -45,43 +45,6 @@ impl<T: bytemuck::Pod> ArrayInterner<T> {
 
 pub(crate) static U32_ARRAYS: ArrayInterner<u32> = ArrayInterner::new();
 pub(crate) static F64_ARRAYS: ArrayInterner<f64> = ArrayInterner::new();
-
-/// Structures derived from one shared object, live while any user holds
-/// them.
-pub(crate) struct DerivedCache<K: 'static, V: 'static> {
-    entries: Mutex<Vec<(Weak<K>, Weak<V>)>>,
-}
-
-impl<K, V> DerivedCache<K, V> {
-    pub(crate) const fn new() -> Self {
-        Self {
-            entries: Mutex::new(Vec::new()),
-        }
-    }
-
-    /// The live value derived from `key`, or `build()`, which later callers
-    /// with the same `key` then share. Concurrent first calls may both
-    /// build; either result is equal.
-    pub(crate) fn get_or_build(&self, key: &Arc<K>, build: impl FnOnce() -> V) -> Arc<V> {
-        let lookup = || {
-            let mut entries = self.entries.lock().unwrap_or_else(PoisonError::into_inner);
-            entries.retain(|(known, value)| known.strong_count() > 0 && value.strong_count() > 0);
-            entries
-                .iter()
-                .find(|(known, _)| std::ptr::eq(known.as_ptr(), Arc::as_ptr(key)))
-                .and_then(|(_, value)| value.upgrade())
-        };
-        if let Some(value) = lookup() {
-            return value;
-        }
-        let value = Arc::new(build());
-        self.entries
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push((Arc::downgrade(key), Arc::downgrade(&value)));
-        value
-    }
-}
 
 /// Topologies whose structures may be shared, registered by the engines
 /// that hold them. A reference to a registered, live topology is the same

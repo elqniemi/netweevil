@@ -17,7 +17,7 @@ flowchart TB
         direction LR
         t[Edge-transition graph] --> nd[Nested dissection order]
         nd --> elim[Elimination game:<br/>insert shortcuts]
-        elim --> bundle[(Acceleration bundle:<br/>edge order, up and down CSR)]
+        elim --> bundle[(Acceleration bundle:<br/>arcs in rank order)]
     end
     subgraph custom [Customization: profile compile]
         direction LR
@@ -65,12 +65,22 @@ The import builds the hierarchy one time for each dataset.
 The build keeps every necessary shortcut. Thus the hierarchy keeps all
 shortest paths for every nonnegative profile metric that NetWeevil supports.
 
-The acceleration bundle contains:
+The acceleration bundle stores the hierarchy in the layout that the
+searches walk. States are numbered by rank:
 
-- The edge order. The rank is the inverse of the order. The loader
-  calculates the rank again at load.
-- The upward and the downward CSR adjacency, sorted by head id. Each row
-  stores its heads as gaps.
+- The edge order (the edge of each rank) and the rank of each edge.
+- The upward arcs, grouped by tail rank. Each row lists the head ranks in
+  ascending order.
+- The downward arcs, grouped by head rank. Each row lists the tail ranks in
+  ascending order.
+- The downward arcs again, grouped by tail rank. Reconstruction uses these
+  rows to find the middle states of lower triangles.
+
+An arc is identified by its position in the upward or the downward rows.
+The customized weights use the same positions. All arrays are raw bundle
+sections: the engine reads them in place from the memory-mapped file.
+Offsets are 64-bit, so the number of arcs has no 32-bit limit. State ids
+are 32-bit.
 
 The bundle does not contain expanded shortcut paths.
 
@@ -144,16 +154,15 @@ be different for edges whose cost is within that bound of the limit.
 
 ## Query
 
-The engine keeps one copy of the customized hierarchy, renumbered by rank:
+The engine searches the mapped hierarchy directly, with the weights of the
+compiled profile bundle, also mapped. It keeps no other copy of the
+hierarchy. Metrics derived in memory (traffic buckets, avoid sets) share
+the hierarchy and add only their own weights.
 
-- Upward arcs, grouped by tail, each with its weight.
-- Downward arcs, grouped by head, each with its weight.
-
-This copy contains the only cost weights. The arcs keep their slots in the
-dataset bundle. Reconstruction finds the slot from the endpoints. Upward
-rows keep the row order of the bundle. Downward rows list the tails by edge
-id. Thus each search relaxes the arcs in the same order as on the bundle
-arrays.
+- The forward search reads the upward rows of the states it settles.
+- The backward search reads the downward rows of the states it settles.
+- Reconstruction finds an arc position from its two end ranks with a
+  binary search in one row.
 
 1.  Snapping converts the origin and the destination to seeds. An endpoint
     inside an edge becomes a partial-edge seed.
@@ -177,7 +186,9 @@ arrays.
 
 The middle rank decreases at each step. Thus reconstruction always stops,
 also for zero-cost transitions. The bundles do not contain middle-state
-arrays or full shortcut expansions.
+arrays or full shortcut expansions. The engine remembers the middle state of
+each arc that it unpacks, 4 bytes per arc, in memory that is committed only
+for the arcs that routes use.
 
 ### Turn restrictions and the exact engine
 

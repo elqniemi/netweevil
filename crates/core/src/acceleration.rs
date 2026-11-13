@@ -3,10 +3,10 @@ use serde::{Deserialize, Serialize};
 use crate::{CacheBundleId, Column};
 
 /// Algorithm identifier for the current CCH acceleration bundle format.
-pub const CCH_ALGORITHM: &str = "edge_based_cch_v2";
+pub const CCH_ALGORITHM: &str = "edge_based_cch_v3";
 
 /// Schema version of [`DatasetAccelerationBundle`].
-pub const ACCELERATION_BUNDLE_SCHEMA_VERSION: u32 = 4;
+pub const ACCELERATION_BUNDLE_SCHEMA_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AccelerationBundleStats {
@@ -15,13 +15,22 @@ pub struct AccelerationBundleStats {
     pub total_arc_count: u64,
 }
 
-/// Metric-independent CCH topology built once per dataset.
+/// Metric-independent CCH topology built once per dataset, laid out in rank
+/// order as hierarchy searches walk it.
 ///
-/// Vertices are directed edge states; arcs are legal edge-to-edge transitions
-/// plus the complete set of elimination shortcuts. Arcs are split by rank
-/// direction into an upward CSR (`edge_rank[tail] < edge_rank[head]`) and a
-/// downward CSR (`edge_rank[tail] > edge_rank[head]`); every CSR row is
-/// sorted by head id so customization and unpacking can binary-search rows.
+/// Vertices are directed edge states, numbered by their contraction rank;
+/// arcs are legal edge-to-edge transitions plus the complete set of
+/// elimination shortcuts. An upward arc's tail ranks below its head, a
+/// downward arc's tail above its head. Upward arcs are stored by tail rank,
+/// downward arcs by head rank, each row sorted by the other endpoint's rank:
+/// forward searches and customization read the rows of the state they
+/// visit, backward searches the rows of the state they come from. An arc is
+/// identified by its position in [`Self::upward_head`] or
+/// [`Self::downward_tail`], and customized weights are aligned with those
+/// positions.
+///
+/// Offsets are 64-bit, so the arc count is not limited by 32-bit
+/// positions; state ids (ranks and edge indexes) are 32-bit.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetAccelerationBundle {
     pub schema_version: u32,
@@ -32,11 +41,24 @@ pub struct DatasetAccelerationBundle {
     /// Customized weights record the key they were computed for, so weights
     /// of another hierarchy are never paired with this one.
     pub hierarchy_key: u64,
+    /// Edge state of each rank: the contraction order.
     pub edge_order: Column<u32>,
+    /// Rank of each edge state.
     pub edge_rank: Column<u32>,
-    pub upward_first_out: Column<u32>,
+    /// Upward arcs by tail rank (CSR offsets over [`Self::upward_head`]).
+    pub upward_first_out: Column<u64>,
+    /// Head rank of each upward arc, ascending within a row.
     pub upward_head: Column<u32>,
-    pub downward_first_out: Column<u32>,
+    /// Downward arcs by head rank (CSR offsets over [`Self::downward_tail`]).
+    pub downward_first_in: Column<u64>,
+    /// Tail rank of each downward arc, ascending within a row.
+    pub downward_tail: Column<u32>,
+    /// The downward arcs again, by tail rank (CSR offsets over
+    /// [`Self::downward_head`]): the lower neighbours unpacking tries as
+    /// triangle middles.
+    pub downward_first_out: Column<u64>,
+    /// Head rank of each downward arc in [`Self::downward_first_out`] rows,
+    /// ordered by the head's edge index.
     pub downward_head: Column<u32>,
 }
 
@@ -46,20 +68,198 @@ impl DatasetAccelerationBundle {
         self.schema_version == ACCELERATION_BUNDLE_SCHEMA_VERSION && self.algorithm == CCH_ALGORITHM
     }
 
+    /// The hierarchy over `edge_order` (the edge state of each rank) with
+    /// the given upward and downward arcs as `(tail, head)` edge indexes, in
+    /// any order and without duplicates. Errors when the order is not a
+    /// permutation or an arc points the wrong way.
+    pub fn from_arcs(
+        source_topology_bundle_id: CacheBundleId,
+        stats: AccelerationBundleStats,
+        edge_order: Vec<u32>,
+        upward: &[(u32, u32)],
+        downward: &[(u32, u32)],
+    ) -> Result<Self, String> {
+        let states = edge_order.len();
+        if u32::try_from(states).is_err() {
+            return Err(format!("{states} edge states exceed 32-bit state ids"));
+        }
+        let mut edge_rank = vec![u32::MAX; states];
+        for (rank, &edge) in edge_order.iter().enumerate() {
+            match edge_rank.get_mut(edge as usize) {
+                Some(slot) if *slot == u32::MAX => *slot = rank as u32,
+                _ => return Err("CCH edge order is not a permutation".to_string()),
+            }
+        }
+        let ranked = |arcs: &[(u32, u32)], upward: bool| -> Result<Vec<(u32, u32)>, String> {
+            arcs.iter()
+                .map(|&(tail, head)| {
+                    let rank = |edge: u32| {
+                        edge_rank
+                            .get(edge as usize)
+                            .copied()
+                            .ok_or_else(|| format!("CCH arc references missing edge {edge}"))
+                    };
+                    let (tail, head) = (rank(tail)?, rank(head)?);
+                    if (tail < head) != upward || tail == head {
+                        return Err("CCH arc points against its rank direction".to_string());
+                    }
+                    Ok((tail, head))
+                })
+                .collect()
+        };
+        let upward = ranked(upward, true)?;
+        let downward = ranked(downward, false)?;
+        // Rows of `(row, entry)` pairs, entries in the order `key` sorts.
+        let csr = |pairs: &[(u32, u32)], key: &dyn Fn(u32) -> u32| {
+            let mut first = vec![0_u64; states + 1];
+            for &(row, _) in pairs {
+                first[row as usize + 1] += 1;
+            }
+            for row in 0..states {
+                first[row + 1] += first[row];
+            }
+            let mut cursor = first[..states].to_vec();
+            let mut entries = vec![0_u32; pairs.len()];
+            for &(row, entry) in pairs {
+                let slot = &mut cursor[row as usize];
+                entries[*slot as usize] = entry;
+                *slot += 1;
+            }
+            for row in 0..states {
+                entries[first[row] as usize..first[row + 1] as usize]
+                    .sort_unstable_by_key(|&entry| key(entry));
+            }
+            (first, entries)
+        };
+        let by_rank = |rank: u32| rank;
+        let by_edge = |rank: u32| edge_order[rank as usize];
+        let (upward_first_out, upward_head) = csr(&upward, &by_rank);
+        let inverted = downward
+            .iter()
+            .map(|&(tail, head)| (head, tail))
+            .collect::<Vec<_>>();
+        let (downward_first_in, downward_tail) = csr(&inverted, &by_rank);
+        drop(inverted);
+        let (downward_first_out, downward_head) = csr(&downward, &by_edge);
+        let mut bundle = Self {
+            schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
+            source_topology_bundle_id,
+            algorithm: CCH_ALGORITHM.to_string(),
+            stats,
+            hierarchy_key: 0,
+            edge_order: edge_order.into(),
+            edge_rank: edge_rank.into(),
+            upward_first_out: upward_first_out.into(),
+            upward_head: upward_head.into(),
+            downward_first_in: downward_first_in.into(),
+            downward_tail: downward_tail.into(),
+            downward_first_out: downward_first_out.into(),
+            downward_head: downward_head.into(),
+        };
+        bundle.hierarchy_key = bundle.compute_hierarchy_key();
+        Ok(bundle)
+    }
+
+    /// Number of edge states (ranks).
+    pub fn state_count(&self) -> usize {
+        self.edge_order.len()
+    }
+
+    /// Positions of the upward arcs leaving `rank`.
+    #[inline]
+    pub fn upward_range(&self, rank: usize) -> std::ops::Range<usize> {
+        self.upward_first_out[rank] as usize..self.upward_first_out[rank + 1] as usize
+    }
+
+    /// Positions of the downward arcs entering `rank`.
+    #[inline]
+    pub fn downward_range(&self, rank: usize) -> std::ops::Range<usize> {
+        self.downward_first_in[rank] as usize..self.downward_first_in[rank + 1] as usize
+    }
+
+    /// Indexes into [`Self::downward_head`] of the downward arcs leaving
+    /// `rank`.
+    #[inline]
+    pub fn downward_out_range(&self, rank: usize) -> std::ops::Range<usize> {
+        self.downward_first_out[rank] as usize..self.downward_first_out[rank + 1] as usize
+    }
+
+    /// Position of the upward arc `tail -> head` (ranks), if any.
+    #[inline]
+    pub fn upward_position(&self, tail: u32, head: u32) -> Option<usize> {
+        let range = self.upward_range(tail as usize);
+        self.upward_head[range.clone()]
+            .binary_search(&head)
+            .ok()
+            .map(|offset| range.start + offset)
+    }
+
+    /// Position of the downward arc `tail -> head` (ranks), if any.
+    #[inline]
+    pub fn downward_position(&self, tail: u32, head: u32) -> Option<usize> {
+        let range = self.downward_range(head as usize);
+        self.downward_tail[range.clone()]
+            .binary_search(&tail)
+            .ok()
+            .map(|offset| range.start + offset)
+    }
+
+    /// Checks that every offset array fits the state count and addresses
+    /// all of its entries, and that the rank table has one entry per state.
+    pub fn validate(&self) -> Result<(), String> {
+        let states = self.state_count();
+        if self.edge_rank.len() != states {
+            return Err("CCH rank table does not match the order".to_string());
+        }
+        for (name, first, entries) in [
+            ("upward", &self.upward_first_out, self.upward_head.len()),
+            (
+                "downward",
+                &self.downward_first_in,
+                self.downward_tail.len(),
+            ),
+            (
+                "downward out",
+                &self.downward_first_out,
+                self.downward_head.len(),
+            ),
+        ] {
+            if first.len() != states + 1
+                || first.first().is_some_and(|start| *start != 0)
+                || first.last().map(|end| *end as usize) != Some(entries)
+            {
+                return Err(format!("CCH {name} offsets do not address their arcs"));
+            }
+        }
+        if self.downward_tail.len() != self.downward_head.len() {
+            return Err("CCH downward arc indexes differ in length".to_string());
+        }
+        Ok(())
+    }
+
     /// A 64-bit fingerprint of the order and every arc array.
     pub fn compute_hierarchy_key(&self) -> u64 {
         let mut hash = FingerprintHasher::default();
         for column in [
             &self.edge_order,
             &self.edge_rank,
-            &self.upward_first_out,
             &self.upward_head,
-            &self.downward_first_out,
+            &self.downward_tail,
             &self.downward_head,
         ] {
             hash.write_u64(column.len() as u64);
             for &value in column.iter() {
                 hash.write_u32(value);
+            }
+        }
+        for column in [
+            &self.upward_first_out,
+            &self.downward_first_in,
+            &self.downward_first_out,
+        ] {
+            hash.write_u64(column.len() as u64);
+            for &value in column.iter() {
+                hash.write_u64(value);
             }
         }
         hash.finish()

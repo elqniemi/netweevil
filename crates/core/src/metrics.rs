@@ -7,10 +7,10 @@ use crate::{CacheBundleId, Column, TemporalRuleSet, TravelMode, VehicleParams};
 /// Schema version of [`CompiledProfileBundle`]. Readers accept this value
 /// only, so bumping it also makes cached bundles recompile; bump it when
 /// compilation semantics change.
-pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 12;
+pub const COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION: u32 = 13;
 
 /// Schema version of [`CompiledAcceleration`] customization data.
-pub const COMPILED_ACCELERATION_SCHEMA_VERSION: u32 = 5;
+pub const COMPILED_ACCELERATION_SCHEMA_VERSION: u32 = 6;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct CompiledTurnCostConfig {
@@ -200,7 +200,9 @@ pub fn add_cch_weights(left: u32, right: u32) -> u32 {
     }
 }
 
-/// Three fixed-point metrics per arc, occupying 12 bytes. Path unpacking
+/// Up to three fixed-point metrics per arc, aligned with the arc positions
+/// of [`crate::DatasetAccelerationBundle`] (upward weights with
+/// `upward_head`, downward weights with `downward_tail`). Path unpacking
 /// finds a matching lower triangle in the shared topology.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompiledAcceleration {

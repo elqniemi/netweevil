@@ -6,15 +6,15 @@ use super::{
     write_topology_bundle,
 };
 use netweevil_core::{
-    ACCELERATION_BUNDLE_SCHEMA_VERSION, AccessMask, CCH_ALGORITHM, CCH_WEIGHT_INFINITY,
-    CCH_WEIGHT_OVERFLOW, COMPILED_ACCELERATION_SCHEMA_VERSION,
-    COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId, CompiledAcceleration,
-    CompiledEdgeMetric, CompiledProfileBundle, CompiledTurnCostConfig, DatasetAccelerationBundle,
-    DirectedEdge, EdgeGuidance, EdgeId, EdgeNameBundle, FeatureAttributeColumn,
-    FeatureAttributeColumnData, FeatureAttributeDefinition, FeatureAttributeTable,
-    FeatureAttributeType, MinuteInterval, NodeId, RoadClass, SmoothnessClass, SurfaceClass,
-    TOPOLOGY_BUNDLE_SCHEMA_VERSION, TemporalEffect, TemporalRule, TemporalRuleSet, TopologyBundle,
-    TopologyEdgeLayers, TopologyNode, TravelMode, TurnRestriction, TurnRestrictionKind,
+    AccessMask, CCH_ALGORITHM, CCH_WEIGHT_INFINITY, CCH_WEIGHT_OVERFLOW,
+    COMPILED_ACCELERATION_SCHEMA_VERSION, COMPILED_PROFILE_BUNDLE_SCHEMA_VERSION, CacheBundleId,
+    CompiledAcceleration, CompiledEdgeMetric, CompiledProfileBundle, CompiledTurnCostConfig,
+    DatasetAccelerationBundle, DirectedEdge, EdgeGuidance, EdgeId, EdgeNameBundle,
+    FeatureAttributeColumn, FeatureAttributeColumnData, FeatureAttributeDefinition,
+    FeatureAttributeTable, FeatureAttributeType, MinuteInterval, NodeId, RoadClass,
+    SmoothnessClass, SurfaceClass, TOPOLOGY_BUNDLE_SCHEMA_VERSION, TemporalEffect, TemporalRule,
+    TemporalRuleSet, TopologyBundle, TopologyEdgeLayers, TopologyNode, TravelMode, TurnRestriction,
+    TurnRestrictionKind,
 };
 use netweevil_core::{
     AdminArea, AdminBoundarySource, DemFormat, DemImportSummary, DemSourceInfo, NO_TIMEZONE,
@@ -317,19 +317,17 @@ fn edge_name_bundle_rejects_out_of_range_guidance_indexes() {
 
 #[test]
 fn round_trips_acceleration_bundle_binary() {
-    let bundle = DatasetAccelerationBundle {
-        hierarchy_key: 0x0123_4567_89ab_cdef,
-        schema_version: ACCELERATION_BUNDLE_SCHEMA_VERSION,
-        source_topology_bundle_id: CacheBundleId::new("topology-test"),
-        algorithm: CCH_ALGORITHM.to_string(),
-        stats: Default::default(),
-        edge_order: vec![0, 2, 1].into(),
-        edge_rank: vec![0, 2, 1].into(),
-        upward_first_out: vec![0, 1, 1, 1].into(),
-        upward_head: vec![2].into(),
-        downward_first_out: vec![0, 0, 1, 1].into(),
-        downward_head: vec![0].into(),
-    };
+    // Order 0, 2, 1: edge 2 has rank 1, edge 1 rank 2.
+    let bundle = DatasetAccelerationBundle::from_arcs(
+        CacheBundleId::new("topology-test"),
+        Default::default(),
+        vec![0, 2, 1],
+        &[(0, 1), (2, 1)],
+        &[(1, 0), (2, 0)],
+    )
+    .expect("valid hierarchy");
+    assert_eq!(bundle.downward_tail, vec![1, 2]);
+    assert_eq!(bundle.downward_head, vec![0, 0]);
     let file = TempFile::new("acceleration");
     write_acceleration_bundle(file.path(), &bundle).expect("bundle should serialize");
     let read =
@@ -344,8 +342,11 @@ fn round_trips_acceleration_bundle_binary() {
     assert_eq!(read.edge_rank, bundle.edge_rank);
     assert_eq!(read.upward_first_out, bundle.upward_first_out);
     assert_eq!(read.upward_head, bundle.upward_head);
+    assert_eq!(read.downward_first_in, bundle.downward_first_in);
+    assert_eq!(read.downward_tail, bundle.downward_tail);
     assert_eq!(read.downward_first_out, bundle.downward_first_out);
     assert_eq!(read.downward_head, bundle.downward_head);
+    assert_eq!(read.compute_hierarchy_key(), bundle.hierarchy_key);
 }
 
 #[test]

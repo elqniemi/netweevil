@@ -8,19 +8,16 @@ use std::sync::Arc;
 /// Edges 0, 1, 2 in rank order: upward arcs 0 -> `upward_head_0` and
 /// 1 -> 2, downward arc 1 -> 0.
 fn hierarchy(upward_head_0: u32) -> Arc<DatasetAccelerationBundle> {
-    Arc::new(DatasetAccelerationBundle {
-        hierarchy_key: 0,
-        schema_version: netweevil_core::ACCELERATION_BUNDLE_SCHEMA_VERSION,
-        source_topology_bundle_id: CacheBundleId::new("witness-test"),
-        algorithm: netweevil_core::CCH_ALGORITHM.into(),
-        stats: Default::default(),
-        edge_order: vec![0, 1, 2].into(),
-        edge_rank: vec![0, 1, 2].into(),
-        upward_first_out: vec![0, 1, 2, 2].into(),
-        upward_head: vec![upward_head_0, 2].into(),
-        downward_first_out: vec![0, 0, 1, 1].into(),
-        downward_head: vec![0].into(),
-    })
+    Arc::new(
+        DatasetAccelerationBundle::from_arcs(
+            CacheBundleId::new("witness-test"),
+            Default::default(),
+            vec![0, 1, 2],
+            &[(0, upward_head_0), (1, 2)],
+            &[(1, 0)],
+        )
+        .expect("valid hierarchy"),
+    )
 }
 
 /// Upward arc 1 has weight `direct_weight`; the triangle through edge 0
@@ -38,7 +35,7 @@ fn graph(source: Arc<DatasetAccelerationBundle>, direct_weight: u32) -> Accelera
         edge_metrics: vec![],
         vehicle: Default::default(),
         acceleration: Some(CompiledAcceleration {
-            source_hierarchy_key: 0,
+            source_hierarchy_key: source.hierarchy_key,
             schema_version: netweevil_core::COMPILED_ACCELERATION_SCHEMA_VERSION,
             source_acceleration_bundle_id: CacheBundleId::new("witness-test"),
             algorithm: netweevil_core::CCH_ALGORITHM.into(),
@@ -60,7 +57,7 @@ fn unpack(graph: &AccelerationGraph) -> Vec<usize> {
     push_unpacked_arc(
         graph,
         &mut UnpackStack::default(),
-        HierarchyArc::upward(1, 1),
+        HierarchyArc::between(&graph.source, 1, 2).expect("arc 1 -> 2"),
         &mut path,
     );
     path
@@ -85,13 +82,14 @@ fn cached_witnesses_follow_metric_and_topology_owners() {
 }
 
 #[test]
-fn ranked_rows_hold_the_slot_ordered_weights() {
+fn ranked_rows_hold_the_weights_at_their_arc_positions() {
     let graph = graph(hierarchy(2), 6);
     let source = graph.source.as_ref();
-    assert_eq!(graph.ranked.slot_weights(source), (vec![4, 6], vec![2]));
-    assert_eq!(graph.ranked.upward_weight(source, 1, 1), 6);
-    assert_eq!(graph.ranked.downward_weight(source, 1, 0), Some(2));
-    assert_eq!(graph.ranked.downward_weight(source, 2, 0), None);
-    assert_eq!(graph.downward_slots(), [0]);
+    assert_eq!(graph.ranked.weight_vectors(), (vec![4, 6], vec![2]));
+    assert_eq!(source.upward_position(1, 2), Some(1));
+    assert_eq!(source.downward_position(1, 0), Some(0));
+    assert_eq!(source.downward_position(2, 0), None);
     assert_eq!(graph.ranked.downward_arc(0), (1, 2));
+    assert_eq!(graph.ranked.upward_row(0).collect::<Vec<_>>(), [(2, 4)]);
+    assert_eq!(graph.ranked.downward_row(0).collect::<Vec<_>>(), [(1, 2)]);
 }
