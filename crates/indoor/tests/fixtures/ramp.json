@@ -1,0 +1,262 @@
+{
+ "version": 1,
+ "crs": "local",
+ "levels": [
+  {
+   "id": "site",
+   "z": 0.0,
+   "props": {}
+  }
+ ],
+ "defaults": {
+  "snap": 0.05,
+  "edge_attach": 1.0
+ },
+ "surfaces": [
+  {
+   "id": "plaza_low",
+   "level": "site",
+   "polygon": [
+    [
+     [
+      0,
+      0,
+      0.0
+     ],
+     [
+      10,
+      0,
+      0.0
+     ],
+     [
+      10,
+      10,
+      0.0
+     ],
+     [
+      0,
+      10,
+      0.0
+     ],
+     [
+      0,
+      0,
+      0.0
+     ]
+    ]
+   ],
+   "space": "plaza_low",
+   "class": "plaza",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "plaza_high",
+   "level": "site",
+   "polygon": [
+    [
+     [
+      20,
+      0,
+      1.2
+     ],
+     [
+      30,
+      0,
+      1.2
+     ],
+     [
+      30,
+      10,
+      1.2
+     ],
+     [
+      20,
+      10,
+      1.2
+     ],
+     [
+      20,
+      0,
+      1.2
+     ]
+    ]
+   ],
+   "space": "plaza_high",
+   "class": "plaza",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "steep_ramp",
+   "level": "site",
+   "polygon": [
+    [
+     [
+      10,
+      4,
+      0.0
+     ],
+     [
+      20,
+      4,
+      1.2
+     ],
+     [
+      20,
+      6,
+      1.2
+     ],
+     [
+      10,
+      6,
+      0.0
+     ],
+     [
+      10,
+      4,
+      0.0
+     ]
+    ]
+   ],
+   "space": "steep_ramp",
+   "class": "ramp",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "landing_low",
+   "level": "site",
+   "polygon": [
+    [
+     [
+      0,
+      -4,
+      0.0
+     ],
+     [
+      2,
+      -4,
+      0.0
+     ],
+     [
+      2,
+      0,
+      0.0
+     ],
+     [
+      0,
+      0,
+      0.0
+     ],
+     [
+      0,
+      -4,
+      0.0
+     ]
+    ]
+   ],
+   "space": "landing_low",
+   "class": "plaza",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "long_ramp",
+   "level": "site",
+   "polygon": [
+    [
+     [
+      2,
+      -4,
+      0.0
+     ],
+     [
+      26,
+      -4,
+      1.2
+     ],
+     [
+      26,
+      -2,
+      1.2
+     ],
+     [
+      2,
+      -2,
+      0.0
+     ],
+     [
+      2,
+      -4,
+      0.0
+     ]
+    ]
+   ],
+   "space": "long_ramp",
+   "class": "ramp",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "landing_high",
+   "level": "site",
+   "polygon": [
+    [
+     [
+      26,
+      -4,
+      1.2
+     ],
+     [
+      28,
+      -4,
+      1.2
+     ],
+     [
+      28,
+      0,
+      1.2
+     ],
+     [
+      26,
+      0,
+      1.2
+     ],
+     [
+      26,
+      -4,
+      1.2
+     ]
+    ]
+   ],
+   "space": "landing_high",
+   "class": "plaza",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  }
+ ],
+ "edges": [],
+ "nodes": [],
+ "portals": [],
+ "barriers": [],
+ "verticals": []
+}

@@ -1,0 +1,543 @@
+{
+ "version": 1,
+ "crs": "local",
+ "levels": [
+  {
+   "id": "street",
+   "z": 0.0,
+   "props": {}
+  }
+ ],
+ "defaults": {
+  "snap": 0.05,
+  "edge_attach": 1.0
+ },
+ "surfaces": [
+  {
+   "id": "sidewalk_S",
+   "level": "street",
+   "polygon": [
+    [
+     [
+      0,
+      0
+     ],
+     [
+      100,
+      0
+     ],
+     [
+      100,
+      4
+     ],
+     [
+      0,
+      4
+     ],
+     [
+      0,
+      0
+     ]
+    ]
+   ],
+   "space": "sidewalk_S",
+   "class": "sidewalk",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "sidewalk_N",
+   "level": "street",
+   "polygon": [
+    [
+     [
+      0,
+      12
+     ],
+     [
+      100,
+      12
+     ],
+     [
+      100,
+      16
+     ],
+     [
+      0,
+      16
+     ],
+     [
+      0,
+      12
+     ]
+    ]
+   ],
+   "space": "sidewalk_N",
+   "class": "sidewalk",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "road_W",
+   "level": "street",
+   "polygon": [
+    [
+     [
+      0,
+      4
+     ],
+     [
+      19,
+      4
+     ],
+     [
+      19,
+      12
+     ],
+     [
+      0,
+      12
+     ],
+     [
+      0,
+      4
+     ]
+    ]
+   ],
+   "space": "road_W",
+   "class": "road",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "crossing_tl",
+   "level": "street",
+   "polygon": [
+    [
+     [
+      19,
+      4
+     ],
+     [
+      23,
+      4
+     ],
+     [
+      23,
+      12
+     ],
+     [
+      19,
+      12
+     ],
+     [
+      19,
+      4
+     ]
+    ]
+   ],
+   "space": "crossing_tl",
+   "class": "crossing",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "road_M",
+   "level": "street",
+   "polygon": [
+    [
+     [
+      23,
+      4
+     ],
+     [
+      70,
+      4
+     ],
+     [
+      70,
+      12
+     ],
+     [
+      23,
+      12
+     ],
+     [
+      23,
+      4
+     ]
+    ]
+   ],
+   "space": "road_M",
+   "class": "road",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "crossing_zebra",
+   "level": "street",
+   "polygon": [
+    [
+     [
+      70,
+      4
+     ],
+     [
+      74,
+      4
+     ],
+     [
+      74,
+      12
+     ],
+     [
+      70,
+      12
+     ],
+     [
+      70,
+      4
+     ]
+    ]
+   ],
+   "space": "crossing_zebra",
+   "class": "crossing",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "road_E",
+   "level": "street",
+   "polygon": [
+    [
+     [
+      74,
+      4
+     ],
+     [
+      100,
+      4
+     ],
+     [
+      100,
+      12
+     ],
+     [
+      74,
+      12
+     ],
+     [
+      74,
+      4
+     ]
+    ]
+   ],
+   "space": "road_E",
+   "class": "road",
+   "walls": false,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {}
+  }
+ ],
+ "edges": [
+  {
+   "id": "path_up",
+   "line": [
+    [
+     50,
+     16.5
+    ],
+    [
+     50,
+     40
+    ]
+   ],
+   "level": "street",
+   "oneway": false,
+   "class": "footway",
+   "step_free": true,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {},
+   "to": "p_west"
+  },
+  {
+   "id": "travelator",
+   "line": [
+    [
+     50,
+     40
+    ],
+    [
+     90,
+     40
+    ]
+   ],
+   "level": "street",
+   "oneway": true,
+   "class": "travelator",
+   "step_free": true,
+   "tags": [
+    "indoor",
+    "travelator"
+   ],
+   "props": {},
+   "from": "p_west",
+   "to": "p_east",
+   "speed": 2.0
+  },
+  {
+   "id": "path_down_oneway",
+   "line": [
+    [
+     90,
+     40
+    ],
+    [
+     90,
+     16.5
+    ]
+   ],
+   "level": "street",
+   "oneway": true,
+   "class": "footway",
+   "step_free": true,
+   "tags": [
+    "outdoor"
+   ],
+   "props": {},
+   "from": "p_east"
+  },
+  {
+   "id": "park_path",
+   "line": [
+    [
+     10,
+     -0.5
+    ],
+    [
+     10,
+     -30
+    ]
+   ],
+   "level": "street",
+   "oneway": false,
+   "class": "footway",
+   "step_free": true,
+   "tags": [
+    "outdoor",
+    "unpaved"
+   ],
+   "props": {},
+   "to": "park"
+  },
+  {
+   "id": "park_steps",
+   "line": [
+    [
+     10,
+     -30
+    ],
+    [
+     30,
+     -30,
+     2.0
+    ]
+   ],
+   "level": "street",
+   "oneway": false,
+   "class": "footway",
+   "step_free": false,
+   "tags": [
+    "outdoor",
+    "steps"
+   ],
+   "props": {},
+   "from": "park"
+  }
+ ],
+ "nodes": [
+  {
+   "id": "park",
+   "at": [
+    10,
+    -30,
+    0.0
+   ],
+   "level": "street",
+   "penalty": 0.0,
+   "tags": [
+    "gate"
+   ],
+   "props": {}
+  }
+ ],
+ "portals": [
+  {
+   "id": "tl_S",
+   "kind": "crossing",
+   "segment": [
+    [
+     19,
+     4
+    ],
+    [
+     23,
+     4
+    ]
+   ],
+   "level": "street",
+   "spaces": [
+    "sidewalk_S",
+    "crossing_tl"
+   ],
+   "penalty": 30.0,
+   "width": 4.0,
+   "step_free": true,
+   "tags": [
+    "traffic_signals"
+   ],
+   "props": {
+    "note": "mean signal wait charged once, at the south kerb"
+   }
+  },
+  {
+   "id": "tl_N",
+   "kind": "crossing",
+   "segment": [
+    [
+     19,
+     12
+    ],
+    [
+     23,
+     12
+    ]
+   ],
+   "level": "street",
+   "spaces": [
+    "crossing_tl",
+    "sidewalk_N"
+   ],
+   "penalty": 0.0,
+   "width": 4.0,
+   "step_free": true,
+   "tags": [
+    "traffic_signals"
+   ],
+   "props": {}
+  },
+  {
+   "id": "zebra_S",
+   "kind": "crossing",
+   "segment": [
+    [
+     70,
+     4
+    ],
+    [
+     74,
+     4
+    ]
+   ],
+   "level": "street",
+   "spaces": [
+    "sidewalk_S",
+    "crossing_zebra"
+   ],
+   "penalty": 3.0,
+   "width": 4.0,
+   "step_free": true,
+   "tags": [
+    "zebra"
+   ],
+   "props": {}
+  },
+  {
+   "id": "zebra_N",
+   "kind": "crossing",
+   "segment": [
+    [
+     70,
+     12
+    ],
+    [
+     74,
+     12
+    ]
+   ],
+   "level": "street",
+   "spaces": [
+    "crossing_zebra",
+    "sidewalk_N"
+   ],
+   "penalty": 0.0,
+   "width": 4.0,
+   "step_free": true,
+   "tags": [
+    "zebra"
+   ],
+   "props": {}
+  }
+ ],
+ "barriers": [
+  {
+   "id": "kerb_S",
+   "line": [
+    [
+     0,
+     4
+    ],
+    [
+     100,
+     4
+    ]
+   ],
+   "level": "street",
+   "tags": [
+    "kerb"
+   ],
+   "props": {}
+  },
+  {
+   "id": "kerb_N",
+   "line": [
+    [
+     0,
+     12
+    ],
+    [
+     100,
+     12
+    ]
+   ],
+   "level": "street",
+   "tags": [
+    "kerb"
+   ],
+   "props": {}
+  }
+ ],
+ "verticals": []
+}

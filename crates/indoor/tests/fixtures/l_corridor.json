@@ -1,0 +1,243 @@
+{
+ "version": 1,
+ "crs": "local",
+ "levels": [
+  {
+   "id": "L0",
+   "z": 0.0,
+   "props": {}
+  }
+ ],
+ "defaults": {
+  "snap": 0.05,
+  "edge_attach": 1.0
+ },
+ "surfaces": [
+  {
+   "id": "corridor",
+   "level": "L0",
+   "polygon": [
+    [
+     [
+      0,
+      0
+     ],
+     [
+      20,
+      0
+     ],
+     [
+      20,
+      2
+     ],
+     [
+      2,
+      2
+     ],
+     [
+      2,
+      20
+     ],
+     [
+      0,
+      20
+     ],
+     [
+      0,
+      0
+     ]
+    ]
+   ],
+   "space": "corridor",
+   "class": "corridor",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "R1",
+   "level": "L0",
+   "polygon": [
+    [
+     [
+      4,
+      2
+     ],
+     [
+      10,
+      2
+     ],
+     [
+      10,
+      7
+     ],
+     [
+      4,
+      7
+     ],
+     [
+      4,
+      2
+     ]
+    ]
+   ],
+   "space": "R1",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "R2",
+   "level": "L0",
+   "polygon": [
+    [
+     [
+      -5,
+      12
+     ],
+     [
+      0,
+      12
+     ],
+     [
+      0,
+      17
+     ],
+     [
+      -5,
+      17
+     ],
+     [
+      -5,
+      12
+     ]
+    ]
+   ],
+   "space": "R2",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {}
+  },
+  {
+   "id": "R3",
+   "level": "L0",
+   "polygon": [
+    [
+     [
+      12,
+      -5
+     ],
+     [
+      18,
+      -5
+     ],
+     [
+      18,
+      0
+     ],
+     [
+      12,
+      0
+     ],
+     [
+      12,
+      -5
+     ]
+    ]
+   ],
+   "space": "R3",
+   "class": "room",
+   "walls": true,
+   "tags": [
+    "indoor"
+   ],
+   "props": {}
+  }
+ ],
+ "edges": [],
+ "nodes": [],
+ "portals": [
+  {
+   "id": "d_r1",
+   "kind": "door",
+   "segment": [
+    [
+     6,
+     2
+    ],
+    [
+     7,
+     2
+    ]
+   ],
+   "level": "L0",
+   "spaces": [
+    "R1",
+    "corridor"
+   ],
+   "penalty": 0.0,
+   "width": 0.9,
+   "step_free": true,
+   "tags": [],
+   "props": {}
+  },
+  {
+   "id": "d_r2",
+   "kind": "door",
+   "segment": [
+    [
+     0,
+     14
+    ],
+    [
+     0,
+     15
+    ]
+   ],
+   "level": "L0",
+   "spaces": [
+    "R2",
+    "corridor"
+   ],
+   "penalty": 0.0,
+   "width": 0.9,
+   "step_free": true,
+   "tags": [],
+   "props": {}
+  },
+  {
+   "id": "d_r3",
+   "kind": "door",
+   "segment": [
+    [
+     14,
+     0
+    ],
+    [
+     15,
+     0
+    ]
+   ],
+   "level": "L0",
+   "spaces": [
+    "R3",
+    "corridor"
+   ],
+   "penalty": 0.0,
+   "width": 0.9,
+   "step_free": true,
+   "tags": [],
+   "props": {}
+  }
+ ],
+ "barriers": [],
+ "verticals": []
+}

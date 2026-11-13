@@ -1,0 +1,50 @@
+{
+  "name": "rainy_day",
+  "speed": 1.4,
+  "class_factor": {
+    "corridor": 1.0,
+    "room": 1.6,
+    "service": 2.5,
+    "stairs": 1.0,
+    "lift": 1.0,
+    "entrance": 1.0,
+    "connector": 1.0,
+    "indoor_way": 1.0,
+    "sidewalk": 1.0,
+    "crossing": 1.0,
+    "footway": 1.0,
+    "plaza": 1.0,
+    "ramp": 1.0,
+    "travelator": 1.0,
+    "outdoor": 1.0,
+    "road": null
+  },
+  "tag_factor": {
+    "outdoor": 2.0,
+    "unpaved": null,
+    "indoor": 0.9
+  },
+  "avoid_tags": [
+    "private"
+  ],
+  "require_tags": [],
+  "step_free": false,
+  "min_width": 0.0,
+  "incline": {
+    "up": 3.0,
+    "down": 1.0,
+    "max": 1.0
+  },
+  "kind_penalty": {
+    "door": 1.0,
+    "crossing": 0.0
+  },
+  "kind_factor": {
+    "stairs": 1.5,
+    "lift": 1.0
+  },
+  "turn_penalty": 0.0,
+  "clearance": 0.35,
+  "corner": "square",
+  "corner_radius": 0.6
+}

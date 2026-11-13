@@ -18,6 +18,7 @@ The main production surfaces are:
 - `crates/query`: routing, batches, OD, matrix, service areas, accessibility, alternatives, snapping, and request/result models.
 - `crates/persist`: `.netweevil/` state layout, dataset/profile/run manifest types, binary bundle IO, and cache reads.
 - `crates/report`: run report rendering and local exports.
+- `crates/indoor`: indoor and surface routing: navmesh walks, edge networks, portals, verticals and POIs across levels.
 - `crates/transit`: GTFS import and street-access (walk/bicycle/car) plus transit routing.
 - `crates/simulate`: agent-based traffic simulation.
 - `crates/api`: HTTP handlers, the router, and the OpenAPI document server (`docs/api/openapi.yaml` must match the router; a test checks it).
