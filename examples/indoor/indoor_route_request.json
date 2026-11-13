@@ -1,0 +1,12 @@
+{
+  "route_id": "workshop-to-1.14",
+  "site_id": "demo",
+  "origin": {
+    "poi": "Workshop"
+  },
+  "destination": {
+    "poi": "1.14"
+  },
+  "profile": "wheelchair",
+  "mode": "mixed"
+}

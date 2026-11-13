@@ -23,6 +23,7 @@ netweevil-persist = { path = "../persist" }
 netweevil-profile = { path = "../profile" }
 netweevil-query = { path = "../query" }
 netweevil-simulate = { path = "../simulate" }
+netweevil-site = { path = "../site" }
 netweevil-transit = { path = "../transit" }
 rayon.workspace = true
 serde.workspace = true

@@ -5,6 +5,7 @@
 //! arrays load with a single memcpy per array from the mapped file.
 
 mod codec;
+pub mod indoor;
 pub mod manifest;
 mod sectioned;
 mod traffic;
@@ -54,6 +55,10 @@ pub struct WorkspacePaths {
     pub profiles_dir: PathBuf,
     /// GTFS editor scenario documents and their exported GTFS archives.
     pub gtfs_scenarios_dir: PathBuf,
+    /// One manifest per imported indoor site.
+    pub indoor_sites_dir: PathBuf,
+    /// Indoor site input documents and compiled graphs, one directory per site.
+    pub indoor_bundles_dir: PathBuf,
     /// Active dataset/profile/feed selection used when `api serve` runs without arguments.
     pub workspace_config_path: PathBuf,
 }
@@ -80,6 +85,8 @@ impl WorkspacePaths {
             uploads_dir: state_dir.join("uploads"),
             profiles_dir: state_dir.join("profiles"),
             gtfs_scenarios_dir: state_dir.join("gtfs_scenarios"),
+            indoor_sites_dir: state_dir.join("indoor_sites"),
+            indoor_bundles_dir: state_dir.join("bundles").join("indoor"),
             workspace_config_path: state_dir.join("workspace.json"),
             state_dir,
         };
@@ -106,6 +113,8 @@ impl WorkspacePaths {
             &self.uploads_dir,
             &self.profiles_dir,
             &self.gtfs_scenarios_dir,
+            &self.indoor_sites_dir,
+            &self.indoor_bundles_dir,
         ] {
             fs::create_dir_all(dir)
                 .with_context(|| format!("creating workspace directory {}", dir.display()))?;
@@ -171,6 +180,11 @@ impl WorkspacePaths {
                 "gtfs_scenarios",
                 &self.gtfs_scenarios_dir,
                 "GTFS editor scenarios (new lines, express variants) and their exported GTFS archives. The original feed is never changed.",
+            ),
+            entry(
+                "indoor_sites",
+                &self.indoor_sites_dir,
+                "One manifest per imported indoor site, with its anchor, levels and entrances.",
             ),
             entry(
                 "bundles",

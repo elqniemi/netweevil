@@ -89,6 +89,8 @@ tags:
     description: Uploads, imports, profiles, jobs and the loaded selection.
   - name: GTFS editor
     description: GTFS scenarios that add lines and stops to a feed or make a new feed.
+  - name: Indoor
+    description: Indoor sites, indoor routes and door-to-door routes.
 
 paths:
   /healthz:
@@ -2772,6 +2774,131 @@ paths:
         '500':
           $ref: '#/components/responses/InternalError'
 
+  /v1/indoor/sites:
+    get:
+      tags: [Indoor]
+      operationId: listIndoorSites
+      summary: List the imported indoor sites
+      description: |
+        Sends one summary for each indoor site in the workspace. Import sites
+        with `netweevil indoor import`. This operation works in setup mode.
+      responses:
+        '200':
+          description: The sites, sorted by id.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/IndoorSiteSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /v1/indoor/sites/{site_id}:
+    get:
+      tags: [Indoor]
+      operationId: getIndoorSite
+      summary: Get the manifest of an indoor site
+      description: |
+        Sends the site manifest: the anchor that places the site on the globe,
+        the levels, the entrances with their outdoor side, the element counts,
+        the footprint and the compile warnings. The first request for a site
+        loads its graph.
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+      responses:
+        '200':
+          description: The site manifest.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IndoorSiteManifest'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/indoor/sites/{site_id}/geojson:
+    get:
+      tags: [Indoor]
+      operationId: getIndoorSiteGeojson
+      summary: Get the elements of an indoor site as GeoJSON
+      description: |
+        Sends the surfaces, barriers, edges, portals, vertical stops, nodes,
+        POIs and entrances of a site as a GeoJSON `FeatureCollection` in
+        WGS84. Each feature has the property `feature_type` (`surface`,
+        `barrier`, `edge`, `portal`, `vertical`, `node`, `poi` or
+        `entrance`), and `id`, `level` and `name`. Entrance features are at
+        the outdoor side of the entrance.
+      parameters:
+        - $ref: '#/components/parameters/SiteIdPath'
+        - name: level
+          in: query
+          description: Send only the features on this level id. A vertical is sent once for each of its stops on the level.
+          schema:
+            type: string
+          example: '1'
+      responses:
+        '200':
+          description: The site features.
+          content:
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/GeoJsonFeatureCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/indoor/route:
+    post:
+      tags: [Indoor]
+      operationId: indoorRoute
+      summary: Find a route inside an indoor site
+      description: |
+        Finds a route between two points of one indoor site. A point is a
+        position (`lon`, `lat` and an optional `level`), a POI (`poi`: its id,
+        `name` or `ref`), or a space (`space`: its id, or the name or ref of a
+        POI). `profile` is a built-in indoor profile (`walk`, `wheelchair`,
+        `fastest`, `bike`, `evacuation`) or an inline profile object. `mode`
+        overrides the mode of the profile. This operation works in setup mode.
+      parameters:
+        - $ref: '#/components/parameters/Format'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IndoorRouteRequest'
+            example:
+              route_id: workshop-to-1.14
+              site_id: demo
+              origin: {poi: Workshop}
+              destination: {poi: '1.14'}
+              profile: wheelchair
+      responses:
+        '200':
+          description: |
+            The route. The GeoJSON variant has one `LineString` feature for
+            each segment, with the segment fields as properties, and the
+            members `route_id`, `site_id`, `profile`, `mode`, `summary`,
+            `spaces` and `warnings` in the top-level `properties`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IndoorRouteResult'
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/GeoJsonFeatureCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableBody'
+
 components:
   parameters:
     Format:
@@ -2793,6 +2920,14 @@ components:
       schema:
         type: string
       example: car_research_v1
+    SiteIdPath:
+      name: site_id
+      in: path
+      required: true
+      description: Id of an indoor site.
+      schema:
+        type: string
+      example: demo
     FeedIdPath:
       name: feed_id
       in: path
@@ -7470,3 +7605,229 @@ components:
           type: boolean
           default: true
           description: Load the built feed into the service.
+    # ------------------------------------------------------------------
+    # Indoor sites and routes
+    # ------------------------------------------------------------------
+    LocalFrame:
+      type: object
+      description: |
+        Places the site's metre coordinates on the globe with a local tangent
+        plane at (`lon`, `lat`).
+      required: [lon, lat]
+      properties:
+        lon: {type: number}
+        lat: {type: number}
+        rotation_deg:
+          type: number
+          default: 0
+          description: Angle from east to the site's x axis, counter-clockwise.
+        elevation_m:
+          type: number
+          default: 0
+          description: Height of the site's z = 0, added to output z.
+    IndoorSiteCounts:
+      type: object
+      properties:
+        levels: {type: integer}
+        surfaces: {type: integer}
+        edges: {type: integer}
+        nodes: {type: integer}
+        portals: {type: integer}
+        barriers: {type: integer}
+        verticals: {type: integer}
+        pois: {type: integer}
+        entrances: {type: integer}
+        graph_nodes: {type: integer}
+        graph_arcs: {type: integer}
+        triangles: {type: integer}
+    IndoorSiteSummary:
+      type: object
+      required: [site_id, label, anchor, levels, entrance_count, bbox, counts, created_at]
+      properties:
+        site_id: {type: string}
+        label: {type: string}
+        anchor:
+          $ref: '#/components/schemas/LocalFrame'
+        levels:
+          type: array
+          items: {type: string}
+        entrance_count: {type: integer}
+        bbox:
+          type: array
+          description: '`[min_lon, min_lat, max_lon, max_lat]`.'
+          items: {type: number}
+        counts:
+          $ref: '#/components/schemas/IndoorSiteCounts'
+        created_at: {type: string}
+    IndoorSiteEntrance:
+      type: object
+      required: [id, kind, at, lon, lat, outdoor_lon, outdoor_lat, step_free]
+      properties:
+        id: {type: string}
+        kind:
+          type: string
+          enum: [portal, node, poi]
+        level: {type: [string, 'null']}
+        at:
+          type: array
+          description: Local position in metres.
+          items: {type: number}
+        lon: {type: number}
+        lat: {type: number}
+        outdoor_lon:
+          type: number
+          description: The outdoor side of the entrance, where it meets the street network.
+        outdoor_lat: {type: number}
+        step_free: {type: boolean}
+        name: {type: [string, 'null']}
+    IndoorSiteManifest:
+      type: object
+      required: [schema_version, site_id, label, anchor, source, created_at, levels, entrances, counts, bbox, footprint]
+      properties:
+        schema_version: {type: integer}
+        site_id: {type: string}
+        label: {type: string}
+        anchor:
+          $ref: '#/components/schemas/LocalFrame'
+        source:
+          type: object
+          properties:
+            path: {type: string}
+            format:
+              type: string
+              enum: [input_json, input_json_wgs84, input_json_crs, osm]
+            crs: {type: string}
+            bbox:
+              type: array
+              items: {type: number}
+        created_at: {type: string}
+        levels:
+          type: array
+          items:
+            type: object
+            properties:
+              id: {type: string}
+              z: {type: number}
+        entrances:
+          type: array
+          items:
+            $ref: '#/components/schemas/IndoorSiteEntrance'
+        counts:
+          $ref: '#/components/schemas/IndoorSiteCounts'
+        bbox:
+          type: array
+          items: {type: number}
+        footprint:
+          type: array
+          description: Convex hull of the site as a closed `[lon, lat]` ring.
+          items:
+            type: array
+            items: {type: number}
+        warnings:
+          type: array
+          items: {type: string}
+        input_path: {type: string}
+        graph_path: {type: string}
+    IndoorPoint:
+      type: object
+      description: |
+        One end of an indoor route: `lon` and `lat` with an optional `level`,
+        or `poi`, or `space`.
+      properties:
+        lon: {type: number}
+        lat: {type: number}
+        level:
+          type: [string, number]
+          description: A level id, or a level number (`1`, `-1`, `0.5`).
+        poi:
+          type: string
+          description: A POI id, name or ref (the match ignores case).
+        space:
+          type: string
+          description: A space id, or the name or ref of a POI.
+    IndoorProfile:
+      description: A built-in profile name or an inline indoor profile object.
+      oneOf:
+        - type: string
+          enum: [walk, wheelchair, fastest, bike, evacuation]
+        - type: object
+          additionalProperties: true
+    IndoorRouteMode:
+      type: string
+      enum: [mixed, edges_only, surfaces_only]
+    IndoorRouteRequest:
+      type: object
+      required: [site_id, origin, destination]
+      properties:
+        route_id: {type: string}
+        site_id: {type: string}
+        origin:
+          $ref: '#/components/schemas/IndoorPoint'
+        destination:
+          $ref: '#/components/schemas/IndoorPoint'
+        profile:
+          $ref: '#/components/schemas/IndoorProfile'
+        mode:
+          $ref: '#/components/schemas/IndoorRouteMode'
+    IndoorRouteSegment:
+      type: object
+      required: [type, kind, id, from_index, to_index, length_m, duration_s]
+      properties:
+        type:
+          type: string
+          enum: [walk, edge, portal, vertical, connector]
+        kind:
+          type: string
+          description: '`walk`, `edge`, the portal kind (`door`, `entrance`) or the vertical kind (`stairs`, `lift`).'
+        id: {type: string}
+        level: {type: [string, 'null']}
+        space: {type: [string, 'null']}
+        class: {type: [string, 'null']}
+        from_index:
+          type: integer
+          description: First index of the segment in `geometry`.
+        to_index: {type: integer}
+        length_m: {type: number}
+        duration_s: {type: number}
+        props:
+          description: The element's input `props`, unchanged.
+    IndoorRouteSummary:
+      type: object
+      properties:
+        duration_s: {type: number}
+        length_m: {type: number}
+        climb_m: {type: number}
+        descent_m: {type: number}
+        cost:
+          type: number
+          description: Search cost in seconds weighted by the profile.
+    IndoorRouteResult:
+      type: object
+      required: [site_id, profile, mode, summary, geometry, segments, spaces, warnings]
+      properties:
+        route_id: {type: string}
+        site_id: {type: string}
+        profile: {type: string}
+        mode:
+          $ref: '#/components/schemas/IndoorRouteMode'
+        summary:
+          $ref: '#/components/schemas/IndoorRouteSummary'
+        geometry:
+          type: array
+          description: '`[lon, lat, z]`; z is metres above the base of the site.'
+          items:
+            type: array
+            items: {type: number}
+        segments:
+          type: array
+          items:
+            $ref: '#/components/schemas/IndoorRouteSegment'
+        spaces:
+          type: array
+          description: The spaces that the route crosses, in order.
+          items: {type: string}
+        origin_poi: {type: string}
+        destination_poi: {type: string}
+        warnings:
+          type: array
+          items: {type: string}

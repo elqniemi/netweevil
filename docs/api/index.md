@@ -89,6 +89,7 @@ geometry. These operations accept the switch:
 - `/v1/service-area`, `/v1/service-area-sequence`
 - `/v1/betweenness`, `/v1/scenario-batch`
 - `/v1/transit-service-area`
+- `/v1/indoor/route`
 - `/v1/simulation/{simulation_id}/frames` (last frame only)
 
 Some operations always send GeoJSON, for example `/v1/expansion`,
@@ -128,6 +129,7 @@ The service can start without a dataset. This is setup mode. In setup mode:
 - `GET /readyz` sends `{"status": "setup"}` with status `503`.
 - The workspace operations under `/v1/workspace` work. Use them to upload
   files, import a dataset and write profiles.
+- The indoor operations under `/v1/indoor` work. They need no dataset.
 - Operations that need a dataset send `503`.
 
 To leave setup mode, send `POST /v1/workspace/activate`. The operation starts

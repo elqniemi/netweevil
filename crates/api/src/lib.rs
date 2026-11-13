@@ -26,6 +26,7 @@ mod geojson;
 mod gtfs_editor;
 mod handlers;
 mod height;
+mod indoor;
 mod jobs;
 mod locate;
 mod network;
@@ -288,6 +289,13 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
             "/v1/transit-feeds/{feed_id}/patterns",
             get(gtfs_editor::feed_route_patterns),
         )
+        .route("/v1/indoor/sites", get(indoor::list_sites))
+        .route("/v1/indoor/sites/{site_id}", get(indoor::get_site))
+        .route(
+            "/v1/indoor/sites/{site_id}/geojson",
+            get(indoor::site_geojson_handler),
+        )
+        .route("/v1/indoor/route", post(indoor::indoor_route_handler))
         .route("/openapi.yaml", get(api_docs::openapi_yaml))
         .route("/docs", get(api_docs::swagger_ui));
     router = console::attach_console(router, console_dir);

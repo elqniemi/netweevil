@@ -90,11 +90,15 @@ pub(crate) struct Workspace {
     pub(crate) paths: WorkspacePaths,
     runtime: RwLock<Option<Arc<ServiceRuntime>>>,
     pub(crate) jobs: JobRegistry,
+    /// Indoor sites, loaded on first use. They belong to the workspace, not to
+    /// the loaded street dataset, so they work in setup mode too.
+    pub(crate) indoor: netweevil_site::SiteCatalog,
 }
 
 impl Workspace {
     pub(crate) fn new(paths: WorkspacePaths, runtime: Option<ServiceRuntime>) -> Self {
         Self {
+            indoor: netweevil_site::SiteCatalog::new(paths.clone()),
             paths,
             runtime: RwLock::new(runtime.map(Arc::new)),
             jobs: JobRegistry::default(),
@@ -241,6 +245,7 @@ fn service_capabilities() -> ServiceCapabilities {
             "transit_route",
             "transit_service_area",
             "simulation",
+            "indoor_route",
         ],
         geometry: vec!["none", "full", "segments"],
         breakdown_metrics: vec!["time_s", "distance_m"],

@@ -30,6 +30,8 @@ The crate `netweevil-persist` defines the layout. The type
     │   └── <scenario_id>.gtfs.zip     # Exported scenario
     ├── traffic/
     │   └── <traffic_id>.json          # Historical traffic manifest
+    ├── indoor_sites/
+    │   └── <site_id>.json             # Indoor site manifest
     ├── terrain/                       # Prepared DEM tiles that the API serves
     ├── runs/
     │   ├── <run_id>.json              # Run manifest
@@ -43,7 +45,8 @@ The crate `netweevil-persist` defines the layout. The type
         ├── source/        source-<dataset_id>-<build>.bin
         ├── metrics/       metric-<dataset_id>-<profile_id>.bin
         ├── transit/       transit-<feed_id>.bin, transfers-<feed_id>-<dataset_id>-<profile_id>.bin
-        └── traffic/       traffic-<traffic_id>.bin
+        ├── traffic/       traffic-<traffic_id>.bin
+        └── indoor/        <site_id>/input.json, <site_id>/graph.bin
 ```
 
 `<build>` is a random 12-character id. Each import of a dataset gets a new
@@ -94,6 +97,7 @@ flowchart LR
 | `bundles/metrics/` | `profile compile` | The per-edge metrics of a compiled profile. |
 | `transit_feeds/`, `bundles/transit/` | `transit import`, `transit transfers build` | Transit feed manifests, timetables and transfer tables. |
 | `traffic/`, `bundles/traffic/` | `traffic import` | Historical traffic speeds. |
+| `indoor_sites/`, `bundles/indoor/` | `indoor import` | Indoor site manifests (anchor, levels, entrances), engine inputs in local metres and compiled indoor graphs. |
 | `runs/` | `analyze`, `experiment`, `simulate` | Run manifests and result files. |
 | `reports/` | `report render` | Rendered reports. |
 | `uploads/`, `profiles/`, `gtfs_scenarios/` | The web console | Uploaded files, profiles and GTFS editor scenarios. |

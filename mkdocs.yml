@@ -101,6 +101,8 @@ nav:
           - Snap constraints: guides/snap-constraints.md
           - Trace matching: guides/trace-matching.md
           - Trip optimization: guides/trip-optimization.md
+      - Indoor:
+          - Indoor routing: guides/indoor-routing.md
       - Transit and time:
           - Transit: guides/transit.md
           - Multilayer and temporal routing: guides/multilayer-temporal-routing.md

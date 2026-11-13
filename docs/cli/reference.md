@@ -22,6 +22,7 @@ Commands:
   dataset     Import, update, audit and list road network datasets
   transit     Import GTFS feeds and prepare them for transit routing
   traffic     Import historical speeds and route with traffic
+  indoor      Import, list, show and remove indoor sites
   profile     Validate routing profiles and compile them for a dataset
   analyze     Run routing analyses and save each result as a run
   experiment  Run reproducible study files
@@ -409,6 +410,106 @@ Options:
           Print help
 ```
 
+### `netweevil indoor` { #netweevil-indoor }
+
+```text
+Import, list, show and remove indoor sites
+
+Usage: netweevil indoor <COMMAND>
+
+Commands:
+  import  Import an indoor site from an engine input document or OSM data
+  list    List the imported indoor sites
+  show    Print a site's manifest: anchor, levels, entrances and counts
+  remove  Remove a site and its bundle
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+#### `netweevil indoor import` { #netweevil-indoor-import }
+
+```text
+Import an indoor site from an engine input document or OSM data.
+
+The source is an engine input JSON in local metres (needs --anchor), in WGS84 (`"crs": "EPSG:4326"`) or in a projected CRS (--crs), or an `.osm.pbf`/`.osm` file with Simple Indoor Tagging.
+
+Usage: netweevil indoor import [OPTIONS] --name <NAME> <SOURCE>
+
+Arguments:
+  <SOURCE>
+          Engine input JSON, `.osm.pbf` or `.osm` file
+
+Options:
+      --name <NAME>
+          Site id (letters, digits, `-`, `_`, `.`)
+
+      --label <LABEL>
+          Display name; defaults to the id
+
+      --anchor <ANCHOR>
+          Site origin `lon,lat` for local metre coordinates. For other sources it replaces the centroid as the origin
+
+      --rotation <ROTATION>
+          Angle from east to the site's x axis, counter-clockwise, degrees
+          
+          [default: 0]
+
+      --elevation <ELEVATION>
+          Height of the site's z = 0 in metres, added to output z
+          
+          [default: 0]
+
+      --crs <CRS>
+          Projected CRS of the input coordinates (`EPSG:<code>` or `+proj=...`)
+
+      --bbox <BBOX>
+          OSM only: `min_lon,min_lat,max_lon,max_lat` filter
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `netweevil indoor list` { #netweevil-indoor-list }
+
+```text
+List the imported indoor sites
+
+Usage: netweevil indoor list
+
+Options:
+  -h, --help  Print help
+```
+
+#### `netweevil indoor show` { #netweevil-indoor-show }
+
+```text
+Print a site's manifest: anchor, levels, entrances and counts
+
+Usage: netweevil indoor show <SITE_ID>
+
+Arguments:
+  <SITE_ID>  Site id
+
+Options:
+  -h, --help  Print help
+```
+
+#### `netweevil indoor remove` { #netweevil-indoor-remove }
+
+```text
+Remove a site and its bundle
+
+Usage: netweevil indoor remove <SITE_ID>
+
+Arguments:
+  <SITE_ID>  Site id
+
+Options:
+  -h, --help  Print help
+```
+
 ### `netweevil profile` { #netweevil-profile }
 
 ```text
@@ -473,6 +574,7 @@ Commands:
   transit-route          Find a public transit journey in an imported GTFS feed
   transit-batch          Find a public transit journey for each request in a batch file
   trip                   Put stops in the best visiting order and route the legs
+  indoor-route           Route inside an imported indoor site
   help                   Print this message or the help of the given subcommand(s)
 
 Options:
@@ -818,6 +920,19 @@ Options:
       --profile <PROFILE>  Routing profile file (YAML or TOML)
       --request <REQUEST>  Trip request (.json, .yml or .yaml)
       --out <OUT>          `.json` writes the full result; `.geojson` writes legs and stops
+  -h, --help               Print help
+```
+
+#### `netweevil analyze indoor-route` { #netweevil-analyze-indoor-route }
+
+```text
+Route inside an imported indoor site
+
+Usage: netweevil analyze indoor-route [OPTIONS] --request <REQUEST>
+
+Options:
+      --request <REQUEST>  Indoor route request (JSON or YAML)
+      --out <OUT>          Result file: `.json` writes the result, `.geojson` one feature per segment. Omit it to write JSON to the runs directory
   -h, --help               Print help
 ```
 

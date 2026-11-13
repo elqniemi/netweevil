@@ -1358,6 +1358,7 @@ dependencies = [
  "netweevil-profile",
  "netweevil-query",
  "netweevil-simulate",
+ "netweevil-site",
  "netweevil-transit",
  "rayon",
  "serde",
@@ -1385,6 +1386,7 @@ dependencies = [
  "netweevil-query",
  "netweevil-report",
  "netweevil-simulate",
+ "netweevil-site",
  "netweevil-transit",
  "serde",
  "serde_json",
@@ -1427,6 +1429,7 @@ dependencies = [
  "hex",
  "memmap2",
  "netweevil-core",
+ "netweevil-indoor",
  "netweevil-persist",
  "netweevil-profile",
  "netweevil-query",
@@ -1531,6 +1534,19 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "toml",
+]
+
+[[package]]
+name = "netweevil-site"
+version = "0.4.0-alpha"
+dependencies = [
+ "anyhow",
+ "netweevil-core",
+ "netweevil-indoor",
+ "netweevil-persist",
+ "netweevil-query",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

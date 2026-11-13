@@ -16,6 +16,7 @@ mod elevation;
 mod geopackage;
 mod guidance;
 mod import;
+pub mod indoor;
 mod mapping;
 mod opening_hours;
 mod osm_change;

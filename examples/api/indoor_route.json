@@ -1,0 +1,8 @@
+{
+  "route_id": "lab-to-meeting-room",
+  "site_id": "demo",
+  "origin": {"lon": 6.56668, "lat": 53.21942, "level": 0},
+  "destination": {"space": "Meeting room"},
+  "profile": "wheelchair",
+  "mode": "mixed"
+}

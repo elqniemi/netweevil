@@ -10,6 +10,7 @@ members = [
     "crates/query",
     "crates/report",
     "crates/simulate",
+    "crates/site",
     "crates/transit",
 ]
 resolver = "2"

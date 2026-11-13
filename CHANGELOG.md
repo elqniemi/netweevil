@@ -19,8 +19,21 @@ All notable changes to NetWeevil are in this file.
   one point to many, multi-stop trips, closures, access groups and
   reachability checks. A profile `mode` (`mixed`, `edges_only`,
   `surfaces_only`) limits the element kinds that a route uses. The concepts
-  page "Indoor and surface routing" describes the model. The CLI and the API
-  do not use the crate yet.
+  page "Indoor and surface routing" describes the model.
+- Indoor sites: `netweevil indoor import|list|show|remove` stores an indoor
+  site (engine input, compiled graph, anchor and entrances) under
+  `.netweevil/indoor_sites/` and `.netweevil/bundles/indoor/`. Sources are
+  engine input JSON in local metres (`--anchor lon,lat`), in WGS84
+  (`"crs": "EPSG:4326"`) or in a projected CRS (`--crs`), and OSM `.osm.pbf`
+  or `.osm` files with Simple Indoor Tagging (`--bbox`). A local tangent
+  plane at the anchor converts between site metres and WGS84.
+- `netweevil analyze indoor-route` and `POST /v1/indoor/route` route inside a
+  site between points given as `{lon, lat, level}`, `{poi}` (id, name or
+  ref) or `{space}`, with an indoor profile and mode; results are in WGS84.
+  `GET /v1/indoor/sites`, `GET /v1/indoor/sites/{site_id}` and
+  `GET /v1/indoor/sites/{site_id}/geojson?level=` list sites and show them on
+  a map. The new `netweevil-site` crate holds the site storage, runtime and
+  routes. See the guide "Indoor routing" and `examples/indoor/`.
 
 ## 0.4.0-alpha - 2026-10-28
 
