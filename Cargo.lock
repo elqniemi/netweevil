@@ -677,6 +677,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "float_eq"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28a80e3145d8ad11ba0995949bbcf48b9df2be62772b3d351ef017dff6ecb853"
+
+[[package]]
 name = "foldhash"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -796,6 +802,26 @@ dependencies = [
  "wasip2",
  "wasip3",
 ]
+
+[[package]]
+name = "h3o"
+version = "0.11.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e09e90732a210d62fb37ce0452cac2b999aeff4ebd1998b53cf45290175b39b5"
+dependencies = [
+ "ahash",
+ "either",
+ "float_eq",
+ "h3o-bit",
+ "libm",
+ "ordered-float 5.5.1",
+]
+
+[[package]]
+name = "h3o-bit"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b42eb4efef1f96510ae1a33b2682562a677d504641e9903a77bf5c666b9013e"
 
 [[package]]
 name = "half"
@@ -1353,6 +1379,7 @@ dependencies = [
  "mime_guess",
  "mvt",
  "netweevil-core",
+ "netweevil-h3",
  "netweevil-ingest",
  "netweevil-persist",
  "netweevil-profile",
@@ -1380,6 +1407,7 @@ dependencies = [
  "md5",
  "netweevil-api",
  "netweevil-core",
+ "netweevil-h3",
  "netweevil-ingest",
  "netweevil-persist",
  "netweevil-profile",
@@ -1402,6 +1430,19 @@ version = "0.4.0-alpha"
 dependencies = [
  "bytemuck",
  "serde",
+]
+
+[[package]]
+name = "netweevil-h3"
+version = "0.4.0-alpha"
+dependencies = [
+ "anyhow",
+ "csv",
+ "h3o",
+ "netweevil-core",
+ "rustc-hash",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1430,6 +1471,7 @@ dependencies = [
  "hex",
  "memmap2",
  "netweevil-core",
+ "netweevil-h3",
  "netweevil-indoor",
  "netweevil-persist",
  "netweevil-profile",
@@ -1527,6 +1569,7 @@ version = "0.4.0-alpha"
 dependencies = [
  "anyhow",
  "netweevil-core",
+ "netweevil-h3",
  "netweevil-profile",
  "netweevil-query",
  "rayon",
@@ -1685,6 +1728,15 @@ name = "ordered-float"
 version = "2.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68f19d67e5a2795c94e73e0bb1cc1a7edeb2e28efd39e2e1c9b7a40c1108b11c"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "ordered-float"
+version = "5.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f59006ce1e204c30956638535b74d317bca99477b9356dfaec54c37f6f600ab"
 dependencies = [
  "num-traits",
 ]
@@ -2480,7 +2532,7 @@ checksum = "7e54bc85fc7faa8bc175c4bab5b92ba8d9a3ce893d0e9f42cc455c8ab16a9e09"
 dependencies = [
  "byteorder",
  "integer-encoding",
- "ordered-float",
+ "ordered-float 2.10.1",
 ]
 
 [[package]]

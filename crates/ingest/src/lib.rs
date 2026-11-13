@@ -20,6 +20,7 @@ pub mod indoor;
 mod mapping;
 mod opening_hours;
 mod osm_change;
+mod osm_points;
 mod overture;
 mod pbf;
 mod restrictions;
@@ -46,10 +47,11 @@ pub use mapping::{
     GeoPackageLayerMapping, GeoPackageMapping, LayerDefaults, RetainMode, load_gpkg_mapping,
 };
 pub use opening_hours::parse_access_schedule;
+pub use osm_points::{OsmTaggedPoint, scan_osm_tagged_points};
 pub use traffic::{
-    ImportedTraffic, TrafficAssignmentSource, TrafficBindingStats, TrafficPatternSource,
-    TrafficSourceDirection, TrafficSourceDocument, TrafficSynthesisOptions, build_traffic_bundle,
-    read_traffic_source, synthesize_traffic_source, traffic_binding_stats,
+    ImportedTraffic, TrafficAssignmentSource, TrafficBindingStats, TrafficCellAssignmentSource,
+    TrafficPatternSource, TrafficSourceDirection, TrafficSourceDocument, TrafficSynthesisOptions,
+    build_traffic_bundle, read_traffic_source, synthesize_traffic_source, traffic_binding_stats,
 };
 pub use update::{
     ChangedObjects, DEFAULT_MAX_FILL_GROWTH, DatasetUpdateInput, DatasetUpdateOptions,

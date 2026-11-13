@@ -6,6 +6,22 @@ All notable changes to NetWeevil are in this file.
 
 ### Added
 
+- H3 cells as a spatial layer. The new `netweevil-h3` crate holds cell sets
+  with mixed resolutions (the finest cell applies), point aggregation,
+  resampling and area coverage. Cells resolve at import or setup time and do
+  not change the speed of requests. See the guide "H3 cells".
+    - `netweevil h3 aggregate|pois|network|cover|points|resample` builds cell
+      tables from point CSVs, tagged OSM objects and datasets, and converts
+      them to point sets for analyses. Outputs are CSV, GeoJSON or JSON.
+    - Traffic sources take `cell_assignments` and `cell_assignments_csv`:
+      a speed pattern for the motorized features in a cell, with optional
+      `road_classes`. `traffic import` resolves them to feature assignments.
+    - `POST /v1/traffic/live` takes `cell_updates` to close or slow the
+      features in a set of cells.
+    - Simulation fleets take `kind: cells` demand (weighted cells, such as
+      population), and zones take `cells` as an alternative to `polygon`.
+    - `GET /v1/h3/network` and `POST /v1/h3/aggregate` give the network of
+      the loaded dataset and aggregated points per cell.
 - `netweevil dataset fetch <REGION>` downloads an OSM extract from Geofabrik.
   `<REGION>` is a Geofabrik path (`europe/netherlands`), a region id or a
   region name; `--url` takes any `.osm.pbf` URL and `--list [FILTER]` prints

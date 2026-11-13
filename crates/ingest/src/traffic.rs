@@ -5,6 +5,11 @@
 //! features. Large inputs keep patterns and assignments in CSV files next to
 //! the document. Identical speed vectors are interned, so per-segment inputs
 //! that repeat a few shapes store each shape once.
+//!
+//! Patterns can also be assigned by H3 cell. A cell assignment covers the
+//! motorized features of the dataset inside the cell, and resolves to
+//! feature assignments here, at import. A served traffic set holds feature
+//! assignments only.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -15,6 +20,7 @@ use netweevil_core::{
     AccessMask, RoadClass, TRAFFIC_BACKWARD, TRAFFIC_BUNDLE_SCHEMA_VERSION, TRAFFIC_FORWARD,
     TRAFFIC_SPEED_UNITS_PER_KPH, TopologyBundle, TrafficSpeedBundle,
 };
+use netweevil_h3::{CellMap, edge_midpoint, parse_cell};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,6 +43,26 @@ pub struct TrafficSourceDocument {
     /// `speeds_kph`, relative to the document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignments_csv: Option<PathBuf>,
+    /// Patterns for the motorized features inside H3 cells. Cells of
+    /// several resolutions may overlap: the finest cell wins. A feature
+    /// assignment wins over a cell.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cell_assignments: Vec<TrafficCellAssignmentSource>,
+    /// CSV with `cell,pattern_id` and an optional `road_classes` column
+    /// (space separated), relative to the document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cell_assignments_csv: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrafficCellAssignmentSource {
+    /// H3 cell id, e.g. `881fa4c4b1fffff`.
+    pub cell: String,
+    pub pattern: String,
+    /// Road classes the assignment covers; empty covers every class.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub road_classes: Vec<RoadClass>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +109,13 @@ pub struct TrafficBindingStats {
     pub matched_edge_count: usize,
 }
 
-pub fn read_traffic_source(path: &Path, traffic_id: Option<&str>) -> Result<ImportedTraffic> {
+/// Reads a source document and its CSV files. `topology` is the dataset
+/// the source is imported for; cell assignments need it.
+pub fn read_traffic_source(
+    path: &Path,
+    traffic_id: Option<&str>,
+    topology: Option<&TopologyBundle>,
+) -> Result<ImportedTraffic> {
     let raw = fs::read_to_string(path)
         .with_context(|| format!("reading traffic source {}", path.display()))?;
     let document: TrafficSourceDocument = match path.extension().and_then(|ext| ext.to_str()) {
@@ -112,6 +144,11 @@ pub fn read_traffic_source(path: &Path, traffic_id: Option<&str>) -> Result<Impo
         .as_deref()
         .map(&mut read_csv)
         .transpose()?;
+    let cell_assignments_csv = document
+        .cell_assignments_csv
+        .as_deref()
+        .map(&mut read_csv)
+        .transpose()?;
     let id = traffic_id
         .map(str::to_string)
         .or_else(|| document.traffic_id.clone())
@@ -121,6 +158,8 @@ pub fn read_traffic_source(path: &Path, traffic_id: Option<&str>) -> Result<Impo
         &document,
         patterns_csv.as_deref(),
         assignments_csv.as_deref(),
+        cell_assignments_csv.as_deref(),
+        topology,
     )?;
     Ok(ImportedTraffic {
         bundle,
@@ -129,11 +168,14 @@ pub fn read_traffic_source(path: &Path, traffic_id: Option<&str>) -> Result<Impo
 }
 
 /// Builds the interned bundle from a parsed document and optional CSV text.
+/// Cell assignments resolve against `topology`.
 pub fn build_traffic_bundle(
     traffic_id: &str,
     document: &TrafficSourceDocument,
     patterns_csv: Option<&str>,
     assignments_csv: Option<&str>,
+    cell_assignments_csv: Option<&str>,
+    topology: Option<&TopologyBundle>,
 ) -> Result<TrafficSpeedBundle> {
     if traffic_id.is_empty()
         || !traffic_id
@@ -249,6 +291,48 @@ pub fn build_traffic_bundle(
             assign(feature_id, direction, pattern).with_context(context)?;
         }
     }
+
+    let mut cell_rules = CellMap::<Vec<CellRule>>::new();
+    for assignment in &document.cell_assignments {
+        cell_rules
+            .entry_or_insert_with(parse_cell(&assignment.cell)?, Vec::new)
+            .push(CellRule {
+                pattern: pattern_index(&assignment.pattern)?,
+                road_classes: assignment.road_classes.clone(),
+            });
+    }
+    if let Some(text) = cell_assignments_csv {
+        let mut reader = csv::Reader::from_reader(text.as_bytes());
+        let headers = reader.headers()?.clone();
+        let cell_column = column(&headers, "cell")?;
+        let pattern_column = column(&headers, "pattern_id")?;
+        let classes_column = column(&headers, "road_classes").ok();
+        for (row, record) in reader.records().enumerate() {
+            let record = record?;
+            let context = || format!("cell_assignments_csv row {}", row + 2);
+            let road_classes = classes_column
+                .map(|column| parse_road_classes(&record[column]))
+                .transpose()
+                .with_context(context)?
+                .unwrap_or_default();
+            cell_rules
+                .entry_or_insert_with(
+                    parse_cell(&record[cell_column]).with_context(context)?,
+                    Vec::new,
+                )
+                .push(CellRule {
+                    pattern: pattern_index(record[pattern_column].trim()).with_context(context)?,
+                    road_classes,
+                });
+        }
+    }
+    if !cell_rules.is_empty() {
+        let topology = topology
+            .context("cell assignments resolve against a dataset; import the source with one")?;
+        for (key, pattern) in resolve_cell_assignments(&cell_rules, topology) {
+            assignments.entry(key).or_insert(pattern);
+        }
+    }
     if assignments.is_empty() {
         bail!("traffic source assigns no features");
     }
@@ -281,6 +365,73 @@ pub fn build_traffic_bundle(
     };
     bundle.validate().map_err(anyhow::Error::msg)?;
     Ok(bundle)
+}
+
+/// One pattern of a cell, for some or all road classes.
+struct CellRule {
+    pattern: u32,
+    road_classes: Vec<RoadClass>,
+}
+
+/// Resolves cell rules to directed features of `topology`. An edge takes
+/// the first rule of the finest covering cell that lists its road class. A
+/// feature whose edges lie in cells with different patterns takes the
+/// pattern that covers most of its length.
+fn resolve_cell_assignments(
+    rules: &CellMap<Vec<CellRule>>,
+    topology: &TopologyBundle,
+) -> BTreeMap<(i64, i8), u32> {
+    let mut covered = HashMap::<(i64, i8), BTreeMap<u32, u64>>::new();
+    for edge_index in 0..topology.edge_count() {
+        let profile = topology.edge_profile(edge_index);
+        if profile.access_mask.0 & AccessMask::MOTOR_VEHICLES == 0 {
+            continue;
+        }
+        let (lon, lat) = edge_midpoint(topology, edge_index);
+        let Some(pattern) = rules.covering(lon, lat).find_map(|(_, rules)| {
+            rules
+                .iter()
+                .find(|rule| {
+                    rule.road_classes.is_empty() || rule.road_classes.contains(&profile.road_class)
+                })
+                .map(|rule| rule.pattern)
+        }) else {
+            continue;
+        };
+        let direction = if topology.edge_source_direction(edge_index) < 0 {
+            TRAFFIC_BACKWARD
+        } else {
+            TRAFFIC_FORWARD
+        };
+        *covered
+            .entry((topology.edge_source_way_id(edge_index), direction))
+            .or_default()
+            .entry(pattern)
+            .or_default() += u64::from(topology.routing_edge(edge_index).length_m.max(1));
+    }
+    covered
+        .into_iter()
+        .map(|(key, patterns)| {
+            let mut best = (0, 0);
+            for (pattern, length) in patterns {
+                if length > best.1 {
+                    best = (pattern, length);
+                }
+            }
+            (key, best.0)
+        })
+        .collect()
+}
+
+fn parse_road_classes(text: &str) -> Result<Vec<RoadClass>> {
+    text.split(|c: char| c == ';' || c.is_whitespace())
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            serde_json::from_value(serde_json::Value::String(value.to_string()))
+                .ok()
+                .with_context(|| format!("unknown road class '{value}'"))
+        })
+        .collect()
 }
 
 /// Counts the assignments that match edges of `topology`.
@@ -512,6 +663,8 @@ pub fn synthesize_traffic_source(
             patterns_csv: None,
             assignments: Vec::new(),
             assignments_csv: None,
+            cell_assignments: Vec::new(),
+            cell_assignments_csv: None,
         },
         csv_text,
     ))

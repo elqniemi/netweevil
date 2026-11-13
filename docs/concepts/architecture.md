@@ -15,6 +15,7 @@ the API give the same result for the same request.
 | `crates/ingest` | `netweevil-ingest` | OSM, Overture and GeoPackage import, topology build, turn restrictions, road classification and preprocessing. |
 | `crates/indoor` | `netweevil-indoor` | Indoor and surface routing: navigation mesh walks, edge networks, portals, verticals and POIs across levels, in site metres. |
 | `crates/site` | `netweevil-site` | Indoor sites placed on the globe: site storage, the site cache, indoor routes in WGS84, site GeoJSON and door-to-door routes. |
+| `crates/h3` | `netweevil-h3` | H3 cell layers: cell sets with mixed resolutions, point aggregation, coverage and network summaries. |
 | `crates/transit` | `netweevil-transit` | GTFS import, street access (walk, bicycle, car) and transit routing. |
 | `crates/simulate` | `netweevil-simulate` | Agent-based traffic simulation. |
 | `crates/report` | `netweevil-report` | Report rendering and local exports. |
@@ -40,9 +41,11 @@ graph TD
     transit[netweevil-transit]
     site[netweevil-site]
     indoor[netweevil-indoor]
+    h3[netweevil-h3]
     core[netweevil-core]
 
     cli --> api
+    cli --> h3
     cli --> ingest
     cli --> report
     cli --> simulate
@@ -60,11 +63,15 @@ graph TD
     api --> profile
     api --> transit
     api --> site
+    api --> h3
     api --> core
 
     ingest --> persist
     ingest --> indoor
+    ingest --> h3
     ingest --> core
+
+    h3 --> core
 
     site --> persist
     site --> query
@@ -84,6 +91,7 @@ graph TD
 
     simulate --> query
     simulate --> profile
+    simulate --> h3
     simulate --> core
 
     query --> profile

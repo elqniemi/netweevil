@@ -17,7 +17,7 @@ use crate::state::test_support::test_runtime;
 
 /// 0 -> 1 -> 2 along two residential ways (1 and 2) plus a slower 0 -> 2
 /// service way (3), with live traffic enabled for the car profile.
-fn state() -> ApiState {
+pub(crate) fn state() -> ApiState {
     let edge = |id: u32, from: u32, to: u32, way: i64, length_m: u32, road_class| DirectedEdge {
         edge_id: EdgeId(id),
         from: NodeId(from),
@@ -91,7 +91,7 @@ fn state() -> ApiState {
     ApiState::for_test(Arc::new(runtime))
 }
 
-async fn body(response: Response) -> Value {
+pub(crate) async fn body(response: Response) -> Value {
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -184,4 +184,68 @@ async fn live_closure_reroutes_timed_requests_until_cleared() {
         .unwrap();
     let reopened = route(&state, &departure).await;
     assert_eq!(reopened["result"]["edge_path"], json!([0, 1]));
+}
+
+/// A cell update closes the motorized features whose edges lie in the
+/// cells; `road_classes` narrows it, and a feature update in the same batch
+/// wins over the cell.
+#[tokio::test]
+async fn live_cell_updates_expand_to_the_features_in_the_cells() {
+    let state = state();
+    let departure = departure();
+    let resolution = netweevil_h3::parse_resolution(12).unwrap();
+    let cell = |lon: f64| {
+        netweevil_h3::cell_at(lon, 53.0, resolution)
+            .unwrap()
+            .to_string()
+    };
+    // Midpoints of ways 1, 2 and 3.
+    let (way_1, way_2, way_3) = (cell(6.0005), cell(6.0015), cell(6.001));
+
+    let report = body(
+        live(
+            &state,
+            json!({"cell_updates": [{"cells": [way_2], "closed": true, "ttl_s": 3600}]}),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(report["active_entry_count"], 1);
+    let closed = route(&state, &departure).await;
+    assert_eq!(closed["result"]["edge_path"], json!([2]));
+
+    // Only the service way of the three cells closes; way 2 reopens through
+    // the feature update of the same batch.
+    let report = body(
+        live(
+            &state,
+            json!({
+                "replace": true,
+                "cell_updates": [
+                    {"cells": [way_1, way_2, way_3], "road_classes": ["service"], "closed": true},
+                    {"cells": [way_2], "closed": true}
+                ],
+                "updates": [{"feature_id": 2, "clear": true}]
+            }),
+        )
+        .await
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(report["active_entry_count"], 1);
+    let status =
+        serde_json::to_value(traffic_status(State(state.clone())).await.unwrap().0).unwrap();
+    assert_eq!(status["live_entry_count"], 1);
+    let reopened = route(&state, &departure).await;
+    assert_eq!(reopened["result"]["edge_path"], json!([0, 1]));
+
+    for invalid in [
+        json!({"cell_updates": [{"cells": ["nope"], "closed": true}]}),
+        json!({"cell_updates": [{"cells": [], "closed": true}]}),
+        json!({"cell_updates": [{"cells": [way_1], "closed": true, "speed_kph": 10}]}),
+    ] {
+        let error = live(&state, invalid).await.unwrap_err();
+        assert_eq!(error.into_response().status(), StatusCode::BAD_REQUEST);
+    }
 }

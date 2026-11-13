@@ -16,6 +16,7 @@ csv.workspace = true
 hex.workspace = true
 memmap2.workspace = true
 netweevil-core = { path = "../core" }
+netweevil-h3 = { path = "../h3" }
 netweevil-indoor = { path = "../indoor" }
 netweevil-persist = { path = "../persist" }
 arrow-array.workspace = true

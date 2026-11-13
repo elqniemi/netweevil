@@ -24,6 +24,7 @@ mod error;
 mod expansion;
 mod geojson;
 mod gtfs_editor;
+mod h3;
 mod handlers;
 mod height;
 mod indoor;
@@ -177,6 +178,8 @@ fn router(state: ApiState, console_dir: Option<&Path>) -> Router {
         )
         .route("/v1/betweenness", post(handlers::betweenness_handler))
         .route("/v1/scenario-batch", post(handlers::scenario_batch_handler))
+        .route("/v1/h3/network", get(h3::h3_network_handler))
+        .route("/v1/h3/aggregate", post(h3::h3_aggregate_handler))
         .route("/v1/network/edges", post(network::network_edges_handler))
         .route("/v1/tiles/{z}/{x}/{tile}", get(tiles::network_tile_handler))
         .route(

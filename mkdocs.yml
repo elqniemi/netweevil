@@ -112,6 +112,7 @@ nav:
           - Regions and elevation: guides/regions-and-elevation.md
           - Terrain: guides/terrain.md
           - Datasets: guides/datasets.md
+          - H3 cells: guides/h3-cells.md
       - Research:
           - Benchmarking: guides/benchmarking.md
           - Reports and experiments: guides/reports-and-experiments.md

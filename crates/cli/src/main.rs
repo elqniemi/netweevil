@@ -9,6 +9,7 @@ mod bench;
 mod cache;
 mod dataset;
 mod experiment;
+mod h3;
 mod indoor;
 mod profile;
 mod report;
@@ -38,6 +39,7 @@ use crate::dataset::{
     DatasetCommand, dataset_audit, dataset_fetch, dataset_import, dataset_list, dataset_update,
 };
 use crate::experiment::{ExperimentCommand, experiment_run};
+use crate::h3::{H3Command, h3_command};
 use crate::indoor::{IndoorCommand, indoor_command};
 use crate::profile::{ProfileCommand, profile_compile, profile_validate};
 use crate::report::{ReportCommand, report_render};
@@ -79,6 +81,7 @@ fn main() -> Result<()> {
         },
         Command::Traffic { command } => traffic_command(&paths, command),
         Command::Indoor { command } => indoor_command(&paths, command),
+        Command::H3 { command } => h3_command(&paths, command),
         Command::Profile { command: profile } => match profile {
             ProfileCommand::Validate { profile } => profile_validate(&profile),
             ProfileCommand::Compile { dataset, profile } => {
@@ -167,6 +170,11 @@ enum Command {
     Indoor {
         #[command(subcommand)]
         command: IndoorCommand,
+    },
+    /// Build and convert H3 cell layers: population, POIs, network density.
+    H3 {
+        #[command(subcommand)]
+        command: H3Command,
     },
     /// Validate routing profiles and compile them for a dataset.
     Profile {

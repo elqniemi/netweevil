@@ -19,7 +19,7 @@ Run all commands from the repository root. In a source checkout, use
 | [`ingest/`](ingest/) | GeoPackage mapping files for `dataset import --mapping` | [Datasets](../docs/guides/datasets.md) |
 | [`scenarios/`](scenarios/) | Feature-state scenarios for `--scenario` (closures and changed facilities) | [Multilayer temporal routing](../docs/guides/multilayer-temporal-routing.md) |
 | [`temporal/`](temporal/) | A holiday calendar and a time-dependent overlay CSV | [Multilayer temporal routing](../docs/guides/multilayer-temporal-routing.md) |
-| [`traffic/`](traffic/) | A synthetic historical speed set for Groningen | [Traffic](../docs/guides/traffic.md) |
+| [`traffic/`](traffic/) | Synthetic historical speed sets for Groningen, by road and by H3 cell | [Traffic](../docs/guides/traffic.md) |
 | [`transit/`](transit/) | Stop binding tables for `transit bindings apply` and `--stop-bindings` | [Transit](../docs/guides/transit.md) |
 | [`experiments/`](experiments/) | A study file for `experiment run` | [Reports and experiments](../docs/guides/reports-and-experiments.md) |
 | [`perf/`](perf/) | Route corpora for `netweevil bench` | [`perf/README.md`](perf/README.md) |

@@ -1,0 +1,22 @@
+[package]
+name = "netweevil-h3"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "H3 hexagonal cell layers for NetWeevil: cell sets, aggregation, coverage, and network summaries"
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+csv.workspace = true
+h3o.workspace = true
+netweevil-core = { path = "../core" }
+rustc-hash.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

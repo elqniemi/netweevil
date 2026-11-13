@@ -22,6 +22,7 @@ csv.workspace = true
 md5.workspace = true
 netweevil-api = { path = "../api" }
 netweevil-core = { path = "../core" }
+netweevil-h3 = { path = "../h3" }
 netweevil-ingest = { path = "../ingest" }
 netweevil-persist = { path = "../persist" }
 netweevil-profile = { path = "../profile" }

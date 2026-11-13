@@ -317,6 +317,7 @@ fn no_access_zone_forces_reroute_around() {
     scenario.zones.push(ZoneConfig {
         zone_id: "blocked".to_string(),
         label: String::new(),
+        cells: Vec::new(),
         polygon: vec![
             [mid_lon - LON_STEP * 0.6, BASE_LAT - LAT_STEP],
             [mid_lon + LON_STEP * 0.6, BASE_LAT - LAT_STEP],

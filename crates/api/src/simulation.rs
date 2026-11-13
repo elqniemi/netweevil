@@ -246,6 +246,12 @@ pub(crate) async fn control_simulation(
             "simulation '{simulation_id}' has finished; commands are no longer accepted"
         )));
     }
+    if let SimulationCommand::AddZone { zone } = &command
+        && !zone.cells.is_empty()
+    {
+        zone.validate()
+            .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    }
     info!(simulation_id = %simulation_id, command = ?command, "simulation control");
     entry.handle.send(command);
     // Give the engine a moment to apply on the next tick before reporting.

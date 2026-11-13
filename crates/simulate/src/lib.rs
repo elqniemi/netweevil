@@ -40,4 +40,4 @@ pub use scenario::{
     SimulationScenario, TimeConfig, TrafficModelConfig, WeightedPoint, ZoneConfig, ZoneEffect,
     load_scenario,
 };
-pub use zones::{PreparedPolygon, PreparedZone, prepare_zones};
+pub use zones::{PreparedCells, PreparedPolygon, PreparedZone, ZoneShape, prepare_zones};

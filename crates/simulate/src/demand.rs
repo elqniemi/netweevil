@@ -24,7 +24,8 @@ use crate::scenario::{
     BehaviorConfig, DepartureConfig, EndpointDistribution, FleetConfig, ZoneEffect,
     default_pcu_for_mode,
 };
-use crate::zones::{PreparedPolygon, PreparedZone};
+use crate::zones::{PreparedCells, PreparedPolygon, PreparedZone, ZoneShape};
+use netweevil_h3::CellIndex;
 
 /// Fully resolved agent ready for the engine.
 #[derive(Debug, Clone)]
@@ -127,11 +128,29 @@ fn sample_in_polygon(polygon: &PreparedPolygon, rng: &mut SimRng) -> [f64; 2] {
     ]
 }
 
+/// Picks a cell in proportion to the running totals in `cumulative`, then
+/// a uniform point inside its hexagon.
+fn sample_in_cells(cells: &[CellIndex], cumulative: &[f64], rng: &mut SimRng) -> [f64; 2] {
+    let total = cumulative.last().copied().unwrap_or(0.0);
+    let draw = rng.uniform(0.0, total);
+    let index = cumulative
+        .partition_point(|running| *running <= draw)
+        .min(cells.len() - 1);
+    sample_in_polygon(
+        &PreparedPolygon::new(netweevil_h3::cell_ring(cells[index])),
+        rng,
+    )
+}
+
 enum PreparedDistribution<'z> {
     Bbox([f64; 4]),
     Polygon(PreparedPolygon),
     Points(Vec<([f64; 2], f64)>),
     Zones(Vec<(&'z PreparedZone, f64)>),
+    Cells {
+        cells: Vec<CellIndex>,
+        cumulative_weight: Vec<f64>,
+    },
 }
 
 impl PreparedDistribution<'_> {
@@ -146,8 +165,19 @@ impl PreparedDistribution<'_> {
             Self::Zones(zones) => {
                 let weights: Vec<f64> = zones.iter().map(|(_, w)| *w).collect();
                 let zone = zones[rng.weighted_index(&weights)].0;
-                sample_in_polygon(&zone.polygon, rng)
+                match &zone.shape {
+                    ZoneShape::Polygon(polygon) => sample_in_polygon(polygon, rng),
+                    ZoneShape::Cells(PreparedCells {
+                        cells,
+                        cumulative_area,
+                        ..
+                    }) => sample_in_cells(cells, cumulative_area, rng),
+                }
             }
+            Self::Cells {
+                cells,
+                cumulative_weight,
+            } => sample_in_cells(cells, cumulative_weight, rng),
         }
     }
 
@@ -191,6 +221,9 @@ fn prepare_distribution<'z>(
                     // Allow any named zone to act as a sampling area too.
                     _ => None,
                 };
+                if matches!(&zone.shape, ZoneShape::Cells(cells) if cells.cells.is_empty()) {
+                    continue;
+                }
                 let explicitly_listed = zone_ids.contains(&zone.zone_id);
                 if !zone_ids.is_empty() && !explicitly_listed {
                     continue;
@@ -208,6 +241,21 @@ fn prepare_distribution<'z>(
                 );
             }
             PreparedDistribution::Zones(selected)
+        }
+        EndpointDistribution::Cells { cells } => {
+            let mut total = 0.0;
+            let mut cumulative_weight = Vec::with_capacity(cells.len());
+            for cell in cells {
+                total += cell.weight.max(0.0);
+                cumulative_weight.push(total);
+            }
+            if total <= 0.0 {
+                bail!("fleet '{fleet_id}': cell distribution has no positive weight");
+            }
+            PreparedDistribution::Cells {
+                cells: cells.iter().map(|cell| cell.cell).collect(),
+                cumulative_weight,
+            }
         }
     })
 }
@@ -613,4 +661,63 @@ pub(crate) fn route_drafts(
         }
     }
     Ok((agents, report))
+}
+
+#[cfg(test)]
+mod tests {
+    use netweevil_h3::{WeightedCell, cell_at, parse_resolution};
+
+    use super::*;
+    use crate::scenario::SimulationScenario;
+
+    #[test]
+    fn cell_distribution_samples_by_weight_inside_the_cells() {
+        let resolution = parse_resolution(8).unwrap();
+        let heavy = cell_at(6.5665, 53.2194, resolution).unwrap();
+        let light = cell_at(6.70, 53.25, resolution).unwrap();
+        let empty = cell_at(6.40, 53.10, resolution).unwrap();
+        let yaml = format!(
+            r#"
+scenario: {{id: cells}}
+fleets:
+  - fleet_id: commuters
+    profile_id: car
+    agent_count: 10
+    demand:
+      origins:
+        kind: cells
+        cells:
+          - {{cell: {heavy}, weight: 3}}
+          - {{cell: {light}}}
+          - {{cell: {empty}, weight: 0}}
+"#
+        );
+        let scenario: SimulationScenario = serde_yaml::from_str(&yaml).unwrap();
+        scenario.validate().unwrap();
+        let distribution = prepare_distribution(
+            &scenario.fleets[0].demand.origins,
+            [0.0, 0.0, 1.0, 1.0],
+            &[],
+            true,
+            "commuters",
+        )
+        .unwrap();
+        let mut rng = SimRng::seeded(7);
+        let mut in_heavy = 0;
+        for _ in 0..4000 {
+            let [lon, lat] = distribution.sample(&mut rng);
+            let cell = cell_at(lon, lat, resolution).unwrap();
+            assert!(cell == heavy || cell == light, "sampled outside the cells");
+            in_heavy += u32::from(cell == heavy);
+        }
+        assert!((2850..3150).contains(&in_heavy), "{in_heavy} of 4000");
+
+        let weightless = EndpointDistribution::Cells {
+            cells: vec![WeightedCell {
+                cell: heavy,
+                weight: 0.0,
+            }],
+        };
+        assert!(prepare_distribution(&weightless, [0.0; 4], &[], true, "f").is_err());
+    }
 }

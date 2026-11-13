@@ -165,14 +165,14 @@ pub(crate) fn traffic_command(paths: &WorkspacePaths, command: TrafficCommand) -
 
 fn traffic_import(paths: &WorkspacePaths, args: TrafficImportArgs) -> Result<()> {
     let started = std::time::Instant::now();
-    let imported = read_traffic_source(&args.source, args.name.as_deref())?;
-    let bundle = imported.bundle;
     let dataset = read_dataset_manifest(paths, &args.dataset)
         .with_context(|| format!("reading dataset manifest for '{}'", args.dataset))?;
     let topology_ref = dataset
         .topology_bundle
         .context("dataset is missing a topology bundle")?;
     let topology = read_topology_bundle(&topology_ref.path)?;
+    let imported = read_traffic_source(&args.source, args.name.as_deref(), Some(&topology))?;
+    let bundle = imported.bundle;
     let stats = traffic_binding_stats(&bundle, &topology);
     if stats.matched_edge_count == 0 {
         bail!(

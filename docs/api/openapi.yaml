@@ -81,6 +81,8 @@ tags:
     description: Historical traffic status and live traffic updates.
   - name: Network and tiles
     description: Network edges with profile values, and network vector tiles.
+  - name: H3 cells
+    description: H3 hexagonal cell layers of the network and of points such as population or POIs.
   - name: Terrain and height
     description: Terrain tile sources, terrain tiles and height samples.
   - name: Simulation
@@ -1472,6 +1474,10 @@ paths:
         clears the live state of a feature. An update expires at `expires_at`
         or after `ttl_s` seconds (default 900).
 
+        A `cell_updates` entry applies one update to every motorized feature
+        in a set of H3 cells. The service applies `cell_updates` in the order
+        of the list and then `updates`. A later entry wins for a feature.
+
         Without `wait`, the service sends `202` at once. With `wait=true`, the
         service sends `200` after it publishes the new engines.
       parameters:
@@ -1539,6 +1545,81 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '503':
           $ref: '#/components/responses/SetupMode'
+
+  /v1/h3/network:
+    get:
+      tags: [H3 cells]
+      operationId: h3Network
+      summary: Summarize the network per H3 cell
+      description: |
+        Counts the nodes and the directed edges of the loaded dataset in each
+        H3 cell of one resolution. An edge counts in the cell of its midpoint.
+        The service sends an error when the dataset covers more than 250000
+        cells at the resolution.
+      parameters:
+        - name: resolution
+          in: query
+          required: true
+          description: H3 resolution.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 15
+          example: 8
+        - $ref: '#/components/parameters/Format'
+      responses:
+        '200':
+          description: The cells.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/H3NetworkResponse'
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/GeoJsonFeatureCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/SetupMode'
+
+  /v1/h3/aggregate:
+    post:
+      tags: [H3 cells]
+      operationId: h3Aggregate
+      summary: Aggregate points into H3 cells
+      description: |
+        Counts points and sums their weights in each H3 cell, on one or more
+        resolutions. Use it for population points, POIs or the results of an
+        analysis. This operation works in setup mode.
+      parameters:
+        - $ref: '#/components/parameters/Format'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/H3AggregateRequest'
+            example:
+              points:
+                - {lon: 6.5665, lat: 53.2194, weight: 120}
+                - {lon: 6.5702, lat: 53.2171}
+              resolutions: [7, 9]
+      responses:
+        '200':
+          description: The cells of every resolution.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/H3AggregateResponse'
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/GeoJsonFeatureCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableBody'
 
   /v1/network/edges:
     post:
@@ -6723,16 +6804,130 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/LiveTrafficUpdate'
+        cell_updates:
+          type: array
+          items:
+            $ref: '#/components/schemas/LiveCellUpdate'
         replace:
           type: boolean
           default: false
           description: Replace all live entries. When false, the service merges the updates.
+    LiveCellUpdate:
+      type: object
+      additionalProperties: false
+      required: [cells]
+      description: |
+        One live observation for every motorized feature in a set of H3 cells.
+        A feature is in a cell when the midpoint of one of its edges is in the
+        cell.
+      properties:
+        cells:
+          type: array
+          minItems: 1
+          description: H3 cell ids. The resolutions can be different.
+          items:
+            $ref: '#/components/schemas/H3Cell'
+        road_classes:
+          type: array
+          description: Road classes that the update covers. An empty list covers every class.
+          items:
+            $ref: '#/components/schemas/RoadClass'
+        speed_kph:
+          type: number
+          description: Observed speed. It replaces the historical speed and the profile speed.
+        closed:
+          type: boolean
+          default: false
+        clear:
+          type: boolean
+          default: false
+          description: Remove the live state of the features.
+        expires_at:
+          type: string
+          format: date-time
+        ttl_s:
+          type: number
+          description: Validity in seconds after receipt when `expires_at` is absent. The default is 900.
     LiveTrafficAccepted:
       type: object
       required: [accepted, replace]
       properties:
         accepted: {type: integer}
         replace: {type: boolean}
+
+    # ------------------------------------------------------------------
+    # H3 cells
+    # ------------------------------------------------------------------
+    H3Cell:
+      type: string
+      description: H3 cell id in hexadecimal form.
+      example: 881fa4c4b1fffff
+    H3NetworkResponse:
+      type: object
+      required: [dataset_id, resolution, cells]
+      properties:
+        dataset_id: {type: string}
+        resolution: {type: integer}
+        cells:
+          type: array
+          description: Cells with at least one node or edge, in the order of the cell ids.
+          items:
+            type: object
+            required: [cell, node_count, edge_count, edge_length_m]
+            properties:
+              cell:
+                $ref: '#/components/schemas/H3Cell'
+              node_count: {type: integer}
+              edge_count:
+                type: integer
+                description: Directed edges with their midpoint in the cell.
+              edge_length_m:
+                type: number
+                description: Total length of these directed edges.
+    H3AggregateRequest:
+      type: object
+      additionalProperties: false
+      required: [points, resolutions]
+      properties:
+        points:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [lon, lat]
+            properties:
+              lon: {type: number}
+              lat: {type: number}
+              weight: {type: number, default: 1.0}
+        resolutions:
+          type: array
+          minItems: 1
+          items:
+            type: integer
+            minimum: 0
+            maximum: 15
+    H3AggregateResponse:
+      type: object
+      required: [point_count, skipped_point_count, cells]
+      properties:
+        point_count: {type: integer}
+        skipped_point_count:
+          type: integer
+          description: Points with a coordinate that is not a valid position.
+        cells:
+          type: array
+          description: Cells in the order of resolution (coarse to fine), then cell id.
+          items:
+            type: object
+            required: [cell, resolution, count, weight]
+            properties:
+              cell:
+                $ref: '#/components/schemas/H3Cell'
+              resolution: {type: integer}
+              count: {type: integer}
+              weight:
+                type: number
+                description: Sum of the point weights.
 
     # ------------------------------------------------------------------
     # Network, terrain and height
@@ -6995,6 +7190,22 @@ components:
             zone_ids:
               type: array
               items: {type: string}
+        - type: object
+          required: [kind, cells]
+          description: |
+            Weighted choice of an H3 cell, then a uniform position in the
+            cell. The weights are, for example, the population of the cells.
+          properties:
+            kind: {const: cells}
+            cells:
+              type: array
+              items:
+                type: object
+                required: [cell]
+                properties:
+                  cell:
+                    $ref: '#/components/schemas/H3Cell'
+                  weight: {type: number, default: 1.0}
     DepartureConfig:
       description: When the agents depart. The default is `uniform` from 0 to 600 s.
       oneOf:
@@ -7111,15 +7322,21 @@ components:
             weight: {type: number, default: 1.0}
     ZoneConfig:
       type: object
-      required: [zone_id, polygon, effect]
+      description: A zone is a polygon or a set of H3 cells.
+      required: [zone_id, effect]
       properties:
         zone_id: {type: string}
         label: {type: string, default: ''}
         polygon:
           type: array
-          description: WGS84 outer ring. It can be open or closed.
+          description: WGS84 outer ring. It can be open or closed. Empty for a zone of cells.
           items:
             $ref: '#/components/schemas/Coordinate2'
+        cells:
+          type: array
+          description: H3 cell ids, as an alternative to `polygon`. The resolutions can be different.
+          items:
+            $ref: '#/components/schemas/H3Cell'
         effect:
           $ref: '#/components/schemas/ZoneEffect'
     SimulationCommand:
