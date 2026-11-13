@@ -398,3 +398,116 @@ export interface NetworkEdgesMeta {
   truncated: boolean;
   ranges: Record<string, [number, number]>;
 }
+
+// --- H3 cell layers ---
+
+export interface CellColumnSummary {
+  name: string;
+  count: number;
+  sum: number;
+  min: number | null;
+  max: number | null;
+}
+
+export interface CellLayerSummary {
+  layer_id: string;
+  label: string;
+  description: string;
+  cell_count: number;
+  resolutions: number[];
+  columns: CellColumnSummary[];
+}
+
+export interface CellLayersResponse {
+  layers: CellLayerSummary[];
+}
+
+export type CellAggregation = "sum" | "mean" | "min" | "max" | "count" | "last";
+
+export interface CellColumnSpec {
+  source: string;
+  name?: string;
+  aggregation?: CellAggregation;
+}
+
+export interface CellValues {
+  cell: string;
+  values: Record<string, number>;
+}
+
+/** Body of `POST /v1/h3/layers`: create, replace or (with `merge`) extend a layer. */
+export interface CellLayerWriteRequest {
+  layer_id: string;
+  label?: string;
+  description?: string;
+  merge?: boolean;
+  cells?: CellValues[];
+  csv?: string;
+  resolution?: number;
+  lon_column?: string;
+  lat_column?: string;
+  columns?: CellColumnSpec[];
+}
+
+export interface CellLayerWriteResponse {
+  layer: CellLayerSummary;
+  /** Rows read and rows skipped from `csv`. */
+  csv_rows?: [number, number];
+}
+
+/** A stored layer: values per cell in `columns` order. */
+export interface CellLayerDocument {
+  layer_id: string;
+  label: string;
+  description: string;
+  columns: string[];
+  cells: Record<string, (number | null)[]>;
+}
+
+export interface CellLayerResponse {
+  summary: CellLayerSummary;
+  layer: CellLayerDocument;
+}
+
+export type CellPaintOp = "set" | "add" | "multiply" | "clear";
+
+/** Body of `POST /v1/h3/layers/{layer_id}/paint`: `cells`, or `bbox`/`polygon` with `resolution`. */
+export interface CellPaintRequest {
+  column: string;
+  op?: CellPaintOp;
+  value?: number;
+  cells?: string[];
+  bbox?: [number, number, number, number];
+  polygon?: [number, number][];
+  points?: [number, number][];
+  resolution?: number;
+}
+
+export interface CellPaintResponse {
+  changed: number;
+  layer: CellLayerSummary;
+}
+
+export interface CellSource {
+  layer_id: string;
+  column: string;
+}
+
+export interface SurgeConfig {
+  resolution?: number;
+  smoothing_rings?: number;
+  ring_decay?: number;
+  balance_ratio?: number;
+  sensitivity?: number;
+  min_multiplier?: number;
+  max_multiplier?: number;
+  step?: number;
+  min_supply?: number;
+}
+
+/** Body of `POST /v1/h3/surge`. */
+export interface SurgeRequest {
+  demand: CellSource;
+  supply: CellSource;
+  config?: SurgeConfig;
+}

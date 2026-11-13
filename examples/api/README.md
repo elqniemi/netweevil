@@ -20,6 +20,10 @@ This folder contains request bodies for the NetWeevil HTTP API. The
 | `expansion_route.json` | `POST /v1/expansion` | Groningen | `car_research_v1` |
 | `traffic_live_updates.json` | `POST /v1/traffic/live` | Groningen | any |
 | `traffic_live_cells.json` | `POST /v1/traffic/live` | Groningen | any |
+| `h3_layer_points.json` | `POST /v1/h3/layers` | none | none |
+| `h3_layer_paint.json` | `POST /v1/h3/layers/city/paint` | none | none |
+| `h3_surge.json` | `POST /v1/h3/surge` | none | none |
+| `dispatch.json` | `POST /v1/dispatch` | Groningen | `car_research_v1` |
 | `height.json` | `POST /v1/height` | Hong Kong, imported with `--dem` | any |
 | `ile_de_france_route_car.json` | `POST /v1/route` | Île-de-France | default profile |
 | `ile_de_france_route_pedestrian.json` | `POST /v1/route` | Île-de-France | `pedestrian_research_v1` |
@@ -137,6 +141,14 @@ the cached engine. See [request profiles](../../docs/guides/request-profiles.md)
 the traffic bucket of that time. `traffic_live_updates.json` slows one road
 and closes another. `traffic_live_cells.json` slows the minor roads in one H3 cell
 and closes the roads in two smaller cells. See [traffic](../../docs/guides/traffic.md).
+
+### H3 cells
+
+`h3_layer_points.json` makes the cell layer `city` from a point table with one
+aggregation for each column. `h3_layer_paint.json` paints a `drivers` column on
+the cells of a bounding box. `h3_surge.json` calculates surge multipliers from
+the two columns. `dispatch.json` assigns four vehicles to five ride requests
+and gives fares. See [H3 cells](../../docs/guides/h3-cells.md).
 
 ### Heights
 

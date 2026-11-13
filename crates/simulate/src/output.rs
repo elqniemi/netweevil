@@ -37,6 +37,54 @@ pub struct FleetSummary {
     pub mean_travel_time_s: Option<f64>,
     pub mean_distance_m: Option<f64>,
     pub mean_delay_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub vehicle_types: Vec<VehicleTypeSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ride_hailing: Option<RideHailingSummary>,
+}
+
+/// Agents of one vehicle type of a fleet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VehicleTypeSummary {
+    pub type_id: String,
+    pub dispatched: u32,
+    pub arrived: u32,
+    pub mean_travel_time_s: Option<f64>,
+    pub mean_distance_m: Option<f64>,
+}
+
+/// Outcome of a ride-hailing fleet. Waits run from the request to the
+/// pickup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RideHailingSummary {
+    pub requests: u32,
+    pub vehicles: u32,
+    /// Requests that got a vehicle in the plan.
+    pub served: u32,
+    /// Requests without a vehicle within the maximum wait.
+    pub unserved: u32,
+    /// Requests dropped by the price elasticity under surge.
+    pub priced_out: u32,
+    /// Riders picked up during the simulated time.
+    pub picked_up: u32,
+    /// Trips that reached the dropoff during the simulated time.
+    pub completed: u32,
+    pub mean_planned_wait_s: Option<f64>,
+    /// Mean simulated wait of the riders picked up.
+    pub mean_wait_s: Option<f64>,
+    /// Mean surge multiplier of the served requests.
+    pub mean_surge_multiplier: Option<f64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub surge_periods: Vec<RideSurgePeriod>,
+}
+
+/// Demand and supply balance of one surge period: the requests of the
+/// period against the vehicles free at its start.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RideSurgePeriod {
+    pub start_s: f64,
+    pub end_s: f64,
+    pub cells: Vec<netweevil_h3::SurgeCell>,
 }
 
 /// Compact agent trajectory: edge index + entry timestamp pairs. The exit
@@ -55,6 +103,13 @@ pub struct AgentTrajectory {
     pub distance_m: f32,
     pub freeflow_time_s: f32,
     pub reroutes: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vehicle_type: Option<String>,
+    /// Ride-hailing: time of the request and of the pickup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pickup_s: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

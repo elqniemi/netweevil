@@ -82,7 +82,7 @@ tags:
   - name: Network and tiles
     description: Network edges with profile values, and network vector tiles.
   - name: H3 cells
-    description: H3 hexagonal cell layers of the network and of points such as population or POIs.
+    description: H3 hexagonal cell layers of the network and of points such as population or POIs, stored layers with values that you can import and paint, surge multipliers and ride dispatch.
   - name: Terrain and height
     description: Terrain tile sources, terrain tiles and height samples.
   - name: Simulation
@@ -1621,6 +1621,306 @@ paths:
         '422':
           $ref: '#/components/responses/UnprocessableBody'
 
+  /v1/h3/layers:
+    get:
+      tags: [H3 cells]
+      operationId: listCellLayers
+      summary: List the stored cell layers
+      description: |
+        Sends the id, the columns and the statistics of each stored cell
+        layer. This operation works in setup mode.
+      responses:
+        '200':
+          description: The layers, in the order of the ids.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [layers]
+                properties:
+                  layers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CellLayerSummary'
+    post:
+      tags: [H3 cells]
+      operationId: writeCellLayer
+      summary: Create, replace or extend a cell layer
+      description: |
+        Stores a cell layer. A layer has named columns and one optional value
+        for each cell and column, for example population, jobs, ride demand
+        and vehicle supply.
+
+        `csv` is a table as CSV text. Without `resolution`, the table has a
+        `cell` column. With `resolution`, each row is a point, and the service
+        aggregates the rows into the cells of that resolution. `columns`
+        selects the CSV columns and the aggregation of each column. Without
+        `columns`, the service sums each numeric column.
+
+        `cells` sets values directly. With `merge: true`, the stored layer
+        keeps its other cells and columns. With `replace: true`, the request
+        replaces the stored layer. Without the two, the service sends an
+        error when the layer exists. This operation works in setup mode.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CellLayerWriteRequest'
+            examples:
+              points:
+                summary: Aggregate a point table with one aggregation for each column
+                value:
+                  layer_id: city
+                  csv: "lon,lat,population,income\n6.5665,53.2194,120,31000\n6.5702,53.2171,80,42000\n"
+                  resolution: 8
+                  columns:
+                    - {source: population}
+                    - {source: income, aggregation: mean, name: mean_income}
+                    - {name: addresses, aggregation: count}
+              cells:
+                summary: Set values for cells
+                value:
+                  layer_id: city
+                  merge: true
+                  cells:
+                    - {cell: 88196d85ebfffff, values: {riders: 40, drivers: 6}}
+      responses:
+        '200':
+          description: The stored layer.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [layer]
+                properties:
+                  layer:
+                    $ref: '#/components/schemas/CellLayerSummary'
+                  csv_rows:
+                    type: array
+                    description: The number of CSV rows that the service read, and the number of rows that it ignored because the position is not valid.
+                    items: {type: integer}
+                    minItems: 2
+                    maxItems: 2
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableBody'
+
+  /v1/h3/layers/{layer_id}:
+    get:
+      tags: [H3 cells]
+      operationId: getCellLayer
+      summary: Get one cell layer
+      description: |
+        Sends the layer with all its cells. `format=geojson` gives one hexagon
+        for each cell with the column values as properties. `format=csv` gives
+        a table with the content type `text/csv`.
+      parameters:
+        - $ref: '#/components/parameters/CellLayerIdPath'
+        - name: format
+          in: query
+          schema:
+            type: string
+            enum: [json, geojson, csv]
+            default: json
+      responses:
+        '200':
+          description: The layer.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [summary, layer]
+                properties:
+                  summary:
+                    $ref: '#/components/schemas/CellLayerSummary'
+                  layer:
+                    $ref: '#/components/schemas/CellLayer'
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/GeoJsonFeatureCollection'
+            text/csv:
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [H3 cells]
+      operationId: deleteCellLayer
+      summary: Delete one cell layer
+      description: Deletes the stored layer.
+      parameters:
+        - $ref: '#/components/parameters/CellLayerIdPath'
+      responses:
+        '204':
+          description: The layer is deleted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/h3/layers/{layer_id}/paint:
+    post:
+      tags: [H3 cells]
+      operationId: paintCellLayer
+      summary: Paint a value on cells of a layer
+      description: |
+        Changes one column on a list of cells, on the cells of a list of
+        positions, or on all cells of one resolution that have their centre
+        in a bounding box or a polygon. The
+        operation sets the value, adds the value, multiplies by the value or
+        clears the column. The service adds a column that the layer does not
+        have. A cell without a value in each column is removed.
+
+        A bounding box smaller than one cell paints the cell at its centre.
+        Thus `bbox: [lon, lat, lon, lat]` paints the cell at a position.
+      parameters:
+        - $ref: '#/components/parameters/CellLayerIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CellLayerPaintRequest'
+            examples:
+              cells:
+                value: {column: riders, op: add, value: 5, cells: [88196d85ebfffff]}
+              area:
+                value: {column: drivers, value: 3, bbox: [6.55, 53.21, 6.58, 53.23], resolution: 8}
+      responses:
+        '200':
+          description: The layer after the change.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [changed, layer]
+                properties:
+                  changed:
+                    type: integer
+                    description: Number of cells with a new value.
+                  layer:
+                    $ref: '#/components/schemas/CellLayerSummary'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableBody'
+
+  /v1/h3/surge:
+    post:
+      tags: [H3 cells]
+      operationId: h3Surge
+      summary: Calculate surge multipliers from demand and supply
+      description: |
+        Calculates the balance of demand and supply in each cell, in the
+        style of ride-hailing surge pricing. The service spreads the demand
+        and the supply over the adjacent cells. Then it divides the demand by
+        the supply. A cell with a ratio above `balance_ratio` gets a
+        multiplier above 1.
+
+        With `rebalance_rings`, the response also has a plan that moves
+        surplus supply to cells with too little supply. This operation works
+        in setup mode.
+      parameters:
+        - $ref: '#/components/parameters/Format'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SurgeRequest'
+            example:
+              demand: {layer_id: city, column: riders}
+              supply: {layer_id: city, column: drivers}
+              config: {resolution: 8, max_multiplier: 2.5}
+              rebalance_rings: 3
+      responses:
+        '200':
+          description: The balance of each cell that has demand or supply.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SurgeResponse'
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/GeoJsonFeatureCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableBody'
+
+  /v1/dispatch:
+    post:
+      tags: [H3 cells]
+      operationId: dispatch
+      summary: Assign ride requests to vehicles
+      description: |
+        Assigns each ride request to one vehicle by the travel time on the
+        network from the vehicle to the pickup. One matrix gives the pickup
+        times. The `optimal` strategy serves the largest number of requests
+        and then minimizes the total pickup time. The `greedy` strategy takes
+        the shortest pickup first. `auto` uses `optimal` for up to 600
+        requests or vehicles.
+
+        A request with a `dropoff` also gets the time and the distance of the
+        trip. With `pricing`, it gets a fare. With `surge`, the fare is
+        multiplied by the surge multiplier of the pickup cell.
+        `surge_demand` and `surge_supply` take the demand and the supply from
+        a stored layer. Without them, the pickups are the demand and the
+        vehicles are the supply.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DispatchExecutionRequest'
+            example:
+              profile_id: car_research_v1
+              request:
+                vehicles:
+                  - {id: car_1, lon: 6.5665, lat: 53.2194}
+                  - {id: van_1, lon: 6.5716, lat: 53.2148, vehicle_type: van}
+                requests:
+                  - id: ride_1
+                    pickup: {lon: 6.5601, lat: 53.2212}
+                    dropoff: {lon: 6.5362, lat: 53.2405}
+                  - id: ride_2
+                    pickup: {lon: 6.5760, lat: 53.2101}
+                    vehicle_type: van
+                matching: {max_pickup_time_s: 900}
+                surge: {config: {resolution: 8}}
+                pricing: {base_fare: 2.5, per_km: 1.4, per_minute: 0.3, minimum_fare: 6}
+      responses:
+        '200':
+          description: The assignment.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DispatchResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/UnprocessableBody'
+        '503':
+          $ref: '#/components/responses/SetupMode'
+
   /v1/network/edges:
     post:
       tags: [Network and tiles]
@@ -3072,6 +3372,14 @@ components:
       schema:
         type: string
       example: car_research_v1
+    CellLayerIdPath:
+      name: layer_id
+      in: path
+      required: true
+      description: Id of a stored cell layer.
+      schema:
+        type: string
+      example: city
     SiteIdPath:
       name: site_id
       in: path
@@ -6929,6 +7237,421 @@ components:
                 type: number
                 description: Sum of the point weights.
 
+    CellLayerSummary:
+      type: object
+      required: [layer_id, label, description, cell_count, resolutions, columns]
+      properties:
+        layer_id: {type: string}
+        label: {type: string}
+        description: {type: string}
+        cell_count: {type: integer}
+        resolutions:
+          type: array
+          description: H3 resolutions of the cells, from coarse to fine.
+          items: {type: integer}
+        columns:
+          type: array
+          items:
+            type: object
+            required: [name, count, sum, min, max]
+            properties:
+              name: {type: string}
+              count:
+                type: integer
+                description: Number of cells with a value.
+              sum: {type: number}
+              min: {type: [number, 'null']}
+              max: {type: [number, 'null']}
+    CellLayer:
+      type: object
+      required: [layer_id, columns, cells]
+      properties:
+        layer_id: {type: string}
+        label: {type: string}
+        description: {type: string}
+        columns:
+          type: array
+          items: {type: string}
+        cells:
+          type: object
+          description: For each cell id, one value for each column. `null` means no value.
+          additionalProperties:
+            type: array
+            items: {type: [number, 'null']}
+    CellLayerColumnSpec:
+      type: object
+      additionalProperties: false
+      description: One layer column that comes from one CSV column.
+      properties:
+        source:
+          type: string
+          description: CSV column. Leave it out with the aggregation `count` to count the rows.
+        name:
+          type: string
+          description: Layer column. The default is `source`.
+        aggregation:
+          type: string
+          enum: [sum, mean, min, max, count, last]
+          default: sum
+          description: How the values of the rows of one cell become one value.
+    CellLayerWriteRequest:
+      type: object
+      additionalProperties: false
+      required: [layer_id]
+      properties:
+        layer_id:
+          type: string
+          description: ASCII letters, digits, `_` and `-`.
+        label: {type: string}
+        description: {type: string}
+        merge:
+          type: boolean
+          default: false
+          description: Keep the cells and the columns of the stored layer.
+        replace:
+          type: boolean
+          default: false
+          description: Replace a stored layer that has the same id. Without `merge` or `replace`, the request only makes a new layer.
+        cells:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [cell]
+            properties:
+              cell:
+                $ref: '#/components/schemas/H3Cell'
+              values:
+                type: object
+                additionalProperties: {type: number}
+        csv:
+          type: string
+          description: A cell table or a point table as CSV text.
+        resolution:
+          type: integer
+          minimum: 0
+          maximum: 15
+          description: Aggregate the CSV rows as points into cells of this resolution.
+        lon_column: {type: string, default: lon}
+        lat_column: {type: string, default: lat}
+        columns:
+          type: array
+          items:
+            $ref: '#/components/schemas/CellLayerColumnSpec'
+    CellLayerPaintRequest:
+      type: object
+      additionalProperties: false
+      required: [column]
+      properties:
+        column: {type: string}
+        op:
+          type: string
+          enum: [set, add, multiply, clear]
+          default: set
+          description: '`add` starts from zero for a cell without a value. `multiply` does not change a cell without a value.'
+        value: {type: number, default: 0}
+        cells:
+          type: array
+          items:
+            $ref: '#/components/schemas/H3Cell'
+        bbox:
+          $ref: '#/components/schemas/BBox'
+        polygon:
+          type: array
+          description: Outer ring. The operation paints the cells with their centre in the ring.
+          items:
+            $ref: '#/components/schemas/Coordinate2'
+        points:
+          type: array
+          description: Positions, for example of a brush stroke. The operation paints the cell of each position one time.
+          items:
+            $ref: '#/components/schemas/Coordinate2'
+        resolution:
+          type: integer
+          minimum: 0
+          maximum: 15
+          description: Resolution of the cells of `bbox`, `polygon` and `points`.
+    CellSource:
+      description: Weighted cells from a column of a stored layer, from a list of cells, or from points.
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [layer_id, column]
+          properties:
+            layer_id: {type: string}
+            column: {type: string}
+        - type: object
+          additionalProperties: false
+          required: [cells]
+          properties:
+            cells:
+              type: array
+              items:
+                $ref: '#/components/schemas/WeightedCell'
+        - type: object
+          additionalProperties: false
+          required: [points]
+          properties:
+            points:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [lon, lat]
+                properties:
+                  lon: {type: number}
+                  lat: {type: number}
+                  weight: {type: number, default: 1.0}
+            resolution:
+              type: integer
+              default: 8
+    WeightedCell:
+      type: object
+      required: [cell]
+      properties:
+        cell:
+          $ref: '#/components/schemas/H3Cell'
+        weight: {type: number, default: 1.0}
+    SurgeConfig:
+      type: object
+      additionalProperties: false
+      properties:
+        resolution:
+          type: integer
+          description: Resolution of the surge cells. The default is the coarsest resolution of the inputs.
+        smoothing_rings:
+          type: integer
+          default: 1
+          maximum: 10
+          description: Number of rings of adjacent cells that the demand and the supply spread over.
+        ring_decay:
+          type: number
+          default: 0.5
+          description: Weight of a ring relative to the ring inside it, from 0 to 1.
+        balance_ratio:
+          type: number
+          default: 1.0
+          description: Demand for each unit of supply at which the multiplier starts to increase.
+        sensitivity:
+          type: number
+          default: 0.5
+          description: Increase of the multiplier for each unit of relative surplus demand.
+        min_multiplier: {type: number, default: 1.0}
+        max_multiplier: {type: number, default: 3.0}
+        step:
+          type: number
+          default: 0.1
+          description: The service rounds the multipliers to this step. Zero keeps the exact values.
+        min_supply:
+          type: number
+          default: 1.0
+          description: Lower limit of the supply in the ratio.
+    SurgeCell:
+      type: object
+      required: [cell, demand, supply, smoothed_demand, smoothed_supply, ratio, multiplier]
+      properties:
+        cell:
+          $ref: '#/components/schemas/H3Cell'
+        demand: {type: number}
+        supply: {type: number}
+        smoothed_demand: {type: number}
+        smoothed_supply: {type: number}
+        ratio:
+          type: number
+          description: Smoothed demand for each unit of smoothed supply.
+        multiplier: {type: number}
+    SurgeRequest:
+      type: object
+      additionalProperties: false
+      required: [demand, supply]
+      properties:
+        demand:
+          $ref: '#/components/schemas/CellSource'
+        supply:
+          $ref: '#/components/schemas/CellSource'
+        config:
+          $ref: '#/components/schemas/SurgeConfig'
+        rebalance_rings:
+          type: integer
+          description: Also plan moves of surplus supply from cells that are at most this number of rings away.
+    SurgeResponse:
+      type: object
+      required: [cells]
+      properties:
+        cells:
+          type: array
+          items:
+            $ref: '#/components/schemas/SurgeCell'
+        moves:
+          type: array
+          items:
+            type: object
+            required: [from, to, amount, grid_distance]
+            properties:
+              from:
+                $ref: '#/components/schemas/H3Cell'
+              to:
+                $ref: '#/components/schemas/H3Cell'
+              amount: {type: number}
+              grid_distance:
+                type: integer
+                description: Number of cells between the two cells.
+    DispatchPoint:
+      type: object
+      additionalProperties: false
+      required: [lon, lat]
+      properties:
+        lon: {type: number}
+        lat: {type: number}
+    DispatchRequest:
+      type: object
+      additionalProperties: false
+      required: [vehicles, requests]
+      properties:
+        vehicles:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, lon, lat]
+            properties:
+              id: {type: string}
+              lon: {type: number}
+              lat: {type: number}
+              vehicle_type:
+                type: string
+                description: Class of the vehicle, for example `standard` or `van`.
+        requests:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [id, pickup]
+            properties:
+              id: {type: string}
+              pickup:
+                $ref: '#/components/schemas/DispatchPoint'
+              dropoff:
+                $ref: '#/components/schemas/DispatchPoint'
+              vehicle_type:
+                type: string
+                description: Only vehicles of this type serve the request.
+        matching:
+          type: object
+          additionalProperties: false
+          properties:
+            strategy:
+              type: string
+              enum: [auto, optimal, greedy]
+              default: auto
+            max_pickup_time_s:
+              type: number
+              description: A vehicle with a longer pickup time does not serve the request.
+            candidate_rings:
+              type: integer
+              description: Only vehicles within this number of H3 rings of the pickup are candidates. Without it, all vehicles are candidates.
+            candidate_resolution: {type: integer, default: 8}
+        surge:
+          type: object
+          additionalProperties: false
+          properties:
+            demand:
+              type: array
+              description: The default is the pickups.
+              items:
+                $ref: '#/components/schemas/WeightedCell'
+            supply:
+              type: array
+              description: The default is the vehicles.
+              items:
+                $ref: '#/components/schemas/WeightedCell'
+            config:
+              $ref: '#/components/schemas/SurgeConfig'
+        pricing:
+          type: object
+          additionalProperties: false
+          properties:
+            base_fare: {type: number, default: 0}
+            per_km: {type: number, default: 0}
+            per_minute: {type: number, default: 0}
+            minimum_fare: {type: number, default: 0}
+            vehicle_type_factors:
+              type: object
+              description: Fare factor for each vehicle type. The default factor is 1.
+              additionalProperties: {type: number}
+        snap:
+          $ref: '#/components/schemas/SnapOptions'
+    DispatchExecutionRequest:
+      type: object
+      additionalProperties: false
+      required: [request]
+      properties:
+        profile_id: {type: string}
+        request:
+          $ref: '#/components/schemas/DispatchRequest'
+        surge_demand:
+          $ref: '#/components/schemas/CellSource'
+        surge_supply:
+          $ref: '#/components/schemas/CellSource'
+    DispatchResponse:
+      type: object
+      required: [dataset_id, profile_id, result]
+      properties:
+        dataset_id: {type: string}
+        profile_id: {type: string}
+        result:
+          type: object
+          required: [summary, assignments, unassigned, idle_vehicle_ids]
+          properties:
+            summary:
+              type: object
+              required: [request_count, vehicle_count, assigned_count, candidate_pair_count, strategy, total_pickup_time_s]
+              properties:
+                request_count: {type: integer}
+                vehicle_count: {type: integer}
+                assigned_count: {type: integer}
+                candidate_pair_count:
+                  type: integer
+                  description: Number of vehicle and request pairs that the assignment used.
+                strategy:
+                  type: string
+                  enum: [optimal, greedy]
+                total_pickup_time_s: {type: number}
+                mean_pickup_time_s: {type: [number, 'null']}
+                max_pickup_time_s: {type: [number, 'null']}
+                total_fare: {type: number}
+            assignments:
+              type: array
+              items:
+                type: object
+                required: [request_id, vehicle_id, pickup_time_s, pickup_distance_m]
+                properties:
+                  request_id: {type: string}
+                  vehicle_id: {type: string}
+                  pickup_time_s: {type: number}
+                  pickup_distance_m: {type: number}
+                  trip_time_s: {type: number}
+                  trip_distance_m: {type: number}
+                  surge_multiplier: {type: number}
+                  fare:
+                    type: number
+                    description: Fare with the surge multiplier.
+            unassigned:
+              type: array
+              items:
+                type: object
+                required: [request_id, reason]
+                properties:
+                  request_id: {type: string}
+                  reason: {type: string}
+            idle_vehicle_ids:
+              type: array
+              items: {type: string}
+            surge:
+              type: array
+              items:
+                $ref: '#/components/schemas/SurgeCell'
+
     # ------------------------------------------------------------------
     # Network, terrain and height
     # ------------------------------------------------------------------
@@ -7206,6 +7929,13 @@ components:
                   cell:
                     $ref: '#/components/schemas/H3Cell'
                   weight: {type: number, default: 1.0}
+        - type: object
+          required: [kind, layer_id, column]
+          description: The cells and the weights of one column of a stored cell layer.
+          properties:
+            kind: {const: cell_layer}
+            layer_id: {type: string}
+            column: {type: string}
     DepartureConfig:
       description: When the agents depart. The default is `uniform` from 0 to 600 s.
       oneOf:
@@ -7284,6 +8014,62 @@ components:
             pcu:
               type: [number, 'null']
               description: Passenger car units of one vehicle. The default depends on the mode.
+        vehicle_types:
+          type: array
+          description: Vehicle classes of the fleet. Each agent gets one class by `share`.
+          items:
+            type: object
+            additionalProperties: false
+            required: [type_id]
+            properties:
+              type_id: {type: string}
+              share: {type: number, default: 1.0}
+              pcu:
+                type: [number, 'null']
+                description: The default is the fleet value.
+              max_speed_kph:
+                type: [number, 'null']
+                description: The default is the fleet value.
+              speed_factor:
+                type: number
+                default: 1.0
+                description: Multiplier on the desired speed of the agent.
+              request_share:
+                type: number
+                default: 0
+                description: Ride-hailing only. Relative share of the requests that need this type. When all shares are zero, each vehicle serves each request.
+        ride_hailing:
+          type: object
+          additionalProperties: false
+          required: [vehicle_count]
+          description: |
+            Makes the fleet a ride-hailing service. `agent_count` is the number
+            of ride requests. `demand.origins` gives the pickups,
+            `demand.destinations` the dropoffs and `departures` the request
+            times. A vehicle drives to the pickup and then to the dropoff.
+          properties:
+            vehicle_count: {type: integer}
+            vehicles:
+              $ref: '#/components/schemas/EndpointDistribution'
+            max_wait_s:
+              type: number
+              default: 600
+              description: A request without a vehicle within this estimated wait is not served.
+            planning_speed_kph:
+              type: number
+              default: 25
+              description: Speed for the estimates of pickup times and trip times in the plan.
+            surge:
+              type: object
+              additionalProperties: false
+              properties:
+                interval_s: {type: number, default: 300}
+                price_elasticity:
+                  type: number
+                  default: 0
+                  description: A request at the multiplier `m` is dropped with the probability `1 - m^-elasticity`.
+                config:
+                  $ref: '#/components/schemas/SurgeConfig'
     ZoneEffect:
       oneOf:
         - type: object

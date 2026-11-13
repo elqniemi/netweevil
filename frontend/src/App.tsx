@@ -12,6 +12,7 @@ import { Rail } from "./ui/Rail";
 import { ResultsPanel } from "./ui/ResultsPanel";
 import { SetupPanel } from "./ui/SetupPanel";
 import { ToolPanel } from "./ui/ToolPanel";
+import { useCellsOverlay } from "./ui/CellsPanel";
 import { fmtValue } from "./ui/format";
 import { transitTimeContext } from "./api/time";
 import { ApiError } from "./api/client";
@@ -23,6 +24,7 @@ export function App() {
   const service = useService();
   const hover = useStore((s) => s.hoverInfo);
   const sidebarOpen = useStore((s) => s.sidebarOpen);
+  const cellsTool = useStore((s) => s.tool === "cells");
   const info = service.data ?? null;
   // The API answers 503 until a dataset is loaded: open Setup once, automatically.
   const setupNeeded = service.error instanceof ApiError && service.error.status === 503;
@@ -54,6 +56,9 @@ export function App() {
     setState(patch);
   }, [info]);
 
+  // The Cells tool draws its layer whether or not the panel is shown.
+  useCellsOverlay();
+
   // Live updating: re-run route tools as their inputs change.
   useEffect(() => startLiveRunner(), []);
 
@@ -69,7 +74,8 @@ export function App() {
         return;
       }
       if (typing || s.setupOpen) return;
-      if (TOOL_BY_ID[s.tool].input === "editor") return;
+      const input = TOOL_BY_ID[s.tool].input;
+      if (input === "editor" || input === "cells") return;
       if (e.key === "Enter" && s.tool !== "simulation") {
         e.preventDefault();
         void runTool(s.tool, { fit: true });
@@ -100,7 +106,7 @@ export function App() {
         {sidebarOpen && (
           <div className="sidebar">
             <ToolPanel service={info} />
-            <ResultsPanel />
+            {!cellsTool && <ResultsPanel />}
           </div>
         )}
         <main className="map-area">

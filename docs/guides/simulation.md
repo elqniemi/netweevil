@@ -128,6 +128,8 @@ standing background traffic in an area of the ring road.
 | `departures` | Departure time distribution |
 | `behavior` | Agent behavior |
 | `speed` | Speed and acceleration |
+| `vehicle_types` | Vehicle classes of the fleet. See [Vehicle types](#vehicle-types) |
+| `ride_hailing` | Makes the fleet a ride-hailing service. See [Ride-hailing fleets](#ride-hailing-fleets) |
 
 `demand.origins` and `demand.destinations` take a `kind`:
 
@@ -139,6 +141,7 @@ standing background traffic in an area of the ring road.
 | `points` | `points: [{lon, lat, weight?, label?}]` | Weighted choice from fixed points |
 | `zones` | `zone_ids` | Inside named `spawn` or `attract` zones, weighted |
 | `cells` | `cells: [{cell, weight?}]` | Weighted choice of an [H3 cell](h3-cells.md), then uniform inside the cell |
+| `cell_layer` | `layer_id`, `column` | The cells and weights of one column of a stored [cell layer](h3-cells.md#cell-layers) |
 
 With `cells`, the weights are a distribution, for example the population of
 each cell for origins and the number of jobs for destinations. The cells can
@@ -189,6 +192,98 @@ by `heterogeneity`.
 | `acceleration_mps2` | 2.0 | For the trapezoidal position model and spawn ramp-up |
 | `deceleration_mps2` | 2.5 | For the trapezoidal position model |
 | `pcu` | by mode | Passenger-car units of one vehicle: car and taxi 1.0, HGV and bus 2.0, motorcycle 0.5, moped and bicycle 0.3, foot 0.1 |
+
+### Vehicle types
+
+`vehicle_types` divides a fleet into vehicle classes, for example compact
+cars, SUVs and delivery vans. Each agent gets one class by `share`. The
+routing profile of the fleet applies to all classes.
+
+```yaml
+vehicle_types:
+  - { type_id: compact, share: 5.0, pcu: 0.9 }
+  - { type_id: suv, share: 3.0, pcu: 1.2 }
+  - { type_id: delivery_van, share: 2.0, pcu: 1.6, max_speed_kph: 80.0, speed_factor: 0.9 }
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `type_id` | required | Id of the class |
+| `share` | 1.0 | Relative share of the vehicles of the fleet |
+| `pcu` | fleet value | Passenger-car units of one vehicle. A larger vehicle uses more storage and flow capacity |
+| `max_speed_kph` | fleet value | Speed limit of the vehicle |
+| `speed_factor` | 1.0 | Multiplier on the desired speed |
+| `request_share` | 0 | Ride-hailing only. Relative share of the requests that need this class |
+
+The result has `vehicle_types` for each fleet: the number of dispatched and
+arrived agents and the mean travel time and distance of each class. Each
+trajectory has its `vehicle_type`. A fleet without `vehicle_types` runs as
+before.
+
+For classes with different access rules or speeds on the network, for
+example cars and trucks, use one fleet for each routing profile.
+
+### Ride-hailing fleets
+
+`ride_hailing` makes a fleet a ride-hailing service. `agent_count` is then
+the number of ride requests. `demand.origins` gives the pickups,
+`demand.destinations` gives the dropoffs and `departures` gives the request
+times.
+
+```yaml
+ride_hailing:
+  vehicle_count: 40
+  vehicles: { kind: random_bbox, bbox: [6.53, 53.20, 6.60, 53.24] }
+  max_wait_s: 600.0
+  surge:
+    interval_s: 300.0
+    price_elasticity: 0.5
+    config: { resolution: 8, max_multiplier: 2.5 }
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `vehicle_count` | required | Number of vehicles |
+| `vehicles` | `random_bounds` | Where the vehicles start. Takes the same kinds as `demand.origins` |
+| `max_wait_s` | 600 | A request without a vehicle within this estimated wait is not served |
+| `planning_speed_kph` | 25 | Speed for the estimates of pickup times and trip times in the plan |
+| `surge.interval_s` | 300 | Length of one surge period |
+| `surge.price_elasticity` | 0 | A request at the multiplier `m` is dropped with the probability `1 - m^-elasticity` |
+| `surge.config` | defaults | The [surge settings](h3-cells.md#surge-balance-demand-and-supply) |
+
+The engine makes the plan before the run. It serves the requests in the
+order of their times. Each request gets the vehicle with the earliest
+estimated arrival at the pickup. The vehicle drives to the pickup and then
+to the dropoff as one agent. After the estimated end of the trip, the
+vehicle is free at the dropoff.
+
+In each surge period, the demand is the requests of the period, and the
+supply is the vehicles that are free at the start of the period. With
+`vehicle_types`, each vehicle has a class. With `request_share`, a request
+needs a vehicle of its class.
+
+The fleet result has `ride_hailing`:
+
+| Field | Meaning |
+| --- | --- |
+| `requests`, `vehicles` | Sizes of the demand and the vehicle pool |
+| `served` | Requests with a vehicle in the plan. These are the agents of the fleet |
+| `unserved` | Requests without a vehicle within `max_wait_s` |
+| `priced_out` | Requests dropped by the price elasticity |
+| `picked_up`, `completed` | Riders picked up and trips finished in the simulated time |
+| `mean_planned_wait_s`, `mean_wait_s` | Mean wait from request to pickup: estimated in the plan, and simulated with congestion |
+| `mean_surge_multiplier` | Mean multiplier of the served requests |
+| `surge_periods[]` | `{start_s, end_s, cells[]}` with the demand, supply, ratio and multiplier of each cell |
+
+Each trajectory of the fleet has `request_s` and `pickup_s`.
+
+!!! note
+    The plan uses estimated times. Congestion in the run delays pickups and
+    trips, but it does not change which vehicle serves which request. A
+    rerouted vehicle keeps its pickup.
+
+`examples/requests/simulation_ride_hailing.yml` is a scenario with a
+ride-hailing fleet, surge and background traffic of three vehicle types.
 
 ### `zones[]`
 

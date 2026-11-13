@@ -330,6 +330,53 @@ departures, weighted destinations (optional) and a slow zone drawn on the map
 4. Optional: pause, resume, change the speed factor, or close a zone during
    the run.
 
+## Cells
+
+The **Cells** tool shows the H3 cell layers of the workspace. It uses the
+`/v1/h3` endpoints and needs no dataset.
+
+1. Select a layer, or type an id and click **Create** to make an empty layer.
+2. Select a column. To paint a new column, type its name and click **Use**.
+3. Read the map. The colour of a cell shows its value in the column, from the
+   column minimum (light) to the maximum (dark). A cell without a value in the
+   column has an outline only. Hover a cell to see all its values.
+
+**CSV** downloads the layer. **Delete** removes the layer.
+
+### Paint cells
+
+1. Turn on **Paint**. The map does not pan while Paint is on.
+2. Set the resolution (5 to 11), the operation (set, add, multiply or clear)
+   and the value.
+3. Select **Brush** or **Area**.
+4. Paint on the map:
+    - A click paints the cell under the pointer.
+    - A brush drag paints each cell along the drag once.
+    - An area drag paints each cell with its centre in the rectangle.
+
+The console sends the stroke when you release the mouse button. Then it loads
+the layer again. A cell without values in all columns disappears.
+
+### Import a CSV file
+
+1. Select the file.
+2. Optional: type a layer id in **Into layer**. The default is the selected
+   layer. The import adds the rows to the layer and keeps the other cells.
+3. For a table with a `cell` column, keep **Points** off. For a table of
+   points, turn on **Points** and set the resolution and the longitude and
+   latitude columns.
+4. Select the aggregation. **sum** adds the values of each numeric column.
+   The other aggregations apply to each numeric column except `cell` and the
+   coordinates.
+5. Click **Import**.
+
+### Surge
+
+Select a demand column and a supply column of the layer, and turn on
+**Surge**. The console sends `POST /v1/h3/surge`. The map colours each cell
+by its surge multiplier: grey at 1×, dark red at the maximum. Turn off
+**Surge** to show the values again.
+
 ## 3D view
 
 ![3D walking route through MTR stations in Hong Kong](../assets/images/console-3d-walking-route.jpg)

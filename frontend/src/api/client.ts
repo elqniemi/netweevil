@@ -1,4 +1,14 @@
-import type { ApiErrorBody } from "./types";
+import type {
+  ApiErrorBody,
+  CellLayerResponse,
+  CellLayersResponse,
+  CellLayerWriteRequest,
+  CellLayerWriteResponse,
+  CellPaintRequest,
+  CellPaintResponse,
+  SurgeRequest,
+} from "./types";
+import type { FeatureCollection } from "../geo/features";
 
 /** One timed request, as shown in the performance panel and its exports. */
 export interface Timing {
@@ -158,3 +168,22 @@ export function toCurl(base: string, path: string, body: unknown, method = "POST
   const json = JSON.stringify(body, null, 2).replace(/'/g, "'\\''");
   return `curl -s -X ${method} '${url}' \\\n  -H 'content-type: application/json' \\\n  --data '${json}'`;
 }
+
+// --- H3 cell layers ---
+
+function layerPath(layerId: string, suffix = ""): string {
+  return `/v1/h3/layers/${encodeURIComponent(layerId)}${suffix}`;
+}
+
+/** Cell layer endpoints. Each call returns the timed response, like `apiRequest`. */
+export const h3Api = {
+  layers: (base: string, tool: string) => apiRequest<CellLayersResponse>(base, "/v1/h3/layers", { tool }),
+  write: (base: string, tool: string, body: CellLayerWriteRequest) => apiRequest<CellLayerWriteResponse>(base, "/v1/h3/layers", { tool, body }),
+  layer: (base: string, tool: string, layerId: string) => apiRequest<CellLayerResponse>(base, layerPath(layerId), { tool }),
+  geojson: (base: string, tool: string, layerId: string) => apiRequest<FeatureCollection>(base, layerPath(layerId, "?format=geojson"), { tool }),
+  remove: (base: string, tool: string, layerId: string) => apiRequest<null>(base, layerPath(layerId), { tool, method: "DELETE" }),
+  paint: (base: string, tool: string, layerId: string, body: CellPaintRequest) => apiRequest<CellPaintResponse>(base, layerPath(layerId, "/paint"), { tool, body }),
+  surgeGeojson: (base: string, tool: string, body: SurgeRequest) => apiRequest<FeatureCollection>(base, "/v1/h3/surge?format=geojson", { tool, body }),
+  /** Download address of a layer as CSV. */
+  csvUrl: (base: string, layerId: string) => joinUrl(base, layerPath(layerId, "?format=csv")),
+};

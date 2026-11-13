@@ -19,13 +19,14 @@ use netweevil_query::{
 };
 use rayon::prelude::*;
 
+use crate::output::RideSurgePeriod;
 use crate::rng::SimRng;
 use crate::scenario::{
-    BehaviorConfig, DepartureConfig, EndpointDistribution, FleetConfig, ZoneEffect,
-    default_pcu_for_mode,
+    BehaviorConfig, DepartureConfig, EndpointDistribution, FleetConfig, RideHailingConfig,
+    VehicleTypeConfig, ZoneEffect, default_pcu_for_mode,
 };
 use crate::zones::{PreparedCells, PreparedPolygon, PreparedZone, ZoneShape};
-use netweevil_h3::CellIndex;
+use netweevil_h3::{CellIndex, WeightedCell};
 
 /// Fully resolved agent ready for the engine.
 #[derive(Debug, Clone)]
@@ -46,7 +47,19 @@ pub struct DispatchedAgent {
     pub obey_signals: bool,
     pub no_collision: bool,
     pub pcu: f32,
+    /// Index into the fleet's `vehicle_types`, or [`NO_VEHICLE_TYPE`].
+    pub vehicle_type: u16,
+    /// Position in `route` of the first edge after the pickup of a
+    /// ride-hailing trip, or [`NO_VIA`].
+    pub via_pos: u32,
+    /// Time of the ride request; `NaN` for agents that are not rides.
+    pub request_s: f64,
 }
+
+/// The agent has no vehicle type.
+pub const NO_VEHICLE_TYPE: u16 = u16::MAX;
+/// The route has no pickup.
+pub const NO_VIA: u32 = u32::MAX;
 
 #[derive(Debug, Clone, Default)]
 pub struct DispatchReport {
@@ -72,6 +85,11 @@ pub(crate) struct AgentDraft {
     wants_alternative: bool,
     pub(crate) origin: [f64; 2],
     pub(crate) destination: [f64; 2],
+    vehicle_type: u16,
+    max_speed_mps: f32,
+    /// Pickup of a ride-hailing trip, between origin and destination.
+    via: Option<[f64; 2]>,
+    request_s: f64,
 }
 
 /// Quantized coordinate key (1e-7 deg ~ 1 cm) for snap/pair deduplication.
@@ -145,8 +163,8 @@ fn sample_in_cells(cells: &[CellIndex], cumulative: &[f64], rng: &mut SimRng) ->
 enum PreparedDistribution<'z> {
     Bbox([f64; 4]),
     Polygon(PreparedPolygon),
-    Points(Vec<([f64; 2], f64)>),
-    Zones(Vec<(&'z PreparedZone, f64)>),
+    Points(Vec<[f64; 2]>, Vec<f64>),
+    Zones(Vec<&'z PreparedZone>, Vec<f64>),
     Cells {
         cells: Vec<CellIndex>,
         cumulative_weight: Vec<f64>,
@@ -158,13 +176,9 @@ impl PreparedDistribution<'_> {
         match self {
             Self::Bbox(bbox) => [rng.uniform(bbox[0], bbox[2]), rng.uniform(bbox[1], bbox[3])],
             Self::Polygon(polygon) => sample_in_polygon(polygon, rng),
-            Self::Points(points) => {
-                let weights: Vec<f64> = points.iter().map(|(_, w)| *w).collect();
-                points[rng.weighted_index(&weights)].0
-            }
-            Self::Zones(zones) => {
-                let weights: Vec<f64> = zones.iter().map(|(_, w)| *w).collect();
-                let zone = zones[rng.weighted_index(&weights)].0;
+            Self::Points(points, weights) => points[rng.weighted_index(weights)],
+            Self::Zones(zones, weights) => {
+                let zone = zones[rng.weighted_index(weights)];
                 match &zone.shape {
                     ZoneShape::Polygon(polygon) => sample_in_polygon(polygon, rng),
                     ZoneShape::Cells(PreparedCells {
@@ -184,7 +198,7 @@ impl PreparedDistribution<'_> {
     /// Random distributions can retry on routing failures; fixed points
     /// should report the failure instead.
     fn retryable(&self) -> bool {
-        !matches!(self, Self::Points(points) if points.len() <= 1)
+        !matches!(self, Self::Points(points, _) if points.len() <= 1)
     }
 }
 
@@ -206,10 +220,8 @@ fn prepare_distribution<'z>(
                 bail!("fleet '{fleet_id}': empty point distribution");
             }
             PreparedDistribution::Points(
-                points
-                    .iter()
-                    .map(|point| ([point.lon, point.lat], point.weight.max(0.0)))
-                    .collect(),
+                points.iter().map(|point| [point.lon, point.lat]).collect(),
+                points.iter().map(|point| point.weight.max(0.0)).collect(),
             )
         }
         EndpointDistribution::Zones { zone_ids } => {
@@ -240,7 +252,13 @@ fn prepare_distribution<'z>(
                     if for_origin { "spawn" } else { "attract" }
                 );
             }
-            PreparedDistribution::Zones(selected)
+            let (zones, weights) = selected.into_iter().unzip();
+            PreparedDistribution::Zones(zones, weights)
+        }
+        EndpointDistribution::CellLayer { layer_id, .. } => {
+            bail!(
+                "fleet '{fleet_id}': cell layer '{layer_id}' is not resolved; run the scenario from a workspace"
+            );
         }
         EndpointDistribution::Cells { cells } => {
             let mut total = 0.0;
@@ -352,6 +370,211 @@ fn choose_path(paths: &[Vec<u32>], wants_alternative: bool, rng: &mut SimRng) ->
     }
 }
 
+/// Planning record of a ride-hailing fleet.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RidePlan {
+    pub(crate) requests: u32,
+    pub(crate) vehicles: u32,
+    pub(crate) unserved: u32,
+    pub(crate) priced_out: u32,
+    pub(crate) planned_wait_sum_s: f64,
+    pub(crate) surge_sum: f64,
+    pub(crate) surge_periods: Vec<RideSurgePeriod>,
+}
+
+struct RideVehicle {
+    position: [f64; 2],
+    free_at_s: f64,
+    vehicle_type: u16,
+}
+
+/// Draws a vehicle type index by `weight`; [`NO_VEHICLE_TYPE`] without
+/// types or without a positive weight.
+fn sample_vehicle_type(
+    types: &[VehicleTypeConfig],
+    weight: impl Fn(&VehicleTypeConfig) -> f64,
+    rng: &mut SimRng,
+) -> u16 {
+    let weights: Vec<f64> = types.iter().map(weight).collect();
+    if weights.iter().all(|weight| *weight <= 0.0) {
+        return NO_VEHICLE_TYPE;
+    }
+    rng.weighted_index(&weights) as u16
+}
+
+/// Serves ride requests in time order with the vehicle that reaches the
+/// pickup first by estimate. A served draft departs from the vehicle's
+/// position, picks the rider up at `via` and ends at the dropoff. Requests
+/// without a vehicle in time, and requests priced out by surge, are removed.
+fn plan_rides(
+    fleet: &FleetConfig,
+    ride: &RideHailingConfig,
+    fleet_index: u16,
+    network_bbox: [f64; 4],
+    zones: &[PreparedZone],
+    seed: u64,
+    id_offset: u32,
+    drafts: Vec<AgentDraft>,
+) -> Result<(Vec<AgentDraft>, RidePlan)> {
+    let pool = prepare_distribution(&ride.vehicles, network_bbox, zones, true, &fleet.fleet_id)?;
+    let mut vehicles = (0..ride.vehicle_count)
+        .map(|index| {
+            let mut rng = SimRng::derive(
+                seed,
+                0x71DE_0000_0000_0000 ^ ((fleet_index as u64) << 32) ^ (id_offset + index) as u64,
+            );
+            RideVehicle {
+                position: pool.sample(&mut rng),
+                free_at_s: 0.0,
+                vehicle_type: sample_vehicle_type(&fleet.vehicle_types, |t| t.share, &mut rng),
+            }
+        })
+        .collect::<Vec<_>>();
+    // Door-to-door estimate: straight line with a detour factor.
+    let speed_mps = ride.planning_speed_kph / 3.6;
+    let estimate_s = |from: [f64; 2], to: [f64; 2]| {
+        1.3 * crate::network::haversine_m(from[0], from[1], to[0], to[1]) / speed_mps
+    };
+    let typed_requests = fleet.vehicle_types.iter().any(|t| t.request_share > 0.0);
+
+    let mut requests = drafts;
+    requests.sort_by(|a, b| {
+        a.depart_s
+            .total_cmp(&b.depart_s)
+            .then(a.agent_id.cmp(&b.agent_id))
+    });
+    let mut plan = RidePlan {
+        requests: requests.len() as u32,
+        vehicles: ride.vehicle_count,
+        ..RidePlan::default()
+    };
+    let surge_resolution = ride
+        .surge
+        .as_ref()
+        .map(|surge| netweevil_h3::parse_resolution(surge.config.resolution.unwrap_or(8)))
+        .transpose()?;
+    let mut period = u64::MAX;
+    let mut surge_index: Option<netweevil_h3::SurgeIndex> = None;
+    let mut served = Vec::with_capacity(requests.len());
+    for index in 0..requests.len() {
+        let request_s = requests[index].depart_s;
+        if let (Some(surge), Some(resolution)) = (&ride.surge, surge_resolution) {
+            let current = (request_s / surge.interval_s).floor().max(0.0) as u64;
+            if current != period {
+                period = current;
+                let start_s = current as f64 * surge.interval_s;
+                let end_s = start_s + surge.interval_s;
+                let count = |points: &mut dyn Iterator<Item = [f64; 2]>| {
+                    netweevil_h3::aggregate_points(
+                        points.map(|point| (point[0], point[1], 1.0)),
+                        &[resolution],
+                    )
+                    .0
+                    .into_iter()
+                    .map(|stat| WeightedCell {
+                        cell: stat.cell,
+                        weight: stat.weight,
+                    })
+                    .collect::<Vec<_>>()
+                };
+                let demand = count(
+                    &mut requests[index..]
+                        .iter()
+                        .take_while(|request| request.depart_s < end_s)
+                        .map(|request| request.origin),
+                );
+                let supply = count(
+                    &mut vehicles
+                        .iter()
+                        .filter(|vehicle| vehicle.free_at_s <= start_s)
+                        .map(|vehicle| vehicle.position),
+                );
+                let mut config = surge.config.clone();
+                config.resolution = Some(u8::from(resolution));
+                let cells = netweevil_h3::compute_surge(&demand, &supply, &config)?;
+                surge_index = Some(netweevil_h3::SurgeIndex::new(&cells, &config));
+                plan.surge_periods.push(RideSurgePeriod {
+                    start_s,
+                    end_s,
+                    cells,
+                });
+            }
+        }
+        let request = &mut requests[index];
+        let pickup = request.origin;
+        let dropoff = request.destination;
+        let multiplier = surge_index
+            .as_ref()
+            .map_or(1.0, |surge| surge.multiplier_at(pickup[0], pickup[1]));
+        if let Some(surge) = &ride.surge
+            && surge.price_elasticity > 0.0
+            && request
+                .rng
+                .chance(1.0 - multiplier.powf(-surge.price_elasticity))
+        {
+            plan.priced_out += 1;
+            continue;
+        }
+        let wanted = if typed_requests {
+            sample_vehicle_type(&fleet.vehicle_types, |t| t.request_share, &mut request.rng)
+        } else {
+            NO_VEHICLE_TYPE
+        };
+        let best = vehicles
+            .iter()
+            .enumerate()
+            .filter(|(_, vehicle)| wanted == NO_VEHICLE_TYPE || vehicle.vehicle_type == wanted)
+            .map(|(vehicle_index, vehicle)| {
+                let start_s = vehicle.free_at_s.max(request_s);
+                (
+                    start_s + estimate_s(vehicle.position, pickup),
+                    vehicle_index,
+                )
+            })
+            .min_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
+        let Some((pickup_s, vehicle_index)) =
+            best.filter(|best| best.0 - request_s <= ride.max_wait_s)
+        else {
+            plan.unserved += 1;
+            continue;
+        };
+        let vehicle = &mut vehicles[vehicle_index];
+        request.depart_s = vehicle.free_at_s.max(request_s);
+        request.request_s = request_s;
+        request.origin = vehicle.position;
+        request.via = Some(pickup);
+        request.wants_alternative = false;
+        apply_vehicle_type(fleet, vehicle.vehicle_type, request);
+        vehicle.free_at_s = pickup_s + estimate_s(pickup, dropoff);
+        vehicle.position = dropoff;
+        plan.planned_wait_sum_s += pickup_s - request_s;
+        plan.surge_sum += multiplier;
+        served.push(index);
+    }
+    let mut keep = vec![false; requests.len()];
+    for index in served {
+        keep[index] = true;
+    }
+    let mut keep = keep.into_iter();
+    requests.retain(|_| keep.next().unwrap_or(false));
+    Ok((requests, plan))
+}
+
+/// Sets the type of a draft and the pcu, speed and cap that come with it.
+fn apply_vehicle_type(fleet: &FleetConfig, vehicle_type: u16, draft: &mut AgentDraft) {
+    let Some(config) = fleet.vehicle_types.get(vehicle_type as usize) else {
+        return;
+    };
+    draft.vehicle_type = vehicle_type;
+    if let Some(pcu) = config.pcu {
+        draft.pcu = pcu.max(0.01) as f32;
+    }
+    draft.mult = (draft.mult * config.speed_factor as f32).clamp(0.1, 3.0);
+    if let Some(kph) = config.max_speed_kph {
+        draft.max_speed_mps = (kph / 3.6) as f32;
+    }
+}
+
 /// Sample departures, behavior, and OD pairs for every agent of a fleet
 /// without routing anything. `id_offset` keeps agent ids globally unique and
 /// deterministic across fleets and mid-run spawns.
@@ -364,7 +587,7 @@ pub(crate) fn plan_fleet(
     seed: u64,
     id_offset: u32,
     depart_offset_s: f64,
-) -> Result<Vec<AgentDraft>> {
+) -> Result<(Vec<AgentDraft>, Option<RidePlan>)> {
     let mode = engine.metrics().mode;
     let pcu_default = default_pcu_for_mode(mode);
 
@@ -383,6 +606,13 @@ pub(crate) fn plan_fleet(
         false,
         &fleet.fleet_id,
     )?;
+    let fleet_max_speed_mps = fleet
+        .speed
+        .max_speed_kph
+        .map(|kph| (kph / 3.6) as f32)
+        .unwrap_or(f32::INFINITY);
+    // Ride-hailing agents take the type of their vehicle.
+    let typed_agents = !fleet.vehicle_types.is_empty() && fleet.ride_hailing.is_none();
 
     // Departure times drawn sequentially so Poisson arrivals stay ordered.
     let mut departure_rng = SimRng::derive(
@@ -406,7 +636,7 @@ pub(crate) fn plan_fleet(
         } else {
             (origins.sample(&mut rng), destinations.sample(&mut rng))
         };
-        drafts.push(AgentDraft {
+        let mut draft = AgentDraft {
             agent_id,
             depart_s,
             rng,
@@ -419,9 +649,37 @@ pub(crate) fn plan_fleet(
             wants_alternative,
             origin,
             destination,
-        });
+            vehicle_type: NO_VEHICLE_TYPE,
+            max_speed_mps: fleet_max_speed_mps,
+            via: None,
+            request_s: f64::NAN,
+        };
+        if typed_agents {
+            // A stream of its own, so that types do not shift the other
+            // draws of the agent.
+            let mut type_rng = SimRng::derive(seed, 0x7E41_C1E5_0000_0000 ^ agent_id as u64);
+            let vehicle_type =
+                sample_vehicle_type(&fleet.vehicle_types, |t| t.share, &mut type_rng);
+            apply_vehicle_type(fleet, vehicle_type, &mut draft);
+        }
+        drafts.push(draft);
     }
-    Ok(drafts)
+    match &fleet.ride_hailing {
+        Some(ride) => {
+            let (drafts, plan) = plan_rides(
+                fleet,
+                ride,
+                fleet_index,
+                network_bbox,
+                zones,
+                seed,
+                id_offset,
+                drafts,
+            )?;
+            Ok((drafts, Some(plan)))
+        }
+        None => Ok((drafts, None)),
+    }
 }
 
 /// Generate and route every agent of a fleet in one call (used for mid-run
@@ -438,7 +696,7 @@ pub fn dispatch_fleet(
     id_offset: u32,
     depart_offset_s: f64,
 ) -> Result<(Vec<DispatchedAgent>, DispatchReport)> {
-    let mut drafts = plan_fleet(
+    let (mut drafts, _) = plan_fleet(
         fleet,
         fleet_index,
         engine,
@@ -507,6 +765,10 @@ pub(crate) fn route_drafts(
     for draft in drafts.iter() {
         unique_origins.insert(coord_key(draft.origin), draft.origin);
         unique_destinations.insert(coord_key(draft.destination), draft.destination);
+        if let Some(via) = draft.via {
+            unique_origins.insert(coord_key(via), via);
+            unique_destinations.insert(coord_key(via), via);
+        }
     }
     let origin_snaps = snap_unique(unique_origins, true);
     let destination_snaps = snap_unique(unique_destinations, false);
@@ -516,14 +778,23 @@ pub(crate) fn route_drafts(
     type PairKey = (CoordKey, CoordKey, bool);
     let mut unique_pairs: BTreeMap<PairKey, ([f64; 2], [f64; 2])> = BTreeMap::new();
     for draft in drafts.iter() {
-        unique_pairs.insert(
-            (
-                coord_key(draft.origin),
-                coord_key(draft.destination),
-                draft.wants_alternative,
-            ),
-            (draft.origin, draft.destination),
-        );
+        match draft.via {
+            Some(via) => {
+                for (from, to) in [(draft.origin, via), (via, draft.destination)] {
+                    unique_pairs.insert((coord_key(from), coord_key(to), false), (from, to));
+                }
+            }
+            None => {
+                unique_pairs.insert(
+                    (
+                        coord_key(draft.origin),
+                        coord_key(draft.destination),
+                        draft.wants_alternative,
+                    ),
+                    (draft.origin, draft.destination),
+                );
+            }
+        }
     }
     let pair_routes: HashMap<PairKey, Result<Vec<Vec<u32>>, String>> = unique_pairs
         .into_iter()
@@ -570,12 +841,6 @@ pub(crate) fn route_drafts(
     // fresh samples when the distribution is random.
     let retryable = !use_explicit_pairs && origins.retryable() && destinations.retryable();
     let retry_attempts = if retryable { 5 } else { 0 };
-    let max_speed_mps = fleet
-        .speed
-        .max_speed_kph
-        .map(|kph| (kph / 3.6) as f32)
-        .unwrap_or(f32::INFINITY);
-
     let build_agent = |draft: &AgentDraft,
                        origin: [f64; 2],
                        destination: [f64; 2],
@@ -587,7 +852,7 @@ pub(crate) fn route_drafts(
         destination,
         route,
         desired_speed_mult: draft.mult,
-        max_speed_mps,
+        max_speed_mps: draft.max_speed_mps,
         overtake_eagerness: draft.overtake,
         reroute_eagerness: draft.reroute,
         jam_speed_threshold: draft.jam,
@@ -595,11 +860,36 @@ pub(crate) fn route_drafts(
         obey_signals: fleet.behavior.obey_traffic_signals,
         no_collision: fleet.behavior.no_collision,
         pcu: draft.pcu,
+        vehicle_type: draft.vehicle_type,
+        via_pos: NO_VIA,
+        request_s: draft.request_s,
     };
 
     let results: Vec<Result<DispatchedAgent, String>> = drafts
         .par_iter_mut()
         .map(|draft| {
+            if let Some(via) = draft.via {
+                // Two legs joined at the pickup; no resampling for rides.
+                let leg = |from: [f64; 2], to: [f64; 2]| {
+                    pair_routes
+                        .get(&(coord_key(from), coord_key(to), false))
+                        .expect("routed leg present")
+                        .as_ref()
+                        .map(|paths| &paths[0])
+                        .map_err(Clone::clone)
+                };
+                let to_pickup = leg(draft.origin, via)?;
+                let trip = leg(via, draft.destination)?;
+                let shared_edge = to_pickup.last() == trip.first();
+                let mut route = to_pickup.clone();
+                route.extend_from_slice(&trip[usize::from(shared_edge)..]);
+                let via_pos = to_pickup.len() as u32;
+                let mut agent = build_agent(draft, draft.origin, draft.destination, route);
+                if (via_pos as usize) < agent.route.len() {
+                    agent.via_pos = via_pos;
+                }
+                return Ok(agent);
+            }
             let pair_key = (
                 coord_key(draft.origin),
                 coord_key(draft.destination),

@@ -7,12 +7,13 @@ use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use netweevil_h3::{
     CellIndex, WeightedCell, aggregate_points, cell_center, cells_geojson, compact_cells,
-    cover_bbox, cover_polygon, parse_resolution, parse_resolutions, read_cells_csv, resample_cells,
-    summarize_network,
+    parse_resolution, parse_resolutions, read_cells_csv, resample_cells, summarize_network,
 };
 use netweevil_ingest::scan_osm_tagged_points;
 use netweevil_persist::{WorkspacePaths, read_dataset_manifest, read_topology_bundle};
 use serde_json::{Map, Value, json};
+
+pub(crate) mod layers;
 
 /// Most cells one `h3 cover` call writes.
 const COVER_CELL_LIMIT: usize = 2_000_000;
@@ -43,6 +44,20 @@ pub(crate) enum H3Command {
     /// Finer cells add up in their parent. Coarser cells spread their
     /// weight evenly over their children.
     Resample(H3ResampleArgs),
+    /// Store, edit and export cell layers with named values per cell.
+    Layer {
+        #[command(subcommand)]
+        command: layers::H3LayerCommand,
+    },
+    /// Compute surge multipliers from demand and supply per cell.
+    ///
+    /// A cell with more demand than supply gets a multiplier above one.
+    Surge(layers::H3SurgeArgs),
+    /// Match ride requests to vehicles by network travel time.
+    ///
+    /// The request file lists vehicles and requests, with optional surge
+    /// and pricing settings.
+    Dispatch(layers::H3DispatchArgs),
 }
 
 #[derive(Args, Debug)]
@@ -160,6 +175,9 @@ pub(crate) fn h3_command(paths: &WorkspacePaths, command: H3Command) -> Result<(
         H3Command::Cover(args) => h3_cover(args),
         H3Command::Points(args) => h3_points(args),
         H3Command::Resample(args) => h3_resample(args),
+        H3Command::Layer { command } => layers::h3_layer(paths, command),
+        H3Command::Surge(args) => layers::h3_surge(paths, args),
+        H3Command::Dispatch(args) => layers::h3_dispatch(paths, args),
     }
 }
 
@@ -405,24 +423,10 @@ fn polygon_ring(document: &Value) -> Result<Vec<[f64; 2]>> {
 
 fn h3_cover(args: H3CoverArgs) -> Result<()> {
     let resolution = parse_resolution(args.resolution)?;
-    let mut cells = match (&args.bbox, &args.polygon) {
-        (Some(bbox), _) => {
-            let bbox: [f64; 4] = bbox
-                .as_slice()
-                .try_into()
-                .ok()
-                .context("--bbox needs four values: min_lon,min_lat,max_lon,max_lat")?;
-            cover_bbox(bbox, resolution, COVER_CELL_LIMIT)?
-        }
-        (None, Some(path)) => {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("reading {}", path.display()))?;
-            let ring = polygon_ring(&serde_json::from_str(&text).context("parsing GeoJSON")?)
-                .with_context(|| format!("reading {}", path.display()))?;
-            cover_polygon(&ring, resolution, COVER_CELL_LIMIT)?
-        }
-        (None, None) => bail!("pass --bbox or --polygon"),
-    };
+    if args.bbox.is_none() && args.polygon.is_none() {
+        bail!("pass --bbox or --polygon");
+    }
+    let mut cells = layers::area_cells(args.bbox.as_deref(), args.polygon.as_deref(), resolution)?;
     if args.compact {
         cells = compact_cells(cells)?;
     }

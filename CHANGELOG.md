@@ -22,6 +22,31 @@ All notable changes to NetWeevil are in this file.
       population), and zones take `cells` as an alternative to `polygon`.
     - `GET /v1/h3/network` and `POST /v1/h3/aggregate` give the network of
       the loaded dataset and aggregated points per cell.
+- Cell layers: stored tables with named columns and one value per H3 cell,
+  under `.netweevil/cell_layers/`. `netweevil h3 layer import` fills a layer
+  from cell tables and point tables with one aggregation per column (sum,
+  mean, min, max, count, last), and later imports add columns.
+  `h3 layer paint` sets, adds to, scales or clears a column on cells, a
+  bounding box or a polygon. `h3 layer list|show|export|remove` manage the
+  layers. The API has `GET|POST /v1/h3/layers`,
+  `GET|DELETE /v1/h3/layers/{layer_id}` and
+  `POST /v1/h3/layers/{layer_id}/paint`. The web console has a Cells tool
+  that shows a layer, paints cells with the pointer and imports CSV files.
+- Surge: `netweevil h3 surge` and `POST /v1/h3/surge` calculate the balance
+  of demand and supply per cell with smoothing over adjacent cells, a price
+  multiplier per cell and an optional plan that moves surplus supply to
+  cells with a shortage.
+- Dispatch: `netweevil h3 dispatch` and `POST /v1/dispatch` assign ride
+  requests to vehicles by network travel time from one matrix request, with
+  an optimal or greedy assignment, vehicle types, a pickup time limit, H3
+  candidate rings, trip times, surge multipliers and fares.
+- Simulation: fleets take `vehicle_types` (share, PCU, speed cap and speed
+  factor per class) with results per class. A fleet with `ride_hailing`
+  serves ride requests with a vehicle pool: each vehicle drives to the
+  pickup and then to the dropoff, surge periods follow requests and free
+  vehicles per cell, and a price elasticity drops requests under surge.
+  `kind: cell_layer` takes endpoint weights from a stored layer column.
+
 - `netweevil dataset fetch <REGION>` downloads an OSM extract from Geofabrik.
   `<REGION>` is a Geofabrik path (`europe/netherlands`), a region id or a
   region name; `--url` takes any `.osm.pbf` URL and `--list [FILTER]` prints
@@ -69,6 +94,18 @@ All notable changes to NetWeevil are in this file.
 - Web console: **Indoor route** and **Door to door** tools with a site and
   level picker that shows the site's level on the map.
 
+### Fixed
+
+- Simulation: a vehicle larger than the storage of an edge can enter the
+  edge when no vehicle is on it. Before, a fleet with a PCU above 1 (trucks
+  and buses by default) stopped for the rest of the run at the first edge
+  shorter than 7.5 m per PCU, and each vehicle stopped at an edge whose
+  capacity factor left less than one vehicle of storage.
+
+### Changed
+
+- Simulation: point and zone demand no longer copy the weights for each
+  sampled endpoint.
 ## 0.4.0-alpha - 2026-10-28
 
 ### Breaking changes

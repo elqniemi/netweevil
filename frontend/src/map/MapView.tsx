@@ -38,6 +38,8 @@ import { StationGeometryCache } from "../geo/stationGeometryCache";
 import { applyTerrain, selectedTerrain, terrainTileError, TERRAIN_SOURCE } from "./terrain";
 import { applyNetworkTiles, networkTileUrl } from "./networkTiles";
 import { stopLetter } from "../tools/clock";
+import { paintStroke } from "../state/cells";
+import { strokePreview, type LonLat } from "../geo/cells";
 
 const RESULT_SOURCE = "results";
 const INPUT_SOURCE = "inputs";
@@ -45,6 +47,8 @@ const SIM_AGENTS_SOURCE = "sim-agents";
 const SIM_EDGES_SOURCE = "sim-edges";
 const EDITOR_SOURCE = "editor";
 const PROFILE_HOVER_SOURCE = "profile-hover";
+const CELLS_SOURCE = "cells";
+const CELLS_STROKE_SOURCE = "cells-stroke";
 const EDITOR_LAYERS = ["editor-base-stop", "editor-stop"];
 
 /** Map features of the GTFS editor: base feed stops, scenario stops and lines. */
@@ -172,9 +176,23 @@ function selectionExpression(selected: number | null): maplibregl.ExpressionSpec
 
 function addLayers(map: MapLibreMap) {
   if (map.getSource(RESULT_SOURCE)) return;
-  for (const id of [RESULT_SOURCE, INPUT_SOURCE, SIM_EDGES_SOURCE, SIM_AGENTS_SOURCE, EDITOR_SOURCE, PROFILE_HOVER_SOURCE]) {
+  for (const id of [RESULT_SOURCE, INPUT_SOURCE, SIM_EDGES_SOURCE, SIM_AGENTS_SOURCE, EDITOR_SOURCE, PROFILE_HOVER_SOURCE, CELLS_SOURCE, CELLS_STROKE_SOURCE]) {
     map.addSource(id, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
   }
+
+  // H3 cell hexagons of the Cells tool, under every result.
+  map.addLayer({
+    id: "cells-fill",
+    type: "fill",
+    source: CELLS_SOURCE,
+    paint: { "fill-color": ["get", "_color"], "fill-opacity": ["get", "_fill"] },
+  });
+  map.addLayer({
+    id: "cells-outline",
+    type: "line",
+    source: CELLS_SOURCE,
+    paint: { "line-color": ["get", "_line"], "line-width": ["get", "_width"], "line-opacity": 0.75 },
+  });
 
   map.addLayer({
     id: "results-fill",
@@ -380,6 +398,30 @@ function addLayers(map: MapLibreMap) {
     },
     paint: { "text-color": "#ffffff" },
   });
+
+  // Cells paint stroke in progress: brush path or area rectangle.
+  map.addLayer({
+    id: "cells-stroke-fill",
+    type: "fill",
+    source: CELLS_STROKE_SOURCE,
+    filter: ["==", ["geometry-type"], "Polygon"],
+    paint: { "fill-color": PALETTE.ink, "fill-opacity": 0.08 },
+  });
+  map.addLayer({
+    id: "cells-stroke-line",
+    type: "line",
+    source: CELLS_STROKE_SOURCE,
+    filter: ["any", ["==", ["geometry-type"], "LineString"], ["==", ["geometry-type"], "Polygon"]],
+    layout: { "line-cap": "round", "line-join": "round" },
+    paint: { "line-color": PALETTE.ink, "line-width": 2, "line-dasharray": [2, 1.5], "line-opacity": 0.8 },
+  });
+  map.addLayer({
+    id: "cells-stroke-point",
+    type: "circle",
+    source: CELLS_STROKE_SOURCE,
+    filter: ["==", ["geometry-type"], "Point"],
+    paint: { "circle-radius": 4, "circle-color": PALETTE.ink, "circle-opacity": 0.6 },
+  });
 }
 
 function setSource(map: MapLibreMap, id: string, data: FeatureCollection) {
@@ -416,6 +458,7 @@ function placing(): boolean {
   const def = TOOL_BY_ID[s.tool];
   if (def.input === "editor") return s.editor.mode === "add" && s.editor.activeLine !== null && !!s.editor.scenario;
   if (def.input === "viewport") return false;
+  if (def.input === "cells") return s.cells.paint;
   if (def.input === "routes") {
     const route = s.routes[Math.min(s.activeRoute, s.routes.length - 1)];
     return !route.origin || !route.destination || !!def.usesVias;
@@ -480,6 +523,7 @@ export function MapView({ service }: Props) {
       setSource(map, SIM_AGENTS_SOURCE, getState().simulation.agentFeatures ?? EMPTY_COLLECTION);
       setSource(map, SIM_EDGES_SOURCE, getState().simulation.edgeFeatures ?? EMPTY_COLLECTION);
       setSource(map, EDITOR_SOURCE, editorFeatures(getState().editor, getState().tool === "transit_editor"));
+      setSource(map, CELLS_SOURCE, getState().cells.features ?? EMPTY_COLLECTION);
       applySelection(map, getState().selectedRun);
       setSource(map, PROFILE_HOVER_SOURCE, profileHoverFeatures(getState().profileHover));
       applyMarkerScale(map, getState().mapStyle.markerScale);
@@ -626,10 +670,50 @@ export function MapView({ service }: Props) {
     map.on("mouseenter", "inputs-point", () => setCursor("grab"));
     map.on("mouseleave", "inputs-point", () => setCursor(placing() ? "crosshair" : ""));
 
+    // --- Cells tool: a click paints the cell under the pointer, a drag paints
+    // along the stroke (brush) or inside its rectangle (area). One stroke is
+    // sent when the button is released. ---
+    let stroke: { points: LonLat[]; start: { x: number; y: number }; last: { x: number; y: number }; moved: boolean } | null = null;
+    let strokeFrame = 0;
+    const cellsPainting = () => {
+      const s = getState();
+      return s.tool === "cells" && s.cells.paint;
+    };
+    const drawStroke = () => {
+      strokeFrame = 0;
+      if (styleReady.current) setSource(map, CELLS_STROKE_SOURCE, stroke ? strokePreview(stroke.points, getState().cells.paintMode) : EMPTY_COLLECTION);
+    };
+    const finishStroke = () => {
+      window.removeEventListener("mouseup", finishStroke);
+      if (!stroke) return;
+      const done = stroke;
+      stroke = null;
+      if (strokeFrame) cancelAnimationFrame(strokeFrame);
+      drawStroke();
+      paintStroke(done.points, done.moved);
+    };
+    map.on("mousedown", (e: MapMouseEvent) => {
+      if (!cellsPainting() || e.originalEvent.button !== 0) return;
+      e.preventDefault();
+      const at = { x: e.point.x, y: e.point.y };
+      stroke = { points: [[e.lngLat.lng, e.lngLat.lat]], start: at, last: at, moved: false };
+      if (getState().hoverInfo) setState({ hoverInfo: null });
+      window.addEventListener("mouseup", finishStroke);
+      drawStroke();
+    });
+    map.on("mousemove", (e: MapMouseEvent) => {
+      if (!stroke) return;
+      if (Math.hypot(e.point.x - stroke.last.x, e.point.y - stroke.last.y) < 3) return;
+      stroke.last = { x: e.point.x, y: e.point.y };
+      if (Math.hypot(e.point.x - stroke.start.x, e.point.y - stroke.start.y) > 4) stroke.moved = true;
+      stroke.points.push([e.lngLat.lng, e.lngLat.lat]);
+      if (!strokeFrame) strokeFrame = requestAnimationFrame(drawStroke);
+    });
+
     // --- Hover info for results. ---
-    const hoverLayers = ["results-badge", "results-point", "results-line", "results-line-dashed", "results-fill", "sim-agents", "sim-edges"];
+    const hoverLayers = ["results-badge", "results-point", "results-line", "results-line-dashed", "results-fill", "sim-agents", "sim-edges", "cells-fill"];
     map.on("mousemove", (e) => {
-      if (dragging || !styleReady.current) return;
+      if (dragging || stroke || !styleReady.current) return;
       if (getState().mapStyle.view3d && overlayRef.current) return;
       const layers = hoverLayers.filter((id) => map.getLayer(id));
       const hits = map.queryRenderedFeatures(e.point, { layers });
@@ -642,6 +726,8 @@ export function MapView({ service }: Props) {
     });
 
     return () => {
+      window.removeEventListener("mouseup", finishStroke);
+      if (strokeFrame) cancelAnimationFrame(strokeFrame);
       if (overlayRef.current) map.removeControl(overlayRef.current.control);
       overlayRef.current = null;
       map.remove();
@@ -805,6 +891,35 @@ export function MapView({ service }: Props) {
     if (!map || !styleReady.current) return;
     applySelection(map, selectedRun);
   }, [selectedRun]);
+
+  // Cells tool: hexagons, paint mode (no drag panning while painting) and zoom to layer.
+  const cellsFeatures = useStore((s) => s.cells.features);
+  const cellsPaint = useStore((s) => s.tool === "cells" && s.cells.paint);
+  const cellsFit = useStore((s) => s.cells.fitRequest);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !styleReady.current) return;
+    setSource(map, CELLS_SOURCE, cellsFeatures ?? EMPTY_COLLECTION);
+  }, [cellsFeatures]);
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+    if (cellsPaint) {
+      map.dragPan.disable();
+      map.doubleClickZoom.disable();
+    } else {
+      map.dragPan.enable();
+      map.doubleClickZoom.enable();
+    }
+    map.getCanvas().style.cursor = placing() ? "crosshair" : "";
+  }, [cellsPaint]);
+  useEffect(() => {
+    const map = mapRef.current;
+    const collection = getState().cells.features;
+    if (!map || !cellsFit || !collection) return;
+    const bounds = featureBounds(collection);
+    if (bounds) map.fitBounds(bounds, { padding: 60, duration: 500, maxZoom: 16 });
+  }, [cellsFit]);
 
   const profileHover = useStore((s) => s.profileHover);
   useEffect(() => {

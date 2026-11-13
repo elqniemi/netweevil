@@ -72,6 +72,7 @@ graph TD
     ingest --> core
 
     h3 --> core
+    query --> h3
 
     site --> persist
     site --> query

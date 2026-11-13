@@ -13,6 +13,7 @@ interface Band {
 export function Legend() {
   const result = useStore((s) => s.result);
   const elevationColors = useStore((s) => s.mapStyle.view3d && s.mapStyle.elevationColor);
+  const cellsLegend = useStore((s) => (s.tool === "cells" && s.cells.features?.features.length ? s.cells.legend : null));
   const bands = useMemo(() => {
     const byLimit = new Map<number, Band>();
     for (const f of result?.features.features ?? []) {
@@ -22,6 +23,21 @@ export function Legend() {
     }
     return Array.from(byLimit.values()).sort((a, b) => a.limit - b.limit);
   }, [result]);
+  if (cellsLegend) {
+    return (
+      <div className="legend" aria-label="Cells legend">
+        <div className="legend-title">{cellsLegend.title}</div>
+        <div className="legend-ramp">
+          <div className="legend-ramp-bar" style={{ background: `linear-gradient(to right, ${cellsLegend.colors.join(", ")})` }} />
+          <div className="legend-ramp-labels">
+            {cellsLegend.labels.map((label, i) => (
+              <span key={i}>{label}</span>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  }
   // The 3D style panel shows its elevation range; a profile-speed legend
   // would describe colours that the elevation override has replaced.
   if (result?.tool === "network" && elevationColors) return null;

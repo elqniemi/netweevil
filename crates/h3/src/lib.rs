@@ -9,7 +9,9 @@
 mod aggregate;
 mod cover;
 mod io;
+mod layer;
 mod network;
+mod surge;
 
 use anyhow::{Context, Result, bail};
 use h3o::LatLng;
@@ -19,7 +21,12 @@ use rustc_hash::FxHashMap;
 pub use aggregate::{CellStat, aggregate_points, resample_cells};
 pub use cover::{compact_cells, cover_bbox, cover_polygon, uncompact_cells};
 pub use io::{WeightedCell, cells_geojson, read_cells_csv};
+pub use layer::{
+    Aggregation, CellLayer, CellLayerSummary, ColumnSpec, ColumnSummary, LayerBuilder, PaintOp,
+    default_column_specs, validate_layer_id,
+};
 pub use network::{NetworkCellStat, edge_midpoint, summarize_network};
+pub use surge::{RebalanceMove, SurgeCell, SurgeConfig, SurgeIndex, compute_surge, plan_rebalance};
 
 /// Parses an H3 cell id in its hexadecimal form (`882830828dfffff`).
 pub fn parse_cell(text: &str) -> Result<CellIndex> {

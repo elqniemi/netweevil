@@ -67,14 +67,14 @@ export interface BuildContext {
 export interface ToolDef {
   id: ToolId;
   label: string;
-  group: "street" | "batch" | "transit" | "indoor" | "simulation";
+  group: "street" | "batch" | "transit" | "indoor" | "simulation" | "cells";
   path: string;
   method: "POST" | "GET";
   description: string;
   supportsGeojson: boolean;
   usesProfile: boolean;
-  /** Whether the tool takes the shared start/end routes, its own point slots, the map view, or the GTFS editor. */
-  input: "routes" | "slots" | "viewport" | "editor";
+  /** Whether the tool takes the shared start/end routes, its own point slots, the map view, the GTFS editor, or the cell painter. */
+  input: "routes" | "slots" | "viewport" | "editor" | "cells";
   /** Whether route vias (intermediate stops) are edited and used. */
   usesVias?: boolean;
   /** Run button text, when "Run <label>" does not fit. */
@@ -1875,6 +1875,24 @@ const doorToDoorTool: ToolDef = {
   },
 };
 
+// --- H3 cells ---
+
+const cellsTool: ToolDef = {
+  id: "cells",
+  label: "Cells",
+  group: "cells",
+  path: "/v1/h3/layers",
+  method: "POST",
+  description: "Shows stored H3 cell layers, paints values onto cells, imports CSV tables and shows surge from demand and supply.",
+  supportsGeojson: false,
+  usesProfile: false,
+  input: "cells",
+  layers: [],
+  slots: [],
+  fields: [],
+  ready: () => "Use the cells panel.",
+};
+
 export const TOOLS: ToolDef[] = [
   routeTool,
   directionsTool,
@@ -1898,6 +1916,7 @@ export const TOOLS: ToolDef[] = [
   indoorRouteTool,
   doorToDoorTool,
   simulationTool,
+  cellsTool,
 ];
 
 export const TOOL_BY_ID: Record<ToolId, ToolDef> = Object.fromEntries(TOOLS.map((t) => [t.id, t])) as Record<ToolId, ToolDef>;
@@ -1908,6 +1927,7 @@ export const GROUP_LABELS: Record<ToolDef["group"], string> = {
   transit: "Transit",
   indoor: "Indoor",
   simulation: "Simulation",
+  cells: "H3 cells",
 };
 
 export function requestPath(tool: ToolDef, format: ResponseFormat): string {

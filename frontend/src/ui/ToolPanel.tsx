@@ -35,6 +35,7 @@ import { TrafficBadge, TrafficPanel } from "./TrafficPanel";
 import { formatClock, parseClock, stopLetter } from "../tools/clock";
 import { GtfsEditorPanel } from "./GtfsEditorPanel";
 import { IndoorSitePanel } from "./IndoorSitePanel";
+import { CellsPanel } from "./CellsPanel";
 
 interface Props {
   service: ServiceInfo | null;
@@ -45,7 +46,7 @@ export function ToolPanel({ service }: Props) {
   const open = useStore((s) => s.settingsOpen);
   const tool = TOOL_BY_ID[toolId];
   return (
-    <section className={`tool-panel${open ? "" : " is-collapsed"}`} aria-label={tool.label}>
+    <section className={`tool-panel${open ? "" : " is-collapsed"}${tool.input === "cells" ? " is-full" : ""}`} aria-label={tool.label}>
       <div className="tool-head">
         <div className="tool-title-row">
           <h1>{tool.label}</h1>
@@ -57,7 +58,7 @@ export function ToolPanel({ service }: Props) {
         {open && <p className="tool-desc">{tool.description}</p>}
         {open && tool.group === "transit" && service?.loaded_transit_feeds.some((feed) => feed.agency_timezone === "Asia/Hong_Kong") && <p className="style-note">MTR and light rail use community estimated times. Surface services use Transport Department headways. Choose a date inside the imported service window.</p>}
       </div>
-      {open && tool.input !== "editor" && (
+      {open && tool.input !== "editor" && tool.input !== "cells" && (
         <>
           {tool.group === "indoor" && <IndoorSitePanel tool={tool.id} />}
           <ProfilePicker tool={tool} service={service} />
@@ -68,7 +69,7 @@ export function ToolPanel({ service }: Props) {
         </>
       )}
       {tool.id === "traffic" && <TrafficPanel service={service} open={open} />}
-      {tool.input === "editor" ? (open ? <GtfsEditorPanel service={service} /> : null) : tool.id === "simulation" ? (open ? <SimulationPanel service={service} /> : null) : <RunBar tool={tool} service={service} />}
+      {tool.input === "cells" ? (open ? <CellsPanel /> : null) : tool.input === "editor" ? (open ? <GtfsEditorPanel service={service} /> : null) : tool.id === "simulation" ? (open ? <SimulationPanel service={service} /> : null) : <RunBar tool={tool} service={service} />}
     </section>
   );
 }
