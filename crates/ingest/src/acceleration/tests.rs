@@ -1,5 +1,10 @@
+use std::collections::{BTreeSet, HashMap, VecDeque};
+
+use super::contraction::contract_with_subtree_limit;
+use super::dissection::{BestCut, Cell, CutBound, direction_roles, inertial_flow_split};
+use super::flow::{FlowGraph, flow_split};
 use super::{
-    Cell, build_dataset_acceleration_bundle_with_progress, build_with_order, inertial_flow_split,
+    build_dataset_acceleration_bundle_with_progress, build_with_order, nested_dissection_order,
     patch_edge_order,
 };
 use crate::test_util::{edge, topology};
@@ -168,7 +173,9 @@ fn edge_order_is_a_valid_elimination_order() {
 fn inertial_flow_separates_a_grid() {
     let side = 24_usize;
     let cell = grid_cell(side);
-    let split = inertial_flow_split(&cell).expect("grid admits an inertial flow split");
+    let split = inertial_flow_split(&cell)
+        .expect("split builds")
+        .expect("grid admits an inertial flow split");
 
     // A square grid is cut by a single grid line.
     assert!(
@@ -366,4 +373,383 @@ fn patched_order_without_changes_is_the_previous_order() {
         (patched.reused, patched.inserted),
         (topology.edge_count(), 0)
     );
+}
+
+/// Deterministic pseudo-random numbers for fixture graphs and orders.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        self.0 >> 33
+    }
+
+    fn below(&mut self, bound: usize) -> usize {
+        (self.next() % bound as u64) as usize
+    }
+
+    fn shuffle(&mut self, values: &mut [u32]) {
+        for index in (1..values.len()).rev() {
+            values.swap(index, self.below(index + 1));
+        }
+    }
+}
+
+/// A jittered `side * side` grid with missing roads, one-way roads and
+/// diagonals, so that edge states have uneven degrees.
+fn irregular_topology(side: u32, seed: u64) -> TopologyBundle {
+    let mut random = Lcg(seed);
+    let nodes = (0..side * side)
+        .map(|node| {
+            let jitter = random.below(400) as f64 * 1e-6;
+            (
+                f64::from(node % side) * 0.001 + jitter,
+                f64::from(node / side) * 0.001 - jitter,
+                0.0,
+            )
+        })
+        .collect::<Vec<_>>();
+    let mut edges = Vec::new();
+    let mut connect = |a: u32, b: u32, random: &mut Lcg| match random.below(10) {
+        0 => {}
+        1 => edges.push(edge(edges.len() as u32, a, b, 1)),
+        2 => edges.push(edge(edges.len() as u32, b, a, 1)),
+        _ => {
+            edges.push(edge(edges.len() as u32, a, b, 1));
+            edges.push(edge(edges.len() as u32, b, a, 1));
+        }
+    };
+    for row in 0..side {
+        for col in 0..side {
+            let node = row * side + col;
+            if col + 1 < side {
+                connect(node, node + 1, &mut random);
+            }
+            if row + 1 < side {
+                connect(node, node + side, &mut random);
+            }
+            if col + 1 < side && row + 1 < side && random.below(6) == 0 {
+                connect(node, node + side + 1, &mut random);
+            }
+        }
+    }
+    topology(&nodes, &edges)
+}
+
+/// Upward and downward rows of the serial elimination game: states are
+/// contracted one at a time in rank order, each pair of an incoming arc
+/// `x -> v` and an outgoing arc `v -> y` with higher-ranked `x != y` adding
+/// `x -> y`.
+struct ReferenceHierarchy {
+    base_arc_count: u64,
+    shortcut_arc_count: u64,
+    upward: Vec<Vec<u32>>,
+    downward: Vec<Vec<u32>>,
+}
+
+fn reference_hierarchy(topology: &TopologyBundle, order: &[u32]) -> ReferenceHierarchy {
+    let edge_count = topology.edge_count();
+    let mut rank = vec![0_u32; edge_count];
+    for (position, &state) in order.iter().enumerate() {
+        rank[state as usize] = position as u32;
+    }
+    // Arcs owned by their lower endpoint as `(other, outgoing)`.
+    let mut pending = vec![BTreeSet::<(u32, bool)>::new(); edge_count];
+    let insert = |pending: &mut Vec<BTreeSet<(u32, bool)>>, tail: u32, head: u32| {
+        if rank[tail as usize] < rank[head as usize] {
+            pending[tail as usize].insert((head, true))
+        } else {
+            pending[head as usize].insert((tail, false))
+        }
+    };
+    let transitions = &topology.edge_based_topology;
+    let mut base_arc_count = 0;
+    for tail in 0..edge_count {
+        let range = transitions.edge_transition_first_out[tail] as usize
+            ..transitions.edge_transition_first_out[tail + 1] as usize;
+        for &head in &transitions.edge_transition_edges[range] {
+            if head as usize != tail && insert(&mut pending, tail as u32, head) {
+                base_arc_count += 1;
+            }
+        }
+    }
+    let mut shortcut_arc_count = 0;
+    let mut upward = vec![Vec::new(); edge_count];
+    let mut downward = vec![Vec::new(); edge_count];
+    for &state in order {
+        let owned = std::mem::take(&mut pending[state as usize]);
+        let incoming = owned
+            .iter()
+            .filter(|&&(_, outgoing)| !outgoing)
+            .map(|&(other, _)| other)
+            .collect::<Vec<_>>();
+        let outgoing = owned
+            .iter()
+            .filter(|&&(_, outgoing)| outgoing)
+            .map(|&(other, _)| other)
+            .collect::<Vec<_>>();
+        for &tail in &incoming {
+            downward[tail as usize].push(state);
+            for &head in &outgoing {
+                if tail != head && insert(&mut pending, tail, head) {
+                    shortcut_arc_count += 1;
+                }
+            }
+        }
+        upward[state as usize] = outgoing;
+    }
+    for row in &mut downward {
+        row.sort_unstable();
+    }
+    ReferenceHierarchy {
+        base_arc_count,
+        shortcut_arc_count,
+        upward,
+        downward,
+    }
+}
+
+fn rows(first_out: &[u32], heads: &[u32]) -> Vec<Vec<u32>> {
+    first_out
+        .windows(2)
+        .map(|range| heads[range[0] as usize..range[1] as usize].to_vec())
+        .collect()
+}
+
+fn fixture_topologies() -> Vec<TopologyBundle> {
+    vec![
+        grid_topology(5),
+        edited_grid(&grid_topology(6)).0,
+        irregular_topology(9, 7),
+        irregular_topology(12, 11),
+    ]
+}
+
+/// Nested-dissection, identity, reversed and shuffled orders.
+fn fixture_orders(topology: &TopologyBundle, seed: u64) -> Vec<Vec<u32>> {
+    let edge_count = topology.edge_count() as u32;
+    let mut random = Lcg(seed);
+    let mut orders = vec![
+        nested_dissection_order(topology).expect("orders"),
+        (0..edge_count).collect(),
+        (0..edge_count).rev().collect(),
+    ];
+    for _ in 0..3 {
+        let mut order = (0..edge_count).collect::<Vec<_>>();
+        random.shuffle(&mut order);
+        orders.push(order);
+    }
+    orders
+}
+
+#[test]
+fn parallel_contraction_matches_the_serial_elimination_game() {
+    for (index, topology) in fixture_topologies().iter().enumerate() {
+        for order in fixture_orders(topology, index as u64) {
+            let reference = reference_hierarchy(topology, &order);
+            let mut rank = vec![0_u32; order.len()];
+            for (position, &state) in order.iter().enumerate() {
+                rank[state as usize] = position as u32;
+            }
+            // Small subtree limits leave most states to the top phase.
+            for subtree_limit in [1, 3, 16, usize::MAX] {
+                for threads in [1, 4] {
+                    let pool = rayon::ThreadPoolBuilder::new()
+                        .num_threads(threads)
+                        .build()
+                        .expect("thread pool builds");
+                    let contraction = pool
+                        .install(|| {
+                            contract_with_subtree_limit(
+                                topology,
+                                &order,
+                                &rank,
+                                subtree_limit,
+                                &mut |_| {},
+                            )
+                        })
+                        .expect("contracts");
+                    assert_eq!(contraction.base_arc_count, reference.base_arc_count);
+                    assert_eq!(contraction.shortcut_arc_count, reference.shortcut_arc_count);
+                    assert_eq!(
+                        rows(&contraction.upward_first_out, &contraction.upward_head),
+                        reference.upward
+                    );
+                    assert_eq!(
+                        rows(&contraction.downward_first_out, &contraction.downward_head),
+                        reference.downward
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Source side, sink side and separator of the minimum vertex cut closest to
+/// the source, from Edmonds-Karp on the explicit split-node network with
+/// the source and sink sets contracted. `None` when a source node touches a
+/// sink node.
+fn reference_split(cell: &Cell, role: &[u8]) -> Option<[Vec<u32>; 3]> {
+    const SOURCE: usize = 0;
+    const SINK: usize = 1;
+    const INFINITE: u32 = u32::MAX;
+    let entry = |node: usize| 2 + 2 * node;
+    let exit = |node: usize| 3 + 2 * node;
+    let flow_nodes = 2 + 2 * cell.len();
+    let mut capacity = HashMap::<(usize, usize), u32>::new();
+    let mut adjacent = vec![BTreeSet::<usize>::new(); flow_nodes];
+    let mut add = |tail: usize, head: usize, amount: u32| {
+        let slot = capacity.entry((tail, head)).or_insert(0);
+        *slot = slot.saturating_add(amount);
+        capacity.entry((head, tail)).or_insert(0);
+        adjacent[tail].insert(head);
+        adjacent[head].insert(tail);
+    };
+    for node in 0..cell.len() {
+        if role[node] == super::dissection::ROLE_INNER {
+            add(entry(node), exit(node), 1);
+        }
+        for &neighbour in cell.neighbours(node) {
+            let tail = match role[node] {
+                super::dissection::ROLE_SOURCE => SOURCE,
+                super::dissection::ROLE_SINK => continue,
+                _ => exit(node),
+            };
+            let head = match role[neighbour as usize] {
+                super::dissection::ROLE_SOURCE => continue,
+                super::dissection::ROLE_SINK => SINK,
+                _ => entry(neighbour as usize),
+            };
+            if (tail, head) == (SOURCE, SINK) {
+                return None;
+            }
+            add(tail, head, INFINITE);
+        }
+    }
+    let reach = |capacity: &HashMap<(usize, usize), u32>| {
+        let mut parent = vec![usize::MAX; flow_nodes];
+        parent[SOURCE] = SOURCE;
+        let mut queue = VecDeque::from([SOURCE]);
+        while let Some(node) = queue.pop_front() {
+            for &next in &adjacent[node] {
+                if parent[next] == usize::MAX && capacity[&(node, next)] > 0 {
+                    parent[next] = node;
+                    queue.push_back(next);
+                }
+            }
+        }
+        parent
+    };
+    loop {
+        let parent = reach(&capacity);
+        if parent[SINK] == usize::MAX {
+            let mut sides = [Vec::new(), Vec::new(), Vec::new()];
+            for (node, &node_role) in role.iter().enumerate() {
+                let side = match node_role {
+                    super::dissection::ROLE_SOURCE => 0,
+                    super::dissection::ROLE_SINK => 1,
+                    _ if parent[exit(node)] != usize::MAX => 0,
+                    _ if parent[entry(node)] != usize::MAX => 2,
+                    _ => 1,
+                };
+                sides[side].push(node as u32);
+            }
+            return Some(sides);
+        }
+        let mut node = SINK;
+        while node != SOURCE {
+            let previous = parent[node];
+            let forward = capacity.get_mut(&(previous, node)).expect("arc exists");
+            if *forward != INFINITE {
+                *forward -= 1;
+            }
+            let backward = capacity.get_mut(&(node, previous)).expect("arc exists");
+            if *backward != INFINITE {
+                *backward += 1;
+            }
+            node = previous;
+        }
+    }
+}
+
+/// `grid_cell(side)` without a pseudo-random fifth of its nodes.
+fn holey_grid_cell(side: usize, seed: u64) -> Cell {
+    let mut random = Lcg(seed);
+    let members = (0..(side * side) as u32)
+        .filter(|_| random.below(5) != 0)
+        .collect::<Vec<_>>();
+    grid_cell(side).induced(&members)
+}
+
+#[test]
+fn flow_split_finds_the_cut_closest_to_the_source() {
+    let mut compared = 0;
+    for seed in 0..12 {
+        let cell = holey_grid_cell(14, seed);
+        let graph = FlowGraph::new(&cell).expect("flow graph builds");
+        for direction in 0..4 {
+            let (projection, role) = direction_roles(&cell, direction, cell.len() / 4);
+            let best = BestCut::new();
+            let split = flow_split(
+                &graph,
+                &role,
+                &projection,
+                CutBound {
+                    best: &best,
+                    direction,
+                },
+            );
+            let expected = reference_split(&cell, &role);
+            assert_eq!(
+                split.map(|split| [split.side_a, split.side_b, split.separator]),
+                expected,
+                "seed {seed}, direction {direction}"
+            );
+            compared += usize::from(expected.is_some());
+        }
+    }
+    assert!(
+        compared > 20,
+        "only {compared} feasible assignments compared"
+    );
+}
+
+#[test]
+fn inertial_flow_takes_the_smallest_cut_of_the_first_direction() {
+    for seed in 0..8 {
+        let cell = holey_grid_cell(16, seed + 100);
+        let side = cell.len() / 4;
+        let expected = (0..4)
+            .filter_map(|direction| {
+                let (_, role) = direction_roles(&cell, direction, side);
+                reference_split(&cell, &role).map(|sides| (sides[2].len(), direction, sides))
+            })
+            .min_by_key(|&(size, direction, _)| (size, direction))
+            .map(|(_, _, sides)| sides);
+        let split = inertial_flow_split(&cell).expect("split builds");
+        assert_eq!(
+            split.map(|split| [split.side_a, split.side_b, split.separator]),
+            expected,
+            "seed {seed}"
+        );
+    }
+}
+
+#[test]
+fn nested_dissection_order_does_not_depend_on_the_thread_count() {
+    for topology in [grid_topology(40), irregular_topology(48, 5)] {
+        let orders = [1, 2, 8].map(|threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .expect("thread pool builds")
+                .install(|| nested_dissection_order(&topology))
+                .expect("orders")
+        });
+        assert_eq!(orders[0], orders[1]);
+        assert_eq!(orders[0], orders[2]);
+    }
 }
