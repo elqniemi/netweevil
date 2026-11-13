@@ -108,8 +108,8 @@ bundle files that no manifest references. It does not touch transit bundles.
 
 ## Prepare a routing-only OSM extract
 
-A full extract contains many objects that routing does not use. A filtered
-extract imports faster and makes a much smaller source snapshot for updates.
+A full extract contains many objects that routing does not use. The import
+skips them, but it still decodes them; a filtered extract imports faster.
 
 1. Write the filter expressions:
 
@@ -279,11 +279,16 @@ until the swap. The reload carries the live traffic state over.
 
 ### Source snapshot
 
-An OSM import reads the extract in one pass. It writes a source snapshot to
-`.netweevil/bundles/source` next to the other bundles. The snapshot holds:
+An OSM import reads the extract in three passes, each decoded on all cores:
+the relations, then the ways, then only the nodes that the kept ways and
+relations refer to. Its memory therefore follows the routable network, not
+the size of the extract. Right after the scan, before the topology and CCH
+builds, it writes a source snapshot to `.netweevil/bundles/source` next to
+the other bundles. The snapshot holds:
 
-- each node position. Topology nodes store only their OSM id, because the
-  topology bundle already holds their coordinates;
+- the position of each node that a routable way, a turn restriction or an
+  admin boundary way refers to. Topology nodes store only their OSM id,
+  because the topology bundle already holds their coordinates;
 - the routable ways as classified records. Id, node list and name are
   separate columns. The other data is interned. This includes guidance tags,
   vehicle restrictions, destination-only and conditional access, and the ids
@@ -292,23 +297,26 @@ An OSM import reads the extract in one pass. It writes a source snapshot to
   condition, and the temporal rule sets that they and the ways use;
 - the traffic-signal and motorway-junction nodes, and the routable ways on
   bridges or in tunnels;
-- the other ways with their node lists, and the ids of the other relations.
-  These keep the source object counts exact. They also let the update
-  assemble admin boundaries from the kept `boundary=administrative`
-  relations;
-- the paths of the boundaries file and the DEM of the import.
+- the `boundary=administrative` relations and the node lists of their member
+  ways, so updates assemble admin boundaries again;
+- the numbers of nodes, ways and relations in the extract;
+- the objects that change files touched since the import;
+- the size and blob layout of the imported extract, and the paths of the
+  boundaries file and the DEM of the import.
 
 A change file lists only the objects that it touches. A modified way can
-reference an unmodified node that no routable way used before. Thus the
-snapshot keeps all node positions.
+reference an unmodified node that no routable way used before. The update
+reads such nodes (and new admin member ways) from the imported extract at
+the dataset's source path, so keep that file in place while you apply change
+files. The update refuses to run when it needs the extract and the file
+there differs from the imported one.
 
 !!! note
     The snapshot does not store raw tags. Changed objects arrive with all
     their tags. A classifier change requires a full re-import.
 
-As a guide, the snapshot of a filtered province extract is about a third of
-the PBF size. The snapshot of an unfiltered extract is much larger, because
-it holds the positions of all building nodes.
+As a guide, the snapshot of the unfiltered Groningen province extract
+(56 MB) is about 2 MB.
 
 ### Apply changes
 
@@ -318,8 +326,10 @@ The update does these steps:
 2. It applies each change file in order. Deletions remove the object.
    Creations and modifications replace it with the newest version in the
    file, as `osmium apply-changes` does. With `--source`, it scans the new
-   extract instead.
-3. It rebuilds the topology with the import code.
+   extract instead, which also becomes the extract later updates read from.
+3. It reads the nodes and admin member ways that the changes newly refer to
+   from the imported extract, and writes the new source snapshot.
+4. It rebuilds the topology with the import code.
 
 The topology is identical to a full import of `osmium apply-changes
 base.osm.pbf changes...`. Rule-set ids depend on the order in which a scan
