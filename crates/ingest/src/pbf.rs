@@ -372,38 +372,64 @@ fn read_varint(cursor: &mut &[u8]) -> Option<u64> {
     None
 }
 
-/// A sorted set of OSM ids with an index for O(1) bucket lookup: ids are
-/// bucketed by their high bits, so a lookup binary-searches only the ids
-/// that share a bucket. Uses 8 bytes per id plus a fixed 16 MiB table.
+/// A sorted set of OSM ids with a bucket table over their high bits, so a
+/// lookup binary-searches only the few ids that share a bucket. Uses
+/// 8 bytes per id plus about half a byte per id for the table.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct IdIndex {
     ids: Vec<i64>,
-    /// `buckets[b]..buckets[b + 1]` are the positions of ids in bucket `b`.
+    /// Ids before this position are negative and not bucketed.
+    first_bucketed: usize,
+    shift: u32,
+    /// `buckets[b]..buckets[b + 1]` are the positions of the ids `x` with
+    /// `x >> shift == b`.
     buckets: Vec<u64>,
 }
 
-/// Ids below this are bucketed; OSM ids stay far below it. Others fall
-/// back to a binary search over all ids.
-const BUCKETED_ID_LIMIT: i64 = 1 << 37;
-const BUCKET_SHIFT: u32 = 16;
+/// Ids per bucket the table aims for.
+const IDS_PER_BUCKET: usize = 16;
 
 impl IdIndex {
     /// Indexes `ids`, sorting them and dropping repeats.
     pub(crate) fn new(mut ids: Vec<i64>) -> Self {
         ids.par_sort_unstable();
         ids.dedup();
+        Self::from_sorted(ids)
+    }
+
+    /// Indexes ids that are sorted and unique.
+    pub(crate) fn from_sorted(mut ids: Vec<i64>) -> Self {
+        debug_assert!(ids.windows(2).all(|pair| pair[0] < pair[1]));
         ids.shrink_to_fit();
-        let bucket_count = (BUCKETED_ID_LIMIT >> BUCKET_SHIFT) as usize;
+        let first_bucketed = ids.partition_point(|id| *id < 0);
+        let Some(&max) = ids.last().filter(|max| **max >= 0) else {
+            return Self {
+                ids,
+                first_bucketed,
+                shift: 0,
+                buckets: Vec::new(),
+            };
+        };
+        let target_buckets = ((ids.len() - first_bucketed) / IDS_PER_BUCKET)
+            .max(1)
+            .next_power_of_two();
+        let shift = (64 - max.leading_zeros()).saturating_sub(target_buckets.trailing_zeros());
+        let bucket_count = (max >> shift) as usize + 1;
         let mut buckets = Vec::with_capacity(bucket_count + 1);
-        let mut position = ids.partition_point(|id| *id < 0);
-        for bucket in 0..=bucket_count as i64 {
-            let start = bucket << BUCKET_SHIFT;
-            while position < ids.len() && ids[position] < start {
+        let mut position = first_bucketed;
+        for bucket in 0..=bucket_count as i128 {
+            let start = bucket << shift;
+            while position < ids.len() && i128::from(ids[position]) < start {
                 position += 1;
             }
             buckets.push(position as u64);
         }
-        Self { ids, buckets }
+        Self {
+            ids,
+            first_bucketed,
+            shift,
+            buckets,
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
@@ -416,16 +442,19 @@ impl IdIndex {
 
     /// Position of `id` among the sorted ids.
     pub(crate) fn position(&self, id: i64) -> Option<usize> {
-        if (0..BUCKETED_ID_LIMIT).contains(&id) {
-            let bucket = (id >> BUCKET_SHIFT) as usize;
-            let start = self.buckets[bucket] as usize;
-            let end = self.buckets[bucket + 1] as usize;
-            return self.ids[start..end]
-                .binary_search(&id)
-                .ok()
-                .map(|offset| start + offset);
+        if id < 0 {
+            return self.ids[..self.first_bucketed].binary_search(&id).ok();
         }
-        self.ids.binary_search(&id).ok()
+        let bucket = (id >> self.shift) as usize;
+        if bucket + 1 >= self.buckets.len() {
+            return None;
+        }
+        let start = self.buckets[bucket] as usize;
+        let end = self.buckets[bucket + 1] as usize;
+        self.ids[start..end]
+            .binary_search(&id)
+            .ok()
+            .map(|offset| start + offset)
     }
 
     pub(crate) fn contains(&self, id: i64) -> bool {

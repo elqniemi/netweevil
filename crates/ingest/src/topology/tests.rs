@@ -3,10 +3,10 @@ use super::{
     label_weak_components,
 };
 use crate::access::ConditionalCounts;
-use crate::scan::{ObjectCounts, RuleSetInterner, ScanOutput, pending_osm_way};
+use crate::scan::{NodeCoords, ObjectCounts, RuleSetInterner, ScanOutput, pending_osm_way};
 use crate::test_util::{edge, pending_way, tags};
 use netweevil_core::{AccessMask, TemporalEffect, VehicleRestrictionKind};
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashSet;
 use std::path::Path;
 
 #[test]
@@ -14,7 +14,10 @@ fn builds_directional_three_dimensional_edge_quantities() {
     let scan = ScanOutput {
         pending_ways: vec![pending_way(10, &[100, 200])],
         restriction_candidates: Vec::new(),
-        node_coords: FxHashMap::from_iter([(100, (114.1, 22.3, 10.0)), (200, (114.1, 22.3, 22.0))]),
+        node_coords: NodeCoords::from_iter([
+            (100, (114.1, 22.3, 10.0)),
+            (200, (114.1, 22.3, 22.0)),
+        ]),
         traffic_signal_nodes: FxHashSet::default(),
         junction_nodes: Default::default(),
         counts: ObjectCounts {
@@ -101,7 +104,7 @@ fn carries_tagged_restrictions_onto_directed_edges() {
     ];
     let scan = ScanOutput {
         pending_ways: ways,
-        node_coords: FxHashMap::from_iter([
+        node_coords: NodeCoords::from_iter([
             (1, (6.56, 53.21, 0.0)),
             (2, (6.561, 53.21, 0.0)),
             (3, (6.562, 53.21, 0.0)),
@@ -149,4 +152,17 @@ fn carries_tagged_restrictions_onto_directed_edges() {
                 .all(|rule| rule.effect == TemporalEffect::OpenOnly)
         );
     }
+}
+
+#[test]
+fn id_narrowing_fails_with_the_limit_named() {
+    assert_eq!(
+        super::checked_u32(u32::MAX as usize, "nodes").unwrap(),
+        u32::MAX
+    );
+    let error = super::checked_u32(u32::MAX as usize + 1, "directed edges").unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the network has more than 4294967295 directed edges, the limit of 32-bit ids"
+    );
 }

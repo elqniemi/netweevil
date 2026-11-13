@@ -174,7 +174,7 @@ where
         &built.bundle,
         bundles.topology.bundle_id.clone(),
         &mut progress,
-    );
+    )?;
     let elevation_bundle = write_dataset_bundles(
         &bundles,
         &built.bundle,

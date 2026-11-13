@@ -91,4 +91,11 @@ fn id_index_finds_positions_in_every_range() {
         assert!(!index.contains(absent), "{absent}");
     }
     assert!(!IdIndex::new(Vec::new()).contains(0));
+    assert!(IdIndex::new(vec![-5, -2]).contains(-2));
+    let extreme = IdIndex::new(vec![i64::MAX, 7]);
+    assert_eq!(extreme.position(i64::MAX), Some(1));
+    // Dense and sparse ranges both bucket.
+    let dense = IdIndex::new((0..100_000).map(|id| id * 3).collect());
+    assert!(dense.contains(299_997) && !dense.contains(299_998));
+    assert!(dense.buckets.len() < dense.len() / 8);
 }

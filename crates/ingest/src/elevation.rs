@@ -18,7 +18,7 @@ use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::dem::DemRaster;
-use crate::scan::PendingWay;
+use crate::scan::{NodeCoords, PendingWay};
 
 /// Smallest spacing between elevation samples along an edge, in metres.
 pub(crate) const MIN_SAMPLE_SPACING_M: f64 = 10.0;
@@ -52,7 +52,7 @@ pub(crate) struct NodeElevationStats {
 /// height (whole decimetres; `NaN` outside coverage).
 pub(crate) fn assign_node_elevations(
     sampling: &DemSampling<'_>,
-    node_coords: &mut FxHashMap<i64, (f64, f64, f64)>,
+    node_coords: &mut NodeCoords,
     ways: &[PendingWay],
     structure_ways: &FxHashSet<i64>,
 ) -> NodeElevationStats {
@@ -68,21 +68,15 @@ pub(crate) fn assign_node_elevations(
         .filter(|node| !ground_nodes.contains(node) && node_coords.contains_key(node))
         .collect::<FxHashSet<_>>();
 
-    let mut ids = node_coords.keys().copied().collect::<Vec<_>>();
-    ids.sort_unstable();
-    let heights = ids
-        .par_iter()
-        .map(|id| {
-            let (lon, lat, _) = node_coords[id];
-            sampling
+    node_coords
+        .coords_mut()
+        .par_iter_mut()
+        .for_each(|(lon, lat, z)| {
+            *z = sampling
                 .dem
-                .sample(lon, lat)
-                .map_or(f64::NAN, round_height_decimetres)
-        })
-        .collect::<Vec<_>>();
-    for (id, height) in ids.iter().zip(heights) {
-        node_coords.get_mut(id).expect("id came from the map").2 = height;
-    }
+                .sample(*lon, *lat)
+                .map_or(f64::NAN, round_height_decimetres);
+        });
 
     let interpolated = interpolate_structures(node_coords, ways, structure_ways, &structure_nodes);
     for (id, height) in &interpolated {
@@ -104,7 +98,7 @@ pub(crate) fn assign_node_elevations(
 /// structure connects to: `sum(z_a / d_a) / sum(1 / d_a)` over anchors at
 /// path distance `d_a`. Components without an anchor keep their DEM sample.
 fn interpolate_structures(
-    node_coords: &FxHashMap<i64, (f64, f64, f64)>,
+    node_coords: &NodeCoords,
     ways: &[PendingWay],
     structure_ways: &FxHashSet<i64>,
     structure_nodes: &FxHashSet<i64>,

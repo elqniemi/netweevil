@@ -381,7 +381,7 @@ pub(crate) fn rebuild_dataset(
     let patched = patch_edge_order(
         &topology,
         &previous_ranks(previous, &topology, topology_node_ids),
-    );
+    )?;
     timer.lap("patch order");
     emit_progress(
         progress,
@@ -397,7 +397,7 @@ pub(crate) fn rebuild_dataset(
         topology_bundle_id.clone(),
         patched.order.clone(),
         progress,
-    );
+    )?;
     timer.lap("contract");
     let patched_shortcut_arc_count = acceleration.stats.shortcut_arc_count;
     let growth = ordering.fill_growth(topology.edge_count() as u64, patched_shortcut_arc_count);
@@ -416,9 +416,9 @@ pub(crate) fn rebuild_dataset(
                 topology.edge_count()
             ),
         );
-        let order = nested_dissection_order(&topology);
+        let order = nested_dissection_order(&topology)?;
         timer.lap("reorder");
-        acceleration = build_with_order(&topology, topology_bundle_id, order, progress);
+        acceleration = build_with_order(&topology, topology_bundle_id, order, progress)?;
         timer.lap("contract reordered");
     }
     Ok(RebuiltDataset {

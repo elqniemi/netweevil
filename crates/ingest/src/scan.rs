@@ -12,6 +12,7 @@ use crate::classify::{
     conditional_speed_rules, parse_duration_from_tags, tag,
 };
 use crate::guidance::{JunctionNodeTags, WayGuidanceTags, way_guidance_tags};
+use crate::pbf::IdIndex;
 use crate::restrictions::TurnRestrictionCandidate;
 use crate::vehicle_tags::way_vehicle_restrictions;
 
@@ -90,6 +91,85 @@ impl RuleSetInterner {
     }
 }
 
+/// Longitude, latitude and elevation of source nodes, sorted by source node
+/// id. A node's position in that order is its topology node id.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct NodeCoords {
+    ids: IdIndex,
+    coords: Vec<(f64, f64, f64)>,
+}
+
+impl NodeCoords {
+    /// Coordinates of nodes with sorted, unique `ids`.
+    pub(crate) fn from_sorted(ids: Vec<i64>, coords: Vec<(f64, f64, f64)>) -> Self {
+        assert_eq!(ids.len(), coords.len(), "one coordinate per node id");
+        Self {
+            ids: IdIndex::from_sorted(ids),
+            coords,
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.coords.len()
+    }
+
+    pub(crate) fn coords_mut(&mut self) -> &mut [(f64, f64, f64)] {
+        &mut self.coords
+    }
+
+    pub(crate) fn get(&self, id: &i64) -> Option<&(f64, f64, f64)> {
+        self.ids
+            .position(*id)
+            .map(|position| &self.coords[position])
+    }
+
+    pub(crate) fn get_mut(&mut self, id: &i64) -> Option<&mut (f64, f64, f64)> {
+        self.ids
+            .position(*id)
+            .map(|position| &mut self.coords[position])
+    }
+
+    pub(crate) fn contains_key(&self, id: &i64) -> bool {
+        self.ids.contains(*id)
+    }
+
+    pub(crate) fn values(&self) -> std::slice::Iter<'_, (f64, f64, f64)> {
+        self.coords.iter()
+    }
+
+    /// Splits into the id index and the coordinates.
+    pub(crate) fn into_parts(self) -> (IdIndex, Vec<(f64, f64, f64)>) {
+        (self.ids, self.coords)
+    }
+}
+
+impl std::ops::Index<&i64> for NodeCoords {
+    type Output = (f64, f64, f64);
+
+    fn index(&self, id: &i64) -> &Self::Output {
+        self.get(id).expect("node has coordinates")
+    }
+}
+
+/// Collects coordinates in any order; a repeated id keeps its last value.
+impl FromIterator<(i64, (f64, f64, f64))> for NodeCoords {
+    fn from_iter<I: IntoIterator<Item = (i64, (f64, f64, f64))>>(iter: I) -> Self {
+        let mut pairs = iter.into_iter().collect::<Vec<_>>();
+        pairs.sort_by_key(|(id, _)| *id);
+        let mut ids = Vec::with_capacity(pairs.len());
+        let mut coords: Vec<(f64, f64, f64)> = Vec::with_capacity(pairs.len());
+        for (id, coord) in pairs {
+            if ids.last() == Some(&id) {
+                *coords.last_mut().expect("coords follow ids") = coord;
+            } else {
+                ids.push(id);
+                coords.push(coord);
+            }
+        }
+        Self::from_sorted(ids, coords)
+    }
+}
+
 /// Source-agnostic scan result consumed by the topology build. The OSM and
 /// Overture scanners both produce this shape; ids are OSM object ids for PBF
 /// sources and synthetic ids for Overture sources.
@@ -100,7 +180,7 @@ pub(crate) struct ScanOutput {
     /// Longitude, latitude and elevation in metres. Sources without
     /// elevation data explicitly use zero; `NaN` is reserved for readers
     /// that need to represent an unknown source value.
-    pub(crate) node_coords: FxHashMap<i64, (f64, f64, f64)>,
+    pub(crate) node_coords: NodeCoords,
     pub(crate) traffic_signal_nodes: FxHashSet<i64>,
     /// Guidance tags of motorway-junction nodes, keyed by source node id.
     pub(crate) junction_nodes: FxHashMap<i64, JunctionNodeTags>,

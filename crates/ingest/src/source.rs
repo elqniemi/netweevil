@@ -34,7 +34,8 @@ use crate::osm_change::{ChangeAction, OsmChange};
 use crate::pbf::{IdIndex, ObjectKind, OsmSource, PbfFile, PbfFingerprint};
 use crate::restrictions::{TurnRestrictionCandidate, ViaSpec, parse_turn_restriction_relation};
 use crate::scan::{
-    ObjectCounts, PendingWay, RuleSetInterner, ScanOutput, is_structure_way, pending_osm_way,
+    NodeCoords, ObjectCounts, PendingWay, RuleSetInterner, ScanOutput, is_structure_way,
+    pending_osm_way,
 };
 use crate::topology::EnrichmentInputs;
 
@@ -751,15 +752,15 @@ impl OsmSourceState {
         } else {
             (Vec::new(), Vec::new())
         };
-        let mut node_coords =
-            FxHashMap::with_capacity_and_hasher(topology_node_ids.len(), Default::default());
+        let mut coords = Vec::with_capacity(topology_node_ids.len());
         let mut nodes = self.nodes.iter().peekable();
         for &id in topology_node_ids {
             while nodes.next_if(|node| node.id < id).is_some() {}
             let node = nodes.next().expect("topology nodes are retained nodes");
             let (lon, lat) = node.lon_lat();
-            node_coords.insert(id, (lon, lat, 0.0));
+            coords.push((lon, lat, 0.0));
         }
+        let node_coords = NodeCoords::from_sorted(topology_node_ids.to_vec(), coords);
         let junction_nodes = self
             .junction_nodes
             .into_iter()
